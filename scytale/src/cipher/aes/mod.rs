@@ -1,56 +1,45 @@
 //! AES (FIPS 197) block cipher.
 //!
-//! The key width is the type: [`Aes128`], [`Aes192`] and [`Aes256`]
-//! are [`Aes<16>`](Aes), `Aes<24>` and `Aes<32>`, and each takes a key
-//! of exactly its width. [`Aes`] runs the best implementation the
-//! processor supports: hardware instructions where present, otherwise
-//! the constant-time portable code. To use a particular one, name it:
-//! [`portable::bitsliced::Aes`], [`portable::ttable::Aes`],
-//! `x86_64::aesni::Aes`, `x86_64::vaes::Aes`, `aarch64::armv8::Aes`,
-//! `riscv64::zkn::Aes` or `riscv64::zvkned::Aes` (the hardware ones
-//! exist only on their architecture), with the same width parameter.
+//! The key width is the type: [`Aes128`], [`Aes192`] and [`Aes256`],
+//! each taking a key of exactly its width. Each runs the best
+//! implementation the processor supports, chosen when the key is
+//! expanded: hardware instructions where there are any, otherwise
+//! constant-time portable code. Which one that is is not a choice a
+//! caller makes, and the implementations are not names a caller can
+//! reach; security comes before speed, so the faster table-driven
+//! code, whose memory access pattern depends on the key, is never
+//! chosen.
 //!
-//! Every implementation wipes its expanded key when dropped.
+//! The expanded key is wiped on drop.
 //!
 //! ```
-//! use scytale::cipher::aes::{portable, Aes128};
+//! use scytale::Key;
+//! use scytale::cipher::aes::Aes128;
+//! use scytale::cipher::BlockCipher;
 //!
-//! # fn main() -> Result<(), scytale::Error> {
-//! let fastest = Aes128::try_new(&[0u8; 16])?;
-//! let bitsliced = portable::bitsliced::Aes::<16>::try_new(&[0u8; 16])?;
-//!
-//! let mut a = [0u8; 16];
-//! let mut b = a;
-//! fastest.encrypt_block(&mut a);
-//! bitsliced.encrypt_block(&mut b);
-//! assert_eq!(a, b);
-//! # Ok(())
-//! # }
+//! let aes = Aes128::new(&Key::from([0u8; 16]));
+//! let mut blocks = [[0u8; 16]; 4];
+//! aes.encrypt(&mut blocks);
+//! aes.decrypt(&mut blocks);
+//! assert_eq!(blocks, [[0u8; 16]; 4]);
 //! ```
 
 #[cfg(target_arch = "aarch64")]
-pub mod aarch64;
-pub mod portable;
+pub(crate) mod aarch64;
+pub(crate) mod portable;
 #[cfg(target_arch = "riscv64")]
-pub mod riscv64;
+pub(crate) mod riscv64;
 #[cfg(target_arch = "x86_64")]
-pub mod x86_64;
+pub(crate) mod x86_64;
 
 use core::fmt;
-use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::cipher::BlockCipher;
-use crate::{BlockType, Error, KeyType};
+use crate::probe::Probe;
+use crate::{BlockType, Key, KeyType};
 
 /// AES block size in bytes.
 pub const BLOCK_SIZE: usize = 16;
-
-/// AES with a 128-bit key.
-pub type Aes128 = Aes<16>;
-/// AES with a 192-bit key.
-pub type Aes192 = Aes<24>;
-/// AES with a 256-bit key.
-pub type Aes256 = Aes<32>;
 
 /// Words in the longest key schedule (AES-256: 15 round keys).
 pub(crate) const MAX_WORDS: usize = 60;
@@ -64,14 +53,16 @@ pub(crate) enum KeySize {
 }
 
 impl KeySize {
-    /// The size of a `key`. A width the type system already fixed
-    /// to 16, 24 or 32 never reaches the error.
-    pub(crate) fn for_key(key: &[u8]) -> Result<Self, Error> {
+    /// The size of a `key`.
+    ///
+    /// Every caller has a key whose width the type system has
+    /// already fixed to 16, 24 or 32.
+    pub(crate) fn for_key(key: &[u8]) -> Self {
         match key.len() {
-            16 => Ok(KeySize::Aes128),
-            24 => Ok(KeySize::Aes192),
-            32 => Ok(KeySize::Aes256),
-            n => Err(Error::InvalidKeyLength(n)),
+            16 => KeySize::Aes128,
+            24 => KeySize::Aes192,
+            32 => KeySize::Aes256,
+            n => unreachable!("AES key of {n} bytes"),
         }
     }
 
@@ -141,28 +132,14 @@ const CHOICES: [Choice; 6] = [
     Choice::Bitsliced,
 ];
 
-/// The probe result: 0 until probed, then one plus the index into
-/// `CHOICES`. Probing is idempotent, so a race between two first
-/// callers is harmless.
-static PROBED: AtomicU8 = AtomicU8::new(0);
+/// Asked once; see [`crate::probe`].
+static PROBED: Probe = Probe::new();
 
 /// Asks the processor once; afterwards a single atomic load.
 fn probe() -> Choice {
-    match PROBED.load(Ordering::Relaxed) {
-        0 => {
-            let found = CHOICES
-                .into_iter()
-                .enumerate()
-                .find(|&(_, c)| supported(c))
-                .unwrap_or((5, Choice::Bitsliced));
-            PROBED.store(found.0 as u8 + 1, Ordering::Relaxed);
-            found.1
-        }
-        n => CHOICES
-            .get(usize::from(n) - 1)
-            .copied()
-            .unwrap_or(Choice::Bitsliced),
-    }
+    PROBED
+        .first(&CHOICES, supported)
+        .unwrap_or(Choice::Bitsliced)
 }
 
 /// Asks the processor directly whether it supports `choice`.
@@ -184,20 +161,18 @@ fn supported(choice: Choice) -> bool {
     }
 }
 
-/// AES using the best implementation the processor supports: the
-/// fastest hardware instructions if there are any, otherwise the
-/// constant-time bitsliced code. Security comes before speed, so the
-/// faster [`portable::ttable::Aes`] is never chosen here; name it
-/// yourself if its trade-off suits you.
+/// AES over the best implementation the processor supports, at a key
+/// width of `K` bytes.
+///
+/// The public types are the three widths: [`Aes128`], [`Aes192`] and
+/// [`Aes256`]. This one is generic so that the crate's own code, and
+/// the tests, can be written once for all three.
 ///
 /// The processor is probed once, the first time a key is expanded;
-/// every later [`Aes::try_new`] reads the cached answer, and each
-/// call then dispatches with a single predictable branch.
-///
-/// `K` is the key width in bytes: 16, 24 or 32, and nothing else
-/// compiles. [`Aes128`], [`Aes192`] and [`Aes256`] name the three.
+/// every later [`Aes::new`] reads the cached answer, and each call
+/// then dispatches with a single predictable branch.
 #[derive(Clone)]
-pub struct Aes<const K: usize>(Inner<K>);
+pub(crate) struct Aes<const K: usize>(Inner<K>);
 
 // Each variant is that implementation's key schedule; the bitsliced
 // one is twice the size of the others and there is no heap to box it.
@@ -254,7 +229,7 @@ impl<const K: usize> Aes<K> {
     // The hardware constructors skip their own processor check because
     // the probe has already made it.
     #[allow(unsafe_code)]
-    pub fn try_new(key: &[u8; K]) -> Result<Self, Error> {
+    pub(crate) fn new(key: &[u8; K]) -> Self {
         const {
             assert!(
                 K == 16 || K == 24 || K == 32,
@@ -267,55 +242,93 @@ impl<const K: usize> Aes<K> {
             match probe() {
                 #[cfg(target_arch = "x86_64")]
                 Choice::Vaes => {
-                    Inner::Vaes(x86_64::vaes::Aes::new_unchecked(key)?)
+                    Inner::Vaes(x86_64::vaes::Aes::new_unchecked(key))
                 }
                 #[cfg(target_arch = "x86_64")]
                 Choice::AesNi => {
-                    Inner::AesNi(x86_64::aesni::Aes::new_unchecked(key)?)
+                    Inner::AesNi(x86_64::aesni::Aes::new_unchecked(key))
                 }
                 #[cfg(target_arch = "aarch64")]
                 Choice::Armv8 => {
-                    Inner::Armv8(aarch64::armv8::Aes::new_unchecked(key)?)
+                    Inner::Armv8(aarch64::armv8::Aes::new_unchecked(key))
                 }
                 #[cfg(target_arch = "riscv64")]
                 Choice::Zvkned => {
-                    Inner::Zvkned(riscv64::zvkned::Aes::new_unchecked(key)?)
+                    Inner::Zvkned(riscv64::zvkned::Aes::new_unchecked(key))
                 }
                 #[cfg(target_arch = "riscv64")]
                 Choice::Zkn => {
-                    Inner::Zkn(riscv64::zkn::Aes::new_unchecked(key)?)
+                    Inner::Zkn(riscv64::zkn::Aes::new_unchecked(key))
                 }
-                _ => Inner::Bitsliced(portable::bitsliced::Aes::try_new(key)?),
+                _ => Inner::Bitsliced(portable::bitsliced::Aes::new(key)),
             }
         };
-        Ok(Aes(inner))
+        Aes(inner)
     }
 
     /// Number of rounds: 10, 12 or 14 depending on key size.
-    pub fn rounds(&self) -> usize {
+    pub(crate) fn rounds(&self) -> usize {
         dispatch!(self, aes => aes.rounds())
     }
 
-    /// Encrypts one block in place.
-    #[inline]
-    pub fn encrypt_block(&self, block: &mut [u8; BLOCK_SIZE]) {
-        dispatch!(self, aes => aes.encrypt_block(block))
-    }
-
-    /// Decrypts one block in place.
-    #[inline]
-    pub fn decrypt_block(&self, block: &mut [u8; BLOCK_SIZE]) {
-        dispatch!(self, aes => aes.decrypt_block(block))
-    }
-
     /// Encrypts every block in place, independently (ECB).
-    pub fn encrypt_blocks(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
+    pub(crate) fn encrypt_blocks(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
         dispatch!(self, aes => aes.encrypt_blocks(blocks))
     }
 
     /// Decrypts every block in place, independently (ECB).
-    pub fn decrypt_blocks(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
+    pub(crate) fn decrypt_blocks(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
         dispatch!(self, aes => aes.decrypt_blocks(blocks))
+    }
+}
+
+/// The expanded key as the AES instructions want it, where the
+/// implementation the processor chose is one of theirs, and `None`
+/// for the portable ones, whose key schedules are nothing those
+/// instructions could read.
+#[cfg(target_arch = "aarch64")]
+impl<const K: usize> aarch64::Keyed for Aes<K> {
+    fn schedule(&self) -> Option<aarch64::Schedule<'_>> {
+        match &self.0 {
+            Inner::Armv8(aes) => aes.schedule(),
+            _ => None,
+        }
+    }
+
+    fn decryption(&self) -> Option<aarch64::Schedule<'_>> {
+        match &self.0 {
+            Inner::Armv8(aes) => aes.decryption(),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+impl<const K: usize> x86_64::Keyed for Aes<K> {
+    fn schedule(&self) -> Option<x86_64::Schedule<'_>> {
+        match &self.0 {
+            Inner::Vaes(aes) => aes.schedule(),
+            Inner::AesNi(aes) => aes.schedule(),
+            _ => None,
+        }
+    }
+
+    fn decryption(&self) -> Option<x86_64::Schedule<'_>> {
+        match &self.0 {
+            Inner::Vaes(aes) => aes.decryption(),
+            Inner::AesNi(aes) => aes.decryption(),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+impl<const K: usize> riscv64::Keyed for Aes<K> {
+    fn schedule(&self) -> Option<riscv64::Schedule<'_>> {
+        match &self.0 {
+            Inner::Zvkned(aes) => aes.schedule(),
+            _ => None,
+        }
     }
 }
 
@@ -328,38 +341,149 @@ impl<const K: usize> BlockType for Aes<K> {
 }
 
 impl<const K: usize> KeyType for Aes<K> {
-    type Key = [u8; K];
+    type Key = Key<[u8; K]>;
 
     fn zero_key() -> Self::Key {
-        [0; K]
+        Key::zeroed()
     }
 }
 
 impl<const K: usize> BlockCipher for Aes<K> {
-    fn try_new(key: &Self::Key) -> Result<Self, Error> {
-        Aes::try_new(key)
+    fn new(key: &Self::Key) -> Self {
+        Aes::new(key.array())
     }
 
-    fn encrypt_block(&self, block: &mut Self::Block) {
-        Aes::encrypt_block(self, block)
-    }
-
-    fn decrypt_block(&self, block: &mut Self::Block) {
-        Aes::decrypt_block(self, block)
-    }
-
-    fn encrypt_blocks(&self, blocks: &mut [Self::Block]) {
+    fn encrypt(&self, blocks: &mut [Self::Block]) {
         Aes::encrypt_blocks(self, blocks)
     }
 
-    fn decrypt_blocks(&self, blocks: &mut [Self::Block]) {
+    fn decrypt(&self, blocks: &mut [Self::Block]) {
         Aes::decrypt_blocks(self, blocks)
     }
 }
 
+/// Defines one of the three public widths over [`Aes`].
+macro_rules! width {
+    ($(#[$doc:meta])* $name:ident, $k:literal) => {
+        $(#[$doc])*
+        #[derive(Clone)]
+        pub struct $name(Aes<$k>);
+
+        impl $name {
+            /// Expands `key`.
+            pub fn new(key: &Key<[u8; $k]>) -> Self {
+                $name(Aes::new(key.array()))
+            }
+
+            /// Number of rounds the key width fixes.
+            pub fn rounds(&self) -> usize {
+                self.0.rounds()
+            }
+
+            /// Encrypts every block in place, independently (ECB).
+            pub fn encrypt(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
+                self.0.encrypt_blocks(blocks)
+            }
+
+            /// Decrypts every block in place, independently (ECB).
+            pub fn decrypt(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
+                self.0.decrypt_blocks(blocks)
+            }
+        }
+
+        impl fmt::Debug for $name {
+            /// Deliberately omits the key material.
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_struct(stringify!($name))
+                    .field("rounds", &self.rounds())
+                    .finish()
+            }
+        }
+
+        /// The expanded key; see the implementation over [`Aes`].
+        #[cfg(target_arch = "aarch64")]
+        impl aarch64::Keyed for $name {
+            fn schedule(&self) -> Option<aarch64::Schedule<'_>> {
+                aarch64::Keyed::schedule(&self.0)
+            }
+
+            fn decryption(&self) -> Option<aarch64::Schedule<'_>> {
+                aarch64::Keyed::decryption(&self.0)
+            }
+        }
+
+        /// The expanded key; see the implementation over [`Aes`].
+        #[cfg(target_arch = "riscv64")]
+        impl riscv64::Keyed for $name {
+            fn schedule(&self) -> Option<riscv64::Schedule<'_>> {
+                riscv64::Keyed::schedule(&self.0)
+            }
+        }
+
+        /// The expanded key; see the implementation over [`Aes`].
+        #[cfg(target_arch = "x86_64")]
+        impl x86_64::Keyed for $name {
+            fn schedule(&self) -> Option<x86_64::Schedule<'_>> {
+                x86_64::Keyed::schedule(&self.0)
+            }
+
+            fn decryption(&self) -> Option<x86_64::Schedule<'_>> {
+                x86_64::Keyed::decryption(&self.0)
+            }
+        }
+
+        impl BlockType for $name {
+            type Block = [u8; BLOCK_SIZE];
+
+            fn zero_block() -> Self::Block {
+                [0; BLOCK_SIZE]
+            }
+        }
+
+        impl KeyType for $name {
+            type Key = Key<[u8; $k]>;
+
+            fn zero_key() -> Self::Key {
+                Key::zeroed()
+            }
+        }
+
+        impl BlockCipher for $name {
+            fn new(key: &Self::Key) -> Self {
+                $name::new(key)
+            }
+
+            fn encrypt(&self, blocks: &mut [Self::Block]) {
+                $name::encrypt(self, blocks)
+            }
+
+            fn decrypt(&self, blocks: &mut [Self::Block]) {
+                $name::decrypt(self, blocks)
+            }
+        }
+    };
+}
+
+width!(
+    /// AES with a 128-bit key.
+    Aes128,
+    16
+);
+width!(
+    /// AES with a 192-bit key.
+    Aes192,
+    24
+);
+width!(
+    /// AES with a 256-bit key.
+    Aes256,
+    32
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cipher::OneBlock;
     use zeroize::ZeroizeOnDrop;
 
     /// Compiles only if every implementation wipes its key on drop.
@@ -410,9 +534,9 @@ mod tests {
 
     #[test]
     fn picks_best_supported() {
-        let aes = Aes::try_new(&[0; 16]).unwrap();
+        let aes = Aes::<16>::new(&[0; 16]);
         let chosen = probe();
-        assert_ne!(PROBED.load(Ordering::Relaxed), 0);
+        assert!(PROBED.asked());
         assert_eq!(probe(), chosen);
         assert!(supported(chosen));
         let faster = CHOICES.iter().take_while(|&&c| c != chosen);
@@ -443,28 +567,68 @@ mod tests {
 
     fn matches_ttable_for<const K: usize>() {
         let key = [0x5au8; K];
-        {
-            let aes = Aes::try_new(&key).unwrap();
-            let sw = portable::ttable::Aes::try_new(&key).unwrap();
-            assert_eq!(aes.rounds(), sw.rounds());
+        let aes = Aes::<K>::new(&key);
+        let sw = portable::ttable::Aes::<K>::new(&key);
+        assert_eq!(aes.rounds(), sw.rounds());
 
-            let mut data = [[0u8; BLOCK_SIZE]; 17];
-            for (i, x) in data.as_flattened_mut().iter_mut().enumerate() {
-                *x = i as u8;
-            }
-            let mut expected = data;
-            sw.encrypt_blocks(&mut expected);
-            aes.encrypt_blocks(&mut data);
-            assert_eq!(data, expected);
-            aes.decrypt_blocks(&mut data);
-
-            let mut block = [7u8; BLOCK_SIZE];
-            let mut block2 = block;
-            sw.encrypt_block(&mut block2);
-            aes.encrypt_block(&mut block);
-            assert_eq!(block, block2);
-            aes.decrypt_block(&mut block);
-            assert_eq!(block, [7u8; BLOCK_SIZE]);
+        let mut data = [[0u8; BLOCK_SIZE]; 17];
+        for (i, x) in data.as_flattened_mut().iter_mut().enumerate() {
+            *x = i as u8;
         }
+        let mut expected = data;
+        sw.encrypt_blocks(&mut expected);
+        aes.encrypt_blocks(&mut data);
+        assert_eq!(data, expected);
+        aes.decrypt_blocks(&mut data);
+
+        let mut block = [7u8; BLOCK_SIZE];
+        let mut block2 = block;
+        sw.encrypt_one(&mut block2);
+        aes.encrypt_one(&mut block);
+        assert_eq!(block, block2);
+        aes.decrypt_one(&mut block);
+        assert_eq!(block, [7u8; BLOCK_SIZE]);
+    }
+
+    /// The three public widths are the same cipher as the generic one
+    /// they wrap, both ways round and over a run of blocks.
+    ///
+    /// The vector suites validate each implementation and the generic
+    /// type's agreement with the table-driven one; these wrappers sit
+    /// above all of that and are covered here.
+    #[test]
+    fn widths_match() {
+        fn same<W, const K: usize>(wrapped: W, key: [u8; K])
+        where
+            W: BlockCipher<Block = [u8; BLOCK_SIZE], Key = Key<[u8; K]>>,
+        {
+            let generic = Aes::<K>::new(&key);
+            // Enough blocks to pass through a group loop and leave a
+            // tail, which is where the two could differ.
+            let mut mine = [[0u8; BLOCK_SIZE]; 19];
+            for (i, x) in mine.as_flattened_mut().iter_mut().enumerate() {
+                *x = (i * 7) as u8;
+            }
+            let plain = mine;
+            let mut theirs = mine;
+
+            wrapped.encrypt(&mut mine);
+            generic.encrypt_blocks(&mut theirs);
+            assert_eq!(mine, theirs, "encrypting under a {K} byte key");
+            assert_ne!(mine, plain, "encrypting changed nothing");
+
+            wrapped.decrypt(&mut mine);
+            generic.decrypt_blocks(&mut theirs);
+            assert_eq!(mine, theirs, "decrypting under a {K} byte key");
+            assert_eq!(mine, plain, "decrypting did not undo encrypting");
+        }
+
+        same(Aes128::new(&Key::from([9u8; 16])), [9u8; 16]);
+        same(Aes192::new(&Key::from([9u8; 24])), [9u8; 24]);
+        same(Aes256::new(&Key::from([9u8; 32])), [9u8; 32]);
+
+        assert_eq!(Aes128::new(&Key::from([0u8; 16])).rounds(), 10);
+        assert_eq!(Aes192::new(&Key::from([0u8; 24])).rounds(), 12);
+        assert_eq!(Aes256::new(&Key::from([0u8; 32])).rounds(), 14);
     }
 }

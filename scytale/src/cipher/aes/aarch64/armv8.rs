@@ -12,50 +12,30 @@
 //!
 //! # Availability
 //!
-//! There is no user-space CPUID on aarch64. [`Aes::try_new`] accepts
+//! There is no user-space CPUID on aarch64. [`Aes::new`] accepts
 //! when the crate was compiled with the `aes` target feature, or, on
 //! Linux, when the kernel's emulated `ID_AA64ISAR0_EL1` register
 //! reports the instructions. Otherwise it returns
 //! [`Error::NotSupported`].
 //!
-//! # Example
-//!
-//! ```
-//! use scytale::cipher::aes::aarch64::armv8::Aes;
-//! use scytale::Error;
-//!
-//! # fn main() -> Result<(), Error> {
-//! match Aes::try_new(&[0u8; 16]) {
-//!     Ok(aes) => {
-//!         let mut block = [0u8; 16];
-//!         aes.encrypt_block(&mut block);
-//!         aes.decrypt_block(&mut block);
-//!         assert_eq!(block, [0u8; 16]);
-//!     }
-//!     Err(Error::NotSupported) => {} // no AES instructions here
-//!     Err(e) => return Err(e),
-//! }
-//! # Ok(())
-//! # }
-//! ```
 
 #![allow(unsafe_code)]
 
 use core::arch::aarch64::{
-    vaeseq_u8, vaesimcq_u8, vdupq_n_u32, vdupq_n_u8, vgetq_lane_u32, vld1q_u8,
-    vreinterpretq_u32_u8, vreinterpretq_u8_u32, vst1q_u8,
+    vaeseq_u8, vaesimcq_u8, vdupq_n_u8, vdupq_n_u32, vgetq_lane_u32, vld1q_u8,
+    vreinterpretq_u8_u32, vreinterpretq_u32_u8, vst1q_u8,
 };
 use core::fmt;
 
-use crate::cipher::aes::{expand_words, KeySize, BLOCK_SIZE, MAX_WORDS};
 use crate::cipher::BlockCipher;
-use crate::{BlockType, Error, KeyType};
+use crate::cipher::aes::{BLOCK_SIZE, KeySize, MAX_WORDS, expand_words};
+use crate::{BlockType, Key, KeyType};
 use zeroize::ZeroizeOnDrop;
 
 /// An AES cipher with an expanded key, using the ARMv8 instructions.
 ///
 /// Supports 128, 192 and 256 bit keys. Key expansion happens once in
-/// [`Aes::try_new`]; the key is wiped on drop.
+/// [`Aes::new`]; the key is wiped on drop.
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct Aes<const K: usize> {
     /// Round keys as words in memory order; the loops load them
@@ -106,21 +86,26 @@ fn id_register_reports_aes() -> bool {
 }
 
 impl<const K: usize> Aes<K> {
-    /// Expands `key`, which must be 16, 24 or 32 bytes long.
+    /// Whether this processor can run this implementation.
+    pub(crate) fn supported() -> bool {
+        has_aes()
+    }
+
+    /// Expands `key`.
     ///
-    /// Returns [`Error::NotSupported`] if the AES instructions cannot
-    /// be confirmed available.
-    pub fn try_new(key: &[u8; K]) -> Result<Self, Error> {
+    /// # Panics
+    /// If the processor lacks the AES instructions. The type is private and
+    /// is named only after the probe has confirmed them, so the
+    /// panic is unreachable from outside this crate.
+    pub(crate) fn new(key: &[u8; K]) -> Self {
         const {
             assert!(
                 K == 16 || K == 24 || K == 32,
                 "AES keys are 16, 24 or 32 bytes"
             )
         };
-        if !has_aes() {
-            return Err(Error::NotSupported);
-        }
-        // SAFETY: the AES instructions were just confirmed present.
+        assert!(Self::supported(), "the AES instructions not available");
+        // SAFETY: just confirmed present.
         unsafe { Self::new_unchecked(key) }
     }
 
@@ -129,28 +114,16 @@ impl<const K: usize> Aes<K> {
     /// # Safety
     /// The caller must have confirmed that the AES instructions are
     /// available.
-    pub(crate) unsafe fn new_unchecked(key: &[u8; K]) -> Result<Self, Error> {
-        let size = KeySize::for_key(key)?;
-        Ok(expand(key, size))
+    pub(crate) unsafe fn new_unchecked(key: &[u8; K]) -> Self {
+        unsafe {
+            let size = KeySize::for_key(key);
+            expand(key, size)
+        }
     }
 
     /// Number of rounds: 10, 12 or 14 depending on key size.
     pub fn rounds(&self) -> usize {
         self.size.rounds()
-    }
-
-    /// Encrypts one block in place.
-    #[inline]
-    pub fn encrypt_block(&self, block: &mut [u8; BLOCK_SIZE]) {
-        // SAFETY: the struct only exists if try_new confirmed support.
-        unsafe { encrypt_blocks(&self.enc, self.rounds(), block) }
-    }
-
-    /// Decrypts one block in place.
-    #[inline]
-    pub fn decrypt_block(&self, block: &mut [u8; BLOCK_SIZE]) {
-        // SAFETY: the struct only exists if try_new confirmed support.
-        unsafe { decrypt_blocks(&self.dec, self.rounds(), block) }
     }
 
     /// Encrypts every block in place, independently (ECB).
@@ -172,6 +145,20 @@ impl<const K: usize> Aes<K> {
     }
 }
 
+/// Reverses the bytes of a register, as `tbl` indices. The counter is
+/// the last four bytes of a block, most significant first; reversed,
+/// it is the low word, least significant first, where a word add can
+impl<const K: usize> super::Keyed for Aes<K> {
+    /// Always: this implementation exists only where they do.
+    fn schedule(&self) -> Option<super::Schedule<'_>> {
+        Some(super::Schedule::new(&self.enc, self.rounds()))
+    }
+
+    fn decryption(&self) -> Option<super::Schedule<'_>> {
+        Some(super::Schedule::new(&self.dec, self.rounds()))
+    }
+}
+
 impl<const K: usize> BlockType for Aes<K> {
     type Block = [u8; BLOCK_SIZE];
 
@@ -181,31 +168,23 @@ impl<const K: usize> BlockType for Aes<K> {
 }
 
 impl<const K: usize> KeyType for Aes<K> {
-    type Key = [u8; K];
+    type Key = Key<[u8; K]>;
 
     fn zero_key() -> Self::Key {
-        [0; K]
+        Key::zeroed()
     }
 }
 
 impl<const K: usize> BlockCipher for Aes<K> {
-    fn try_new(key: &Self::Key) -> Result<Self, Error> {
-        Aes::try_new(key)
+    fn new(key: &Self::Key) -> Self {
+        Aes::new(key.array())
     }
 
-    fn encrypt_block(&self, block: &mut Self::Block) {
-        Aes::encrypt_block(self, block)
-    }
-
-    fn decrypt_block(&self, block: &mut Self::Block) {
-        Aes::decrypt_block(self, block)
-    }
-
-    fn encrypt_blocks(&self, blocks: &mut [Self::Block]) {
+    fn encrypt(&self, blocks: &mut [Self::Block]) {
         Aes::encrypt_blocks(self, blocks)
     }
 
-    fn decrypt_blocks(&self, blocks: &mut [Self::Block]) {
+    fn decrypt(&self, blocks: &mut [Self::Block]) {
         Aes::decrypt_blocks(self, blocks)
     }
 }
@@ -230,24 +209,26 @@ unsafe fn sub_word(w: u32) -> u32 {
 /// Requires the AES instructions.
 #[target_feature(enable = "aes")]
 unsafe fn expand<const K: usize>(key: &[u8; K], size: KeySize) -> Aes<K> {
-    let rounds = size.rounds();
-    let enc = expand_words(key, size, |w| sub_word(w));
+    unsafe {
+        let rounds = size.rounds();
+        let enc = expand_words(key, size, |w| sub_word(w));
 
-    // Decryption runs the round keys backwards, with the inner ones
-    // passed through InvMixColumns so `aesd`/`aesimc` can use them
-    // directly.
-    let mut dec = [0u32; MAX_WORDS];
-    dec[..4].copy_from_slice(&enc[4 * rounds..4 * rounds + 4]);
-    for r in 1..rounds {
-        let src = 4 * (rounds - r);
-        // SAFETY: both slices are four words; vld1q/vst1q have no
-        // alignment demand.
-        let k = vld1q_u8(enc[src..].as_ptr() as *const u8);
-        vst1q_u8(dec[4 * r..].as_mut_ptr() as *mut u8, vaesimcq_u8(k));
+        // Decryption runs the round keys backwards, with the inner ones
+        // passed through InvMixColumns so `aesd`/`aesimc` can use them
+        // directly.
+        let mut dec = [0u32; MAX_WORDS];
+        dec[..4].copy_from_slice(&enc[4 * rounds..4 * rounds + 4]);
+        for r in 1..rounds {
+            let src = 4 * (rounds - r);
+            // SAFETY: both slices are four words; vld1q/vst1q have no
+            // alignment demand.
+            let k = vld1q_u8(enc[src..].as_ptr() as *const u8);
+            vst1q_u8(dec[4 * r..].as_mut_ptr() as *mut u8, vaesimcq_u8(k));
+        }
+        dec[4 * rounds..4 * rounds + 4].copy_from_slice(&enc[..4]);
+
+        Aes { enc, dec, size }
     }
-    dec[4 * rounds..4 * rounds + 4].copy_from_slice(&enc[..4]);
-
-    Aes { enc, dec, size }
 }
 
 /// Encrypts a whole number of blocks.
@@ -260,16 +241,18 @@ unsafe fn encrypt_blocks(
     rounds: usize,
     data: &mut [u8],
 ) {
-    run(
-        rk.as_ptr(),
-        rounds,
-        data,
-        encrypt8,
-        [
-            encrypt1, encrypt2, encrypt3, encrypt4, encrypt5, encrypt6,
-            encrypt7,
-        ],
-    )
+    unsafe {
+        run(
+            rk.as_ptr(),
+            rounds,
+            data,
+            encrypt8,
+            [
+                encrypt1, encrypt2, encrypt3, encrypt4, encrypt5, encrypt6,
+                encrypt7,
+            ],
+        )
+    }
 }
 
 /// Decrypts a whole number of blocks.
@@ -282,16 +265,18 @@ unsafe fn decrypt_blocks(
     rounds: usize,
     data: &mut [u8],
 ) {
-    run(
-        rk.as_ptr(),
-        rounds,
-        data,
-        decrypt8,
-        [
-            decrypt1, decrypt2, decrypt3, decrypt4, decrypt5, decrypt6,
-            decrypt7,
-        ],
-    )
+    unsafe {
+        run(
+            rk.as_ptr(),
+            rounds,
+            data,
+            decrypt8,
+            [
+                decrypt1, decrypt2, decrypt3, decrypt4, decrypt5, decrypt6,
+                decrypt7,
+            ],
+        )
+    }
 }
 
 /// A body that processes `n` blocks at `data`.
@@ -311,15 +296,17 @@ unsafe fn run(
     groups: unsafe fn(*const u32, usize, *mut u8, usize),
     tails: [Body; 7],
 ) {
-    let blocks = data.len() / BLOCK_SIZE;
-    let full = blocks / 8;
-    let mut p = data.as_mut_ptr();
-    if full > 0 {
-        groups(rk, rounds, p, full);
-        p = p.add(full * 8 * BLOCK_SIZE);
-    }
-    if let Some(tail) = (blocks % 8).checked_sub(1) {
-        tails[tail](rk, rounds, p);
+    unsafe {
+        let blocks = data.len() / BLOCK_SIZE;
+        let full = blocks / 8;
+        let mut p = data.as_mut_ptr();
+        if full > 0 {
+            groups(rk, rounds, p, full);
+            p = p.add(full * 8 * BLOCK_SIZE);
+        }
+        if let Some(tail) = (blocks % 8).checked_sub(1) {
+            tails[tail](rk, rounds, p);
+        }
     }
 }
 
@@ -342,33 +329,35 @@ macro_rules! body {
         /// handles.
         #[target_feature(enable = "aes")]
         unsafe fn $name(rk: *const u32, rounds: usize, data: *mut u8) {
-            core::arch::asm!(
-                "mov {p}, {data}",
-                $(concat!("ld1 {{", $r, ".16b}}, [{p}], #16"),)+
-                "mov {k}, {rk}",
-                "mov {n}, {nr}",
-                "2:",
-                "ld1 {{v8.16b}}, [{k}], #16",
-                $(concat!($mid, " ", $r, ".16b, v8.16b"),
-                  concat!($mix, " ", $r, ".16b, ", $r, ".16b"),)+
-                "subs {n}, {n}, #1",
-                "b.ne 2b",
-                "ld1 {{v8.16b, v9.16b}}, [{k}]",
-                $(concat!($mid, " ", $r, ".16b, v8.16b"),
-                  concat!("eor ", $r, ".16b, ", $r, ".16b, v9.16b"),)+
-                "mov {p}, {data}",
-                $(concat!("st1 {{", $r, ".16b}}, [{p}], #16"),)+
-                rk = in(reg) rk,
-                nr = in(reg) rounds - 1,
-                data = in(reg) data,
-                p = out(reg) _,
-                k = out(reg) _,
-                n = out(reg) _,
-                out("v0") _, out("v1") _, out("v2") _, out("v3") _,
-                out("v4") _, out("v5") _, out("v6") _, out("v7") _,
-                out("v8") _, out("v9") _,
-                options(nostack),
-            );
+            unsafe {
+                core::arch::asm!(
+                    "mov {p}, {data}",
+                    $(concat!("ld1 {{", $r, ".16b}}, [{p}], #16"),)+
+                    "mov {k}, {rk}",
+                    "mov {n}, {nr}",
+                    "2:",
+                    "ld1 {{v8.16b}}, [{k}], #16",
+                    $(concat!($mid, " ", $r, ".16b, v8.16b"),
+                      concat!($mix, " ", $r, ".16b, ", $r, ".16b"),)+
+                    "subs {n}, {n}, #1",
+                    "b.ne 2b",
+                    "ld1 {{v8.16b, v9.16b}}, [{k}]",
+                    $(concat!($mid, " ", $r, ".16b, v8.16b"),
+                      concat!("eor ", $r, ".16b, ", $r, ".16b, v9.16b"),)+
+                    "mov {p}, {data}",
+                    $(concat!("st1 {{", $r, ".16b}}, [{p}], #16"),)+
+                    rk = in(reg) rk,
+                    nr = in(reg) rounds - 1,
+                    data = in(reg) data,
+                    p = out(reg) _,
+                    k = out(reg) _,
+                    n = out(reg) _,
+                    out("v0") _, out("v1") _, out("v2") _, out("v3") _,
+                    out("v4") _, out("v5") _, out("v6") _, out("v7") _,
+                    out("v8") _, out("v9") _,
+                    options(nostack),
+                );
+            }
         }
     };
 }
@@ -387,66 +376,68 @@ macro_rules! groups {
             data: *mut u8,
             groups: usize,
         ) {
-            core::arch::asm!(
-                "3:",
-                "add {p}, {data}, #64",
-                "ld1 {{v0.16b, v1.16b, v2.16b, v3.16b}}, [{data}]",
-                "ld1 {{v4.16b, v5.16b, v6.16b, v7.16b}}, [{p}]",
-                "mov {k}, {rk}",
-                "mov {n}, {nr}",
-                "2:",
-                "ld1 {{v8.16b}}, [{k}], #16",
-                concat!($mid, " v0.16b, v8.16b"),
-                concat!($mix, " v0.16b, v0.16b"),
-                concat!($mid, " v1.16b, v8.16b"),
-                concat!($mix, " v1.16b, v1.16b"),
-                concat!($mid, " v2.16b, v8.16b"),
-                concat!($mix, " v2.16b, v2.16b"),
-                concat!($mid, " v3.16b, v8.16b"),
-                concat!($mix, " v3.16b, v3.16b"),
-                concat!($mid, " v4.16b, v8.16b"),
-                concat!($mix, " v4.16b, v4.16b"),
-                concat!($mid, " v5.16b, v8.16b"),
-                concat!($mix, " v5.16b, v5.16b"),
-                concat!($mid, " v6.16b, v8.16b"),
-                concat!($mix, " v6.16b, v6.16b"),
-                concat!($mid, " v7.16b, v8.16b"),
-                concat!($mix, " v7.16b, v7.16b"),
-                "subs {n}, {n}, #1",
-                "b.ne 2b",
-                "ld1 {{v8.16b, v9.16b}}, [{k}]",
-                concat!($mid, " v0.16b, v8.16b"),
-                "eor v0.16b, v0.16b, v9.16b",
-                concat!($mid, " v1.16b, v8.16b"),
-                "eor v1.16b, v1.16b, v9.16b",
-                concat!($mid, " v2.16b, v8.16b"),
-                "eor v2.16b, v2.16b, v9.16b",
-                concat!($mid, " v3.16b, v8.16b"),
-                "eor v3.16b, v3.16b, v9.16b",
-                concat!($mid, " v4.16b, v8.16b"),
-                "eor v4.16b, v4.16b, v9.16b",
-                concat!($mid, " v5.16b, v8.16b"),
-                "eor v5.16b, v5.16b, v9.16b",
-                concat!($mid, " v6.16b, v8.16b"),
-                "eor v6.16b, v6.16b, v9.16b",
-                concat!($mid, " v7.16b, v8.16b"),
-                "eor v7.16b, v7.16b, v9.16b",
-                "st1 {{v0.16b, v1.16b, v2.16b, v3.16b}}, [{data}], #64",
-                "st1 {{v4.16b, v5.16b, v6.16b, v7.16b}}, [{data}], #64",
-                "subs {groups}, {groups}, #1",
-                "b.ne 3b",
-                rk = in(reg) rk,
-                nr = in(reg) rounds - 1,
-                data = inout(reg) data => _,
-                groups = inout(reg) groups => _,
-                p = out(reg) _,
-                k = out(reg) _,
-                n = out(reg) _,
-                out("v0") _, out("v1") _, out("v2") _, out("v3") _,
-                out("v4") _, out("v5") _, out("v6") _, out("v7") _,
-                out("v8") _, out("v9") _,
-                options(nostack),
-            );
+            unsafe {
+                core::arch::asm!(
+                    "3:",
+                    "add {p}, {data}, #64",
+                    "ld1 {{v0.16b, v1.16b, v2.16b, v3.16b}}, [{data}]",
+                    "ld1 {{v4.16b, v5.16b, v6.16b, v7.16b}}, [{p}]",
+                    "mov {k}, {rk}",
+                    "mov {n}, {nr}",
+                    "2:",
+                    "ld1 {{v8.16b}}, [{k}], #16",
+                    concat!($mid, " v0.16b, v8.16b"),
+                    concat!($mix, " v0.16b, v0.16b"),
+                    concat!($mid, " v1.16b, v8.16b"),
+                    concat!($mix, " v1.16b, v1.16b"),
+                    concat!($mid, " v2.16b, v8.16b"),
+                    concat!($mix, " v2.16b, v2.16b"),
+                    concat!($mid, " v3.16b, v8.16b"),
+                    concat!($mix, " v3.16b, v3.16b"),
+                    concat!($mid, " v4.16b, v8.16b"),
+                    concat!($mix, " v4.16b, v4.16b"),
+                    concat!($mid, " v5.16b, v8.16b"),
+                    concat!($mix, " v5.16b, v5.16b"),
+                    concat!($mid, " v6.16b, v8.16b"),
+                    concat!($mix, " v6.16b, v6.16b"),
+                    concat!($mid, " v7.16b, v8.16b"),
+                    concat!($mix, " v7.16b, v7.16b"),
+                    "subs {n}, {n}, #1",
+                    "b.ne 2b",
+                    "ld1 {{v8.16b, v9.16b}}, [{k}]",
+                    concat!($mid, " v0.16b, v8.16b"),
+                    "eor v0.16b, v0.16b, v9.16b",
+                    concat!($mid, " v1.16b, v8.16b"),
+                    "eor v1.16b, v1.16b, v9.16b",
+                    concat!($mid, " v2.16b, v8.16b"),
+                    "eor v2.16b, v2.16b, v9.16b",
+                    concat!($mid, " v3.16b, v8.16b"),
+                    "eor v3.16b, v3.16b, v9.16b",
+                    concat!($mid, " v4.16b, v8.16b"),
+                    "eor v4.16b, v4.16b, v9.16b",
+                    concat!($mid, " v5.16b, v8.16b"),
+                    "eor v5.16b, v5.16b, v9.16b",
+                    concat!($mid, " v6.16b, v8.16b"),
+                    "eor v6.16b, v6.16b, v9.16b",
+                    concat!($mid, " v7.16b, v8.16b"),
+                    "eor v7.16b, v7.16b, v9.16b",
+                    "st1 {{v0.16b, v1.16b, v2.16b, v3.16b}}, [{data}], #64",
+                    "st1 {{v4.16b, v5.16b, v6.16b, v7.16b}}, [{data}], #64",
+                    "subs {groups}, {groups}, #1",
+                    "b.ne 3b",
+                    rk = in(reg) rk,
+                    nr = in(reg) rounds - 1,
+                    data = inout(reg) data => _,
+                    groups = inout(reg) groups => _,
+                    p = out(reg) _,
+                    k = out(reg) _,
+                    n = out(reg) _,
+                    out("v0") _, out("v1") _, out("v2") _, out("v3") _,
+                    out("v4") _, out("v5") _, out("v6") _, out("v7") _,
+                    out("v8") _, out("v9") _,
+                    options(nostack),
+                );
+            }
         }
     };
 }
@@ -498,11 +489,7 @@ mod tests {
     /// Returns the cipher, or `None` (skipping the test) without the
     /// AES instructions.
     fn aes<const K: usize>(key: &[u8; K]) -> Option<Aes<K>> {
-        match Aes::try_new(key) {
-            Ok(a) => Some(a),
-            Err(Error::NotSupported) => None,
-            Err(e) => panic!("{e}"),
-        }
+        Aes::<K>::supported().then(|| Aes::new(key))
     }
 
     fn unhex(s: &str) -> [u8; 32] {
@@ -521,9 +508,9 @@ mod tests {
         let Some(aes) = aes(&key) else { return };
 
         let mut block = plain;
-        aes.encrypt_block(&mut block);
+        aes.encrypt_blocks(core::slice::from_mut(&mut block));
         assert_eq!(block, cipher, "encrypt");
-        aes.decrypt_block(&mut block);
+        aes.decrypt_blocks(core::slice::from_mut(&mut block));
         assert_eq!(block, plain, "decrypt");
     }
 
@@ -571,7 +558,7 @@ mod tests {
                 *k = (i * 37 + klen) as u8;
             }
             let Some(hw) = aes(&key) else { return };
-            let sw = portable::ttable::Aes::try_new(&key).unwrap();
+            let sw = portable::ttable::Aes::new(&key);
             // Every tail width, with and without full groups before it.
             for nblocks in 0..26 {
                 let mut data = [[0u8; BLOCK_SIZE]; 25];

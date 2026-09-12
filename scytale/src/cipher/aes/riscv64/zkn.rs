@@ -14,38 +14,18 @@
 //!
 //! # Availability
 //!
-//! [`Aes::try_new`] accepts when the crate was compiled with the
+//! [`Aes::new`] accepts when the crate was compiled with the
 //! `zkne` and `zknd` target features, or, on Linux, when
 //! `riscv_hwprobe` reports them. Otherwise it returns
 //! [`Error::NotSupported`].
 //!
-//! # Example
-//!
-//! ```
-//! use scytale::cipher::aes::riscv64::zkn::Aes;
-//! use scytale::Error;
-//!
-//! # fn main() -> Result<(), Error> {
-//! match Aes::try_new(&[0u8; 16]) {
-//!     Ok(aes) => {
-//!         let mut block = [0u8; 16];
-//!         aes.encrypt_block(&mut block);
-//!         aes.decrypt_block(&mut block);
-//!         assert_eq!(block, [0u8; 16]);
-//!     }
-//!     Err(Error::NotSupported) => {} // no Zkn on this machine
-//!     Err(e) => return Err(e),
-//! }
-//! # Ok(())
-//! # }
-//! ```
 
 use core::fmt;
 
 use super::has_zkn;
-use crate::cipher::aes::{KeySize, BLOCK_SIZE};
 use crate::cipher::BlockCipher;
-use crate::{BlockType, Error, KeyType};
+use crate::cipher::aes::{BLOCK_SIZE, KeySize};
+use crate::{BlockType, Key, KeyType};
 use zeroize::ZeroizeOnDrop;
 
 /// 64-bit halves in the longest key schedule (15 round keys).
@@ -54,7 +34,7 @@ const MAX_HALVES: usize = 30;
 /// An AES cipher with an expanded key, using the Zkn instructions.
 ///
 /// Supports 128, 192 and 256 bit keys. Key expansion happens once in
-/// [`Aes::try_new`]; the key is wiped on drop.
+/// [`Aes::new`]; the key is wiped on drop.
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct Aes<const K: usize> {
     /// Round keys as (low, high) 64-bit halves.
@@ -76,21 +56,26 @@ impl<const K: usize> fmt::Debug for Aes<K> {
 }
 
 impl<const K: usize> Aes<K> {
-    /// Expands `key`, which must be 16, 24 or 32 bytes long.
+    /// Whether this processor can run this implementation.
+    pub(crate) fn supported() -> bool {
+        has_zkn()
+    }
+
+    /// Expands `key`.
     ///
-    /// Returns [`Error::NotSupported`] if the instructions cannot be
-    /// confirmed available.
-    pub fn try_new(key: &[u8; K]) -> Result<Self, Error> {
+    /// # Panics
+    /// If the processor lacks the Zkn instructions. The type is private and
+    /// is named only after the probe has confirmed them, so the
+    /// panic is unreachable from outside this crate.
+    pub(crate) fn new(key: &[u8; K]) -> Self {
         const {
             assert!(
                 K == 16 || K == 24 || K == 32,
                 "AES keys are 16, 24 or 32 bytes"
             )
         };
-        if !has_zkn() {
-            return Err(Error::NotSupported);
-        }
-        // SAFETY: the instructions were just confirmed present.
+        assert!(Self::supported(), "the Zkn instructions not available");
+        // SAFETY: just confirmed present.
         unsafe { Self::new_unchecked(key) }
     }
 
@@ -99,52 +84,36 @@ impl<const K: usize> Aes<K> {
     /// # Safety
     /// The caller must have confirmed that Zkne and Zknd are
     /// available.
-    pub(crate) unsafe fn new_unchecked(key: &[u8; K]) -> Result<Self, Error> {
-        let size = KeySize::for_key(key)?;
-        let rounds = size.rounds();
+    pub(crate) unsafe fn new_unchecked(key: &[u8; K]) -> Self {
+        unsafe {
+            let size = KeySize::for_key(key);
+            let rounds = size.rounds();
 
-        let mut enc = [0u64; MAX_HALVES];
-        match size {
-            KeySize::Aes128 => expand128(key.as_ptr(), enc.as_mut_ptr()),
-            KeySize::Aes192 => expand192(key.as_ptr(), enc.as_mut_ptr()),
-            KeySize::Aes256 => expand256(key.as_ptr(), enc.as_mut_ptr()),
+            let mut enc = [0u64; MAX_HALVES];
+            match size {
+                KeySize::Aes128 => expand128(key.as_ptr(), enc.as_mut_ptr()),
+                KeySize::Aes192 => expand192(key.as_ptr(), enc.as_mut_ptr()),
+                KeySize::Aes256 => expand256(key.as_ptr(), enc.as_mut_ptr()),
+            }
+
+            let mut dec = [0u64; MAX_HALVES];
+            dec[0] = enc[2 * rounds];
+            dec[1] = enc[2 * rounds + 1];
+            for r in 1..rounds {
+                let src = 2 * (rounds - r);
+                dec[2 * r] = inv_mix_columns(enc[src]);
+                dec[2 * r + 1] = inv_mix_columns(enc[src + 1]);
+            }
+            dec[2 * rounds] = enc[0];
+            dec[2 * rounds + 1] = enc[1];
+
+            Aes { enc, dec, size }
         }
-
-        let mut dec = [0u64; MAX_HALVES];
-        dec[0] = enc[2 * rounds];
-        dec[1] = enc[2 * rounds + 1];
-        for r in 1..rounds {
-            let src = 2 * (rounds - r);
-            dec[2 * r] = inv_mix_columns(enc[src]);
-            dec[2 * r + 1] = inv_mix_columns(enc[src + 1]);
-        }
-        dec[2 * rounds] = enc[0];
-        dec[2 * rounds + 1] = enc[1];
-
-        Ok(Aes { enc, dec, size })
     }
 
     /// Number of rounds: 10, 12 or 14 depending on key size.
     pub fn rounds(&self) -> usize {
         self.size.rounds()
-    }
-
-    /// Encrypts one block in place.
-    #[inline]
-    pub fn encrypt_block(&self, block: &mut [u8; BLOCK_SIZE]) {
-        // SAFETY: the struct only exists if try_new confirmed support.
-        unsafe {
-            encrypt(self.enc.as_ptr(), self.rounds(), block.as_mut_ptr(), 1)
-        }
-    }
-
-    /// Decrypts one block in place.
-    #[inline]
-    pub fn decrypt_block(&self, block: &mut [u8; BLOCK_SIZE]) {
-        // SAFETY: the struct only exists if try_new confirmed support.
-        unsafe {
-            decrypt(self.dec.as_ptr(), self.rounds(), block.as_mut_ptr(), 1)
-        }
     }
 
     /// Encrypts every block in place, independently (ECB).
@@ -183,6 +152,8 @@ impl<const K: usize> Aes<K> {
     }
 }
 
+impl<const K: usize> Aes<K> {}
+
 impl<const K: usize> BlockType for Aes<K> {
     type Block = [u8; BLOCK_SIZE];
 
@@ -192,31 +163,23 @@ impl<const K: usize> BlockType for Aes<K> {
 }
 
 impl<const K: usize> KeyType for Aes<K> {
-    type Key = [u8; K];
+    type Key = Key<[u8; K]>;
 
     fn zero_key() -> Self::Key {
-        [0; K]
+        Key::zeroed()
     }
 }
 
 impl<const K: usize> BlockCipher for Aes<K> {
-    fn try_new(key: &Self::Key) -> Result<Self, Error> {
-        Aes::try_new(key)
+    fn new(key: &Self::Key) -> Self {
+        Aes::new(key.array())
     }
 
-    fn encrypt_block(&self, block: &mut Self::Block) {
-        Aes::encrypt_block(self, block)
-    }
-
-    fn decrypt_block(&self, block: &mut Self::Block) {
-        Aes::decrypt_block(self, block)
-    }
-
-    fn encrypt_blocks(&self, blocks: &mut [Self::Block]) {
+    fn encrypt(&self, blocks: &mut [Self::Block]) {
         Aes::encrypt_blocks(self, blocks)
     }
 
-    fn decrypt_blocks(&self, blocks: &mut [Self::Block]) {
+    fn decrypt(&self, blocks: &mut [Self::Block]) {
         Aes::decrypt_blocks(self, blocks)
     }
 }
@@ -236,71 +199,73 @@ impl<const K: usize> BlockCipher for Aes<K> {
 /// Requires Zkne; `key` must point at the key bytes and `out` at
 /// 240 writable bytes.
 unsafe fn expand128(key: *const u8, out: *mut u64) {
-    core::arch::asm!(
-        ".option push",
-        ".option arch, +zkne",
-        "ld      {t0}, 0({key})",
-        "ld      {t1}, 8({key})",
-        "sd      {t0}, 0({out})",
-        "sd      {t1}, 8({out})",
-        "aes64ks1i {t2}, {t1}, 0",
-        "aes64ks2 {t0}, {t2}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "sd      {t0}, 16({out})",
-        "sd      {t1}, 24({out})",
-        "aes64ks1i {t2}, {t1}, 1",
-        "aes64ks2 {t0}, {t2}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "sd      {t0}, 32({out})",
-        "sd      {t1}, 40({out})",
-        "aes64ks1i {t2}, {t1}, 2",
-        "aes64ks2 {t0}, {t2}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "sd      {t0}, 48({out})",
-        "sd      {t1}, 56({out})",
-        "aes64ks1i {t2}, {t1}, 3",
-        "aes64ks2 {t0}, {t2}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "sd      {t0}, 64({out})",
-        "sd      {t1}, 72({out})",
-        "aes64ks1i {t2}, {t1}, 4",
-        "aes64ks2 {t0}, {t2}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "sd      {t0}, 80({out})",
-        "sd      {t1}, 88({out})",
-        "aes64ks1i {t2}, {t1}, 5",
-        "aes64ks2 {t0}, {t2}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "sd      {t0}, 96({out})",
-        "sd      {t1}, 104({out})",
-        "aes64ks1i {t2}, {t1}, 6",
-        "aes64ks2 {t0}, {t2}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "sd      {t0}, 112({out})",
-        "sd      {t1}, 120({out})",
-        "aes64ks1i {t2}, {t1}, 7",
-        "aes64ks2 {t0}, {t2}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "sd      {t0}, 128({out})",
-        "sd      {t1}, 136({out})",
-        "aes64ks1i {t2}, {t1}, 8",
-        "aes64ks2 {t0}, {t2}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "sd      {t0}, 144({out})",
-        "sd      {t1}, 152({out})",
-        "aes64ks1i {t2}, {t1}, 9",
-        "aes64ks2 {t0}, {t2}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "sd      {t0}, 160({out})",
-        "sd      {t1}, 168({out})",
-        ".option pop",
-        key = in(reg) key,
-        out = in(reg) out,
-        t0 = out(reg) _,
-        t1 = out(reg) _,
-        t2 = out(reg) _,
-        options(nostack),
-    );
+    unsafe {
+        core::arch::asm!(
+            ".option push",
+            ".option arch, +zkne",
+            "ld      {t0}, 0({key})",
+            "ld      {t1}, 8({key})",
+            "sd      {t0}, 0({out})",
+            "sd      {t1}, 8({out})",
+            "aes64ks1i {t2}, {t1}, 0",
+            "aes64ks2 {t0}, {t2}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "sd      {t0}, 16({out})",
+            "sd      {t1}, 24({out})",
+            "aes64ks1i {t2}, {t1}, 1",
+            "aes64ks2 {t0}, {t2}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "sd      {t0}, 32({out})",
+            "sd      {t1}, 40({out})",
+            "aes64ks1i {t2}, {t1}, 2",
+            "aes64ks2 {t0}, {t2}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "sd      {t0}, 48({out})",
+            "sd      {t1}, 56({out})",
+            "aes64ks1i {t2}, {t1}, 3",
+            "aes64ks2 {t0}, {t2}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "sd      {t0}, 64({out})",
+            "sd      {t1}, 72({out})",
+            "aes64ks1i {t2}, {t1}, 4",
+            "aes64ks2 {t0}, {t2}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "sd      {t0}, 80({out})",
+            "sd      {t1}, 88({out})",
+            "aes64ks1i {t2}, {t1}, 5",
+            "aes64ks2 {t0}, {t2}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "sd      {t0}, 96({out})",
+            "sd      {t1}, 104({out})",
+            "aes64ks1i {t2}, {t1}, 6",
+            "aes64ks2 {t0}, {t2}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "sd      {t0}, 112({out})",
+            "sd      {t1}, 120({out})",
+            "aes64ks1i {t2}, {t1}, 7",
+            "aes64ks2 {t0}, {t2}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "sd      {t0}, 128({out})",
+            "sd      {t1}, 136({out})",
+            "aes64ks1i {t2}, {t1}, 8",
+            "aes64ks2 {t0}, {t2}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "sd      {t0}, 144({out})",
+            "sd      {t1}, 152({out})",
+            "aes64ks1i {t2}, {t1}, 9",
+            "aes64ks2 {t0}, {t2}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "sd      {t0}, 160({out})",
+            "sd      {t1}, 168({out})",
+            ".option pop",
+            key = in(reg) key,
+            out = in(reg) out,
+            t0 = out(reg) _,
+            t1 = out(reg) _,
+            t2 = out(reg) _,
+            options(nostack),
+        );
+    }
 }
 
 /// AES-192 key schedule: eight steps of one and a half round keys.
@@ -309,78 +274,80 @@ unsafe fn expand128(key: *const u8, out: *mut u64) {
 /// Requires Zkne; `key` must point at the key bytes and `out` at
 /// 240 writable bytes.
 unsafe fn expand192(key: *const u8, out: *mut u64) {
-    core::arch::asm!(
-        ".option push",
-        ".option arch, +zkne",
-        "ld      {t0}, 0({key})",
-        "ld      {t1}, 8({key})",
-        "ld      {t2}, 16({key})",
-        "sd      {t0}, 0({out})",
-        "sd      {t1}, 8({out})",
-        "sd      {t2}, 16({out})",
-        "aes64ks1i {t3}, {t2}, 0",
-        "aes64ks2 {t0}, {t3}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "aes64ks2 {t2}, {t1}, {t2}",
-        "sd      {t0}, 24({out})",
-        "sd      {t1}, 32({out})",
-        "sd      {t2}, 40({out})",
-        "aes64ks1i {t3}, {t2}, 1",
-        "aes64ks2 {t0}, {t3}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "aes64ks2 {t2}, {t1}, {t2}",
-        "sd      {t0}, 48({out})",
-        "sd      {t1}, 56({out})",
-        "sd      {t2}, 64({out})",
-        "aes64ks1i {t3}, {t2}, 2",
-        "aes64ks2 {t0}, {t3}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "aes64ks2 {t2}, {t1}, {t2}",
-        "sd      {t0}, 72({out})",
-        "sd      {t1}, 80({out})",
-        "sd      {t2}, 88({out})",
-        "aes64ks1i {t3}, {t2}, 3",
-        "aes64ks2 {t0}, {t3}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "aes64ks2 {t2}, {t1}, {t2}",
-        "sd      {t0}, 96({out})",
-        "sd      {t1}, 104({out})",
-        "sd      {t2}, 112({out})",
-        "aes64ks1i {t3}, {t2}, 4",
-        "aes64ks2 {t0}, {t3}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "aes64ks2 {t2}, {t1}, {t2}",
-        "sd      {t0}, 120({out})",
-        "sd      {t1}, 128({out})",
-        "sd      {t2}, 136({out})",
-        "aes64ks1i {t3}, {t2}, 5",
-        "aes64ks2 {t0}, {t3}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "aes64ks2 {t2}, {t1}, {t2}",
-        "sd      {t0}, 144({out})",
-        "sd      {t1}, 152({out})",
-        "sd      {t2}, 160({out})",
-        "aes64ks1i {t3}, {t2}, 6",
-        "aes64ks2 {t0}, {t3}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "aes64ks2 {t2}, {t1}, {t2}",
-        "sd      {t0}, 168({out})",
-        "sd      {t1}, 176({out})",
-        "sd      {t2}, 184({out})",
-        "aes64ks1i {t3}, {t2}, 7",
-        "aes64ks2 {t0}, {t3}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "sd      {t0}, 192({out})",
-        "sd      {t1}, 200({out})",
-        ".option pop",
-        key = in(reg) key,
-        out = in(reg) out,
-        t0 = out(reg) _,
-        t1 = out(reg) _,
-        t2 = out(reg) _,
-        t3 = out(reg) _,
-        options(nostack),
-    );
+    unsafe {
+        core::arch::asm!(
+            ".option push",
+            ".option arch, +zkne",
+            "ld      {t0}, 0({key})",
+            "ld      {t1}, 8({key})",
+            "ld      {t2}, 16({key})",
+            "sd      {t0}, 0({out})",
+            "sd      {t1}, 8({out})",
+            "sd      {t2}, 16({out})",
+            "aes64ks1i {t3}, {t2}, 0",
+            "aes64ks2 {t0}, {t3}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "aes64ks2 {t2}, {t1}, {t2}",
+            "sd      {t0}, 24({out})",
+            "sd      {t1}, 32({out})",
+            "sd      {t2}, 40({out})",
+            "aes64ks1i {t3}, {t2}, 1",
+            "aes64ks2 {t0}, {t3}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "aes64ks2 {t2}, {t1}, {t2}",
+            "sd      {t0}, 48({out})",
+            "sd      {t1}, 56({out})",
+            "sd      {t2}, 64({out})",
+            "aes64ks1i {t3}, {t2}, 2",
+            "aes64ks2 {t0}, {t3}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "aes64ks2 {t2}, {t1}, {t2}",
+            "sd      {t0}, 72({out})",
+            "sd      {t1}, 80({out})",
+            "sd      {t2}, 88({out})",
+            "aes64ks1i {t3}, {t2}, 3",
+            "aes64ks2 {t0}, {t3}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "aes64ks2 {t2}, {t1}, {t2}",
+            "sd      {t0}, 96({out})",
+            "sd      {t1}, 104({out})",
+            "sd      {t2}, 112({out})",
+            "aes64ks1i {t3}, {t2}, 4",
+            "aes64ks2 {t0}, {t3}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "aes64ks2 {t2}, {t1}, {t2}",
+            "sd      {t0}, 120({out})",
+            "sd      {t1}, 128({out})",
+            "sd      {t2}, 136({out})",
+            "aes64ks1i {t3}, {t2}, 5",
+            "aes64ks2 {t0}, {t3}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "aes64ks2 {t2}, {t1}, {t2}",
+            "sd      {t0}, 144({out})",
+            "sd      {t1}, 152({out})",
+            "sd      {t2}, 160({out})",
+            "aes64ks1i {t3}, {t2}, 6",
+            "aes64ks2 {t0}, {t3}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "aes64ks2 {t2}, {t1}, {t2}",
+            "sd      {t0}, 168({out})",
+            "sd      {t1}, 176({out})",
+            "sd      {t2}, 184({out})",
+            "aes64ks1i {t3}, {t2}, 7",
+            "aes64ks2 {t0}, {t3}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "sd      {t0}, 192({out})",
+            "sd      {t1}, 200({out})",
+            ".option pop",
+            key = in(reg) key,
+            out = in(reg) out,
+            t0 = out(reg) _,
+            t1 = out(reg) _,
+            t2 = out(reg) _,
+            t3 = out(reg) _,
+            options(nostack),
+        );
+    }
 }
 
 /// AES-256 key schedule: seven steps of two round keys.
@@ -389,92 +356,94 @@ unsafe fn expand192(key: *const u8, out: *mut u64) {
 /// Requires Zkne; `key` must point at the key bytes and `out` at
 /// 240 writable bytes.
 unsafe fn expand256(key: *const u8, out: *mut u64) {
-    core::arch::asm!(
-        ".option push",
-        ".option arch, +zkne",
-        "ld      {t0}, 0({key})",
-        "ld      {t1}, 8({key})",
-        "ld      {t2}, 16({key})",
-        "ld      {t3}, 24({key})",
-        "sd      {t0}, 0({out})",
-        "sd      {t1}, 8({out})",
-        "sd      {t2}, 16({out})",
-        "sd      {t3}, 24({out})",
-        "aes64ks1i {t4}, {t3}, 0",
-        "aes64ks2 {t0}, {t4}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "sd      {t0}, 32({out})",
-        "sd      {t1}, 40({out})",
-        "aes64ks1i {t4}, {t1}, 0xA",
-        "aes64ks2 {t2}, {t4}, {t2}",
-        "aes64ks2 {t3}, {t2}, {t3}",
-        "sd      {t2}, 48({out})",
-        "sd      {t3}, 56({out})",
-        "aes64ks1i {t4}, {t3}, 1",
-        "aes64ks2 {t0}, {t4}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "sd      {t0}, 64({out})",
-        "sd      {t1}, 72({out})",
-        "aes64ks1i {t4}, {t1}, 0xA",
-        "aes64ks2 {t2}, {t4}, {t2}",
-        "aes64ks2 {t3}, {t2}, {t3}",
-        "sd      {t2}, 80({out})",
-        "sd      {t3}, 88({out})",
-        "aes64ks1i {t4}, {t3}, 2",
-        "aes64ks2 {t0}, {t4}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "sd      {t0}, 96({out})",
-        "sd      {t1}, 104({out})",
-        "aes64ks1i {t4}, {t1}, 0xA",
-        "aes64ks2 {t2}, {t4}, {t2}",
-        "aes64ks2 {t3}, {t2}, {t3}",
-        "sd      {t2}, 112({out})",
-        "sd      {t3}, 120({out})",
-        "aes64ks1i {t4}, {t3}, 3",
-        "aes64ks2 {t0}, {t4}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "sd      {t0}, 128({out})",
-        "sd      {t1}, 136({out})",
-        "aes64ks1i {t4}, {t1}, 0xA",
-        "aes64ks2 {t2}, {t4}, {t2}",
-        "aes64ks2 {t3}, {t2}, {t3}",
-        "sd      {t2}, 144({out})",
-        "sd      {t3}, 152({out})",
-        "aes64ks1i {t4}, {t3}, 4",
-        "aes64ks2 {t0}, {t4}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "sd      {t0}, 160({out})",
-        "sd      {t1}, 168({out})",
-        "aes64ks1i {t4}, {t1}, 0xA",
-        "aes64ks2 {t2}, {t4}, {t2}",
-        "aes64ks2 {t3}, {t2}, {t3}",
-        "sd      {t2}, 176({out})",
-        "sd      {t3}, 184({out})",
-        "aes64ks1i {t4}, {t3}, 5",
-        "aes64ks2 {t0}, {t4}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "sd      {t0}, 192({out})",
-        "sd      {t1}, 200({out})",
-        "aes64ks1i {t4}, {t1}, 0xA",
-        "aes64ks2 {t2}, {t4}, {t2}",
-        "aes64ks2 {t3}, {t2}, {t3}",
-        "sd      {t2}, 208({out})",
-        "sd      {t3}, 216({out})",
-        "aes64ks1i {t4}, {t3}, 6",
-        "aes64ks2 {t0}, {t4}, {t0}",
-        "aes64ks2 {t1}, {t0}, {t1}",
-        "sd      {t0}, 224({out})",
-        "sd      {t1}, 232({out})",
-        ".option pop",
-        key = in(reg) key,
-        out = in(reg) out,
-        t0 = out(reg) _,
-        t1 = out(reg) _,
-        t2 = out(reg) _,
-        t3 = out(reg) _,
-        t4 = out(reg) _,
-        options(nostack),
-    );
+    unsafe {
+        core::arch::asm!(
+            ".option push",
+            ".option arch, +zkne",
+            "ld      {t0}, 0({key})",
+            "ld      {t1}, 8({key})",
+            "ld      {t2}, 16({key})",
+            "ld      {t3}, 24({key})",
+            "sd      {t0}, 0({out})",
+            "sd      {t1}, 8({out})",
+            "sd      {t2}, 16({out})",
+            "sd      {t3}, 24({out})",
+            "aes64ks1i {t4}, {t3}, 0",
+            "aes64ks2 {t0}, {t4}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "sd      {t0}, 32({out})",
+            "sd      {t1}, 40({out})",
+            "aes64ks1i {t4}, {t1}, 0xA",
+            "aes64ks2 {t2}, {t4}, {t2}",
+            "aes64ks2 {t3}, {t2}, {t3}",
+            "sd      {t2}, 48({out})",
+            "sd      {t3}, 56({out})",
+            "aes64ks1i {t4}, {t3}, 1",
+            "aes64ks2 {t0}, {t4}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "sd      {t0}, 64({out})",
+            "sd      {t1}, 72({out})",
+            "aes64ks1i {t4}, {t1}, 0xA",
+            "aes64ks2 {t2}, {t4}, {t2}",
+            "aes64ks2 {t3}, {t2}, {t3}",
+            "sd      {t2}, 80({out})",
+            "sd      {t3}, 88({out})",
+            "aes64ks1i {t4}, {t3}, 2",
+            "aes64ks2 {t0}, {t4}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "sd      {t0}, 96({out})",
+            "sd      {t1}, 104({out})",
+            "aes64ks1i {t4}, {t1}, 0xA",
+            "aes64ks2 {t2}, {t4}, {t2}",
+            "aes64ks2 {t3}, {t2}, {t3}",
+            "sd      {t2}, 112({out})",
+            "sd      {t3}, 120({out})",
+            "aes64ks1i {t4}, {t3}, 3",
+            "aes64ks2 {t0}, {t4}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "sd      {t0}, 128({out})",
+            "sd      {t1}, 136({out})",
+            "aes64ks1i {t4}, {t1}, 0xA",
+            "aes64ks2 {t2}, {t4}, {t2}",
+            "aes64ks2 {t3}, {t2}, {t3}",
+            "sd      {t2}, 144({out})",
+            "sd      {t3}, 152({out})",
+            "aes64ks1i {t4}, {t3}, 4",
+            "aes64ks2 {t0}, {t4}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "sd      {t0}, 160({out})",
+            "sd      {t1}, 168({out})",
+            "aes64ks1i {t4}, {t1}, 0xA",
+            "aes64ks2 {t2}, {t4}, {t2}",
+            "aes64ks2 {t3}, {t2}, {t3}",
+            "sd      {t2}, 176({out})",
+            "sd      {t3}, 184({out})",
+            "aes64ks1i {t4}, {t3}, 5",
+            "aes64ks2 {t0}, {t4}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "sd      {t0}, 192({out})",
+            "sd      {t1}, 200({out})",
+            "aes64ks1i {t4}, {t1}, 0xA",
+            "aes64ks2 {t2}, {t4}, {t2}",
+            "aes64ks2 {t3}, {t2}, {t3}",
+            "sd      {t2}, 208({out})",
+            "sd      {t3}, 216({out})",
+            "aes64ks1i {t4}, {t3}, 6",
+            "aes64ks2 {t0}, {t4}, {t0}",
+            "aes64ks2 {t1}, {t0}, {t1}",
+            "sd      {t0}, 224({out})",
+            "sd      {t1}, 232({out})",
+            ".option pop",
+            key = in(reg) key,
+            out = in(reg) out,
+            t0 = out(reg) _,
+            t1 = out(reg) _,
+            t2 = out(reg) _,
+            t3 = out(reg) _,
+            t4 = out(reg) _,
+            options(nostack),
+        );
+    }
 }
 
 /// InvMixColumns on the two columns in one 64-bit half of a round
@@ -483,17 +452,19 @@ unsafe fn expand256(key: *const u8, out: *mut u64) {
 /// # Safety
 /// Requires Zknd.
 unsafe fn inv_mix_columns(half: u64) -> u64 {
-    let out: u64;
-    core::arch::asm!(
-        ".option push",
-        ".option arch, +zknd",
-        "aes64im {out}, {half}",
-        ".option pop",
-        half = in(reg) half,
-        out = lateout(reg) out,
-        options(pure, nomem, nostack, preserves_flags),
-    );
-    out
+    unsafe {
+        let out: u64;
+        core::arch::asm!(
+            ".option push",
+            ".option arch, +zknd",
+            "aes64im {out}, {half}",
+            ".option pop",
+            half = in(reg) half,
+            out = lateout(reg) out,
+            options(pure, nomem, nostack, preserves_flags),
+        );
+        out
+    }
 }
 
 // The block loops below are hand-written so the instruction order can
@@ -510,53 +481,55 @@ unsafe fn inv_mix_columns(half: u64) -> u64 {
 /// (two halves each), `data` at `blocks * 16` writable bytes, and
 /// `blocks >= 1`.
 unsafe fn encrypt(rk: *const u64, rounds: usize, data: *mut u8, blocks: usize) {
-    core::arch::asm!(
-        ".option push",
-        ".option arch, +zkne",
-        "3:",
-        "ld      {l}, 0({data})",
-        "ld      {h}, 8({data})",
-        "ld      {kl}, 0({rk})",
-        "ld      {kh}, 8({rk})",
-        "xor     {l}, {l}, {kl}",
-        "xor     {h}, {h}, {kh}",
-        "addi    {k}, {rk}, 16",
-        "mv      {n}, {nr}",
-        "2:",
-        "ld      {kl}, 0({k})",
-        "ld      {kh}, 8({k})",
-        "aes64esm {t}, {l}, {h}",
-        "aes64esm {h}, {h}, {l}",
-        "xor     {l}, {t}, {kl}",
-        "xor     {h}, {h}, {kh}",
-        "addi    {k}, {k}, 16",
-        "addi    {n}, {n}, -1",
-        "bnez    {n}, 2b",
-        "ld      {kl}, 0({k})",
-        "ld      {kh}, 8({k})",
-        "aes64es {t}, {l}, {h}",
-        "aes64es {h}, {h}, {l}",
-        "xor     {l}, {t}, {kl}",
-        "xor     {h}, {h}, {kh}",
-        "sd      {l}, 0({data})",
-        "sd      {h}, 8({data})",
-        "addi    {data}, {data}, 16",
-        "addi    {blocks}, {blocks}, -1",
-        "bnez    {blocks}, 3b",
-        ".option pop",
-        rk = in(reg) rk,
-        nr = in(reg) rounds - 1,
-        data = inout(reg) data => _,
-        blocks = inout(reg) blocks => _,
-        k = out(reg) _,
-        n = out(reg) _,
-        kl = out(reg) _,
-        kh = out(reg) _,
-        l = out(reg) _,
-        h = out(reg) _,
-        t = out(reg) _,
-        options(nostack),
-    );
+    unsafe {
+        core::arch::asm!(
+            ".option push",
+            ".option arch, +zkne",
+            "3:",
+            "ld      {l}, 0({data})",
+            "ld      {h}, 8({data})",
+            "ld      {kl}, 0({rk})",
+            "ld      {kh}, 8({rk})",
+            "xor     {l}, {l}, {kl}",
+            "xor     {h}, {h}, {kh}",
+            "addi    {k}, {rk}, 16",
+            "mv      {n}, {nr}",
+            "2:",
+            "ld      {kl}, 0({k})",
+            "ld      {kh}, 8({k})",
+            "aes64esm {t}, {l}, {h}",
+            "aes64esm {h}, {h}, {l}",
+            "xor     {l}, {t}, {kl}",
+            "xor     {h}, {h}, {kh}",
+            "addi    {k}, {k}, 16",
+            "addi    {n}, {n}, -1",
+            "bnez    {n}, 2b",
+            "ld      {kl}, 0({k})",
+            "ld      {kh}, 8({k})",
+            "aes64es {t}, {l}, {h}",
+            "aes64es {h}, {h}, {l}",
+            "xor     {l}, {t}, {kl}",
+            "xor     {h}, {h}, {kh}",
+            "sd      {l}, 0({data})",
+            "sd      {h}, 8({data})",
+            "addi    {data}, {data}, 16",
+            "addi    {blocks}, {blocks}, -1",
+            "bnez    {blocks}, 3b",
+            ".option pop",
+            rk = in(reg) rk,
+            nr = in(reg) rounds - 1,
+            data = inout(reg) data => _,
+            blocks = inout(reg) blocks => _,
+            k = out(reg) _,
+            n = out(reg) _,
+            kl = out(reg) _,
+            kh = out(reg) _,
+            l = out(reg) _,
+            h = out(reg) _,
+            t = out(reg) _,
+            options(nostack),
+        );
+    }
 }
 
 /// Decrypts `blocks` blocks at `data` with `rounds` rounds, using the
@@ -567,53 +540,55 @@ unsafe fn encrypt(rk: *const u64, rounds: usize, data: *mut u8, blocks: usize) {
 /// (two halves each), `data` at `blocks * 16` writable bytes, and
 /// `blocks >= 1`.
 unsafe fn decrypt(rk: *const u64, rounds: usize, data: *mut u8, blocks: usize) {
-    core::arch::asm!(
-        ".option push",
-        ".option arch, +zknd",
-        "3:",
-        "ld      {l}, 0({data})",
-        "ld      {h}, 8({data})",
-        "ld      {kl}, 0({rk})",
-        "ld      {kh}, 8({rk})",
-        "xor     {l}, {l}, {kl}",
-        "xor     {h}, {h}, {kh}",
-        "addi    {k}, {rk}, 16",
-        "mv      {n}, {nr}",
-        "2:",
-        "ld      {kl}, 0({k})",
-        "ld      {kh}, 8({k})",
-        "aes64dsm {t}, {l}, {h}",
-        "aes64dsm {h}, {h}, {l}",
-        "xor     {l}, {t}, {kl}",
-        "xor     {h}, {h}, {kh}",
-        "addi    {k}, {k}, 16",
-        "addi    {n}, {n}, -1",
-        "bnez    {n}, 2b",
-        "ld      {kl}, 0({k})",
-        "ld      {kh}, 8({k})",
-        "aes64ds {t}, {l}, {h}",
-        "aes64ds {h}, {h}, {l}",
-        "xor     {l}, {t}, {kl}",
-        "xor     {h}, {h}, {kh}",
-        "sd      {l}, 0({data})",
-        "sd      {h}, 8({data})",
-        "addi    {data}, {data}, 16",
-        "addi    {blocks}, {blocks}, -1",
-        "bnez    {blocks}, 3b",
-        ".option pop",
-        rk = in(reg) rk,
-        nr = in(reg) rounds - 1,
-        data = inout(reg) data => _,
-        blocks = inout(reg) blocks => _,
-        k = out(reg) _,
-        n = out(reg) _,
-        kl = out(reg) _,
-        kh = out(reg) _,
-        l = out(reg) _,
-        h = out(reg) _,
-        t = out(reg) _,
-        options(nostack),
-    );
+    unsafe {
+        core::arch::asm!(
+            ".option push",
+            ".option arch, +zknd",
+            "3:",
+            "ld      {l}, 0({data})",
+            "ld      {h}, 8({data})",
+            "ld      {kl}, 0({rk})",
+            "ld      {kh}, 8({rk})",
+            "xor     {l}, {l}, {kl}",
+            "xor     {h}, {h}, {kh}",
+            "addi    {k}, {rk}, 16",
+            "mv      {n}, {nr}",
+            "2:",
+            "ld      {kl}, 0({k})",
+            "ld      {kh}, 8({k})",
+            "aes64dsm {t}, {l}, {h}",
+            "aes64dsm {h}, {h}, {l}",
+            "xor     {l}, {t}, {kl}",
+            "xor     {h}, {h}, {kh}",
+            "addi    {k}, {k}, 16",
+            "addi    {n}, {n}, -1",
+            "bnez    {n}, 2b",
+            "ld      {kl}, 0({k})",
+            "ld      {kh}, 8({k})",
+            "aes64ds {t}, {l}, {h}",
+            "aes64ds {h}, {h}, {l}",
+            "xor     {l}, {t}, {kl}",
+            "xor     {h}, {h}, {kh}",
+            "sd      {l}, 0({data})",
+            "sd      {h}, 8({data})",
+            "addi    {data}, {data}, 16",
+            "addi    {blocks}, {blocks}, -1",
+            "bnez    {blocks}, 3b",
+            ".option pop",
+            rk = in(reg) rk,
+            nr = in(reg) rounds - 1,
+            data = inout(reg) data => _,
+            blocks = inout(reg) blocks => _,
+            k = out(reg) _,
+            n = out(reg) _,
+            kl = out(reg) _,
+            kh = out(reg) _,
+            l = out(reg) _,
+            h = out(reg) _,
+            t = out(reg) _,
+            options(nostack),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -624,11 +599,7 @@ mod tests {
     /// Returns the cipher, or `None` (skipping the test) without
     /// Zkn.
     fn aes<const K: usize>(key: &[u8; K]) -> Option<Aes<K>> {
-        match Aes::try_new(key) {
-            Ok(a) => Some(a),
-            Err(Error::NotSupported) => None,
-            Err(e) => panic!("{e}"),
-        }
+        Aes::<K>::supported().then(|| Aes::new(key))
     }
 
     fn unhex(s: &str) -> [u8; 32] {
@@ -647,9 +618,9 @@ mod tests {
         let Some(aes) = aes(&key) else { return };
 
         let mut block = plain;
-        aes.encrypt_block(&mut block);
+        aes.encrypt_blocks(core::slice::from_mut(&mut block));
         assert_eq!(block, cipher, "encrypt");
-        aes.decrypt_block(&mut block);
+        aes.decrypt_blocks(core::slice::from_mut(&mut block));
         assert_eq!(block, plain, "decrypt");
     }
 
@@ -698,7 +669,7 @@ mod tests {
                 *k = (i * 37 + klen) as u8;
             }
             let Some(hw) = aes(&key) else { return };
-            let sw = portable::ttable::Aes::try_new(&key).unwrap();
+            let sw = portable::ttable::Aes::new(&key);
             for nblocks in [0, 1, 3, 4, 5, 8, 9] {
                 let mut data = [[0u8; BLOCK_SIZE]; MAX];
                 for (i, b) in data.as_flattened_mut().iter_mut().enumerate() {

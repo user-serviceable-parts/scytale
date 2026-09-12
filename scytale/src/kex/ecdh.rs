@@ -29,10 +29,10 @@
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::kdf::hkdf;
 //! use scytale::kex::ecdh::p256::PrivateKey;
-//! use scytale::random::{Rng, System};
+//! use scytale::random::CtrDrbg;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = Rng::try_new(System::try_new()?)?;
+//! let mut rng = CtrDrbg::from_system()?;
 //! let alice = PrivateKey::generate(&mut rng)?;
 //! let bob = PrivateKey::generate(&mut rng)?;
 //!
@@ -40,7 +40,7 @@
 //! let shared = alice.shared_secret(bob.public_key())?;
 //! assert_eq!(shared, bob.shared_secret(alice.public_key())?);
 //! let mut key = [0u8; 32];
-//! hkdf::derive::<Sha256>(b"", &shared, b"session v1", &mut key)?;
+//! hkdf::derive::<Sha256>(b"", &shared, &[b"session v1"], &mut key)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -136,10 +136,7 @@ mod tests {
     /// key form.
     #[test]
     fn agreement_through_formats() {
-        let mut rng = crate::random::Rng::try_new(
-            crate::random::System::try_new().unwrap(),
-        )
-        .unwrap();
+        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
         let a = p384::PrivateKey::generate(&mut rng).unwrap();
         let b = p384::PrivateKey::generate(&mut rng).unwrap();
         let shared = a.shared_secret(b.public_key()).unwrap();

@@ -16,7 +16,8 @@
 
 use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
 
-use super::{Backend, Cipher, Sealed, BLOCK_SIZE};
+use super::{BLOCK_SIZE, Backend, Cipher, Sealed};
+use crate::align::At32;
 
 /// ChaCha20 with AVX2.
 pub type ChaCha20 = Cipher<Avx2>;
@@ -53,37 +54,28 @@ impl Backend for Avx2 {
         counter: u32,
         data: &mut [u8],
     ) {
-        xor(key, nonce, counter, data)
+        unsafe { xor(key, nonce, counter, data) }
     }
 }
 
 /// Blocks one pass of the assembly handles.
 const GROUP: usize = 4;
 
-/// Sixteen-byte aligned tables the shuffles and the block counters
-/// come from.
-#[repr(align(32))]
-struct Aligned([u8; 32]);
-
 /// Rotate each word left by 16, as a byte shuffle.
-static ROTATE16: Aligned = Aligned([
+static ROTATE16: At32<[u8; 32]> = At32([
     2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13, //
     2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13,
 ]);
 
 /// Rotate each word left by 8, as a byte shuffle.
-static ROTATE8: Aligned = Aligned([
+static ROTATE8: At32<[u8; 32]> = At32([
     3, 0, 1, 2, 7, 4, 5, 6, 11, 8, 9, 10, 15, 12, 13, 14, //
     3, 0, 1, 2, 7, 4, 5, 6, 11, 8, 9, 10, 15, 12, 13, 14,
 ]);
 
-/// The counter row's per-half increments: the second half of a
-/// register is the block after the first.
-#[repr(align(32))]
-struct Counters([u32; 8]);
-static COUNTERS: [Counters; 2] = [
-    Counters([0, 0, 0, 0, 1, 0, 0, 0]),
-    Counters([2, 0, 0, 0, 3, 0, 0, 0]),
+static COUNTERS: [At32<[u32; 8]>; 2] = [
+    At32([0, 0, 0, 0, 1, 0, 0, 0]),
+    At32([2, 0, 0, 0, 3, 0, 0, 0]),
 ];
 
 /// The state rows for a group, laid out for `vbroadcasti128`.
@@ -102,23 +94,25 @@ fn rows(key: &[u32; 8], nonce: &[u32; 3], counter: u32) -> [u32; 16] {
 /// # Safety
 /// Requires AVX2.
 unsafe fn xor(key: &[u32; 8], nonce: &[u32; 3], counter: u32, data: &mut [u8]) {
-    debug_assert_eq!(data.len() % BLOCK_SIZE, 0);
-    let mut counter = counter;
-    let mut chunks = data.chunks_exact_mut(BLOCK_SIZE * GROUP);
-    for group in &mut chunks {
-        let state = rows(key, nonce, counter);
-        group4(&state, group.as_mut_ptr());
-        counter = counter.wrapping_add(GROUP as u32);
-    }
-    let rest = chunks.into_remainder();
-    if !rest.is_empty() {
-        // A short group: keystream into a scratch buffer, then only
-        // as much of it as is wanted.
-        let mut scratch = [0u8; BLOCK_SIZE * GROUP];
-        let state = rows(key, nonce, counter);
-        group4(&state, scratch.as_mut_ptr());
-        for (d, k) in rest.iter_mut().zip(&scratch) {
-            *d ^= k;
+    unsafe {
+        debug_assert_eq!(data.len() % BLOCK_SIZE, 0);
+        let mut counter = counter;
+        let mut chunks = data.chunks_exact_mut(BLOCK_SIZE * GROUP);
+        for group in &mut chunks {
+            let state = rows(key, nonce, counter);
+            group4(&state, group.as_mut_ptr());
+            counter = counter.wrapping_add(GROUP as u32);
+        }
+        let rest = chunks.into_remainder();
+        if !rest.is_empty() {
+            // A short group: keystream into a scratch buffer, then only
+            // as much of it as is wanted.
+            let mut scratch = [0u8; BLOCK_SIZE * GROUP];
+            let state = rows(key, nonce, counter);
+            group4(&state, scratch.as_mut_ptr());
+            for (d, k) in rest.iter_mut().zip(&scratch) {
+                *d ^= k;
+            }
         }
     }
 }
@@ -200,77 +194,80 @@ macro_rules! output {
 /// # Safety
 /// Requires AVX2; `data` must point at 256 writable bytes.
 unsafe fn group4(state: &[u32; 16], data: *mut u8) {
-    core::arch::asm!(
-        "vmovdqa ymm14, [{rot16}]",
-        "vmovdqa ymm15, [{rot8}]",
-        "vmovdqa ymm12, [{counters}]",
-        "vmovdqa ymm13, [{counters} + 32]",
-        "vbroadcasti128 ymm0, [{state}]",
-        "vbroadcasti128 ymm1, [{state} + 16]",
-        "vbroadcasti128 ymm2, [{state} + 32]",
-        "vbroadcasti128 ymm3, [{state} + 48]",
-        "vpaddd ymm7, ymm3, ymm13",
-        "vpaddd ymm3, ymm3, ymm12",
-        "vmovdqa ymm4, ymm0",
-        "vmovdqa ymm5, ymm1",
-        "vmovdqa ymm6, ymm2",
-        "mov {n}, 10",
-        "2:",
-        quarter!("ymm0", "ymm1", "ymm2", "ymm3", "ymm8"),
-        quarter!("ymm4", "ymm5", "ymm6", "ymm7", "ymm9"),
-        diagonal!("ymm1", "ymm2", "ymm3", "0x39", "0x93"),
-        diagonal!("ymm5", "ymm6", "ymm7", "0x39", "0x93"),
-        quarter!("ymm0", "ymm1", "ymm2", "ymm3", "ymm8"),
-        quarter!("ymm4", "ymm5", "ymm6", "ymm7", "ymm9"),
-        diagonal!("ymm1", "ymm2", "ymm3", "0x93", "0x39"),
-        diagonal!("ymm5", "ymm6", "ymm7", "0x93", "0x39"),
-        "dec {n}",
-        "jnz 2b",
-        // Add the input back. The counter rows take their increments
-        // again, since the broadcast row is the base counter.
-        "vbroadcasti128 ymm8, [{state}]",
-        "vbroadcasti128 ymm9, [{state} + 16]",
-        "vbroadcasti128 ymm10, [{state} + 32]",
-        "vbroadcasti128 ymm11, [{state} + 48]",
-        "vpaddd ymm0, ymm0, ymm8",
-        "vpaddd ymm1, ymm1, ymm9",
-        "vpaddd ymm2, ymm2, ymm10",
-        "vpaddd ymm4, ymm4, ymm8",
-        "vpaddd ymm5, ymm5, ymm9",
-        "vpaddd ymm6, ymm6, ymm10",
-        "vpaddd ymm8, ymm11, ymm12",
-        "vpaddd ymm9, ymm11, ymm13",
-        "vpaddd ymm3, ymm3, ymm8",
-        "vpaddd ymm7, ymm7, ymm9",
-        output!(
-            "ymm0", "ymm1", "ymm2", "ymm3", "xmm0", "xmm1", "xmm2", "xmm3", 0
-        ),
-        output!(
-            "ymm4", "ymm5", "ymm6", "ymm7", "xmm4", "xmm5", "xmm6", "xmm7",
-            128
-        ),
-        "vzeroupper",
-        state = in(reg) state.as_ptr(),
-        data = in(reg) data,
-        rot16 = in(reg) ROTATE16.0.as_ptr(),
-        rot8 = in(reg) ROTATE8.0.as_ptr(),
-        counters = in(reg) COUNTERS[0].0.as_ptr(),
-        n = out(reg) _,
-        out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
-        out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
-        out("ymm8") _, out("ymm9") _, out("ymm10") _, out("ymm11") _,
-        out("ymm12") _, out("ymm13") _, out("ymm14") _, out("ymm15") _,
-        options(nostack),
-    );
+    unsafe {
+        core::arch::asm!(
+            "vmovdqa ymm14, [{rot16}]",
+            "vmovdqa ymm15, [{rot8}]",
+            "vmovdqa ymm12, [{counters}]",
+            "vmovdqa ymm13, [{counters} + 32]",
+            "vbroadcasti128 ymm0, [{state}]",
+            "vbroadcasti128 ymm1, [{state} + 16]",
+            "vbroadcasti128 ymm2, [{state} + 32]",
+            "vbroadcasti128 ymm3, [{state} + 48]",
+            "vpaddd ymm7, ymm3, ymm13",
+            "vpaddd ymm3, ymm3, ymm12",
+            "vmovdqa ymm4, ymm0",
+            "vmovdqa ymm5, ymm1",
+            "vmovdqa ymm6, ymm2",
+            "mov {n}, 10",
+            "2:",
+            quarter!("ymm0", "ymm1", "ymm2", "ymm3", "ymm8"),
+            quarter!("ymm4", "ymm5", "ymm6", "ymm7", "ymm9"),
+            diagonal!("ymm1", "ymm2", "ymm3", "0x39", "0x93"),
+            diagonal!("ymm5", "ymm6", "ymm7", "0x39", "0x93"),
+            quarter!("ymm0", "ymm1", "ymm2", "ymm3", "ymm8"),
+            quarter!("ymm4", "ymm5", "ymm6", "ymm7", "ymm9"),
+            diagonal!("ymm1", "ymm2", "ymm3", "0x93", "0x39"),
+            diagonal!("ymm5", "ymm6", "ymm7", "0x93", "0x39"),
+            "dec {n}",
+            "jnz 2b",
+            // Add the input back. The counter rows take their increments
+            // again, since the broadcast row is the base counter.
+            "vbroadcasti128 ymm8, [{state}]",
+            "vbroadcasti128 ymm9, [{state} + 16]",
+            "vbroadcasti128 ymm10, [{state} + 32]",
+            "vbroadcasti128 ymm11, [{state} + 48]",
+            "vpaddd ymm0, ymm0, ymm8",
+            "vpaddd ymm1, ymm1, ymm9",
+            "vpaddd ymm2, ymm2, ymm10",
+            "vpaddd ymm4, ymm4, ymm8",
+            "vpaddd ymm5, ymm5, ymm9",
+            "vpaddd ymm6, ymm6, ymm10",
+            "vpaddd ymm8, ymm11, ymm12",
+            "vpaddd ymm9, ymm11, ymm13",
+            "vpaddd ymm3, ymm3, ymm8",
+            "vpaddd ymm7, ymm7, ymm9",
+            output!(
+                "ymm0", "ymm1", "ymm2", "ymm3", "xmm0", "xmm1", "xmm2",
+                "xmm3", 0
+            ),
+            output!(
+                "ymm4", "ymm5", "ymm6", "ymm7", "xmm4", "xmm5", "xmm6", "xmm7",
+                128
+            ),
+            "vzeroupper",
+            state = in(reg) state.as_ptr(),
+            data = in(reg) data,
+            rot16 = in(reg) ROTATE16.0.as_ptr(),
+            rot8 = in(reg) ROTATE8.0.as_ptr(),
+            counters = in(reg) COUNTERS[0].0.as_ptr(),
+            n = out(reg) _,
+            out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
+            out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
+            out("ymm8") _, out("ymm9") _, out("ymm10") _, out("ymm11") _,
+            out("ymm12") _, out("ymm13") _, out("ymm14") _, out("ymm15") _,
+            options(nostack),
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Error;
     use crate::cipher::chacha20::tests::{
         check_known_answers, check_matches_portable,
     };
-    use crate::Error;
 
     #[test]
     fn known_answers() {
@@ -288,7 +285,7 @@ mod tests {
 
     #[test]
     fn probe_agrees_with_constructor() {
-        let result = ChaCha20::try_new(&[0u8; 32]);
+        let result = ChaCha20::try_new(&crate::Key::from([0u8; 32]));
         assert_eq!(result.is_ok(), has_avx2());
         if !has_avx2() {
             assert_eq!(result.err(), Some(Error::NotSupported));

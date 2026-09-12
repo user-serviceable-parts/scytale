@@ -31,11 +31,11 @@
 //! the form to store.
 //!
 //! ```
-//! use scytale::random::{Rng, System};
+//! use scytale::random::CtrDrbg;
 //! use scytale::sig::ml_dsa::ml_dsa_65::{PrivateKey, PublicKey};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = Rng::try_new(System::try_new()?)?;
+//! let mut rng = CtrDrbg::from_system()?;
 //! let key = PrivateKey::generate(&mut rng)?;
 //! let signature = key.sign(&mut rng, b"", b"release v1.2")?;
 //!
@@ -58,10 +58,10 @@
 
 use zeroize::Zeroize;
 
+use crate::Error;
+use crate::constant_time;
 use crate::hash::sha3::{Shake128, Shake256};
 use crate::hash::{Xof, XofReader};
-use crate::util;
-use crate::Error;
 
 /// The modulus.
 const Q: u32 = 8_380_417;
@@ -731,7 +731,7 @@ fn check_private<const K: usize, const L: usize>(
     encode_public(&e.rho, &t1, pk);
     let mut tr = [0u8; 64];
     h(&[pk], &mut tr)?;
-    Ok(same && util::equal(&tr, &e.tr))
+    Ok(same && constant_time::equal(&tr, &e.tr))
 }
 
 /// `ML-DSA.Sign_internal`, algorithm 7, over the formatted message
@@ -928,7 +928,7 @@ fn verify<const K: usize, const L: usize>(
     }
     let mut again = [0u8; 64];
     h(&[&mu, w1_bytes], &mut again[..p.c_tilde])?;
-    if util::equal(&again[..p.c_tilde], c_tilde) {
+    if constant_time::equal(&again[..p.c_tilde], c_tilde) {
         Ok(())
     } else {
         Err(Error::InvalidSignature)
@@ -964,10 +964,10 @@ macro_rules! parameter_set {
     ($k:literal, $l:literal, $arc:literal, $name:literal) => {
         use zeroize::Zeroize;
 
-        use crate::der::SeedOrExpanded;
-        use crate::random::Random;
-        use crate::sig::ml_dsa::{self, params};
         use crate::Error;
+        use crate::Random;
+        use crate::der::SeedOrExpanded;
+        use crate::sig::ml_dsa::{self, params};
 
         /// The length of a private key's seed, the form to store.
         pub const SEED_SIZE: usize = 32;
@@ -1379,10 +1379,7 @@ mod tests {
         macro_rules! check {
             ($module:ident) => {{
                 use $module::*;
-                let mut rng = crate::random::Rng::try_new(
-                    crate::random::System::try_new().unwrap(),
-                )
-                .unwrap();
+                let mut rng = crate::random::CtrDrbg::from_system().unwrap();
                 let key = PrivateKey::generate(&mut rng).unwrap();
                 let public = key.public_key();
                 let sig = key.sign(&mut rng, b"ctx", b"message").unwrap();

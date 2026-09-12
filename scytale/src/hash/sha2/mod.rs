@@ -4,9 +4,9 @@
 //! Two functions, really. SHA-256 works in 32-bit words over 64-byte
 //! blocks and SHA-512 in 64-bit words over 128-byte blocks; SHA-224
 //! and SHA-384 are those two with a different starting value and a
-//! shortened digest. The four types here pick the best implementation
-//! the processor has, and each implementation is also reachable by
-//! name under [`portable`] and the architecture modules beside it.
+//! shortened digest. Each type here picks the best implementation
+//! the processor has; which one that is is not a choice a caller
+//! makes, and the implementations are not names a caller can reach.
 //!
 //! ```
 //! use scytale::hash::sha2::Sha256;
@@ -46,39 +46,54 @@
 //! extensions, RISC-V Zknh) make each round cheaper instead, and are
 //! several times the speed of the portable code. x86-64 has no
 //! SHA-512 instruction in common use yet, so SHA-384 and SHA-512 are
-//! portable there. Each implementation is a module beside this one,
-//! `x86_64`, `aarch64` and `riscv64`, present only on its own
-//! architecture, with the same type names as `portable`; the types
-//! here choose among them.
+//! portable there. The implementations are private modules beside
+//! this one, each present only on its own architecture; the types
+//! here choose among them when a hash is started.
 //!
 //! # Not a MAC
 //!
 //! See [the module above](crate::hash#not-a-mac): a key in front of
 //! the message does not make a MAC.
 
+// The engines are named here for the vector suites and the
+// benchmark, which drive each one in turn; a build that runs
+// neither reaches them only through the dispatching types.
+#[allow(dead_code)]
 #[cfg(target_arch = "aarch64")]
-pub mod aarch64;
-pub mod engine;
-pub mod portable;
+pub(crate) mod aarch64;
+pub(crate) mod engine;
+// The engines are named here for the vector suites and the
+// benchmark, which drive each one in turn; a build that runs
+// neither reaches them only through the dispatching types.
+#[allow(dead_code)]
+pub(crate) mod portable;
+// The engines are named here for the vector suites and the
+// benchmark, which drive each one in turn; a build that runs
+// neither reaches them only through the dispatching types.
+#[allow(dead_code)]
 #[cfg(target_arch = "riscv64")]
-pub mod riscv64;
+pub(crate) mod riscv64;
+// The engines are named here for the vector suites and the
+// benchmark, which drive each one in turn; a build that runs
+// neither reaches them only through the dispatching types.
+#[allow(dead_code)]
 #[cfg(target_arch = "x86_64")]
-pub mod x86_64;
+pub(crate) mod x86_64;
 
 use core::fmt;
-use core::sync::atomic::{AtomicU8, Ordering};
 
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use engine::Compress64;
 use engine::{Compress32, Engine32, Engine64, Variant32, Variant64};
 
 use crate::hash::{BitHash, Hash};
+use crate::probe::Probe;
 use crate::{BlockType, Error};
 
 /// The members of the family, as markers the engines are generic
 /// over. Each says only where the hash starts and how much of the
 /// final state is the digest.
-pub mod variant {
+pub(crate) mod variant {
     use super::engine::Sealed;
     use super::{Variant32, Variant64};
 
@@ -217,57 +232,36 @@ pub mod variant {
     }
 }
 
-/// SHA-224 using the best implementation the processor supports.
-pub type Sha224 = Auto32<variant::Sha224>;
-/// SHA-256 using the best implementation the processor supports.
-pub type Sha256 = Auto32<variant::Sha256>;
-/// SHA-384 using the best implementation the processor supports.
-pub type Sha384 = Auto64<variant::Sha384>;
-/// SHA-512 using the best implementation the processor supports.
-pub type Sha512 = Auto64<variant::Sha512>;
-/// SHA-512/224 using the best implementation the processor supports.
-pub type Sha512_224 = Auto64<variant::Sha512_224>;
-/// SHA-512/256 using the best implementation the processor supports.
-pub type Sha512_256 = Auto64<variant::Sha512_256>;
-
 /// The implementation the processor gets, chosen once per family.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Choice {
     ShaNi,
     Armv8,
+    Zvknh,
     Zknh,
     Portable,
 }
 
 /// Candidates in order of preference: hardware first, then the
 /// portable code, which is always last so the search always ends.
-const CHOICES: [Choice; 4] =
-    [Choice::ShaNi, Choice::Armv8, Choice::Zknh, Choice::Portable];
+const CHOICES: [Choice; 5] = [
+    Choice::ShaNi,
+    Choice::Armv8,
+    Choice::Zvknh,
+    Choice::Zknh,
+    Choice::Portable,
+];
 
-/// One probe result per family, since the processor may have an
-/// instruction for one and not the other: 0 until probed, then one
-/// plus the index into `CHOICES`. Probing is idempotent, so a race
-/// between two first callers is harmless.
-static PROBED32: AtomicU8 = AtomicU8::new(0);
-static PROBED64: AtomicU8 = AtomicU8::new(0);
+/// One probe per family, since the processor may have an
+/// instruction for one and not the other; see [`crate::probe`].
+static PROBED32: Probe = Probe::new();
+static PROBED64: Probe = Probe::new();
 
 /// Asks the processor once; afterwards a single atomic load.
-fn probe(probed: &AtomicU8, supported: fn(Choice) -> bool) -> Choice {
-    match probed.load(Ordering::Relaxed) {
-        0 => {
-            let found = CHOICES
-                .into_iter()
-                .enumerate()
-                .find(|&(_, c)| supported(c))
-                .unwrap_or((3, Choice::Portable));
-            probed.store(found.0 as u8 + 1, Ordering::Relaxed);
-            found.1
-        }
-        n => CHOICES
-            .get(usize::from(n) - 1)
-            .copied()
-            .unwrap_or(Choice::Portable),
-    }
+fn probe(probed: &Probe, supported: fn(Choice) -> bool) -> Choice {
+    probed
+        .first(&CHOICES, supported)
+        .unwrap_or(Choice::Portable)
 }
 
 /// Whether the processor can run `choice`'s SHA-256.
@@ -277,6 +271,8 @@ fn supported32(choice: Choice) -> bool {
         Choice::ShaNi => <x86_64::ShaNi as Compress32>::supported(),
         #[cfg(target_arch = "aarch64")]
         Choice::Armv8 => <aarch64::Armv8 as Compress32>::supported(),
+        #[cfg(target_arch = "riscv64")]
+        Choice::Zvknh => <riscv64::Zvknh as Compress32>::supported(),
         #[cfg(target_arch = "riscv64")]
         Choice::Zknh => <riscv64::Zknh as Compress32>::supported(),
         Choice::Portable => true,
@@ -290,6 +286,8 @@ fn supported64(choice: Choice) -> bool {
     match choice {
         #[cfg(target_arch = "aarch64")]
         Choice::Armv8 => <aarch64::Armv8 as Compress64>::supported(),
+        #[cfg(target_arch = "riscv64")]
+        Choice::Zvknh => <riscv64::Zvknh as Compress64>::supported(),
         #[cfg(target_arch = "riscv64")]
         Choice::Zknh => <riscv64::Zknh as Compress64>::supported(),
         Choice::Portable => true,
@@ -310,7 +308,7 @@ macro_rules! automatic {
     ) => {
         $(#[$doc])*
         #[derive(Clone)]
-        pub struct $name<V: $variant>($inner<V>);
+        pub(crate) struct $name<V: $variant>($inner<V>);
 
         #[derive(Clone)]
         enum $inner<V: $variant> {
@@ -443,6 +441,7 @@ automatic!(
     [
         ("x86_64", ShaNi, x86_64::ShaNi),
         ("aarch64", Armv8, aarch64::Armv8),
+        ("riscv64", Zvknh, riscv64::Zvknh),
         ("riscv64", Zknh, riscv64::Zknh)
     ]
 );
@@ -454,6 +453,7 @@ automatic!(
     supported64, 128,
     [
         ("aarch64", Armv8, aarch64::Armv8),
+        ("riscv64", Zvknh, riscv64::Zvknh),
         ("riscv64", Zknh, riscv64::Zknh)
     ]
 );
@@ -775,10 +775,14 @@ pub(crate) mod tests {
         }
         #[cfg(target_arch = "riscv64")]
         {
-            wipes::<riscv64::Sha224>();
-            wipes::<riscv64::Sha256>();
-            wipes::<riscv64::Sha384>();
-            wipes::<riscv64::Sha512>();
+            wipes::<riscv64::zknh::Sha224>();
+            wipes::<riscv64::zknh::Sha256>();
+            wipes::<riscv64::zknh::Sha384>();
+            wipes::<riscv64::zknh::Sha512>();
+            wipes::<riscv64::zvknh::Sha224>();
+            wipes::<riscv64::zvknh::Sha256>();
+            wipes::<riscv64::zvknh::Sha384>();
+            wipes::<riscv64::zvknh::Sha512>();
         }
     }
 
@@ -824,3 +828,121 @@ pub(crate) mod tests {
         assert!(text.contains("bytes: 6"));
     }
 }
+
+/// Defines one of the six public digests over its family's
+/// dispatching type.
+macro_rules! digest {
+    ($(#[$doc:meta])* $name:ident, $auto:ident, $variant:ident,
+     $block:literal, $out:literal) => {
+        $(#[$doc])*
+        #[derive(Clone, Default)]
+        pub struct $name($auto<variant::$variant>);
+
+        impl $name {
+            /// Starts a hash with the best implementation the
+            /// processor supports.
+            ///
+            /// The processor is probed the first time; every later
+            /// call reads the cached answer.
+            pub fn new() -> Self {
+                $name($auto::new())
+            }
+        }
+
+        impl fmt::Debug for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+
+        impl BlockType for $name {
+            type Block = [u8; $block];
+
+            fn zero_block() -> Self::Block {
+                [0; $block]
+            }
+        }
+
+        impl Hash for $name {
+            type Output = [u8; $out];
+
+            fn try_new() -> Result<Self, Error> {
+                Ok(Self::new())
+            }
+
+            fn reset(&mut self) {
+                self.0.reset()
+            }
+
+            #[inline]
+            fn update(&mut self, data: &[u8]) {
+                self.0.update(data)
+            }
+
+            fn finalize(&mut self) -> Self::Output {
+                self.0.finalize()
+            }
+        }
+
+        impl BitHash for $name {
+            fn finalize_bits(
+                &mut self,
+                last: u8,
+                bits: u32,
+            ) -> Result<Self::Output, Error> {
+                self.0.finalize_bits(last, bits)
+            }
+        }
+    };
+}
+
+digest!(
+    /// SHA-224.
+    Sha224,
+    Auto32,
+    Sha224,
+    64,
+    28
+);
+digest!(
+    /// SHA-256.
+    Sha256,
+    Auto32,
+    Sha256,
+    64,
+    32
+);
+digest!(
+    /// SHA-384.
+    Sha384,
+    Auto64,
+    Sha384,
+    128,
+    48
+);
+digest!(
+    /// SHA-512.
+    Sha512,
+    Auto64,
+    Sha512,
+    128,
+    64
+);
+digest!(
+    /// SHA-512/224, SHA-512 truncated to 224 bits and started from a
+    /// different value.
+    Sha512_224,
+    Auto64,
+    Sha512_224,
+    128,
+    28
+);
+digest!(
+    /// SHA-512/256, SHA-512 truncated to 256 bits and started from a
+    /// different value.
+    Sha512_256,
+    Auto64,
+    Sha512_256,
+    128,
+    32
+);

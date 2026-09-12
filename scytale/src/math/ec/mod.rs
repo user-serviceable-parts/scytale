@@ -33,14 +33,14 @@ use zeroize::Zeroize;
 
 use super::montgomery::Montgomery;
 use super::uint::Uint;
-use crate::der::{self, Reader, Writer};
-use crate::hash::Hash;
-use crate::mac::hmac::Hmac;
-use crate::mac::Mac;
-use crate::pem;
-use crate::random::Random;
 use crate::BlockType;
 use crate::Error;
+use crate::Random;
+use crate::der::{self, Reader, Writer};
+use crate::hash::Hash;
+use crate::mac::Mac;
+use crate::mac::hmac::Hmac;
+use crate::pem;
 
 /// A curve's constants, each as a big-endian hex string of the
 /// curve's width, and the OID that names it in a certificate.
@@ -928,10 +928,10 @@ impl<const L: usize> Secret<L> {
         carried: Option<Public<L>>,
     ) -> Result<(Self, Public<L>), Error> {
         let public = self.public(e);
-        if let Some(carried) = carried {
-            if carried.x.0 != public.x.0 || carried.y.0 != public.y.0 {
-                return Err(Error::InvalidEncoding);
-            }
+        if let Some(carried) = carried
+            && (carried.x.0 != public.x.0 || carried.y.0 != public.y.0)
+        {
+            return Err(Error::InvalidEncoding);
         }
         Ok((self, public))
     }
@@ -1068,9 +1068,9 @@ macro_rules! key_types {
         $constants:expr, $limbs:literal, $curve:literal, $job:literal,
         der $der:literal, public der $public_der:literal
     ) => {
-        use crate::math::ec::{Engine, Public, Secret};
-        use crate::random::Random;
         use crate::Error;
+        use crate::Random;
+        use crate::math::ec::{Engine, Public, Secret};
 
         /// The length of a private key.
         pub const KEY_SIZE: usize = 8 * $limbs;
@@ -1474,10 +1474,7 @@ mod tests {
     fn compressed_points() {
         fn check<const L: usize>(curve: &Curve<L>) {
             let e = Engine::new(curve);
-            let mut rng = crate::random::Rng::try_new(
-                crate::random::System::try_new().unwrap(),
-            )
-            .unwrap();
+            let mut rng = crate::random::CtrDrbg::from_system().unwrap();
             let mut sec1 = [0u8; 97];
             let w = width::<L>();
             for _ in 0..4 {
@@ -1588,10 +1585,7 @@ mod tests {
     #[test]
     fn verify_refusals() {
         let e = Engine::new(&P256);
-        let mut rng = crate::random::Rng::try_new(
-            crate::random::System::try_new().unwrap(),
-        )
-        .unwrap();
+        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
         let d = Secret::generate(&e, &mut rng).unwrap();
         let public = d.public(&e);
         let mut sig = [0u8; 64];
@@ -1626,10 +1620,7 @@ mod tests {
     #[test]
     fn agreement() {
         let e = Engine::new(&P384);
-        let mut rng = crate::random::Rng::try_new(
-            crate::random::System::try_new().unwrap(),
-        )
-        .unwrap();
+        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
         let a = Secret::generate(&e, &mut rng).unwrap();
         let b = Secret::generate(&e, &mut rng).unwrap();
         let mut ab = [0u8; 48];

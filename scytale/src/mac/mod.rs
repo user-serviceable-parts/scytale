@@ -29,7 +29,7 @@
 //!     Ok(mac.finalize())
 //! }
 //! let mut key = HmacSha256::zero_key();
-//! key[..3].copy_from_slice(b"key");
+//! key.as_mut()[..3].copy_from_slice(b"key");
 //! let tag = seal::<HmacSha256>(&key, b"message")?;
 //!
 //! // On receipt: never compare the tag yourself. HMAC takes a key
@@ -92,7 +92,7 @@ pub trait Mac: KeyType {
     /// would leak the tag through timing.
     fn verify(&mut self, tag: &[u8]) -> Result<(), Error> {
         let expected = self.finalize();
-        if crate::util::equal(expected.as_ref(), tag) {
+        if crate::constant_time::equal(expected.as_ref(), tag) {
             Ok(())
         } else {
             Err(Error::AuthenticationFailed)
@@ -103,13 +103,16 @@ pub trait Mac: KeyType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Key;
     use crate::mac::hmac::{HmacSha256, HmacSha512_256};
     use crate::mac::poly1305::Poly1305;
 
     /// Fed through an object, a MAC gives the tag its type gives.
     #[test]
     fn as_an_object() {
-        fn tag(mac: &mut dyn Mac<Key = [u8; 64], Tag = [u8; 32]>) -> [u8; 32] {
+        fn tag(
+            mac: &mut dyn Mac<Key = Key<[u8; 64]>, Tag = [u8; 32]>,
+        ) -> [u8; 32] {
             mac.update(b"message");
             mac.finalize()
         }
@@ -117,16 +120,16 @@ mod tests {
         assert_eq!(tag(&mut mac), HmacSha256::mac(b"key", b"message").unwrap());
 
         fn tag16(
-            mac: &mut dyn Mac<Key = [u8; 32], Tag = [u8; 16]>,
+            mac: &mut dyn Mac<Key = Key<[u8; 32]>, Tag = [u8; 16]>,
         ) -> [u8; 16] {
             mac.update(b"message");
             mac.finalize()
         }
         let key = [7u8; 32];
-        let mut fresh = Poly1305::new(&key);
+        let mut fresh = Poly1305::new(&Key::from(key));
         fresh.update(b"message");
         let expected = fresh.finalize();
-        let mut poly = Poly1305::new(&key);
+        let mut poly = Poly1305::new(&Key::from(key));
         assert_eq!(tag16(&mut poly), expected);
     }
 
@@ -148,15 +151,15 @@ mod tests {
             mac.update(b"abc");
             mac.verify(tag.as_ref()).unwrap();
         }
-        check::<HmacSha256>(&[3u8; 64]);
-        check::<HmacSha512_256>(&[3u8; 128]);
-        check::<Poly1305>(&[7u8; 32]);
+        check::<HmacSha256>(&Key::from([3u8; 64]));
+        check::<HmacSha512_256>(&Key::from([3u8; 128]));
+        check::<Poly1305>(&Key::from([7u8; 32]));
     }
 
     #[test]
     fn zero_keys_are_the_key_type() {
-        assert_eq!(HmacSha256::zero_key(), [0u8; 64]);
-        assert_eq!(HmacSha512_256::zero_key(), [0u8; 128]);
-        assert_eq!(Poly1305::zero_key(), [0u8; 32]);
+        assert_eq!(HmacSha256::zero_key(), Key::from([0u8; 64]));
+        assert_eq!(HmacSha512_256::zero_key(), Key::from([0u8; 128]));
+        assert_eq!(Poly1305::zero_key(), Key::from([0u8; 32]));
     }
 }

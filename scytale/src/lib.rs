@@ -1,8 +1,8 @@
 //! Portable cryptographic primitives.
 //!
-//! Symmetric ciphers and their modes, hashes, message
-//! authentication, key derivation, key agreement, public-key
-//! encryption, signatures and random numbers,
+//! Symmetric ciphers, authenticated encryption and the modes over
+//! them, hashes, message authentication, key derivation, key
+//! agreement, public-key encryption, signatures and random numbers,
 //! written to run anywhere Rust
 //! does: `no_std`, no allocator, no cargo features to get wrong. Where
 //! the processor has instructions for a primitive they are used,
@@ -10,6 +10,7 @@
 //!
 //! | Module | What is in it |
 //! | --- | --- |
+//! | [`aead`] | GCM, GCM-SIV, XPN and ChaCha20-Poly1305 |
 //! | [`cipher`] | AES, ChaCha20, and the modes built on them |
 //! | [`hash`] | SHA-2, SHA-3, SHAKE, and SHA-1 for old protocols |
 //! | [`mac`] | HMAC over any hash, and Poly1305 |
@@ -18,6 +19,7 @@
 //! | [`kex`] | X25519 and ECDH key agreement |
 //! | [`pke`] | RSA-OAEP public-key encryption |
 //! | [`random`] | a CTR_DRBG generator and the entropy that seeds it |
+//! | [`constant_time`] | comparing secrets without timing them |
 //! | [`sig`] | Ed25519, ECDSA, ML-DSA, SLH-DSA and RSA signatures |
 //! | [`Error`] | the one type every fallible call returns |
 //!
@@ -27,21 +29,28 @@
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::hash::Hash;
 //! use scytale::kdf::hkdf;
-//! use scytale::mac::hmac::Hmac;
+//! use scytale::mac::hmac::{Hmac, HmacSha256};
+//! use scytale::KeyType;
 //! use scytale::cipher::aes::Aes128;
-//! use scytale::cipher::mode::{Gcm, Nonces};
+//! use scytale::cipher::Nonces;
+//! use scytale::aead::{Aead, Gcm};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! // A session key, and a key for each job derived from it.
+//! // A session key, and a key for each job derived from it,
+//! // straight into keys that wipe themselves when they go out of
+//! // scope.
 //! let secret = [0x42u8; 32];
-//! let mut cipher_key = [0u8; 16];
-//! let mut mac_key = [0u8; 32];
-//! hkdf::derive::<Sha256>(b"salt", &secret, b"cipher", &mut cipher_key)?;
-//! hkdf::derive::<Sha256>(b"salt", &secret, b"mac", &mut mac_key)?;
+//! let mut cipher_key = Aes128::zero_key();
+//! let mut mac_key = HmacSha256::zero_key();
+//! let cipher = &[b"cipher".as_slice()];
+//! hkdf::derive::<Sha256>(b"salt", &secret, cipher, cipher_key.as_mut())?;
+//! let mac = &[b"mac".as_slice()];
+//! hkdf::derive::<Sha256>(b"salt", &secret, mac, mac_key.as_mut())?;
 //!
 //! // Authenticated encryption, with nonces that cannot repeat.
-//! let gcm = Gcm::try_new(Aes128::try_new(&cipher_key)?)?;
-//! let mut nonces = Nonces::new(7, 0);
+//! let gcm = Gcm::<Aes128>::new(&cipher_key);
+//! let mut nonces =
+//!     Nonces::<[u8; 12]>::try_new(&7u64.to_be_bytes(), 0)?;
 //! let nonce = nonces.take()?;
 //! let mut message = *b"attack at dawn";
 //! let mut tag = [0u8; 16];
@@ -51,7 +60,7 @@
 //!
 //! // A digest, and a tag over the same bytes.
 //! let digest = Sha256::digest(&message)?;
-//! let mac = Hmac::<Sha256>::mac(&mac_key, &message)?;
+//! let mac = Hmac::<Sha256>::mac(mac_key.as_ref(), &message)?;
 //! assert_ne!(digest, mac);
 //! # Ok(())
 //! # }
@@ -107,11 +116,27 @@
 #![warn(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+// The vector suites in `acvp` read files and parse JSON, so the
+// library's own test build has the standard library; nothing else
+// does.
+#[cfg(test)]
+extern crate std;
+
+#[cfg(test)]
+mod acvp;
+
+#[cfg(test)]
+mod bench;
+
+pub mod aead;
+mod align;
 mod arch;
 pub mod cipher;
+pub mod constant_time;
 mod der;
 mod error;
 pub mod hash;
+mod implementation;
 pub mod kdf;
 pub mod kem;
 pub mod kex;
@@ -119,11 +144,11 @@ pub mod mac;
 mod math;
 mod pem;
 pub mod pke;
+mod probe;
 pub mod random;
 pub mod sig;
 
 mod traits;
-mod util;
 
 pub use error::Error;
-pub use traits::{BlockType, ByteArray, KeyType};
+pub use traits::{BlockType, ByteArray, Key, KeyType, Random};

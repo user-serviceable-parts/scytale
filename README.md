@@ -1,10 +1,27 @@
 # scytale
 
-Cryptographic primitives in Rust: ciphers and the modes over them,
-hashes, message authentication, key derivation, key agreement,
-signatures, post-quantum key encapsulation and signatures, and random
-numbers. It is `no_std`, has two dependencies, needs no C compiler
-and no build script, and has no feature flags to get wrong.
+[![CI][ci-badge]][ci]
+[![crates.io][version-badge]][crate]
+[![docs.rs][docs-badge]][docs]
+[![MSRV][msrv-badge]][crate]
+[![BSD-2-Clause][license-badge]][license]
+
+[ci-badge]: https://github.com/MichaelPaddon/scytale/actions/workflows/ci.yml/badge.svg?branch=main
+[ci]: https://github.com/MichaelPaddon/scytale/actions/workflows/ci.yml
+[version-badge]: https://img.shields.io/crates/v/scytale.svg
+[crate]: https://crates.io/crates/scytale
+[docs-badge]: https://docs.rs/scytale/badge.svg
+[docs]: https://docs.rs/scytale
+[msrv-badge]: https://img.shields.io/crates/msrv/scytale.svg
+[license-badge]: https://img.shields.io/crates/l/scytale.svg
+[license]: https://github.com/MichaelPaddon/scytale/blob/main/LICENSE
+
+Correct, fast, portable cryptography in Rust: ciphers, authenticated
+encryption and the modes over them, hashes, message authentication, key derivation, key
+agreement, public-key encryption, signatures, post-quantum key
+encapsulation and signatures, and random numbers. It is `no_std`, has
+two dependencies, needs no C compiler and no build script, and has no
+feature flags to get wrong.
 
 ## The name
 
@@ -46,18 +63,19 @@ key formats other software stores keys in.
 
 It is tested to the same extent. The standards' own vectors are built
 into the unit tests, and on top of them run the NIST ACVP suites and
-the Project Wycheproof files, close to sixty thousand vector cases
+the Project Wycheproof files, more than seventy thousand vector cases
 before the Monte Carlo suites add several million chained calls of
 their own. Every implementation of a primitive is put through the
 whole vector set for it, at every key size, and the whole suite runs
-on x86-64, aarch64 and riscv64 rather than on the machine that
-happens to be to hand. The Goals section below says exactly what that
+on x86-64, aarch64 and riscv64 hardware rather than on the machine
+that happens to be to hand. The Goals section below says exactly what that
 means.
 
-Work from here goes into speed and into algorithms that are still
-missing, not into rearranging what is already here. API changes will
-be avoided; the version number is below one, but the shape of the
-library is not expected to move.
+Work from here will focus on speed and algorithms that are still
+missing. The API is still being stabilized, and the version number is
+still below one, but the major shape of the library is not expected to
+change massively. Expect implementation details to become better hidden and
+interfaces to be streamlined for usuability.
 
 It builds on stable Rust 1.88 or later, on any architecture,
 with or without an operating system under it.
@@ -69,16 +87,17 @@ cargo add scytale
 ```
 
 ```rust
-use scytale::cipher::{aes::Aes256, mode::Gcm};
-use scytale::random::{Random, Rng, System};
+use scytale::aead::{Aead, Gcm};
+use scytale::cipher::aes::Aes256;
+use scytale::random::CtrDrbg;
+use scytale::{KeyType, Random};
 
-let mut rng = Rng::try_new(System::try_new()?)?;
-let mut key = [0u8; 32];
+let mut rng = CtrDrbg::from_system()?;
+let key = Aes256::random_key(&mut rng)?;
 let mut nonce = [0u8; 12];
-rng.fill(&mut key)?;
 rng.fill(&mut nonce)?;
 
-let gcm = Gcm::try_new(Aes256::try_new(&key)?)?;
+let gcm = Gcm::<Aes256>::new(&key);
 let header = b"to: alice";
 let mut message = *b"attack at dawn";
 let mut tag = [0u8; 16];
@@ -96,23 +115,31 @@ The same binary does that on a laptop with VAES and on a board with
 no cryptographic instructions at all.
 
 The API documentation is on [docs.rs](https://docs.rs/scytale), and
-`cargo doc --open` builds it locally with your own processor's
-modules in it.
+`cargo doc --open` builds it locally.
 
 ## Goals
 
 **Correct.** Every implementation is checked against the standard
 test vectors, against the NIST Automated Cryptographic Validation
 Program (ACVP) vectors, and against Project Wycheproof, whose cases
-are chosen to break implementations rather than to exercise them:
-56,078 one-shot cases and 3600 Monte Carlo steps, the latter being
-3.6 million chained cipher calls with the key re-derived at each
-step. Every implementation of a primitive is put through the whole
-vector set for it, at every key size; the modes and constructions
-built on top run once each, on the implementation the processor
-picks. Every implementation is also compared byte for byte against
-the portable one across a range of buffer lengths, so the paths that
-only some processors take get the same scrutiny as the rest.
+are chosen to break implementations rather than to exercise them.
+The corpus is 109 files holding 74,433 cases, and every case this
+build can run is run; the Monte Carlo groups chain a thousand cipher
+calls per case, with the key re-derived at each step. Every
+implementation is put through the whole vector set for its primitive,
+at every key size, the modes and the AEADs included: each engine
+written for a particular instruction set is validated as itself
+rather than only the one this processor would pick. Every
+implementation is also compared byte for byte against the portable
+one across a range of buffer lengths, so the paths that only some
+processors take get the same scrutiny as the rest.
+
+What a given machine actually ran, and what it skipped for want of
+instructions, is a command away:
+
+```sh
+cargo test --lib acvp::inventory -- --nocapture
+```
 
 **Fast.** Where a processor has instructions for a primitive, scytale
 uses them, through hand-written assembly rather than compiler
@@ -141,6 +168,7 @@ the machinery behind it:
 
 | Module | Job | Algorithms |
 | --- | --- | --- |
+| `aead` | authenticated encryption | GCM, GCM-SIV, XPN, ChaCha20-Poly1305 |
 | `cipher` | encryption | AES, ChaCha20, and the modes built on them |
 | `hash` | digests | SHA-2, SHA-3, SHAKE; SHA-1 for what still names it |
 | `mac` | message authentication | HMAC, Poly1305 |
@@ -150,6 +178,7 @@ the machinery behind it:
 | `pke` | public-key encryption | RSA-OAEP |
 | `sig` | signatures | Ed25519, ECDSA over P-256 and P-384, ML-DSA, SLH-DSA, RSA-PSS, RSA PKCS#1 v1.5 |
 | `random` | random numbers | CTR_DRBG over AES-256, and what seeds it |
+| `constant_time` | comparing secrets | equality whose timing says nothing |
 
 ### Ciphers
 
@@ -158,10 +187,34 @@ the machinery behind it:
 | AES (FIPS 197) | 128, 192, 256 | the block cipher itself |
 | ChaCha20 (RFC 8439) | 256 | a stream cipher; no tables, no AES needed |
 
+### Authenticated encryption
+
+These encrypt a message and authenticate it together, and refuse to
+hand back a message whose tag does not check. Unless a protocol
+dictates otherwise, start here.
+
+| Construction | Notes |
+| --- | --- |
+| GCM | the default; GMAC is GCM with no plaintext |
+| GCM-SIV | survives a repeated nonce (RFC 8452) |
+| XPN | GCM under a MACsec extended packet number |
+| ChaCha20-Poly1305 (RFC 8439) | GCM's equal; faster without AES hardware |
+
+The first three are modes of operation of a block cipher and are
+generic over it; the fourth is a stream cipher and a MAC designed
+together, with no block cipher underneath. They share a module because
+what a caller wants is authenticated encryption, not a particular way
+of building it, and they share a trait for the same reason.
+
+### Modes of operation
+
 Every mode below is generic: it wraps any block cipher, and AES is
 simply the one there is so far. The key width is part of the type,
 `Aes128`, `Aes192` or `Aes256`, so a key of the wrong length is a
-compile error rather than a run-time one.
+compile error rather than a run-time one. None of them authenticates
+anything, so each must be paired with a MAC over the ciphertext,
+checked before decrypting; the `aead` module has already done that
+work.
 
 | Mode | Kind | Notes |
 | --- | --- | --- |
@@ -169,18 +222,9 @@ compile error rather than a run-time one.
 | CFB1, CFB8, CFB128 | confidentiality | the three NIST segment sizes |
 | OFB | confidentiality | |
 | CTR | confidentiality | |
-| GCM | authenticated | GMAC is GCM with no plaintext |
-| GCM-SIV | authenticated | survives a repeated nonce (RFC 8452) |
-| XPN | authenticated | GCM under a MACsec extended packet number |
 | XTS | disk sectors | ciphertext stealing for a partial block |
 | FF1, FF3-1 | format preserving | see their documentation first |
 | KW, KWP | key wrapping | deterministic; for keys, not messages |
-
-And one that wraps no block cipher:
-
-| Mode | Kind | Notes |
-| --- | --- | --- |
-| ChaCha20-Poly1305 (RFC 8439) | authenticated | GCM's equal; faster without AES hardware |
 
 `encrypt_blocks` on the cipher itself encrypts each block
 independently, which is ECB. On its own that is not a safe way to
@@ -188,8 +232,10 @@ encrypt a message, because equal blocks produce equal ciphertext. Use
 a mode.
 
 Most initialisation vectors need to be *unique* rather than random,
-which is a stronger requirement. `mode::Nonces` counts nonces for GCM
-and GCM-SIV so a repeat is impossible rather than merely unlikely.
+which is a stronger requirement. `cipher::Nonces` counts nonces so a
+repeat is impossible rather than merely unlikely: it splits the nonce
+into a fixed part and a counter, wherever the caller puts the
+boundary.
 
 Key wrapping is the odd one out: it takes no nonce and is
 deterministic, so wrapping the same key twice gives the same answer.
@@ -259,19 +305,35 @@ Keys and initialisation vectors need randomness, so `scytale::random`
 provides a generator you hold:
 
 ```rust
-use scytale::random::{Random, Rng, System};
+use scytale::cipher::aes::Aes256;
+use scytale::random::CtrDrbg;
+use scytale::{KeyType, Random};
 
-let mut rng = Rng::try_new(System::try_new()?)?;
-let mut key = [0u8; 32];
-rng.fill(&mut key)?;
+let mut rng = CtrDrbg::from_system()?;
+
+// A key of the right width for the cipher, which wipes itself.
+let key = Aes256::random_key(&mut rng)?;
+
+// Or bytes for anything else.
+let mut nonce = [0u8; 12];
+rng.fill(&mut nonce)?;
 ```
 
-It is the CTR_DRBG of NIST SP 800-90A: AES-256 driven by a counter,
-with its key and counter replaced after every request, checked
-against the ACVP vectors for that mechanism alongside everything
-else. Seed material of any length and any density is condensed by the
-standard's derivation function, so entropy from a slow or biased
-source is worth its full weight.
+`CtrDrbg` is named for what it is, the CTR_DRBG of NIST SP 800-90A:
+AES-256 driven by a counter, with its key and counter replaced after
+every request, checked against the ACVP vectors for that mechanism
+alongside everything else. Seed material of any length and any
+density is condensed by the standard's derivation function, so
+entropy from a slow or biased source is worth its full weight.
+
+`from_system` asks this machine for the seed, which is what almost
+every caller wants. The sources are named individually under
+`random::entropy` for the cases that are not: `entropy::Processor`
+for the processor's own generator, and `entropy::External` for a
+generator seeded with entropy you gathered, through
+`CtrDrbg::<entropy::External>::from_seed`. What your code should
+take is the `Random` trait, so a second generator, or a fixed
+sequence in a test, drops in without it noticing.
 
 | Where it runs | What seeds it |
 | --- | --- |
@@ -302,8 +364,8 @@ fails and the program does not start, rather than every later call
 failing. That is not the end of the road on such a board: a hardware
 generator on a bus, a ring oscillator or a chip on I2C is supplied
 through the `random::Entropy` trait, and entropy gathered some other
-way goes in through `Rng::from_seed`. Either is served exactly as
-well as a machine with an instruction for it.
+way goes in through `CtrDrbg::from_seed`. Either is served exactly
+as well as a machine with an instruction for it.
 
 Because the generator has state, it is yours to look after. After a
 `fork`, or after a virtual machine is restored from a snapshot, the
@@ -314,25 +376,38 @@ wiped when the generator is dropped.
 
 ## Supported architectures
 
-| Architecture | Acceleration used | For | Verified |
-| --- | --- | --- | --- |
-| x86-64 | VAES on 256-bit registers | AES | on hardware |
-| x86-64 | AES-NI on 128-bit registers | AES | on hardware |
-| x86-64 | PCLMULQDQ | GHASH | on hardware |
-| aarch64 | ARMv8 cryptography extension | AES | under emulation |
-| aarch64 | PMULL | GHASH | under emulation |
-| riscv64 | vector cryptography (Zvkned) | AES | under emulation |
-| riscv64 | scalar cryptography (Zkne, Zknd) | AES | under emulation |
-| riscv64 | vector GHASH (Zvkg) | GHASH | under emulation |
-| x86-64 | SHA-NI | SHA-256 | on hardware |
-| aarch64 | ARMv8 SHA2 extension | SHA-256 | under emulation |
-| aarch64 | ARMv8 SHA512 extension | SHA-512 | under emulation |
-| riscv64 | scalar cryptography (Zknh) | SHA-256, SHA-512 | under emulation |
-| aarch64 | ARMv8 SHA3 extension | SHA-3, SHAKE | under emulation |
-| x86-64 | AVX2 | ChaCha20 | on hardware |
-| aarch64 | NEON | ChaCha20 | under emulation |
-| riscv64 | vector extension with Zvbb | ChaCha20 | under emulation |
-| any | none needed; portable Rust | all | on hardware |
+| Architecture | Acceleration used | For |
+| --- | --- | --- |
+| x86-64 | VAES on 256-bit registers | AES |
+| x86-64 | AES-NI on 128-bit registers | AES |
+| x86-64 | PCLMULQDQ | GHASH |
+| aarch64 | ARMv8 cryptography extension | AES |
+| aarch64 | PMULL | GHASH |
+| riscv64 | vector cryptography (Zvkned) | AES |
+| riscv64 | scalar cryptography (Zkne, Zknd) | AES |
+| riscv64 | vector GHASH (Zvkg) | GHASH |
+| riscv64 | vector carry-less multiply (Zvbc) | GHASH |
+| riscv64 | scalar carry-less multiply (Zbc, Zbkc) | GHASH |
+| x86-64 | SHA-NI | SHA-256 |
+| aarch64 | ARMv8 SHA2 extension | SHA-256 |
+| aarch64 | ARMv8 SHA512 extension | SHA-512 |
+| riscv64 | vector cryptography (Zvknha, Zvknhb) | SHA-256, SHA-512 |
+| riscv64 | scalar cryptography (Zknh) | SHA-256, SHA-512 |
+| aarch64 | ARMv8 SHA3 extension | SHA-3, SHAKE |
+| x86-64 | AVX2 | ChaCha20 |
+| aarch64 | NEON | ChaCha20 |
+| riscv64 | vector extension with Zvkb | ChaCha20 |
+| riscv64 | scalar rotates (Zbb, Zbkb) | ChaCha20 |
+| any | none needed; portable Rust | all |
+
+The x86-64 and arm64 rows are exercised on real silicon: the
+continuous integration matrix runs the whole test suite natively on
+runners of both, so the assembly is run by the processor it was
+written for. The RISC-V rows are not. The riscv64 runner is a plain
+`rv64imafdcsu` machine with none of the extensions below, so it
+reports every one of those rows as unavailable, and they are covered
+under qemu instead -- at two vector lengths, which is more than one
+machine would give, but it is emulation and not silicon.
 
 GHASH is the hash inside GCM, GCM-SIV and XPN. Without a carry-less
 multiply instruction it costs more than the cipher does. SHA-224 and
@@ -352,10 +427,12 @@ to the portable code.
 
 ## Documentation
 
-The API documentation for the main branch, one copy per architecture
-so that each processor's own modules can be read, is at
+The API documentation for the main branch is at
 <https://michaelpaddon.github.io/scytale/>. Released versions are on
-[docs.rs](https://docs.rs/scytale). Locally, `cargo doc --open`.
+[docs.rs](https://docs.rs/scytale). Locally, `cargo doc --open`. One
+copy serves every architecture: the implementations that exist only
+on one of them are private, so the documentation does not vary with
+the target.
 
 ## Using it
 
@@ -368,25 +445,30 @@ let mut block = [0u8; 16];
 aes.encrypt_block(&mut block);
 aes.decrypt_block(&mut block);
 
-// Any whole number of blocks, each encrypted independently.
-aes.encrypt_blocks(&mut buffer)?;
+// Any number of blocks, each encrypted independently.
+aes.encrypt_blocks(&mut blocks); // blocks: [[u8; 16]; N]
 ```
 
-A mode wraps the cipher. Authenticated encryption returns a tag, and
-decryption checks it before the plaintext is worth anything:
+An AEAD wraps the cipher. It returns a tag, and decryption checks it
+before the plaintext is worth anything:
 
 ```rust
-use scytale::cipher::{aes::Aes128, mode::Gcm};
+use scytale::aead::{Aead, Gcm};
+use scytale::cipher::aes::Aes128;
 
-let gcm = Gcm::try_new(Aes128::try_new(&key)?)?;
+let gcm = Gcm::<Aes128>::new(&key);
 
 let mut tag = [0u8; 16];
 gcm.encrypt(&nonce, associated_data, &mut buffer, &mut tag)?;
 gcm.decrypt(&nonce, associated_data, &mut buffer, &tag)?;
 ```
 
-Every mode also has an incremental form for data that arrives in
-pieces. Note that incremental decryption hands back plaintext before
+GCM, GCM-SIV and ChaCha20-Poly1305 share an `Aead` trait, so code that
+does not care which one it was handed -- a protocol that negotiated it,
+a format that records it -- can hold any of them behind one type. XPN
+stays out of it: its nonce is two separate halves, a secret salt and a
+frame identifier, and only the caller knows which is which. Most of
+these also have an incremental form for data that arrives in pieces. Note that incremental decryption hands back plaintext before
 the tag has been checked; the one-shot call above is the safe
 default.
 
@@ -405,205 +487,83 @@ mac.update(message);
 mac.verify(&tag)?;
 ```
 
-`Sha256` and the rest pick the best implementation the processor
-supports, as `Aes` does, and each implementation is reachable by name
-under `hash::sha2::portable`, `x86_64`, `aarch64` and `riscv64`.
+### One type per algorithm
 
-`Aes<K>` picks the best implementation the processor supports,
-probing once on first use; `K` is the key width in bytes, and
-`Aes128`, `Aes192` and `Aes256` name the three. Each implementation
-can also be named directly, with the same width parameter:
+`Aes128`, `Aes192` and `Aes256` are the ciphers; `Sha256`,
+`Sha3_256`, `Shake128` and the rest are the hashes. Each picks the
+best implementation this processor supports, probing once on first
+use, and then dispatches with a single predictable branch.
 
-| Type | Uses |
-| --- | --- |
-| `cipher::aes::Aes<K>` | the best of the below for this processor |
-| `aes::x86_64::vaes::Aes<K>` | VAES |
-| `aes::x86_64::aesni::Aes<K>` | AES-NI |
-| `aes::aarch64::armv8::Aes<K>` | ARMv8 cryptography extension |
-| `aes::riscv64::zvkned::Aes<K>` | RISC-V vector cryptography |
-| `aes::riscv64::zkn::Aes<K>` | RISC-V scalar cryptography |
-| `aes::portable::bitsliced::Aes<K>` | portable, constant time |
-| `aes::portable::ttable::Aes<K>` | portable, table driven; see below |
+Which implementation that is is not a choice a caller makes. The
+implementations are private: hardware instructions where the
+processor has them, otherwise constant-time portable code. There is a
+table-driven AES in the crate that is about seventy percent faster
+than the constant-time portable one, and it is never chosen, because
+it indexes tables with bytes derived from the key and so leaks the
+key to an attacker who can measure cache timing. A way for an application
+that runs nothing untrusted to ask for it by name is still to be
+designed.
 
-The architecture-specific types exist only on their architecture, and
-their `try_new` returns `Error::NotSupported` when the processor
-lacks the instructions. Every implementation wipes its expanded key
-when dropped.
+### Keys wipe themselves
 
-### Choosing an implementation
+A key is a `Key<[u8; 16]>`, not a `[u8; 16]`. It wipes itself when
+it goes out of scope, and it is not `Copy`, so a second copy of a
+key is something someone wrote rather than something that happened.
+The type carries the width, so the wrong one will not compile.
 
-Prefer `Aes` unless you have a reason not to.
+```rust
+use scytale::cipher::aes::Aes128;
+use scytale::{Key, KeyType};
 
-The two portable implementations are peers, and `Aes` never chooses
-`portable::ttable`, the table-driven one. That one is about twice the
-speed of `portable::bitsliced`, but its memory access pattern depends
-on the key, which leaks the key to an attacker who can measure the
-timing, typically by running code on the same processor. Use it only
-where nothing untrusted runs, and read the notes in its documentation
-first.
+let key = Aes128::random_key(&mut rng)?;   // drawn and protected
+let key = Key::from([0u8; 16]);            // from bytes you have
+let key = Key::take(&mut bytes);           // and wipe where they were
+```
+
+`Key::take` is the one worth reaching for when a key arrives in a
+buffer of your own: the buffer is the copy that nothing else would
+erase.
+
+The expanded key inside a cipher is wiped when the cipher is
+dropped, as it always was, and the generator wipes its state.
 
 ## Speed
 
-Measured on a 13th Gen Intel Core i7-1355U, one thread, on mains
-power. The benchmark ships with the library, so these are numbers you
-can reproduce: `cargo bench --bench speed`. Every figure below is a
-row it prints, and it prints rather more than are quoted here. On a
-laptop running on battery, expect about half of each of them.
+Measured on a 13th Gen Intel Core i7-1355U, one thread pinned to a
+performance core, on mains power. Over 16 KB buffers, in bytes a
+second counted in millions and thousands of millions:
 
-### The ciphers
-
-AES itself, over 8 KB buffers:
-
-| Implementation | AES-128 | AES-256 |
+| What | Implementation | Speed |
 | --- | --- | --- |
-| `vaes` | 28 GB/s | 20 GB/s |
-| `aesni` | 14 GB/s | 10 GB/s |
-| `ttable` | 490 MB/s | 360 MB/s |
-| `bitsliced` | 280 MB/s | 210 MB/s |
-
-Short messages are not an afterthought: a buffer of eight blocks or
-fewer costs 8 to 11 ns per call with AES-NI.
-
-ChaCha20 needs no cipher instructions, only a vector unit: 2.8 GB/s
-with AVX2 and 790 MB/s portable. On a processor with no AES hardware
-it is several times faster than any AES here, which is what it is
-for.
-
-### The modes
-
-AES-128 over 16 KB buffers, on the implementation the processor
-picks. Rates are bytes, counted in millions and thousands of
-millions:
-
-| Mode | Speed |
-| --- | --- |
-| CBC encrypt | 1.9 GB/s |
-| CBC decrypt | 15 GB/s |
-| CFB1 | 7.4 MB/s |
-| CFB8 | 83 MB/s |
-| CFB128 | 1.6 GB/s |
-| OFB | 2.0 GB/s |
-| CTR | 12 GB/s |
-| GMAC | 11 GB/s |
-| GCM | 5.9 GB/s |
-| GCM-SIV | 1.3 GB/s |
-| XPN | 5.5 GB/s |
-| XTS | 8.4 GB/s |
-| KW, KWP | 116 MB/s |
-| ChaCha20-Poly1305 | 1.4 GB/s |
-
-CBC encryption, OFB and the CFB modes are serial by definition: each
-block waits for the one before it, so they run at the speed of single
-blocks and no amount of interleaving helps. CFB1 is a block operation
-per bit, which is the two orders of magnitude between it and CFB128.
-Key wrapping passes over its input six times, by construction, and is
-meant for keys rather than for messages.
-
-### Hashes and message authentication
-
-Over 16 KB buffers:
-
-| Function | Implementation | Speed |
-| --- | --- | --- |
-| SHA-1 | `portable` | 560 MB/s |
+| AES-128-GCM encrypt | `vaes` | 13.9 GB/s |
+| AES-128-GCM encrypt | `aesni` | 8.5 GB/s |
+| AES-128-GCM encrypt | `bitsliced` | 276 MB/s |
 | SHA-256 | `shani` | 2.4 GB/s |
-| SHA-256 | `portable` | 330 MB/s |
-| SHA-512 | `portable` | 520 MB/s |
-| SHA3-256 | `portable` | 540 MB/s |
-| SHA3-512 | `portable` | 270 MB/s |
-| SHAKE128 | `portable` | 640 MB/s |
-| SHAKE256 | `portable` | 520 MB/s |
-| HMAC-SHA-256 | `shani` | 2.3 GB/s |
-| HMAC-SHA-512 | `portable` | 540 MB/s |
-| Poly1305 | `portable` | 3.0 GB/s |
-| CTR_DRBG | `vaes` | 930 MB/s |
+| SHA-256 | `portable` | 341 MB/s |
+| ChaCha20-Poly1305 encrypt | `avx2` | 2.1 GB/s |
 
-SHA-224, SHA-384 and the SHA-512/t pair run at the speed of the
-function whose code they share.
+ChaCha20-Poly1305 is the one to reach for where the processor has no
+AES instructions: there it is several times faster than any AES here,
+which is what it is for.
 
-### Key derivation
+Every other construction, every implementation of each, and the key
+agreement, signature and post-quantum operations are measured too.
+Complete runs ship with the crate, in `benchmarks/`, one file per
+machine, each recording the date and the commit it measured:
+[i7-1355u][bench] is this one. The benchmark ships with the library
+too, so these are numbers you can reproduce:
 
-One derivation of a 32-byte key:
+```sh
+taskset -c 0 scripts/bench
+```
 
-| Function | Time |
-| --- | --- |
-| HKDF-SHA-256 | 0.6 us |
-| HKDF-SHA-512 | 2.6 us |
-| PBKDF2-HMAC-SHA-256, 100,000 iterations | 13 ms |
-| PBKDF2-HMAC-SHA-512, 100,000 iterations | 63 ms |
+The pin matters on a hybrid processor: unpinned, a row records which
+core the scheduler picked rather than how fast the code is. The
+benchmark has only been run on this x86-64 machine, so there are no
+timings for the ARM and RISC-V implementations. On a laptop running
+on battery, expect about half of each figure.
 
-PBKDF2 is slow on purpose, and its cost is the iteration count and
-nothing else. The two figures are what a login path costs at a round
-number of iterations; choose the count from the time you are willing
-to spend, not from this table.
-
-### Key agreement, signatures and encryption
-
-One operation, in microseconds:
-
-| Operation | Time |
-| --- | --- |
-| X25519 key generation | 29 us |
-| X25519 agreement | 29 us |
-| ECDH P-256 key generation | 40 us |
-| ECDH P-256 agreement | 97 us |
-| ECDH P-384 key generation | 107 us |
-| ECDH P-384 agreement | 290 us |
-| Ed25519 key generation | 57 us |
-| Ed25519 sign | 115 us |
-| Ed25519 verify | 113 us |
-| ECDSA P-256 sign | 50 us |
-| ECDSA P-256 verify | 135 us |
-| ECDSA P-384 sign | 140 us |
-| ECDSA P-384 verify | 393 us |
-| RSA-2048 PSS sign | 910 us |
-| RSA-2048 PSS verify | 158 us |
-| RSA-2048 OAEP encrypt | 159 us |
-| RSA-2048 OAEP decrypt | 915 us |
-
-Signing and key generation on the prime curves multiply the base
-point, which is known in advance and has a table of its multiples
-built in; agreement and verification multiply a point that arrives at
-run time and cannot. That is the whole distance between the 50 us
-ECDSA signature and the 135 us verification of it, and it is why
-Ed25519, which has no such table here yet, signs more slowly than
-P-256 while verifying faster.
-
-### Post-quantum
-
-| Parameter set | Key generation | Encapsulate | Decapsulate |
-| --- | --- | --- | --- |
-| ML-KEM-512 | 23 us | 25 us | 32 us |
-| ML-KEM-768 | 40 us | 40 us | 49 us |
-| ML-KEM-1024 | 60 us | 60 us | 72 us |
-
-| Parameter set | Key generation | Sign | Verify |
-| --- | --- | --- | --- |
-| ML-DSA-44 | 65 us | 607 us | 65 us |
-| ML-DSA-65 | 126 us | 385 us | 105 us |
-| ML-DSA-87 | 182 us | 332 us | 178 us |
-| SLH-DSA-SHA2-128s | 33 ms | 252 ms | 246 us |
-| SLH-DSA-SHA2-128f | 503 us | 11.7 ms | 699 us |
-
-ML-DSA signing repeats until a candidate passes, so its cost depends
-on the message and not only on the parameter set: ML-DSA-44 being the
-slowest to sign here is that, not a mistake. SLH-DSA has twelve
-parameter sets; the two shown are the small and the fast end of the
-128-bit ones, and they are the whole trade the family offers, a
-signature small and slow or large and quick.
-
-### Format-preserving encryption
-
-| Mode | Time |
-| --- | --- |
-| FF1, sixteen digits base 10 | 1.2 ms |
-| FF3-1, sixteen digits base 10 | 362 us |
-
-Both are ten rounds of a Feistel network over the caller's radix, and
-FF1 does more work per round.
-
-The ARM and RISC-V implementations have only been run under
-emulation, so there are no timings for them.
+[bench]: https://github.com/MichaelPaddon/scytale/blob/main/scytale/benchmarks/i7-1355u.md
 
 ## Testing
 
@@ -611,7 +571,14 @@ emulation, so there are no timings for them.
 cargo test              # unit tests and the one-shot vector suites
 cargo test-extended     # adds the Monte Carlo and large data suites
 scripts/test-all-arches # every architecture, foreign ones emulated
+scripts/bench           # measures rather than checks
 ```
+
+The suites live inside the crate, under `#[cfg(test)]`, rather than
+in `tests/`: an integration test is a separate crate and would see
+only the public types, and each implementation behind them is meant
+to be validated in its own right. The benchmark is there for the same
+reason, and runs as an ignored test that `scripts/bench` starts.
 
 The ACVP and Project Wycheproof vectors live in
 `scytale/tests/vectors` and are not shipped in the published crate,

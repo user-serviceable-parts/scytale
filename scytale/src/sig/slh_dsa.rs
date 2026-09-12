@@ -28,11 +28,11 @@
 //! offered.
 //!
 //! ```
-//! use scytale::random::{Rng, System};
+//! use scytale::random::CtrDrbg;
 //! use scytale::sig::slh_dsa::shake_128f::{PrivateKey, PublicKey};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = Rng::try_new(System::try_new()?)?;
+//! let mut rng = CtrDrbg::from_system()?;
 //! let key = PrivateKey::generate(&mut rng)?;
 //! let signature = key.sign(&mut rng, b"", b"release v1.2")?;
 //!
@@ -53,12 +53,12 @@
 
 use zeroize::Zeroize;
 
+use crate::constant_time;
 use crate::hash::sha2::{Sha256, Sha512};
 use crate::hash::sha3::Shake256;
 use crate::hash::{Hash, Xof, XofReader};
-use crate::mac::hmac::Hmac;
 use crate::mac::Mac;
-use crate::util;
+use crate::mac::hmac::Hmac;
 use crate::{BlockType, Error};
 
 /// The largest `n` of any set, which sizes every node buffer.
@@ -831,7 +831,7 @@ impl<F: Family> Ctx<'_, F> {
             idx_leaf = (idx_tree & ((1 << p.hp) - 1)) as u32;
             idx_tree >>= p.hp;
         }
-        Ok(util::equal(&node[..n], pk_root))
+        Ok(constant_time::equal(&node[..n], pk_root))
     }
 
     /// `fors_skGen`: the secret at leaf `idx` of the FORS instance
@@ -1103,9 +1103,9 @@ macro_rules! parameter_set {
     ($params:expr, $family:ty, $arc:literal, $name:literal) => {
         use zeroize::Zeroize;
 
-        use crate::random::Random;
-        use crate::sig::slh_dsa::{self, Params};
         use crate::Error;
+        use crate::Random;
+        use crate::sig::slh_dsa::{self, Params};
 
         const P: &Params = &$params;
 
@@ -1455,10 +1455,7 @@ mod tests {
         macro_rules! check {
             ($module:ident) => {{
                 use $module::*;
-                let mut rng = crate::random::Rng::try_new(
-                    crate::random::System::try_new().unwrap(),
-                )
-                .unwrap();
+                let mut rng = crate::random::CtrDrbg::from_system().unwrap();
                 let key = PrivateKey::generate(&mut rng).unwrap();
                 let public = key.public_key();
                 let sig = key.sign(&mut rng, b"ctx", b"message").unwrap();
@@ -1499,10 +1496,7 @@ mod tests {
 
     #[test]
     fn sets_do_not_mix() {
-        let mut rng = crate::random::Rng::try_new(
-            crate::random::System::try_new().unwrap(),
-        )
-        .unwrap();
+        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
         let key = shake_128f::PrivateKey::generate(&mut rng).unwrap();
         let mut out = [0u8; 1024];
         let n = key.der_bytes(&mut out).unwrap();

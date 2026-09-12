@@ -220,10 +220,10 @@ pub trait BitXof: Xof {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BlockType;
     use crate::hash::sha1::Sha1;
     use crate::hash::sha2::{Sha256, Sha512, Sha512_256};
     use crate::hash::sha3::{self, Sha3_256, Shake128, Shake256};
-    use crate::BlockType;
 
     /// Fed through an object, a hash gives the digest its type gives.
     #[test]
@@ -240,8 +240,9 @@ mod tests {
         assert_eq!(feed(&mut sha512_256), Sha512_256::digest(b"abc").unwrap());
         assert_eq!(feed(&mut sha3_256), Sha3_256::digest(b"abc").unwrap());
 
-        type Reader = sha3::AutoReader<sha3::variant::Shake128>;
-        fn squeeze(xof: &mut dyn Xof<Reader = Reader>) -> [u8; 40] {
+        fn squeeze(
+            xof: &mut dyn Xof<Reader = sha3::Shake128Reader>,
+        ) -> [u8; 40] {
             xof.update(b"abc");
             let mut out = [0u8; 40];
             xof.finalize_xof().squeeze(&mut out);

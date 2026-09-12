@@ -9,37 +9,17 @@
 //!
 //! # Availability
 //!
-//! [`Aes::try_new`] checks at run time for VAES, AVX2 and operating
+//! [`Aes::new`] checks at run time for VAES, AVX2 and operating
 //! system support for 256-bit registers, and returns
 //! [`Error::NotSupported`] otherwise.
 //!
-//! # Example
-//!
-//! ```
-//! use scytale::cipher::aes::x86_64::vaes::Aes;
-//! use scytale::Error;
-//!
-//! # fn main() -> Result<(), Error> {
-//! match Aes::try_new(&[0u8; 16]) {
-//!     Ok(aes) => {
-//!         let mut data = [[0u8; 16]; 3];
-//!         aes.encrypt_blocks(&mut data);
-//!         aes.decrypt_blocks(&mut data);
-//!         assert_eq!(data, [[0u8; 16]; 3]);
-//!     }
-//!     Err(Error::NotSupported) => {} // no VAES on this machine
-//!     Err(e) => return Err(e),
-//! }
-//! # Ok(())
-//! # }
-//! ```
 
 use core::fmt;
 
-use super::{aesni, expand, has_vaes256, RoundKeys};
-use crate::cipher::aes::{KeySize, BLOCK_SIZE};
+use super::{RoundKeys, aesni, expand, has_vaes256};
 use crate::cipher::BlockCipher;
-use crate::{BlockType, Error, KeyType};
+use crate::cipher::aes::{BLOCK_SIZE, KeySize};
+use crate::{BlockType, Key, KeyType};
 use zeroize::ZeroizeOnDrop;
 
 /// Bytes in one 256-bit register: two blocks.
@@ -48,7 +28,7 @@ const PAIR: usize = 2 * BLOCK_SIZE;
 /// An AES cipher with an expanded key, using VAES.
 ///
 /// Supports 128, 192 and 256 bit keys. Key expansion happens once in
-/// [`Aes::try_new`]; the key is wiped on drop.
+/// [`Aes::new`]; the key is wiped on drop.
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct Aes<const K: usize> {
     /// 128-bit keys; the loops broadcast each into both halves of a
@@ -66,21 +46,26 @@ impl<const K: usize> fmt::Debug for Aes<K> {
 }
 
 impl<const K: usize> Aes<K> {
-    /// Expands `key`, which must be 16, 24 or 32 bytes long.
+    /// Whether this processor can run this implementation.
+    pub(crate) fn supported() -> bool {
+        has_vaes256()
+    }
+
+    /// Expands `key`.
     ///
-    /// Returns [`Error::NotSupported`] if the processor or operating
-    /// system lacks VAES on 256-bit registers.
-    pub fn try_new(key: &[u8; K]) -> Result<Self, Error> {
+    /// # Panics
+    /// If the processor lacks VAES. The type is private and
+    /// is named only after the probe has confirmed them, so the
+    /// panic is unreachable from outside this crate.
+    pub(crate) fn new(key: &[u8; K]) -> Self {
         const {
             assert!(
                 K == 16 || K == 24 || K == 32,
                 "AES keys are 16, 24 or 32 bytes"
             )
         };
-        if !has_vaes256() {
-            return Err(Error::NotSupported);
-        }
-        // SAFETY: VAES (and so AES-NI) was just confirmed present.
+        assert!(Self::supported(), "VAES not available");
+        // SAFETY: just confirmed present.
         unsafe { Self::new_unchecked(key) }
     }
 
@@ -89,29 +74,17 @@ impl<const K: usize> Aes<K> {
     /// # Safety
     /// The caller must have confirmed that VAES, AVX2 and operating
     /// system support for 256-bit registers are available.
-    pub(crate) unsafe fn new_unchecked(key: &[u8; K]) -> Result<Self, Error> {
-        let size = KeySize::for_key(key)?;
-        let keys = expand(key, size);
-        Ok(Aes { keys })
+    pub(crate) unsafe fn new_unchecked(key: &[u8; K]) -> Self {
+        unsafe {
+            let size = KeySize::for_key(key);
+            let keys = expand(key, size);
+            Aes { keys }
+        }
     }
 
     /// Number of rounds: 10, 12 or 14 depending on key size.
     pub fn rounds(&self) -> usize {
         self.keys.size.rounds()
-    }
-
-    /// Encrypts one block in place.
-    #[inline]
-    pub fn encrypt_block(&self, block: &mut [u8; BLOCK_SIZE]) {
-        // SAFETY: the struct only exists if try_new confirmed AES-NI.
-        unsafe { aesni::encrypt_blocks(&self.keys, block) }
-    }
-
-    /// Decrypts one block in place.
-    #[inline]
-    pub fn decrypt_block(&self, block: &mut [u8; BLOCK_SIZE]) {
-        // SAFETY: the struct only exists if try_new confirmed AES-NI.
-        unsafe { aesni::decrypt_blocks(&self.keys, block) }
     }
 
     /// Encrypts every block in place, independently (ECB).
@@ -138,6 +111,17 @@ impl<const K: usize> Aes<K> {
     }
 }
 
+impl<const K: usize> super::Keyed for Aes<K> {
+    /// Always: this implementation exists only where they do.
+    fn schedule(&self) -> Option<super::Schedule<'_>> {
+        Some(super::Schedule::new(&self.keys))
+    }
+
+    fn decryption(&self) -> Option<super::Schedule<'_>> {
+        Some(super::Schedule::inverse(&self.keys))
+    }
+}
+
 impl<const K: usize> BlockType for Aes<K> {
     type Block = [u8; BLOCK_SIZE];
 
@@ -147,31 +131,23 @@ impl<const K: usize> BlockType for Aes<K> {
 }
 
 impl<const K: usize> KeyType for Aes<K> {
-    type Key = [u8; K];
+    type Key = Key<[u8; K]>;
 
     fn zero_key() -> Self::Key {
-        [0; K]
+        Key::zeroed()
     }
 }
 
 impl<const K: usize> BlockCipher for Aes<K> {
-    fn try_new(key: &Self::Key) -> Result<Self, Error> {
-        Aes::try_new(key)
+    fn new(key: &Self::Key) -> Self {
+        Aes::new(key.array())
     }
 
-    fn encrypt_block(&self, block: &mut Self::Block) {
-        Aes::encrypt_block(self, block)
-    }
-
-    fn decrypt_block(&self, block: &mut Self::Block) {
-        Aes::decrypt_block(self, block)
-    }
-
-    fn encrypt_blocks(&self, blocks: &mut [Self::Block]) {
+    fn encrypt(&self, blocks: &mut [Self::Block]) {
         Aes::encrypt_blocks(self, blocks)
     }
 
-    fn decrypt_blocks(&self, blocks: &mut [Self::Block]) {
+    fn decrypt(&self, blocks: &mut [Self::Block]) {
         Aes::decrypt_blocks(self, blocks)
     }
 }
@@ -181,16 +157,18 @@ impl<const K: usize> BlockCipher for Aes<K> {
 /// # Safety
 /// Requires VAES and AVX2; `data.len()` must be a multiple of 32.
 unsafe fn encrypt_pairs(keys: &RoundKeys, data: &mut [u8]) {
-    run(
-        keys.enc.as_ptr(),
-        keys.size.rounds(),
-        data,
-        encrypt8,
-        [
-            encrypt1, encrypt2, encrypt3, encrypt4, encrypt5, encrypt6,
-            encrypt7,
-        ],
-    )
+    unsafe {
+        run(
+            keys.enc.as_ptr(),
+            keys.size.rounds(),
+            data,
+            encrypt8,
+            [
+                encrypt1, encrypt2, encrypt3, encrypt4, encrypt5, encrypt6,
+                encrypt7,
+            ],
+        )
+    }
 }
 
 /// Decrypts a whole number of block pairs.
@@ -198,16 +176,18 @@ unsafe fn encrypt_pairs(keys: &RoundKeys, data: &mut [u8]) {
 /// # Safety
 /// Requires VAES and AVX2; `data.len()` must be a multiple of 32.
 unsafe fn decrypt_pairs(keys: &RoundKeys, data: &mut [u8]) {
-    run(
-        keys.dec.as_ptr(),
-        keys.size.rounds(),
-        data,
-        decrypt8,
-        [
-            decrypt1, decrypt2, decrypt3, decrypt4, decrypt5, decrypt6,
-            decrypt7,
-        ],
-    )
+    unsafe {
+        run(
+            keys.dec.as_ptr(),
+            keys.size.rounds(),
+            data,
+            decrypt8,
+            [
+                decrypt1, decrypt2, decrypt3, decrypt4, decrypt5, decrypt6,
+                decrypt7,
+            ],
+        )
+    }
 }
 
 /// A body that processes `n` register pairs at `data`.
@@ -226,15 +206,17 @@ unsafe fn run(
     groups: unsafe fn(*const u32, usize, *mut u8, usize),
     tails: [Body; 7],
 ) {
-    let pairs = data.len() / PAIR;
-    let full = pairs / 8;
-    let mut p = data.as_mut_ptr();
-    if full > 0 {
-        groups(rk, rounds, p, full);
-        p = p.add(full * 8 * PAIR);
-    }
-    if let Some(tail) = (pairs % 8).checked_sub(1) {
-        tails[tail](rk, rounds, p);
+    unsafe {
+        let pairs = data.len() / PAIR;
+        let full = pairs / 8;
+        let mut p = data.as_mut_ptr();
+        if full > 0 {
+            groups(rk, rounds, p, full);
+            p = p.add(full * 8 * PAIR);
+        }
+        if let Some(tail) = (pairs % 8).checked_sub(1) {
+            tails[tail](rk, rounds, p);
+        }
     }
 }
 
@@ -254,32 +236,34 @@ macro_rules! body {
         /// Requires VAES and AVX2; `rk` must point at `rounds + 1`
         /// round keys and `data` at the pairs this body handles.
         unsafe fn $name(rk: *const u32, rounds: usize, data: *mut u8) {
-            core::arch::asm!(
-                "vbroadcasti128 ymm8, [{rk}]",
-                $(concat!("vmovdqu ", $r, ", [{data} + ", $off, "]"),)+
-                $(concat!("vpxor ", $r, ", ", $r, ", ymm8"),)+
-                "lea {k}, [{rk} + 16]",
-                "mov {n}, {nr}",
-                "2:",
-                "vbroadcasti128 ymm8, [{k}]",
-                $(concat!($mid, " ", $r, ", ", $r, ", ymm8"),)+
-                "add {k}, 16",
-                "dec {n}",
-                "jnz 2b",
-                "vbroadcasti128 ymm8, [{k}]",
-                $(concat!($last, " ", $r, ", ", $r, ", ymm8"),)+
-                $(concat!("vmovdqu [{data} + ", $off, "], ", $r),)+
-                "vzeroupper",
-                rk = in(reg) rk,
-                nr = in(reg) rounds - 1,
-                data = in(reg) data,
-                k = out(reg) _,
-                n = out(reg) _,
-                out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
-                out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
-                out("ymm8") _,
-                options(nostack),
-            );
+            unsafe {
+                core::arch::asm!(
+                    "vbroadcasti128 ymm8, [{rk}]",
+                    $(concat!("vmovdqu ", $r, ", [{data} + ", $off, "]"),)+
+                    $(concat!("vpxor ", $r, ", ", $r, ", ymm8"),)+
+                    "lea {k}, [{rk} + 16]",
+                    "mov {n}, {nr}",
+                    "2:",
+                    "vbroadcasti128 ymm8, [{k}]",
+                    $(concat!($mid, " ", $r, ", ", $r, ", ymm8"),)+
+                    "add {k}, 16",
+                    "dec {n}",
+                    "jnz 2b",
+                    "vbroadcasti128 ymm8, [{k}]",
+                    $(concat!($last, " ", $r, ", ", $r, ", ymm8"),)+
+                    $(concat!("vmovdqu [{data} + ", $off, "], ", $r),)+
+                    "vzeroupper",
+                    rk = in(reg) rk,
+                    nr = in(reg) rounds - 1,
+                    data = in(reg) data,
+                    k = out(reg) _,
+                    n = out(reg) _,
+                    out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
+                    out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
+                    out("ymm8") _,
+                    options(nostack),
+                );
+            }
         }
     };
 }
@@ -297,72 +281,74 @@ macro_rules! groups {
             data: *mut u8,
             groups: usize,
         ) {
-            core::arch::asm!(
-                "3:",
-                "vbroadcasti128 ymm8, [{rk}]",
-                "vmovdqu ymm0, [{data}]",
-                "vmovdqu ymm1, [{data} + 32]",
-                "vmovdqu ymm2, [{data} + 64]",
-                "vmovdqu ymm3, [{data} + 96]",
-                "vmovdqu ymm4, [{data} + 128]",
-                "vmovdqu ymm5, [{data} + 160]",
-                "vmovdqu ymm6, [{data} + 192]",
-                "vmovdqu ymm7, [{data} + 224]",
-                "vpxor ymm0, ymm0, ymm8",
-                "vpxor ymm1, ymm1, ymm8",
-                "vpxor ymm2, ymm2, ymm8",
-                "vpxor ymm3, ymm3, ymm8",
-                "vpxor ymm4, ymm4, ymm8",
-                "vpxor ymm5, ymm5, ymm8",
-                "vpxor ymm6, ymm6, ymm8",
-                "vpxor ymm7, ymm7, ymm8",
-                "lea {k}, [{rk} + 16]",
-                "mov {n}, {nr}",
-                "2:",
-                "vbroadcasti128 ymm8, [{k}]",
-                concat!($mid, " ymm0, ymm0, ymm8"),
-                concat!($mid, " ymm1, ymm1, ymm8"),
-                concat!($mid, " ymm2, ymm2, ymm8"),
-                concat!($mid, " ymm3, ymm3, ymm8"),
-                concat!($mid, " ymm4, ymm4, ymm8"),
-                concat!($mid, " ymm5, ymm5, ymm8"),
-                concat!($mid, " ymm6, ymm6, ymm8"),
-                concat!($mid, " ymm7, ymm7, ymm8"),
-                "add {k}, 16",
-                "dec {n}",
-                "jnz 2b",
-                "vbroadcasti128 ymm8, [{k}]",
-                concat!($last, " ymm0, ymm0, ymm8"),
-                concat!($last, " ymm1, ymm1, ymm8"),
-                concat!($last, " ymm2, ymm2, ymm8"),
-                concat!($last, " ymm3, ymm3, ymm8"),
-                concat!($last, " ymm4, ymm4, ymm8"),
-                concat!($last, " ymm5, ymm5, ymm8"),
-                concat!($last, " ymm6, ymm6, ymm8"),
-                concat!($last, " ymm7, ymm7, ymm8"),
-                "vmovdqu [{data}], ymm0",
-                "vmovdqu [{data} + 32], ymm1",
-                "vmovdqu [{data} + 64], ymm2",
-                "vmovdqu [{data} + 96], ymm3",
-                "vmovdqu [{data} + 128], ymm4",
-                "vmovdqu [{data} + 160], ymm5",
-                "vmovdqu [{data} + 192], ymm6",
-                "vmovdqu [{data} + 224], ymm7",
-                "add {data}, 256",
-                "dec {groups}",
-                "jnz 3b",
-                "vzeroupper",
-                rk = in(reg) rk,
-                nr = in(reg) rounds - 1,
-                data = inout(reg) data => _,
-                groups = inout(reg) groups => _,
-                k = out(reg) _,
-                n = out(reg) _,
-                out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
-                out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
-                out("ymm8") _,
-                options(nostack),
-            );
+            unsafe {
+                core::arch::asm!(
+                    "3:",
+                    "vbroadcasti128 ymm8, [{rk}]",
+                    "vmovdqu ymm0, [{data}]",
+                    "vmovdqu ymm1, [{data} + 32]",
+                    "vmovdqu ymm2, [{data} + 64]",
+                    "vmovdqu ymm3, [{data} + 96]",
+                    "vmovdqu ymm4, [{data} + 128]",
+                    "vmovdqu ymm5, [{data} + 160]",
+                    "vmovdqu ymm6, [{data} + 192]",
+                    "vmovdqu ymm7, [{data} + 224]",
+                    "vpxor ymm0, ymm0, ymm8",
+                    "vpxor ymm1, ymm1, ymm8",
+                    "vpxor ymm2, ymm2, ymm8",
+                    "vpxor ymm3, ymm3, ymm8",
+                    "vpxor ymm4, ymm4, ymm8",
+                    "vpxor ymm5, ymm5, ymm8",
+                    "vpxor ymm6, ymm6, ymm8",
+                    "vpxor ymm7, ymm7, ymm8",
+                    "lea {k}, [{rk} + 16]",
+                    "mov {n}, {nr}",
+                    "2:",
+                    "vbroadcasti128 ymm8, [{k}]",
+                    concat!($mid, " ymm0, ymm0, ymm8"),
+                    concat!($mid, " ymm1, ymm1, ymm8"),
+                    concat!($mid, " ymm2, ymm2, ymm8"),
+                    concat!($mid, " ymm3, ymm3, ymm8"),
+                    concat!($mid, " ymm4, ymm4, ymm8"),
+                    concat!($mid, " ymm5, ymm5, ymm8"),
+                    concat!($mid, " ymm6, ymm6, ymm8"),
+                    concat!($mid, " ymm7, ymm7, ymm8"),
+                    "add {k}, 16",
+                    "dec {n}",
+                    "jnz 2b",
+                    "vbroadcasti128 ymm8, [{k}]",
+                    concat!($last, " ymm0, ymm0, ymm8"),
+                    concat!($last, " ymm1, ymm1, ymm8"),
+                    concat!($last, " ymm2, ymm2, ymm8"),
+                    concat!($last, " ymm3, ymm3, ymm8"),
+                    concat!($last, " ymm4, ymm4, ymm8"),
+                    concat!($last, " ymm5, ymm5, ymm8"),
+                    concat!($last, " ymm6, ymm6, ymm8"),
+                    concat!($last, " ymm7, ymm7, ymm8"),
+                    "vmovdqu [{data}], ymm0",
+                    "vmovdqu [{data} + 32], ymm1",
+                    "vmovdqu [{data} + 64], ymm2",
+                    "vmovdqu [{data} + 96], ymm3",
+                    "vmovdqu [{data} + 128], ymm4",
+                    "vmovdqu [{data} + 160], ymm5",
+                    "vmovdqu [{data} + 192], ymm6",
+                    "vmovdqu [{data} + 224], ymm7",
+                    "add {data}, 256",
+                    "dec {groups}",
+                    "jnz 3b",
+                    "vzeroupper",
+                    rk = in(reg) rk,
+                    nr = in(reg) rounds - 1,
+                    data = inout(reg) data => _,
+                    groups = inout(reg) groups => _,
+                    k = out(reg) _,
+                    n = out(reg) _,
+                    out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
+                    out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
+                    out("ymm8") _,
+                    options(nostack),
+                );
+            }
         }
     };
 }
@@ -505,11 +491,7 @@ mod tests {
 
     /// Returns the cipher, or `None` (skipping the test) without VAES.
     fn aes<const K: usize>(key: &[u8; K]) -> Option<Aes<K>> {
-        match Aes::try_new(key) {
-            Ok(a) => Some(a),
-            Err(Error::NotSupported) => None,
-            Err(e) => panic!("{e}"),
-        }
+        Aes::<K>::supported().then(|| Aes::new(key))
     }
 
     fn unhex(s: &str) -> [u8; 32] {
@@ -528,9 +510,9 @@ mod tests {
         let Some(aes) = aes(&key) else { return };
 
         let mut block = plain;
-        aes.encrypt_block(&mut block);
+        aes.encrypt_blocks(core::slice::from_mut(&mut block));
         assert_eq!(block, cipher, "encrypt");
-        aes.decrypt_block(&mut block);
+        aes.decrypt_blocks(core::slice::from_mut(&mut block));
         assert_eq!(block, plain, "decrypt");
 
         // Same vector through the 256-bit path: two copies.
@@ -586,7 +568,7 @@ mod tests {
                 *k = (i * 37 + klen) as u8;
             }
             let Some(hw) = aes(&key) else { return };
-            let sw = portable::ttable::Aes::try_new(&key).unwrap();
+            let sw = portable::ttable::Aes::new(&key);
             // Every pair-tail width and odd block, with and without
             // full groups before it.
             for nblocks in 0..40 {
