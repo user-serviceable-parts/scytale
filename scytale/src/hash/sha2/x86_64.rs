@@ -12,36 +12,56 @@
 
 #![allow(unsafe_code)]
 
+use crate::probe::Probe;
 use core::arch::x86_64::__cpuid_count;
 
-use super::engine::{Compress32, Engine32};
+use super::engine::Compress32;
+#[cfg(test)]
+use super::engine::Engine32;
 use super::portable::K256;
+#[cfg(test)]
 use super::variant;
 use crate::align::At16;
 
+// Named for the vector suites and the benchmark, which drive each
+// engine in turn; the dispatching types reach it directly.
 /// SHA-224 with SHA-NI.
+#[cfg(test)]
 pub type Sha224 = Engine32<ShaNi, variant::Sha224>;
 /// SHA-256 with SHA-NI.
+#[cfg(test)]
 pub type Sha256 = Engine32<ShaNi, variant::Sha256>;
 
 /// Whether the processor reports SHA-NI (CPUID leaf 7, EBX bit 29).
 /// Every such processor also has the SSSE3 and SSE4.1 shuffles the
 /// code uses.
 pub(crate) fn has_sha() -> bool {
+    SHA.yes(ask_sha)
+}
+
+/// Kept: `cpuid` serialises the pipeline, and a hash is started
+/// for every message, every HMAC block and every PBKDF2 iteration.
+static SHA: Probe = Probe::new();
+
+fn ask_sha() -> bool {
     __cpuid_count(7, 0).ebx & (1 << 29) != 0
 }
 
 /// The compression function via SHA-NI.
-pub struct ShaNi;
+// No public constructor: a value exists only by way of `probe`.
+#[derive(Clone, Copy)]
+pub struct ShaNi(());
 
 impl super::engine::Sealed for ShaNi {}
 
 impl Compress32 for ShaNi {
-    fn supported() -> bool {
-        has_sha()
+    fn probe() -> Option<Self> {
+        has_sha().then_some(ShaNi(()))
     }
 
-    unsafe fn compress(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+    fn compress(self, state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // instructions.
         unsafe {
             if !blocks.is_empty() {
                 compress(state, blocks.as_ptr().cast(), blocks.len());

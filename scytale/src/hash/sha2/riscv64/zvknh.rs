@@ -46,28 +46,41 @@
 
 #![allow(unsafe_code)]
 
-use super::super::engine::{Compress32, Compress64, Engine32, Engine64};
+use super::super::engine::{Compress32, Compress64};
+#[cfg(test)]
+use super::super::engine::{Engine32, Engine64};
 use super::super::portable::{K256, K512};
+#[cfg(test)]
 use super::super::variant;
 use crate::arch::riscv64::{
     EXT_ZVBB, EXT_ZVKB, EXT_ZVKNHA, EXT_ZVKNHB, IMA_V, extensions, vector_bytes,
 };
 
+// Named for the vector suites and the benchmark, which drive each
+// engine in turn; the dispatching types reach it directly.
 /// SHA-224 with Zvknh.
+#[cfg(test)]
 pub type Sha224 = Engine32<Zvknh, variant::Sha224>;
 /// SHA-256 with Zvknh.
+#[cfg(test)]
 pub type Sha256 = Engine32<Zvknh, variant::Sha256>;
 /// SHA-384 with Zvknh.
+#[cfg(test)]
 pub type Sha384 = Engine64<Zvknh, variant::Sha384>;
 /// SHA-512 with Zvknh.
+#[cfg(test)]
 pub type Sha512 = Engine64<Zvknh, variant::Sha512>;
 /// SHA-512/224 with Zvknh.
+#[cfg(test)]
 pub type Sha512_224 = Engine64<Zvknh, variant::Sha512_224>;
 /// SHA-512/256 with Zvknh.
+#[cfg(test)]
 pub type Sha512_256 = Engine64<Zvknh, variant::Sha512_256>;
 
 /// The vector SHA-2 instructions.
-pub struct Zvknh;
+// No public constructor: a value exists only by way of `probe`.
+#[derive(Clone, Copy)]
+pub struct Zvknh(());
 
 impl super::super::engine::Sealed for Zvknh {}
 
@@ -311,11 +324,13 @@ unsafe fn rounds512(
 }
 
 impl Compress32 for Zvknh {
-    fn supported() -> bool {
-        has_sha256()
+    fn probe() -> Option<Self> {
+        has_sha256().then_some(Zvknh(()))
     }
 
-    unsafe fn compress(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+    fn compress(self, state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // instructions.
         unsafe {
             if blocks.is_empty() {
                 return;
@@ -333,11 +348,12 @@ impl Compress32 for Zvknh {
 }
 
 impl Compress64 for Zvknh {
-    fn supported() -> bool {
-        has_sha512()
+    fn probe() -> Option<Self> {
+        has_sha512().then_some(Zvknh(()))
     }
 
-    unsafe fn compress(state: &mut [u64; 8], blocks: &[[u8; 128]]) {
+    fn compress(self, state: &mut [u64; 8], blocks: &[[u8; 128]]) {
+        // SAFETY: as for the 32-bit family.
         unsafe {
             if blocks.is_empty() {
                 return;

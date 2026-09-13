@@ -11,25 +11,44 @@
 
 #![allow(unsafe_code)]
 
-use super::engine::{LANES, Permutation, Sponge};
+#[cfg(test)]
+use super::engine::Sponge;
+use super::engine::{LANES, Permutation};
 use super::portable::ROUND_CONSTANTS;
+#[cfg(test)]
 use super::variant;
+use crate::probe::Probe;
 
+// Named for the vector suites and the benchmark, which drive each
+// engine in turn; the dispatching types reach it directly.
 /// SHA3-224 with the SHA3 instructions.
+#[cfg(test)]
 pub type Sha3_224 = Sponge<Armv8, variant::Sha3_224>;
 /// SHA3-256 with the SHA3 instructions.
+#[cfg(test)]
 pub type Sha3_256 = Sponge<Armv8, variant::Sha3_256>;
 /// SHA3-384 with the SHA3 instructions.
+#[cfg(test)]
 pub type Sha3_384 = Sponge<Armv8, variant::Sha3_384>;
 /// SHA3-512 with the SHA3 instructions.
+#[cfg(test)]
 pub type Sha3_512 = Sponge<Armv8, variant::Sha3_512>;
 /// SHAKE128 with the SHA3 instructions.
+#[cfg(test)]
 pub type Shake128 = Sponge<Armv8, variant::Shake128>;
 /// SHAKE256 with the SHA3 instructions.
+#[cfg(test)]
 pub type Shake256 = Sponge<Armv8, variant::Shake256>;
 
 /// Whether the SHA3 instructions are available.
 pub(crate) fn has_sha3() -> bool {
+    SHA3.yes(ask_sha3)
+}
+
+/// Kept: a hash is started for every message.
+static SHA3: Probe = Probe::new();
+
+fn ask_sha3() -> bool {
     cfg!(target_feature = "sha3") || id_register_reports_sha3()
 }
 
@@ -58,17 +77,21 @@ fn id_register_reports_sha3() -> bool {
     false
 }
 
-/// The permutation via the SHA3 instructions.
-pub struct Armv8;
+/// The permutation via the SHA3 instructions. No public constructor:
+/// a value exists only by way of `probe`.
+#[derive(Clone, Copy)]
+pub struct Armv8(());
 
 impl super::engine::Sealed for Armv8 {}
 
 impl Permutation for Armv8 {
-    fn supported() -> bool {
-        has_sha3()
+    fn probe() -> Option<Self> {
+        has_sha3().then_some(Armv8(()))
     }
 
-    unsafe fn permute(state: &mut [u64; LANES]) {
+    fn permute(self, state: &mut [u64; LANES]) {
+        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // instructions.
         unsafe { keccak_f1600(state.as_mut_ptr()) }
     }
 }
@@ -275,8 +298,7 @@ mod tests {
             }
             let mut expected = state;
             reference(&mut expected);
-            // SAFETY: `has_sha3` was just checked.
-            unsafe { Armv8::permute(&mut state) };
+            Armv8::probe().expect("checked above").permute(&mut state);
             assert_eq!(state, expected);
         }
     }

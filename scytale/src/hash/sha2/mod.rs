@@ -55,36 +55,20 @@
 //! See [the module above](crate::hash#not-a-mac): a key in front of
 //! the message does not make a MAC.
 
-// The engines are named here for the vector suites and the
-// benchmark, which drive each one in turn; a build that runs
-// neither reaches them only through the dispatching types.
-#[allow(dead_code)]
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod aarch64;
 pub(crate) mod engine;
-// The engines are named here for the vector suites and the
-// benchmark, which drive each one in turn; a build that runs
-// neither reaches them only through the dispatching types.
-#[allow(dead_code)]
 pub(crate) mod portable;
-// The engines are named here for the vector suites and the
-// benchmark, which drive each one in turn; a build that runs
-// neither reaches them only through the dispatching types.
-#[allow(dead_code)]
 #[cfg(target_arch = "riscv64")]
 pub(crate) mod riscv64;
-// The engines are named here for the vector suites and the
-// benchmark, which drive each one in turn; a build that runs
-// neither reaches them only through the dispatching types.
-#[allow(dead_code)]
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod x86_64;
 
 use core::fmt;
 
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-use engine::Compress64;
-use engine::{Compress32, Engine32, Engine64, Variant32, Variant64};
+use engine::{
+    Compress32, Compress64, Engine32, Engine64, Variant32, Variant64,
+};
 
 use crate::hash::{BitHash, Hash};
 use crate::probe::Probe;
@@ -275,7 +259,7 @@ fn supported32(choice: Choice) -> bool {
         Choice::Zvknh => <riscv64::Zvknh as Compress32>::supported(),
         #[cfg(target_arch = "riscv64")]
         Choice::Zknh => <riscv64::Zknh as Compress32>::supported(),
-        Choice::Portable => true,
+        Choice::Portable => <portable::Compress as Compress32>::supported(),
         #[allow(unreachable_patterns)]
         _ => false,
     }
@@ -290,7 +274,7 @@ fn supported64(choice: Choice) -> bool {
         Choice::Zvknh => <riscv64::Zvknh as Compress64>::supported(),
         #[cfg(target_arch = "riscv64")]
         Choice::Zknh => <riscv64::Zknh as Compress64>::supported(),
-        Choice::Portable => true,
+        Choice::Portable => <portable::Compress as Compress64>::supported(),
         #[allow(unreachable_patterns)]
         _ => false,
     }
@@ -325,22 +309,22 @@ macro_rules! automatic {
             ///
             /// The processor is probed the first time; every later
             /// call reads the cached answer.
-            // The hardware engines skip their own processor check
-            // because the probe has already made it.
-            #[allow(unsafe_code)]
             pub fn new() -> Self {
-                // SAFETY: `probe` only names hardware after confirming
-                // the processor supports it.
-                let inner = unsafe {
-                    match probe(&$probed, $supported) {
-                        $(
-                            #[cfg(target_arch = $arch)]
-                            Choice::$choice => {
-                                $inner::$choice($engine::new_unchecked())
+                let inner = match probe(&$probed, $supported) {
+                    $(
+                        #[cfg(target_arch = $arch)]
+                        Choice::$choice => {
+                            match <$path as $compress>::probe() {
+                                Some(c) => $inner::$choice($engine::with(c)),
+                                // The probe chose it, so this is not
+                                // taken; portable is right if it were.
+                                None => $inner::Portable($engine::with(
+                                    portable::Compress,
+                                )),
                             }
-                        )*
-                        _ => $inner::Portable($engine::new_unchecked()),
-                    }
+                        }
+                    )*
+                    _ => $inner::Portable($engine::with(portable::Compress)),
                 };
                 $name(inner)
             }
@@ -609,7 +593,7 @@ pub(crate) mod tests {
     fn sha512_t_ivs_derive() {
         fn derive(name: &[u8]) -> [u64; 8] {
             let iv = variant::Sha512::IV.map(|w| w ^ 0xa5a5a5a5a5a5a5a5);
-            let mut hash = portable::Sha512::with_iv(iv);
+            let mut hash = portable::Sha512::with_iv(portable::Compress, iv);
             hash.update(name);
             let digest = hash.finalize();
             core::array::from_fn(|i| {

@@ -10,30 +10,57 @@
 
 #![allow(unsafe_code)]
 
-use super::engine::{Compress32, Compress64, Engine32, Engine64};
+use super::engine::{Compress32, Compress64};
+#[cfg(test)]
+use super::engine::{Engine32, Engine64};
 use super::portable::{K256, K512};
+#[cfg(test)]
 use super::variant;
+use crate::probe::Probe;
 
+// Named for the vector suites and the benchmark, which drive each
+// engine in turn; the dispatching types reach it directly.
 /// SHA-224 with the SHA2 instructions.
+#[cfg(test)]
 pub type Sha224 = Engine32<Armv8, variant::Sha224>;
 /// SHA-256 with the SHA2 instructions.
+#[cfg(test)]
 pub type Sha256 = Engine32<Armv8, variant::Sha256>;
 /// SHA-384 with the SHA512 instructions.
+#[cfg(test)]
 pub type Sha384 = Engine64<Armv8, variant::Sha384>;
 /// SHA-512 with the SHA512 instructions.
+#[cfg(test)]
 pub type Sha512 = Engine64<Armv8, variant::Sha512>;
 /// SHA-512/224 with the SHA512 instructions.
+#[cfg(test)]
 pub type Sha512_224 = Engine64<Armv8, variant::Sha512_224>;
 /// SHA-512/256 with the SHA512 instructions.
+#[cfg(test)]
 pub type Sha512_256 = Engine64<Armv8, variant::Sha512_256>;
 
 /// Whether the SHA-256 instructions are available.
 pub(crate) fn has_sha256() -> bool {
+    SHA256.yes(ask_sha256)
+}
+
+/// Kept, as on every architecture: a hash is started for every
+/// message, every HMAC block and every PBKDF2 iteration.
+static SHA256: Probe = Probe::new();
+
+fn ask_sha256() -> bool {
     cfg!(target_feature = "sha2") || id_register_sha2() >= 1
 }
 
 /// Whether the SHA-512 instructions are available.
 pub(crate) fn has_sha512() -> bool {
+    SHA512.yes(ask_sha512)
+}
+
+/// Kept, as [`SHA256`] is.
+static SHA512: Probe = Probe::new();
+
+fn ask_sha512() -> bool {
     cfg!(target_feature = "sha3") || id_register_sha2() >= 2
 }
 
@@ -63,16 +90,20 @@ fn id_register_sha2() -> u64 {
 }
 
 /// The compression functions via the ARMv8 instructions.
-pub struct Armv8;
+// No public constructor: a value exists only by way of `probe`.
+#[derive(Clone, Copy)]
+pub struct Armv8(());
 
 impl super::engine::Sealed for Armv8 {}
 
 impl Compress32 for Armv8 {
-    fn supported() -> bool {
-        has_sha256()
+    fn probe() -> Option<Self> {
+        has_sha256().then_some(Armv8(()))
     }
 
-    unsafe fn compress(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+    fn compress(self, state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // instructions.
         unsafe {
             if !blocks.is_empty() {
                 compress256(state, blocks.as_ptr().cast(), blocks.len());
@@ -82,11 +113,12 @@ impl Compress32 for Armv8 {
 }
 
 impl Compress64 for Armv8 {
-    fn supported() -> bool {
-        has_sha512()
+    fn probe() -> Option<Self> {
+        has_sha512().then_some(Armv8(()))
     }
 
-    unsafe fn compress(state: &mut [u64; 8], blocks: &[[u8; 128]]) {
+    fn compress(self, state: &mut [u64; 8], blocks: &[[u8; 128]]) {
+        // SAFETY: as for the 32-bit family.
         unsafe {
             if !blocks.is_empty() {
                 compress512(state, blocks.as_ptr().cast(), blocks.len());

@@ -66,9 +66,14 @@ pub struct Poly1305 {
     /// Bytes of a block not yet complete.
     block: [u8; BLOCK],
     used: usize,
-    /// The powers of `r` the loop written out for this processor
-    /// wants, worked out the first time a run long enough to use them
-    /// arrives. A short message never pays for them.
+    /// Whether this processor has the loop written out for it. Asked
+    /// once, here, rather than on the way past for every run of
+    /// blocks.
+    #[cfg(target_arch = "x86_64")]
+    fast: bool,
+    /// The powers of `r` that loop wants, worked out the first time a
+    /// run long enough to use them arrives. A short message never
+    /// pays for them.
     #[cfg(target_arch = "x86_64")]
     powers: Option<x86_64::Powers>,
 }
@@ -102,6 +107,8 @@ impl Poly1305 {
             h: [0; 3],
             block: [0; BLOCK],
             used: 0,
+            #[cfg(target_arch = "x86_64")]
+            fast: x86_64::supported(),
             #[cfg(target_arch = "x86_64")]
             powers: None,
         }
@@ -151,17 +158,20 @@ impl Poly1305 {
         self.h = [h0, h1, h2];
     }
 
-    /// Makes sure the powers of `r` are to hand, and says whether
-    /// this processor can use them.
+    /// The powers of `r`, where this processor can use them. What
+    /// the processor has was settled when the authenticator was made;
+    /// only the powers are left until a run arrives that is worth
+    /// them.
     #[cfg(target_arch = "x86_64")]
-    fn ready(&mut self) -> bool {
-        if self.powers.is_none() {
-            if !x86_64::supported() {
-                return false;
-            }
-            self.powers = Some(x86_64::Powers::new(&self.r));
+    fn ready(&mut self) -> Option<x86_64::Powers> {
+        if !self.fast {
+            return None;
         }
-        true
+        Some(
+            *self
+                .powers
+                .get_or_insert_with(|| x86_64::Powers::new(&self.r)),
+        )
     }
 
     /// Fully reduces the accumulator, adds `s`, and returns the tag.
@@ -248,10 +258,11 @@ impl Mac for Poly1305 {
         // Whole groups through the loop written out for this
         // processor, where there is one, and the odd blocks after.
         #[cfg(target_arch = "x86_64")]
-        if data.len() >= x86_64::SPAN && self.ready() {
+        if data.len() >= x86_64::SPAN
+            && let Some(powers) = self.ready()
+        {
             let groups = data.len() / x86_64::SPAN;
             let (whole, rest) = data.split_at(groups * x86_64::SPAN);
-            let powers = self.powers.expect("just made");
             x86_64::bulk(&mut self.h, &powers, whole);
             data = rest;
         }
@@ -288,6 +299,8 @@ impl Clone for Poly1305 {
             h: self.h,
             block: self.block,
             used: self.used,
+            #[cfg(target_arch = "x86_64")]
+            fast: self.fast,
             #[cfg(target_arch = "x86_64")]
             powers: self.powers,
         }

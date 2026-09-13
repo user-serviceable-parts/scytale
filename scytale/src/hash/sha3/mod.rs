@@ -57,17 +57,9 @@
 //! on a 64-bit processor is a little slower than SHA-256 with no
 //! hardware and much slower than SHA-256 with it.
 
-// The engines are named here for the vector suites and the
-// benchmark, which drive each one in turn; a build that runs
-// neither reaches them only through the dispatching types.
-#[allow(dead_code)]
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod aarch64;
 pub(crate) mod engine;
-// The engines are named here for the vector suites and the
-// benchmark, which drive each one in turn; a build that runs
-// neither reaches them only through the dispatching types.
-#[allow(dead_code)]
 pub(crate) mod portable;
 
 use core::fmt;
@@ -167,7 +159,9 @@ fn supported(choice: Choice) -> bool {
     match choice {
         #[cfg(target_arch = "aarch64")]
         Choice::Armv8 => <aarch64::Armv8 as engine::Permutation>::supported(),
-        Choice::Portable => true,
+        Choice::Portable => {
+            <portable::Keccak as engine::Permutation>::supported()
+        }
         #[allow(unreachable_patterns)]
         _ => false,
     }
@@ -202,18 +196,16 @@ enum Inner<V: engine::Variant> {
 impl<V: engine::Variant> Auto<V> {
     /// Starts a function with the best implementation the processor
     /// supports.
-    // The hardware sponge skips its own processor check because the
-    // probe has already made it.
-    #[allow(unsafe_code)]
     pub fn new() -> Self {
-        // SAFETY: `probe` only names hardware after confirming the
-        // processor supports it.
-        let inner = unsafe {
-            match probe() {
-                #[cfg(target_arch = "aarch64")]
-                Choice::Armv8 => Inner::Armv8(Sponge::new_unchecked()),
-                _ => Inner::Portable(Sponge::new_unchecked()),
-            }
+        let inner = match probe() {
+            #[cfg(target_arch = "aarch64")]
+            Choice::Armv8 => match engine::Permutation::probe() {
+                Some(p) => Inner::Armv8(Sponge::with(p)),
+                // The probe chose it, so this is not taken; portable
+                // is right if it were.
+                None => Inner::Portable(Sponge::with(portable::Keccak)),
+            },
+            _ => Inner::Portable(Sponge::with(portable::Keccak)),
         };
         Auto(inner)
     }

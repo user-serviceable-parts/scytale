@@ -13,6 +13,7 @@
 //! coming in.
 
 #![allow(unsafe_code)]
+use crate::probe::Probe;
 
 /// The field polynomial `x^128 + x^7 + x^2 + x + 1` without its
 /// leading term, written in the reversed bit order.
@@ -142,14 +143,60 @@ pub(crate) unsafe fn multiply_group(
     }
 }
 
-/// How many blocks the group multiply takes at once, asked as a
-/// call because one architecture decides it at run time.
-pub(super) fn group() -> usize {
-    GROUP
+/// The processor's polynomial multiply. A value exists only by way
+/// of [`probe`], so holding one is holding the proof that the
+/// instructions are there, and the calls on it are safe.
+#[derive(Clone, Copy)]
+pub(crate) struct Multiply(());
+
+/// The multiply, where the processor has it. Asked once.
+pub(crate) fn probe() -> Option<Multiply> {
+    has_carryless_multiply().then_some(Multiply(()))
+}
+
+impl Multiply {
+    /// How many blocks the group multiply takes at once, asked as a
+    /// call because one architecture decides it at run time.
+    pub(crate) fn group(self) -> usize {
+        GROUP
+    }
+
+    /// Prepares the subkey for [`Multiply::multiply`].
+    pub(crate) fn prepare(self, h: &[u64; 2]) -> [u64; 2] {
+        prepare(h)
+    }
+
+    /// Multiplies `value` by the prepared subkey `h`, in place.
+    pub(crate) fn multiply(self, value: &mut [u64; 2], h: &[u64; 2]) {
+        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // instructions.
+        unsafe { multiply(value, h) }
+    }
+
+    /// Multiplies in the whole of `blocks`, which is
+    /// [`group`](Multiply::group) blocks, leaving the running hash in
+    /// `value`. `powers` holds the prepared powers of the subkey, `H`
+    /// first.
+    pub(crate) fn multiply_group(
+        self,
+        value: &mut [u64; 2],
+        powers: &[[u64; 2]; super::MAX_GROUP],
+        blocks: &[u8],
+    ) {
+        // SAFETY: as for `multiply`, and the length is the caller's.
+        unsafe { multiply_group(value, powers, blocks) }
+    }
 }
 
 /// Whether the polynomial multiply is available.
 pub(crate) fn has_carryless_multiply() -> bool {
+    PMULL.yes(ask_carryless_multiply)
+}
+
+/// Kept: the hash subkey is prepared for every GCM-SIV message.
+static PMULL: Probe = Probe::new();
+
+fn ask_carryless_multiply() -> bool {
     cfg!(target_feature = "aes") || id_register_reports_pmull()
 }
 
