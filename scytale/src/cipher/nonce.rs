@@ -39,12 +39,16 @@
 //!   after.
 //! - **Restoring a virtual machine snapshot brings the counter back
 //!   with it.** A restored machine must take a new key, since it is
-//!   about to reissue nonces the original already sent.
+//!   about to reissue nonces the original already sent. A `fork`
+//!   does the same to both halves.
 //! - [`try_random`](Nonces::try_random) sidesteps the problem by
 //!   drawing a new prefix each time, which is right for a program
 //!   that cannot store anything. It trades certainty for a collision
 //!   chance that depends on how wide the prefix is: one in 2^64
-//!   between runs, for the split in the example below.
+//!   between runs, for the split in the example below. The prefix
+//!   comes from a generator, and a generator copied with the process
+//!   draws the same prefix on both sides: see
+//!   [the rule](crate::random#fork-snapshots-and-clones-the-rule).
 //! - If none of that can be guaranteed, use GCM-SIV, which survives a
 //!   repeat rather than collapsing.
 //!
@@ -89,7 +93,7 @@ const COUNTER: usize = 8;
 ///
 /// `B` is the nonce, so its width is a type: `Nonces<[u8; 12]>` is
 /// the ninety-six bit nonce [`Gcm`](crate::aead::Gcm),
-/// [`GcmSiv`](crate::aead::GcmSiv) and
+/// [`GcmSiv`](crate::aead::GcmSiv), [`Ccm`](crate::aead::Ccm) and
 /// [`ChaCha20`](super::chacha20) all take. Read the warnings above
 /// before using one across restarts.
 #[derive(Clone, Debug)]

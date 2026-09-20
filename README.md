@@ -17,11 +17,11 @@
 [license]: https://github.com/MichaelPaddon/scytale/blob/main/LICENSE
 
 Correct, fast, portable cryptography in Rust: ciphers, authenticated
-encryption and the modes over them, hashes, message authentication, key derivation, key
-agreement, public-key encryption, signatures, post-quantum key
-encapsulation and signatures, and random numbers. It is `no_std`, has
-two dependencies, needs no C compiler and no build script, and has no
-feature flags to get wrong.
+encryption and the modes over them, hashes, message authentication,
+key derivation, key agreement, public-key encryption, signatures,
+post-quantum key encapsulation and signatures, and random numbers. It
+is `no_std`, has two dependencies, needs no C compiler and no build
+script, and has no feature flags to get wrong.
 
 ## The name
 
@@ -55,6 +55,14 @@ English ended up.
 
 ## Status
 
+Scytale is now a credible choice for a developer who needs
+cryptography in Rust. It covers what many applications need, from
+authenticated encryption to post-quantum signatures; it is checked
+against every public vector set that exists for what it implements;
+its constant-time claims are written down, file by file, in
+SECURITY.md; and its performance is competitive, although there is
+more work to be done.
+
 The algorithm set is complete enough to build serious applications
 on: encryption and authenticated encryption, hashes and MACs, key
 derivation, key agreement, public-key encryption, signatures, the
@@ -62,20 +70,20 @@ three post-quantum families, a validated random generator, and the
 key formats other software stores keys in.
 
 It is tested to the same extent. The standards' own vectors are built
-into the unit tests, and on top of them run the NIST ACVP suites and
-the Project Wycheproof files, more than seventy thousand vector cases
-before the Monte Carlo suites add several million chained calls of
-their own. Every implementation of a primitive is put through the
-whole vector set for it, at every key size, and the whole suite runs
-on x86-64, aarch64 and riscv64 hardware rather than on the machine
-that happens to be to hand. The Goals section below says exactly what that
-means.
+into the unit tests, and on top of them run the NIST [ACVP][acvp]
+suites and the [Project Wycheproof][wycheproof] files, more than
+seventy thousand vector cases before the Monte Carlo suites add
+several million chained calls of their own. Every implementation of a
+primitive is put through the whole vector set for it, at every key
+size, and the whole suite runs on x86-64, aarch64 and riscv64 hardware
+rather than on the machine that happens to be to hand. The Goals
+section below says exactly what that means.
 
 Work from here will focus on speed and algorithms that are still
 missing. The API is still being stabilized, and the version number is
 still below one, but the major shape of the library is not expected to
-change massively. Expect implementation details to become better hidden and
-interfaces to be streamlined for usuability.
+change massively. Expect implementation details to become better
+hidden and interfaces to be streamlined for usability.
 
 It builds on stable Rust 1.88 or later, on any architecture,
 with or without an operating system under it.
@@ -123,7 +131,7 @@ The API documentation is on [docs.rs](https://docs.rs/scytale), and
 test vectors, against the NIST Automated Cryptographic Validation
 Program (ACVP) vectors, and against Project Wycheproof, whose cases
 are chosen to break implementations rather than to exercise them.
-The corpus is 109 files holding 74,433 cases, and every case this
+The corpus is 115 files holding 85,393 cases, and every case this
 build can run is run; the Monte Carlo groups chain a thousand cipher
 calls per case, with the key re-derived at each step. Every
 implementation is put through the whole vector set for its primitive,
@@ -168,10 +176,10 @@ the machinery behind it:
 
 | Module | Job | Algorithms |
 | --- | --- | --- |
-| `aead` | authenticated encryption | GCM, GCM-SIV, XPN, ChaCha20-Poly1305 |
+| `aead` | authenticated encryption | GCM, GCM-SIV, XPN, CCM, ChaCha20-Poly1305 |
 | `cipher` | encryption | AES, ChaCha20, and the modes built on them |
-| `hash` | digests | SHA-2, SHA-3, SHAKE; SHA-1 for what still names it |
-| `mac` | message authentication | HMAC, Poly1305 |
+| `hash` | digests | SHA-2, SHA-3, SHAKE, cSHAKE; SHA-1 for what still names it |
+| `mac` | message authentication | HMAC, CMAC, KMAC, Poly1305 |
 | `kdf` | key derivation | HKDF, PBKDF2 |
 | `kem` | key encapsulation | ML-KEM-512, -768 and -1024 |
 | `kex` | key agreement | X25519, ECDH over P-256 and P-384 |
@@ -198,10 +206,11 @@ dictates otherwise, start here.
 | GCM | the default; GMAC is GCM with no plaintext |
 | GCM-SIV | survives a repeated nonce (RFC 8452) |
 | XPN | GCM under a MACsec extended packet number |
+| CCM | counter mode with CBC-MAC (SP 800-38C); Bluetooth, 802.15.4, CCMP |
 | ChaCha20-Poly1305 (RFC 8439) | GCM's equal; faster without AES hardware |
 
-The first three are modes of operation of a block cipher and are
-generic over it; the fourth is a stream cipher and a MAC designed
+The first four are modes of operation of a block cipher and are
+generic over it; the fifth is a stream cipher and a MAC designed
 together, with no block cipher underneath. They share a module because
 what a caller wants is authenticated encryption, not a particular way
 of building it, and they share a trait for the same reason.
@@ -257,6 +266,7 @@ too.
 | SHA-512/224, SHA-512/256 | 28, 32 bytes | truncated; no length extension |
 | SHA3-224 to SHA3-512 (FIPS 202) | 28 to 64 bytes | no length extension |
 | SHAKE128, SHAKE256 | any length | extendable output |
+| cSHAKE128, cSHAKE256 (SP 800-185) | any length | SHAKE with a function name and customization |
 | SHA-1 (FIPS 180-4) | 20 bytes | broken for collisions; for HMAC, HKDF and OAEP in old protocols only |
 
 All of them take bit strings as well as bytes, as the standards
@@ -267,6 +277,8 @@ define them.
 | Construction | Notes |
 | --- | --- |
 | HMAC (FIPS 198-1) | over any hash; constant-time verify |
+| CMAC (SP 800-38B) | over any block cipher; constant-time verify |
+| KMAC128, KMAC256 (SP 800-185) | over cSHAKE; any output length, KMACXOF, bit strings |
 | Poly1305 (RFC 8439) | one-time key; for the AEAD |
 
 ### Key derivation
@@ -287,7 +299,7 @@ encryption keys are distinct types: a key does one job.
 | X25519 (RFC 7748) | `kex` | shared secret needs HKDF; refuses low-order keys |
 | ECDH (SP 800-56A) over P-256, P-384 | `kex` | every public key checked on the curve; compressed points read |
 | RSA-OAEP (RFC 8017) | `pke` | constant-time unpadding; no v1.5 decryption, ever |
-| Ed25519 (RFC 8032) | `sig` | deterministic; refuses malleable signatures |
+| Ed25519, Ed25519ctx, Ed25519ph (RFC 8032) | `sig` | deterministic; refuses malleable signatures; context strings |
 | ECDSA (FIPS 186-5) over P-256, P-384 | `sig` | RFC 6979 nonces; r \|\| s and DER signature forms |
 | RSA-PSS, RSA PKCS#1 v1.5 (RFC 8017) | `sig` | any width; CRT signing and key generation |
 | ML-DSA (FIPS 204), all three sets | `sig` | post-quantum; hedged or deterministic; context strings |
@@ -324,16 +336,22 @@ AES-256 driven by a counter, with its key and counter replaced after
 every request, checked against the ACVP vectors for that mechanism
 alongside everything else. Seed material of any length and any
 density is condensed by the standard's derivation function, so
-entropy from a slow or biased source is worth its full weight.
+entropy from a slow or biased source is worth its full weight. The
+generator takes additional input at a reseeding or a single request,
+to bind the output to something the caller knows, and `below` draws
+an unbiased number under a bound, so an index or a shuffle never
+comes from a byte reduced modulo something.
 
 `from_system` asks this machine for the seed, which is what almost
-every caller wants. The sources are named individually under
-`random::entropy` for the cases that are not: `entropy::Processor`
-for the processor's own generator, and `entropy::External` for a
-generator seeded with entropy you gathered, through
-`CtrDrbg::<entropy::External>::from_seed`. What your code should
-take is the `Random` trait, so a second generator, or a fixed
-sequence in a test, drops in without it noticing.
+every caller wants. `entropy::Processor` names the processor's own
+generator for the cases that are not, and entropy you gather any
+other way goes in by implementing `random::Entropy` over it and
+handing that to `CtrDrbg::try_new`. There is deliberately no way to
+build a generator from a seed alone: one with no source cannot reseed
+itself, and a seed that is a constant or a test value looks exactly
+like a good one. What your code should take is the `Random` trait,
+so a second generator, or a fixed sequence in a test, drops in
+without it noticing.
 
 | Where it runs | What seeds it |
 | --- | --- |
@@ -363,16 +381,25 @@ Where the processor has no such instruction either, construction
 fails and the program does not start, rather than every later call
 failing. That is not the end of the road on such a board: a hardware
 generator on a bus, a ring oscillator or a chip on I2C is supplied
-through the `random::Entropy` trait, and entropy gathered some other
-way goes in through `CtrDrbg::from_seed`. Either is served exactly
-as well as a machine with an instruction for it.
+through the `random::Entropy` trait, and so is entropy gathered some
+other way. Either is served exactly as well as a machine with an
+instruction for it.
 
-Because the generator has state, it is yours to look after. After a
-`fork`, or after a virtual machine is restored from a snapshot, the
-state has been duplicated and the child must reseed or start again;
-nothing here can detect that without asking the kernel on every call,
-which is most of the reason to hold a generator at all. The state is
-wiped when the generator is dropped.
+Because the generator has state, it is yours to look after, and the
+rule is this: **a copy of the process holds a copy of the generator,
+both copies will hand out the same bytes, and the copy must call
+`reseed` or build a fresh generator before it uses one.** A `fork`,
+a virtual machine restored from a snapshot, a container restored from
+a checkpoint, or a live migration that clones all make such a copy.
+Do it where the copy is made, in an `atfork` handler or the first
+thing a worker does, not lazily on first use, because the first use
+is the nonce. The library does not detect any of this, deliberately:
+the only hook is bypassed by raw `clone`, absent without a C library
+and blind to snapshots, and a check that is silently wrong on some
+platforms is worse than a rule that is true on all of them. The
+reasoning and what each primitive loses are in SECURITY.md and the
+`random` module documentation. The state is wiped when the generator
+is dropped.
 
 ## Supported architectures
 
@@ -388,12 +415,16 @@ wiped when the generator is dropped.
 | riscv64 | vector GHASH (Zvkg) | GHASH |
 | riscv64 | vector carry-less multiply (Zvbc) | GHASH |
 | riscv64 | scalar carry-less multiply (Zbc, Zbkc) | GHASH |
-| x86-64 | SHA-NI | SHA-256 |
+| x86-64 | SHA-NI | SHA-256, SHA-1 |
+| aarch64 | ARMv8 SHA1 extension | SHA-1 |
 | aarch64 | ARMv8 SHA2 extension | SHA-256 |
 | aarch64 | ARMv8 SHA512 extension | SHA-512 |
 | riscv64 | vector cryptography (Zvknha, Zvknhb) | SHA-256, SHA-512 |
 | riscv64 | scalar cryptography (Zknh) | SHA-256, SHA-512 |
-| aarch64 | ARMv8 SHA3 extension | SHA-3, SHAKE |
+| aarch64 | ARMv8 SHA3 extension | SHA-3, SHAKE, cSHAKE, KMAC |
+| x86-64 | BMI1 and BMI2 | SHA-3, SHAKE, cSHAKE, KMAC |
+| riscv64 | scalar bit manipulation (Zbb) | SHA-3, SHAKE, cSHAKE, KMAC |
+| x86-64 | BMI2 and ADX | RSA, P-256 and P-384 field arithmetic |
 | x86-64 | AVX2 | ChaCha20 |
 | aarch64 | NEON | ChaCha20 |
 | riscv64 | vector extension with Zvkb | ChaCha20 |
@@ -413,12 +444,23 @@ GHASH is the hash inside GCM, GCM-SIV and XPN. Without a carry-less
 multiply instruction it costs more than the cipher does. SHA-224 and
 SHA-384 and the SHA-512/t pair use the SHA-256 and SHA-512 code, so
 whatever accelerates those accelerates them. x86-64 has no SHA-512
-instruction in common use, so SHA-512 is portable there. Every SHA-3
-and SHAKE function is the one Keccak permutation, which only AArch64
-has instructions for; elsewhere it is portable. ChaCha20 needs no
+instruction in common use, so SHA-512 is portable there. Every SHA-3,
+SHAKE and cSHAKE function, and KMAC, is the one Keccak permutation,
+which only AArch64 has instructions for. On x86-64 the portable
+permutation is compiled a second time for BMI1 and BMI2, whose
+`andn` and `rorx` are chi and rho in fewer instructions, and on
+RISC-V for Zbb, whose `andn` and `rori` are the same two; elsewhere
+it is portable. ChaCha20 needs no
 special instructions, only a vector unit: several blocks are computed
 at once, eight with AVX2, four with NEON, and as many as a register
 holds on RISC-V. Poly1305 is portable everywhere.
+
+The prime curves and RSA are integer arithmetic rather than a
+primitive with instructions of its own, and what they use is the
+pair of add-with-carry chains `adcx` and `adox`, with `mulx` to keep
+the flags free: the 256-bit field product and square, and RSA's
+Montgomery block, are written out for those. Everything above them,
+the point formulas and the windows, is Rust.
 
 Support is detected while the program runs: on x86-64 with CPUID, on
 aarch64 by reading the ID registers, on RISC-V through the kernel's
@@ -463,17 +505,18 @@ gcm.encrypt(&nonce, associated_data, &mut buffer, &mut tag)?;
 gcm.decrypt(&nonce, associated_data, &mut buffer, &tag)?;
 ```
 
-GCM, GCM-SIV and ChaCha20-Poly1305 share an `Aead` trait, so code that
-does not care which one it was handed -- a protocol that negotiated it,
-a format that records it -- can hold any of them behind one type. XPN
-stays out of it: its nonce is two separate halves, a secret salt and a
-frame identifier, and only the caller knows which is which. Most of
-these also have an incremental form for data that arrives in pieces. Note that incremental decryption hands back plaintext before
-the tag has been checked; the one-shot call above is the safe
-default.
+GCM, GCM-SIV, CCM and ChaCha20-Poly1305 share an `Aead` trait, so code
+that does not care which one it was handed -- a protocol that
+negotiated it, a format that records it -- can hold any of them behind
+one type. XPN stays out of it: its nonce is two separate halves, a
+secret salt and a frame identifier, and only the caller knows which is
+which. Most of these also have an incremental form for data that
+arrives in pieces. Note that incremental decryption hands back
+plaintext before the tag has been checked; the one-shot call above is
+the safe default.
 
-Hashes and MACs take their message in pieces or in one call, and a
-MAC is checked with `verify`, never by comparing bytes yourself:
+Hashes and MACs take their message in pieces or in one call, and a MAC
+is checked with `verify`, never by comparing bytes yourself:
 
 ```rust
 use scytale::hash::{sha2::Sha256, Hash};
@@ -495,12 +538,12 @@ best implementation this processor supports, probing once on first
 use, and then dispatches with a single predictable branch.
 
 Which implementation that is is not a choice a caller makes. The
-implementations are private: hardware instructions where the
-processor has them, otherwise constant-time portable code. There is a
+implementations are private: hardware instructions where the processor
+has them, otherwise constant-time portable code. There is a
 table-driven AES in the crate that is about seventy percent faster
 than the constant-time portable one, and it is never chosen, because
-it indexes tables with bytes derived from the key and so leaks the
-key to an attacker who can measure cache timing. A way for an application
+it indexes tables with bytes derived from the key and so leaks the key
+to an attacker who can measure cache timing. A way for an application
 that runs nothing untrusted to ask for it by name is still to be
 designed.
 
@@ -535,12 +578,12 @@ second counted in millions and thousands of millions:
 
 | What | Implementation | Speed |
 | --- | --- | --- |
-| AES-128-GCM encrypt | `vaes` | 14.2 GB/s |
+| AES-128-GCM encrypt | `vaes` | 14.0 GB/s |
 | AES-128-GCM encrypt | `aesni` | 8.6 GB/s |
-| AES-128-GCM encrypt | `bitsliced` | 279 MB/s |
+| AES-128-GCM encrypt | `bitsliced` | 272 MB/s |
 | SHA-256 | `shani` | 2.4 GB/s |
-| SHA-256 | `portable` | 335 MB/s |
-| ChaCha20-Poly1305 encrypt | `avx2` | 2.1 GB/s |
+| SHA-256 | `portable` | 349 MB/s |
+| ChaCha20-Poly1305 encrypt | `avx2` | 2.7 GB/s |
 
 ChaCha20-Poly1305 is the one to reach for where the processor has no
 AES instructions: there it is several times faster than any AES here,
@@ -558,10 +601,11 @@ taskset -c 0 scripts/bench
 ```
 
 The pin matters on a hybrid processor: unpinned, a row records which
-core the scheduler picked rather than how fast the code is. The
-benchmark has only been run on this x86-64 machine, so there are no
-timings for the ARM and RISC-V implementations. On a laptop running
-on battery, expect about half of each figure.
+core the scheduler picked rather than how fast the code is. A full
+pass has only been saved for this x86-64 machine; the ARM and RISC-V
+implementations are measured a few rows at a time on the native CI
+runners, by starting the `Bench` workflow by hand. On a laptop
+running on battery, expect about half of each figure.
 
 [bench]: https://github.com/MichaelPaddon/scytale/blob/main/scytale/benchmarks/i7-1355u.md
 
@@ -606,5 +650,9 @@ affects users of the library.
 BSD 2-Clause. See `LICENSE`.
 
 The test vectors under `scytale/tests/vectors` come from the NIST
-ACVP-Server project and carry their own notice, in `LICENSE.txt`
-beside them.
+[ACVP-Server][acvp-server] project and carry their own notice, in
+`LICENSE.txt` beside them.
+
+[acvp]: https://pages.nist.gov/ACVP/
+[acvp-server]: https://github.com/usnistgov/ACVP-Server
+[wycheproof]: https://github.com/C2SP/wycheproof

@@ -5,6 +5,7 @@
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
 pub mod aes_cbc;
+pub mod aes_ccm;
 pub mod aes_cfb1;
 pub mod aes_cfb128;
 pub mod aes_cfb8;
@@ -20,11 +21,14 @@ pub mod aes_kwp;
 pub mod aes_ofb;
 pub mod aes_xpn;
 pub mod aes_xts;
+pub mod cmac_aes;
+pub mod cshake;
 pub mod ctr_drbg;
 pub mod ecdsa;
 pub mod eddsa;
 pub mod hmac;
 pub mod kda_hkdf;
+pub mod kmac;
 pub mod kts_ifc;
 pub mod ml_dsa;
 pub mod ml_kem;

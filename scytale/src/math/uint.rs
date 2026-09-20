@@ -18,7 +18,11 @@ use zeroize::Zeroize;
 
 /// An unsigned integer of `LIMBS` 64-bit words, least significant
 /// first.
+///
+/// The layout is the array's, which the assembly that reads a point
+/// straight out of memory relies on.
 #[derive(Clone, Copy, Zeroize)]
+#[repr(transparent)]
 pub(crate) struct Uint<const LIMBS: usize>(pub(crate) [u64; LIMBS]);
 
 impl<const LIMBS: usize> Uint<LIMBS> {
@@ -112,6 +116,15 @@ impl<const LIMBS: usize> Uint<LIMBS> {
 
     /// Replaces `self` with `other` when `condition` is one, by a
     /// mask rather than a branch.
+    /// One when every limb is zero, without a branch on any of them.
+    pub(crate) fn is_zero_mask(&self) -> u64 {
+        let mut any = 0u64;
+        for limb in self.0 {
+            any |= limb;
+        }
+        ((any | any.wrapping_neg()) >> 63) ^ 1
+    }
+
     pub(crate) fn cmov(&mut self, other: &Self, condition: u64) {
         debug_assert!(condition <= 1);
         let mask = condition.wrapping_neg();
@@ -120,7 +133,9 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         }
     }
 
-    /// `2 * self mod n`, for a value already below `n`.
+    /// `2 * self mod n`, for a value already below `n`. Only the tests
+    /// double at run time; the contexts do it when the crate is built.
+    #[cfg(test)]
     pub(crate) fn double_mod(&self, n: &Self) -> Self {
         self.add_mod(self, n)
     }

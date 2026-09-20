@@ -21,12 +21,13 @@ use std::{eprintln, format, println, string::String, vec, vec::Vec};
 mod support;
 
 use support::acvp::{
-    aes_cbc as cbc, aes_cfb1 as cfb1, aes_cfb8 as cfb8, aes_cfb128 as cfb128,
-    aes_ctr as ctr, aes_ecb as ecb, aes_ff1 as ff1, aes_ff3_1 as ff3_1,
-    aes_gcm as gcm, aes_gcm_siv as gcm_siv, aes_gmac as gmac, aes_kw as kw,
-    aes_kwp as kwp, aes_ofb as ofb, aes_xpn as xpn, aes_xts as xts,
-    ctr_drbg as drbg, hmac as hmac_vectors, pbkdf as pbkdf_vectors,
-    sha as sha_vectors, shake as shake_vectors,
+    aes_cbc as cbc, aes_ccm as ccm, aes_cfb1 as cfb1, aes_cfb8 as cfb8,
+    aes_cfb128 as cfb128, aes_ctr as ctr, aes_ecb as ecb, aes_ff1 as ff1,
+    aes_ff3_1 as ff3_1, aes_gcm as gcm, aes_gcm_siv as gcm_siv,
+    aes_gmac as gmac, aes_kw as kw, aes_kwp as kwp, aes_ofb as ofb,
+    aes_xpn as xpn, aes_xts as xts, cmac_aes as cmac, cshake as cshake_vectors,
+    ctr_drbg as drbg, hmac as hmac_vectors, kmac as kmac_vectors,
+    pbkdf as pbkdf_vectors, sha as sha_vectors, shake as shake_vectors,
 };
 
 /// Defines the suites for an implementation that is always
@@ -332,6 +333,12 @@ mod aes_gcm {
     modes!(gcm, aft_only);
 }
 
+/// AES in counter with CBC-MAC mode (SP 800-38C). This suite has no
+/// Monte Carlo test.
+mod aes_ccm {
+    modes!(ccm, aft_only);
+}
+
 /// AES-GCM-SIV (RFC 8452), which survives a repeated nonce.
 ///
 /// Two widths rather than three: RFC 8452 derives its keys for
@@ -382,6 +389,12 @@ mod aes_kw {
 /// from one byte up. This suite has no Monte Carlo test.
 mod aes_kwp {
     modes!(kwp, aft_only);
+}
+
+/// CMAC over AES (SP 800-38B), the MAC built from the cipher. This
+/// suite has no Monte Carlo test.
+mod cmac_aes {
+    modes!(cmac, aft_only);
 }
 
 /// The CTR_DRBG random number generator (SP 800-90A). Not generic
@@ -631,10 +644,10 @@ mod sha3_512 {
 
 /// Defines the SHAKE suites for one implementation.
 macro_rules! shake_suites {
-    ($name:ident, $ty:ty, $file:literal, $algorithm:literal) => {
-        shake_suites!($name, $ty, $file, $algorithm, "portable code");
+    ($name:ident, $ty:ty, $run:ident, $file:literal, $algorithm:literal) => {
+        shake_suites!($name, $ty, $run, $file, $algorithm, "portable code");
     };
-    ($name:ident, $ty:ty, $file:literal, $algorithm:literal,
+    ($name:ident, $ty:ty, $run:ident, $file:literal, $algorithm:literal,
      $what:literal) => {
         mod $name {
             use super::*;
@@ -655,7 +668,7 @@ macro_rules! shake_suites {
             #[test]
             fn acvp_aft() {
                 if supported() {
-                    shake_vectors::run_aft::<$ty>($file, $algorithm);
+                    $run::run_aft::<$ty>($file, $algorithm);
                 }
             }
 
@@ -664,26 +677,34 @@ macro_rules! shake_suites {
             #[ignore]
             fn acvp_mct() {
                 if supported() {
-                    shake_vectors::run_mct::<$ty>($file, $algorithm);
+                    $run::run_mct::<$ty>($file, $algorithm);
                 }
             }
         }
     };
 }
 
-/// Runs one SHAKE function's suites against each implementation
-/// this architecture has, as `every_sha2!` does.
+/// Runs one SHAKE or cSHAKE function's suites against each
+/// implementation this architecture has, as `every_sha2!` does.
+/// `$run` is the driver: cSHAKE's runs over the bare sponge.
 macro_rules! every_shake {
-    ($variant:ident, $file:literal, $algorithm:literal) => {
+    ($variant:ident, $run:ident, $file:literal, $algorithm:literal) => {
         use super::*;
         use crate::hash::sha3;
 
-        shake_suites!(portable, sha3::portable::$variant, $file, $algorithm);
+        shake_suites!(
+            portable,
+            sha3::portable::$variant,
+            $run,
+            $file,
+            $algorithm
+        );
 
         #[cfg(target_arch = "aarch64")]
         shake_suites!(
             armv8,
             sha3::aarch64::$variant,
+            $run,
             $file,
             $algorithm,
             "ARMv8 SHA3"
@@ -695,6 +716,7 @@ macro_rules! every_shake {
 mod shake_128 {
     every_shake!(
         Shake128,
+        shake_vectors,
         "ACVP-SHAKE-128-1.0/internalProjection.json",
         "SHAKE-128"
     );
@@ -704,9 +726,56 @@ mod shake_128 {
 mod shake_256 {
     every_shake!(
         Shake256,
+        shake_vectors,
         "ACVP-SHAKE-256-1.0/internalProjection.json",
         "SHAKE-256"
     );
+}
+
+/// cSHAKE128 (SP 800-185).
+mod cshake_128 {
+    every_shake!(
+        CShake128,
+        cshake_vectors,
+        "cSHAKE-128-1.0/internalProjection.json",
+        "cSHAKE-128"
+    );
+}
+
+/// cSHAKE256 (SP 800-185).
+mod cshake_256 {
+    every_shake!(
+        CShake256,
+        cshake_vectors,
+        "cSHAKE-256-1.0/internalProjection.json",
+        "cSHAKE-256"
+    );
+}
+
+/// KMAC128 (SP 800-185), over whichever permutation the probe picks.
+mod kmac_128 {
+    use super::*;
+
+    #[test]
+    fn acvp_aft() {
+        kmac_vectors::run_aft::<crate::mac::kmac::Kmac128>(
+            "KMAC-128-1.0/internalProjection.json",
+            "KMAC-128",
+        );
+    }
+}
+
+/// KMAC256 (SP 800-185).
+mod kmac_256 {
+    use super::*;
+
+    #[test]
+    fn acvp_aft() {
+        kmac_vectors::run_aft::<crate::mac::kmac::Kmac256>(
+            "KMAC-256-1.0/internalProjection.json",
+            "KMAC-256",
+        );
+    }
 }
 
 /// The large data tests: messages of 1 to 8 GiB, which take the
@@ -1220,7 +1289,7 @@ mod inventory {
                 Key = crate::Key<[u8; 16]>,
             >,
     {
-        use crate::aead::{gcm, gcm_siv};
+        use crate::aead::{ccm, gcm, gcm_siv};
         use crate::cipher::mode::{cbc, ctr, xts};
         use crate::implementation::Implementation;
 
@@ -1242,6 +1311,9 @@ mod inventory {
         });
         one("AES-XTS", xts::CHOICES, &|i| {
             xts::Xts::<C>::with_implementation(&key, &tweak, i).is_some()
+        });
+        one("AES-CCM", ccm::CHOICES, &|i| {
+            ccm::Ccm::<C>::with_implementation(&key, i).is_some()
         });
         one("AES-GCM", gcm::CHOICES, &|i| {
             gcm::Gcm::<C>::with_implementation(&key, i).is_some()

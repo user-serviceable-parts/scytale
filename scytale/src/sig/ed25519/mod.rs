@@ -10,9 +10,14 @@
 //! the same signature, and no randomness is consumed, so a weak
 //! generator cannot leak the key the way it can with ECDSA.
 //!
-//! This is the plain Ed25519 of RFC 8032 section 5.1: no context
-//! string, no pre-hashing. Ed25519ctx and Ed25519ph can be added if
-//! a protocol requires them.
+//! All three variants of RFC 8032 section 5.1 are here. Plain
+//! Ed25519, [`sign`] and [`verify`], is the one to reach for.
+//! Ed25519ctx, [`sign_ctx`], adds a context string that separates a
+//! key's signatures across uses, for a protocol that assigns one.
+//! Ed25519ph, [`sign_ph`], signs a SHA-512 digest the caller has
+//! already made, so a message too large to hold can be hashed as it
+//! arrives, and takes a context too. The three never accept each
+//! other's signatures.
 //!
 //! Keys are 32 bytes each way. [`PrivateKey`] and [`PublicKey`] are
 //! the pair to reach for: the secret is held in a [`Key`], so it is
@@ -36,9 +41,12 @@
 //! # Constant time
 //!
 //! Signing performs the same sequence of field and scalar operations
-//! whatever the secret: scalar multiplication is a fixed ladder of
-//! doublings and additions with the result chosen by a mask.
-//! Verification handles only public data.
+//! whatever the secret. Multiplying the base point reads a table of
+//! its multiples, and the read scans every entry, choosing by a mask,
+//! so the secret digit that selects one never becomes an index or a
+//! branch. Verification handles only public data, so it takes the
+//! faster path whose work depends on the scalars: one pass over both
+//! in signed digits, adding only where a digit is nonzero.
 //!
 //! # What verification accepts
 //!
@@ -59,6 +67,8 @@ use crate::hash::sha2::Sha512;
 use crate::math::fe25519::Fe;
 use crate::{Error, Key, Random};
 
+mod base;
+
 /// The length of a secret key.
 pub const KEY_SIZE: usize = 32;
 
@@ -77,7 +87,7 @@ pub fn public_key(
 ) -> Result<[u8; PUBLIC_KEY_SIZE], Error> {
     let mut h = Sha512::digest(secret)?;
     let mut a = secret_scalar(&h);
-    let public = Point::BASE.scalar_mul(&a).compress();
+    let public = Point::mul_base(&a).compress();
     h.zeroize();
     a.zeroize();
     Ok(public)
@@ -88,25 +98,153 @@ pub fn sign(
     secret: &[u8; KEY_SIZE],
     message: &[u8],
 ) -> Result<[u8; SIGNATURE_SIZE], Error> {
+    sign_with(secret, &public_key(secret)?, &[], message)
+}
+
+/// Checks that `signature` signs `message` under `public`.
+///
+/// [`Error::InvalidPublicKey`] when the key does not name a point on
+/// the curve; [`Error::InvalidSignature`] for everything else, which
+/// deliberately says no more than that.
+pub fn verify(
+    public: &[u8; PUBLIC_KEY_SIZE],
+    message: &[u8],
+    signature: &[u8; SIGNATURE_SIZE],
+) -> Result<(), Error> {
+    verify_with(public, &[], message, signature)
+}
+
+/// The longest context string Ed25519ctx and Ed25519ph take.
+pub const CONTEXT_MAX: usize = 255;
+
+/// The length of the SHA-512 digest Ed25519ph signs.
+pub const PREHASH_SIZE: usize = 64;
+
+/// Signs `message` under `context` with `secret`, by Ed25519ctx.
+///
+/// The context is 1 to [`CONTEXT_MAX`] bytes; anything else is
+/// [`Error::InvalidLength`]. RFC 8032 says it should not be empty,
+/// and a use with no context to give is plain [`sign`]'s.
+pub fn sign_ctx(
+    secret: &[u8; KEY_SIZE],
+    context: &[u8],
+    message: &[u8],
+) -> Result<[u8; SIGNATURE_SIZE], Error> {
+    let head = dom2(CTX, context)?;
+    sign_with(secret, &public_key(secret)?, &[&head, context], message)
+}
+
+/// Checks that `signature` signs `message` under `context` and
+/// `public`, by Ed25519ctx. The context is refused as [`sign_ctx`]
+/// refuses it, and the errors are otherwise [`verify`]'s.
+pub fn verify_ctx(
+    public: &[u8; PUBLIC_KEY_SIZE],
+    context: &[u8],
+    message: &[u8],
+    signature: &[u8; SIGNATURE_SIZE],
+) -> Result<(), Error> {
+    let head = dom2(CTX, context)?;
+    verify_with(public, &[&head, context], message, signature)
+}
+
+/// Signs the SHA-512 digest `prehash` under `context` with `secret`,
+/// by Ed25519ph.
+///
+/// The digest is what the caller has hashed the message to, in as
+/// many pieces as it arrived in, which is the reason to choose this
+/// variant. The context is up to [`CONTEXT_MAX`] bytes and may be
+/// empty; a longer one is [`Error::InvalidLength`].
+///
+/// ```
+/// use scytale::hash::Hash;
+/// use scytale::hash::sha2::Sha512;
+/// use scytale::sig::ed25519;
+///
+/// # fn main() -> Result<(), scytale::Error> {
+/// let secret = [0x42u8; 32];
+/// let mut hasher = Sha512::try_new()?;
+/// hasher.update(b"a message that ");
+/// hasher.update(b"arrives in parts");
+/// let prehash = hasher.finalize();
+/// let signature = ed25519::sign_ph(&secret, b"", &prehash)?;
+/// let public = ed25519::public_key(&secret)?;
+/// ed25519::verify_ph(&public, b"", &prehash, &signature)?;
+/// # Ok(())
+/// # }
+/// ```
+pub fn sign_ph(
+    secret: &[u8; KEY_SIZE],
+    context: &[u8],
+    prehash: &[u8; PREHASH_SIZE],
+) -> Result<[u8; SIGNATURE_SIZE], Error> {
+    let head = dom2(PH, context)?;
+    sign_with(secret, &public_key(secret)?, &[&head, context], prehash)
+}
+
+/// Checks that `signature` signs the SHA-512 digest `prehash` under
+/// `context` and `public`, by Ed25519ph. The context is refused as
+/// [`sign_ph`] refuses it, and the errors are otherwise [`verify`]'s.
+pub fn verify_ph(
+    public: &[u8; PUBLIC_KEY_SIZE],
+    context: &[u8],
+    prehash: &[u8; PREHASH_SIZE],
+    signature: &[u8; SIGNATURE_SIZE],
+) -> Result<(), Error> {
+    let head = dom2(PH, context)?;
+    verify_with(public, &[&head, context], prehash, signature)
+}
+
+/// The phflag of Ed25519ctx.
+const CTX: u8 = 0;
+
+/// The phflag of Ed25519ph.
+const PH: u8 = 1;
+
+/// The fixed part of RFC 8032's `dom2(phflag, context)`: the name,
+/// the flag and the context's length. The context follows it into
+/// both hashes, which is what keeps a signature under one variant or
+/// context from verifying under another. Ed25519ctx takes a context
+/// of at least a byte, Ed25519ph any up to [`CONTEXT_MAX`].
+fn dom2(flag: u8, context: &[u8]) -> Result<[u8; 34], Error> {
+    let shortest = if flag == CTX { 1 } else { 0 };
+    if context.len() < shortest || context.len() > CONTEXT_MAX {
+        return Err(Error::InvalidLength(context.len()));
+    }
+    let mut head = [0u8; 34];
+    head[..32].copy_from_slice(b"SigEd25519 no Ed25519 collisions");
+    head[32] = flag;
+    head[33] = context.len() as u8;
+    Ok(head)
+}
+
+/// Signs `message` with `secret`, whose public key `public` must be,
+/// with `dom` hashed ahead of both hashes: nothing for Ed25519, and
+/// `dom2` and the context for the other two. A [`PrivateKey`] has
+/// derived the public key already, and deriving it again would cost
+/// as much as the signature's own multiplication.
+fn sign_with(
+    secret: &[u8; KEY_SIZE],
+    public: &[u8; PUBLIC_KEY_SIZE],
+    dom: &[&[u8]],
+    message: &[u8],
+) -> Result<[u8; SIGNATURE_SIZE], Error> {
     let mut h = Sha512::digest(secret)?;
     let mut a = secret_scalar(&h);
-    let public = Point::BASE.scalar_mul(&a).compress();
 
     // The nonce: a hash of the secret prefix and the message, so it
     // is unique per message without consuming randomness.
     let mut hasher = Sha512::try_new()?;
+    for part in dom {
+        hasher.update(part);
+    }
     hasher.update(&h[32..]);
     hasher.update(message);
     let mut wide = hasher.finalize();
     let mut r = Scalar::from_bytes_wide(&wide);
-    let big_r = Point::BASE.scalar_mul(&r).compress();
+    let big_r = Point::mul_base(&r).compress();
 
     // The challenge binds R, the public key and the message.
-    let mut hasher = Sha512::try_new()?;
-    hasher.update(&big_r);
-    hasher.update(&public);
-    hasher.update(message);
-    let k = Scalar::from_bytes_wide(&hasher.finalize());
+    let k = challenge(dom, &big_r, public, message)?;
 
     let s = k.mulmod(&a).addmod(&r);
     let mut signature = [0u8; SIGNATURE_SIZE];
@@ -120,13 +258,11 @@ pub fn sign(
     Ok(signature)
 }
 
-/// Checks that `signature` signs `message` under `public`.
-///
-/// [`Error::InvalidPublicKey`] when the key does not name a point on
-/// the curve; [`Error::InvalidSignature`] for everything else, which
-/// deliberately says no more than that.
-pub fn verify(
+/// Verification under any of the three variants, `dom` as
+/// [`sign_with`] takes it.
+fn verify_with(
     public: &[u8; PUBLIC_KEY_SIZE],
+    dom: &[&[u8]],
     message: &[u8],
     signature: &[u8; SIGNATURE_SIZE],
 ) -> Result<(), Error> {
@@ -141,23 +277,34 @@ pub fn verify(
     }
     let s = Scalar::from_bytes_reduced(&s_bytes);
 
-    let mut hasher = Sha512::try_new()?;
-    hasher.update(&signature[..32]);
-    hasher.update(public);
-    hasher.update(message);
-    let k = Scalar::from_bytes_wide(&hasher.finalize());
+    let mut big_r = [0u8; 32];
+    big_r.copy_from_slice(&signature[..32]);
+    let k = challenge(dom, &big_r, public, message)?;
 
     // sB = R + kA, checked as R = sB - kA so R need never be
     // decompressed: its bytes are compared directly.
-    let big_r = Point::BASE
-        .scalar_mul(&s)
-        .add(&a.neg().scalar_mul(&k))
-        .compress();
-    if big_r == signature[..32] {
+    if a.neg().mul_add_base_vartime(&k, &s).compress() == big_r {
         Ok(())
     } else {
         Err(Error::InvalidSignature)
     }
+}
+
+/// `k = H(dom || R || A || M)`, reduced into the group.
+fn challenge(
+    dom: &[&[u8]],
+    big_r: &[u8; 32],
+    public: &[u8; PUBLIC_KEY_SIZE],
+    message: &[u8],
+) -> Result<Scalar, Error> {
+    let mut hasher = Sha512::try_new()?;
+    for part in dom {
+        hasher.update(part);
+    }
+    hasher.update(big_r);
+    hasher.update(public);
+    hasher.update(message);
+    Ok(Scalar::from_bytes_wide(&hasher.finalize()))
 }
 
 /// The length of a secret key's DER encoding, a PKCS#8
@@ -330,7 +477,31 @@ impl PrivateKey {
 
     /// Signs `message`.
     pub fn sign(&self, message: &[u8]) -> Result<[u8; SIGNATURE_SIZE], Error> {
-        sign(self.secret.array(), message)
+        sign_with(self.secret.array(), &self.public.bytes, &[], message)
+    }
+
+    /// Signs `message` under `context`, by Ed25519ctx, as
+    /// [`sign_ctx`] does.
+    pub fn sign_ctx(
+        &self,
+        context: &[u8],
+        message: &[u8],
+    ) -> Result<[u8; SIGNATURE_SIZE], Error> {
+        let head = dom2(CTX, context)?;
+        let dom: [&[u8]; 2] = [&head, context];
+        sign_with(self.secret.array(), &self.public.bytes, &dom, message)
+    }
+
+    /// Signs the SHA-512 digest `prehash` under `context`, by
+    /// Ed25519ph, as [`sign_ph`] does.
+    pub fn sign_ph(
+        &self,
+        context: &[u8],
+        prehash: &[u8; PREHASH_SIZE],
+    ) -> Result<[u8; SIGNATURE_SIZE], Error> {
+        let head = dom2(PH, context)?;
+        let dom: [&[u8]; 2] = [&head, context];
+        sign_with(self.secret.array(), &self.public.bytes, &dom, prehash)
     }
 
     /// A key from its DER `PrivateKeyInfo`, of either version; a
@@ -400,6 +571,29 @@ impl PublicKey {
         verify(&self.bytes, message, signature)
     }
 
+    /// Checks that `signature` signs `message` under `context` and
+    /// this key, by Ed25519ctx, as [`verify_ctx`] does.
+    pub fn verify_ctx(
+        &self,
+        context: &[u8],
+        message: &[u8],
+        signature: &[u8; SIGNATURE_SIZE],
+    ) -> Result<(), Error> {
+        verify_ctx(&self.bytes, context, message, signature)
+    }
+
+    /// Checks that `signature` signs the SHA-512 digest `prehash`
+    /// under `context` and this key, by Ed25519ph, as [`verify_ph`]
+    /// does.
+    pub fn verify_ph(
+        &self,
+        context: &[u8],
+        prehash: &[u8; PREHASH_SIZE],
+        signature: &[u8; SIGNATURE_SIZE],
+    ) -> Result<(), Error> {
+        verify_ph(&self.bytes, context, prehash, signature)
+    }
+
     /// A key from its DER `SubjectPublicKeyInfo`.
     pub fn try_from_der(bytes: &[u8]) -> Result<Self, Error> {
         Ok(PublicKey {
@@ -423,6 +617,33 @@ impl PublicKey {
     pub fn pem_bytes(&self) -> [u8; PUBLIC_KEY_PEM_SIZE] {
         public_key_pem(&self.bytes)
     }
+}
+
+/// The u-coordinate of `k` times X25519's base point, with `k`
+/// already clamped: the comb over the Ed25519 base table, then the
+/// birational map `u = (1 + y) / (1 - y)` from the Edwards curve,
+/// whose base point is the same point. A fixed-base comb and one
+/// inversion cost much less than a ladder step for every bit, and
+/// both are free of branches and lookups on the secret.
+///
+/// Reducing `k` modulo the group order changes nothing, since the
+/// base point has that order; and a clamped `k` is a nonzero multiple
+/// of nothing smaller, so the point is never the identity and `1 - y`
+/// is never zero.
+pub(crate) fn montgomery_base(k: &[u8; 32]) -> [u8; 32] {
+    let mut scalar = Scalar::from_bytes_reduced(k);
+    let mut point = Point::mul_base(&scalar);
+    let u = point
+        .z
+        .add(&point.y)
+        .mul(&point.z.sub(&point.y).invert())
+        .to_bytes();
+    scalar.0.zeroize();
+    point.x.zeroize();
+    point.y.zeroize();
+    point.z.zeroize();
+    point.t.zeroize();
+    u
 }
 
 /// The secret scalar: the low half of the expanded secret, clamped
@@ -468,6 +689,103 @@ const SQRT_M1: Fe = Fe([
     0x2b8324804fc1d,
 ]);
 
+/// The blocks the comb cuts a scalar into.
+const COMB: usize = 6;
+
+/// The bits in a block: enough that six of them cover the 253 bits
+/// of a reduced scalar.
+const BLOCK: usize = 253usize.div_ceil(COMB);
+
+/// An affine point as the mixed addition reads it: `y + x`, `y - x`
+/// and `2dxy`, each fully reduced.
+#[derive(Clone, Copy)]
+struct Niels {
+    y_plus_x: Fe,
+    y_minus_x: Fe,
+    xy2d: Fe,
+}
+
+impl Niels {
+    /// The neutral element, (0, 1).
+    const IDENTITY: Niels = Niels {
+        y_plus_x: Fe::ONE,
+        y_minus_x: Fe::ONE,
+        xy2d: Fe::ZERO,
+    };
+
+    /// Replaces `self` with `other` when `condition` is one, by a
+    /// mask rather than a branch.
+    fn cmov(&mut self, other: &Niels, condition: u64) {
+        self.y_plus_x.cmov(&other.y_plus_x, condition);
+        self.y_minus_x.cmov(&other.y_minus_x, condition);
+        self.xy2d.cmov(&other.xy2d, condition);
+    }
+
+    /// `-P` is `(-x, y)`, which swaps the sum and the difference and
+    /// negates the product.
+    fn neg(&self) -> Niels {
+        Niels {
+            y_plus_x: self.y_minus_x,
+            y_minus_x: self.y_plus_x,
+            xy2d: self.xy2d.neg(),
+        }
+    }
+}
+
+/// The digit width for the public key's scalar in verification,
+/// whose odd multiples are built per signature: eight of them.
+const A_WIDTH: u32 = 5;
+
+/// The digit width for the base point's scalar, whose odd multiples
+/// are the 32 in [`base::ODD`].
+const B_WIDTH: u32 = 7;
+
+/// `scalar` in width-`width` non-adjacent form: digits that are zero
+/// or odd, below `2^(width - 1)` in magnitude, with at least
+/// `width - 1` zeros between any two nonzero ones, whose sum of
+/// `digit[i] * 2^i` is the scalar. Branches on the scalar, so for
+/// public ones only.
+fn naf(scalar: &Scalar, width: u32) -> [i8; 256] {
+    debug_assert!((2..=8).contains(&width));
+    let mut words = [0u64; 5];
+    words[..4].copy_from_slice(&scalar.0);
+    let span = 1u64 << width;
+    let mask = span - 1;
+
+    let mut digits = [0i8; 256];
+    let mut carry = 0u64;
+    let mut pos = 0usize;
+    while pos < 256 {
+        let (word, bit) = (pos / 64, pos % 64);
+        // The window can straddle a word; the fifth word is zero and
+        // stands for the bits past the scalar.
+        let mut window = words[word] >> bit;
+        if bit > 0 {
+            window |= words[word + 1] << (64 - bit);
+        }
+        let value = carry + (window & mask);
+        // An even value has a zero bottom bit, carry included: no
+        // digit here, and the carry moves up with the position.
+        if value & 1 == 0 {
+            pos += 1;
+            continue;
+        }
+        // Past half the span the digit goes negative, and what it
+        // borrowed from the next window is the carry.
+        if value < span / 2 {
+            carry = 0;
+            digits[pos] = value as i8;
+        } else {
+            carry = 1;
+            digits[pos] = (value as i64 - span as i64) as i8;
+        }
+        pos += width as usize;
+    }
+    // Reduced scalars are below 2^253, so nothing carries out.
+    debug_assert_eq!(carry, 0);
+    digits
+}
+
 /// A point in extended coordinates: x = X/Z, y = Y/Z, T = XY/Z.
 ///
 /// The extra T coordinate is what lets one addition formula serve
@@ -487,32 +805,6 @@ impl Point {
         y: Fe::ONE,
         z: Fe::ONE,
         t: Fe::ZERO,
-    };
-
-    /// The base point B: y = 4/5, x the even root for it.
-    const BASE: Point = Point {
-        x: Fe([
-            0x62d608f25d51a,
-            0x412a4b4f6592a,
-            0x75b7171a4b31d,
-            0x1ff60527118fe,
-            0x216936d3cd6e5,
-        ]),
-        y: Fe([
-            0x6666666666658,
-            0x4cccccccccccc,
-            0x1999999999999,
-            0x3333333333333,
-            0x6666666666666,
-        ]),
-        z: Fe::ONE,
-        t: Fe([
-            0x68ab3a5b7dda3,
-            0x00eea2a5eadbb,
-            0x2af8df483c27e,
-            0x332b375274732,
-            0x67875f0fd78b7,
-        ]),
     };
 
     /// The unified addition of Hisil, Wong, Carter and Dawson,
@@ -564,27 +856,105 @@ impl Point {
         }
     }
 
-    /// Replaces `self` with `other` when `condition` is one, by a
-    /// mask rather than a branch.
-    fn cmov(&mut self, other: &Point, condition: u64) {
-        self.x.cmov(&other.x, condition);
-        self.y.cmov(&other.y, condition);
-        self.z.cmov(&other.z, condition);
-        self.t.cmov(&other.t, condition);
+    /// `self + other`, where `other` is affine and precomputed: the
+    /// general addition with `Z2 = 1` and the three products it
+    /// would spend on `other` already made, so seven multiplications
+    /// rather than nine. Complete, as that one is.
+    fn add_niels(&self, other: &Niels) -> Point {
+        let a = self.y.sub(&self.x).mul(&other.y_minus_x);
+        let b = self.y.add(&self.x).mul(&other.y_plus_x);
+        let c = self.t.mul(&other.xy2d);
+        let d = self.z.add(&self.z);
+        let e = b.sub(&a);
+        let f = d.sub(&c);
+        let g = d.add(&c);
+        let h = b.add(&a);
+        Point {
+            x: e.mul(&f),
+            y: g.mul(&h),
+            z: f.mul(&g),
+            t: e.mul(&h),
+        }
     }
 
-    /// `scalar` times `self`: one doubling and one masked addition
-    /// per bit, the same work whatever the scalar.
-    fn scalar_mul(&self, scalar: &Scalar) -> Point {
+    /// `scalar` times the base point, by the comb over the table in
+    /// [`base`]: a doubling and one table addition for each bit of a
+    /// block, rather than a doubling and an addition for each bit of
+    /// the scalar. The table is public; only the digit that reads it
+    /// is secret, so the read scans every entry and chooses by a
+    /// mask.
+    fn mul_base(scalar: &Scalar) -> Point {
         let bytes = scalar.to_bytes();
         let mut acc = Point::IDENTITY;
-        // The group order is below 2^253, so 253 bits cover every
-        // reduced scalar.
-        for i in (0..253).rev() {
+        for t in (0..BLOCK).rev() {
             acc = acc.double();
-            let sum = acc.add(self);
-            let bit = u64::from((bytes[i >> 3] >> (i & 7)) & 1);
-            acc.cmov(&sum, bit);
+            // Bit `t` of every block, gathered least block first.
+            // The last block runs past the 253 bits a reduced scalar
+            // has, and those bits are zero.
+            let mut digit = 0u64;
+            for i in 0..COMB {
+                let bit = i * BLOCK + t;
+                if bit < 256 {
+                    digit |= u64::from((bytes[bit >> 3] >> (bit & 7)) & 1) << i;
+                }
+            }
+            // Entry `j` holds the digit `j + 1`, so a zero digit
+            // matches nothing and leaves the identity, which is what
+            // it stands for.
+            let mut chosen = Niels::IDENTITY;
+            for (j, entry) in base::BASE.iter().enumerate() {
+                let index = j as u64 + 1;
+                let matches = ((index ^ digit).wrapping_sub(1)) >> 63;
+                chosen.cmov(entry, matches);
+            }
+            acc = acc.add_niels(&chosen);
+        }
+        acc
+    }
+
+    /// `a` times `self` plus `b` times the base point, in one pass
+    /// that shares the doublings: each scalar is written in signed
+    /// odd digits, five bits wide for `self`, whose odd multiples are
+    /// built here, and seven for the base point, whose are in
+    /// [`base::ODD`]. A doubling for each bit and an addition for
+    /// each nonzero digit, of which there are about one in six and
+    /// one in eight.
+    ///
+    /// For public scalars only: which additions happen, and from
+    /// which entries, is what the scalars are.
+    fn mul_add_base_vartime(&self, a: &Scalar, b: &Scalar) -> Point {
+        let a_digits = naf(a, A_WIDTH);
+        let b_digits = naf(b, B_WIDTH);
+
+        // self, 3 self, 5 self, ..., 15 self.
+        let twice = self.double();
+        let mut odd = [*self; 8];
+        for i in 1..odd.len() {
+            odd[i] = odd[i - 1].add(&twice);
+        }
+
+        let mut acc = Point::IDENTITY;
+        let Some(top) = (0..256).rposition(|i| a_digits[i] | b_digits[i] != 0)
+        else {
+            return acc;
+        };
+        for i in (0..=top).rev() {
+            acc = acc.double();
+            // Digit `d` is odd, and `|d| / 2` indexes its multiple.
+            let d = a_digits[i];
+            let entry = usize::from(d.unsigned_abs() / 2);
+            if d > 0 {
+                acc = acc.add(&odd[entry]);
+            } else if d < 0 {
+                acc = acc.add(&odd[entry].neg());
+            }
+            let d = b_digits[i];
+            let entry = usize::from(d.unsigned_abs() / 2);
+            if d > 0 {
+                acc = acc.add_niels(&base::ODD[entry]);
+            } else if d < 0 {
+                acc = acc.add_niels(&base::ODD[entry].neg());
+            }
         }
         acc
     }
@@ -829,6 +1199,34 @@ mod tests {
     use super::*;
     use crate::random::{CtrDrbg, MIN_SEED};
 
+    /// The base point B: y = 4/5, x the even root for it. Signing
+    /// reads its multiples from [`base`]; the tests check those
+    /// against it, and the general multiplication against the comb.
+    const BASE: Point = Point {
+        x: Fe([
+            0x62d608f25d51a,
+            0x412a4b4f6592a,
+            0x75b7171a4b31d,
+            0x1ff60527118fe,
+            0x216936d3cd6e5,
+        ]),
+        y: Fe([
+            0x6666666666658,
+            0x4cccccccccccc,
+            0x1999999999999,
+            0x3333333333333,
+            0x6666666666666,
+        ]),
+        z: Fe::ONE,
+        t: Fe([
+            0x68ab3a5b7dda3,
+            0x00eea2a5eadbb,
+            0x2af8df483c27e,
+            0x332b375274732,
+            0x67875f0fd78b7,
+        ]),
+    };
+
     /// Decodes hex into `buf`, returning the filled prefix.
     fn unhex<'a>(hex: &str, buf: &'a mut [u8]) -> &'a [u8] {
         let hex = hex.as_bytes();
@@ -1060,6 +1458,197 @@ mod tests {
         }
     }
 
+    /// The RFC 8032 section 7.2 Ed25519ctx vectors: secret key,
+    /// public key, message, context, signature.
+    const CTX_VECTORS: &[(&str, &str, &str, &str, &str)] = &[
+        (
+            "0305334e381af78f141cb666f6199f57\
+             bc3495335a256a95bd2a55bf546663f6",
+            "dfc9425e4f968f7f0c29f0259cf5f9ae\
+             d6851c2bb4ad8bfb860cfee0ab248292",
+            "f726936d19c800494e3fdaff20b276a8",
+            "666f6f",
+            "55a4cc2f70a54e04288c5f4cd1e45a7b\
+             b520b36292911876cada7323198dd87a\
+             8b36950b95130022907a7fb7c4e9b2d5\
+             f6cca685a587b4b21f4b888e4e7edb0d",
+        ),
+        (
+            "0305334e381af78f141cb666f6199f57\
+             bc3495335a256a95bd2a55bf546663f6",
+            "dfc9425e4f968f7f0c29f0259cf5f9ae\
+             d6851c2bb4ad8bfb860cfee0ab248292",
+            "f726936d19c800494e3fdaff20b276a8",
+            "626172",
+            "fc60d5872fc46b3aa69f8b5b4351d580\
+             8f92bcc044606db097abab6dbcb1aee3\
+             216c48e8b3b66431b5b186d1d28f8ee1\
+             5a5ca2df6668346291c2043d4eb3e90d",
+        ),
+        (
+            "0305334e381af78f141cb666f6199f57\
+             bc3495335a256a95bd2a55bf546663f6",
+            "dfc9425e4f968f7f0c29f0259cf5f9ae\
+             d6851c2bb4ad8bfb860cfee0ab248292",
+            "508e9e6882b979fea900f62adceaca35",
+            "666f6f",
+            "8b70c1cc8310e1de20ac53ce28ae6e72\
+             07f33c3295e03bb5c0732a1d20dc6490\
+             8922a8b052cf99b7c4fe107a5abb5b2c\
+             4085ae75890d02df26269d8945f84b0b",
+        ),
+        (
+            "ab9c2853ce297ddab85c993b3ae14bca\
+             d39b2c682beabc27d6d4eb20711d6560",
+            "0f1d1274943b91415889152e893d80e9\
+             3275a1fc0b65fd71b4b0dda10ad7d772",
+            "f726936d19c800494e3fdaff20b276a8",
+            "666f6f",
+            "21655b5f1aa965996b3f97b3c849eafb\
+             a922a0a62992f73b3d1b73106a84ad85\
+             e9b86a7b6005ea868337ff2d20a7f5fb\
+             d4cd10b0be49a68da2b2e0dc0ad8960f",
+        ),
+    ];
+
+    #[test]
+    fn rfc8032_ctx_vectors() {
+        let mut message_buf = [0u8; 16];
+        let mut context_buf = [0u8; 3];
+        for (sk, pk, msg, ctx, sig) in CTX_VECTORS {
+            let secret = unhex32(sk);
+            let public = unhex32(pk);
+            let message = unhex(msg, &mut message_buf);
+            let context = unhex(ctx, &mut context_buf);
+            let expected = unhex64(sig);
+            assert_eq!(public_key(&secret), Ok(public));
+            assert_eq!(sign_ctx(&secret, context, message), Ok(expected));
+            assert_eq!(
+                verify_ctx(&public, context, message, &expected),
+                Ok(())
+            );
+        }
+    }
+
+    /// The RFC 8032 section 7.3 Ed25519ph vector, whose message is
+    /// "abc" and whose context is empty.
+    #[test]
+    fn rfc8032_ph_vector() {
+        let secret = unhex32(
+            "833fe62409237b9d62ec77587520911e\
+             9a759cec1d19755b7da901b96dca3d42",
+        );
+        let public = unhex32(
+            "ec172b93ad5e563bf4932c70e1245034\
+             c35467ef2efd4d64ebf819683467e2bf",
+        );
+        let expected = unhex64(
+            "98a70222f0b8121aa9d30f813d683f80\
+             9e462b469c7ff87639499bb94e6dae41\
+             31f85042463c2a355a2003d062adf5aa\
+             a10b8c61e636062aaad11c2a26083406",
+        );
+        let prehash = Sha512::digest(b"abc").unwrap();
+        assert_eq!(public_key(&secret), Ok(public));
+        assert_eq!(sign_ph(&secret, b"", &prehash), Ok(expected));
+        assert_eq!(verify_ph(&public, b"", &prehash, &expected), Ok(()));
+    }
+
+    /// Ed25519ctx takes 1 to 255 bytes of context and Ed25519ph 0 to
+    /// 255, signing and verifying alike; the refusal is the length.
+    #[test]
+    fn context_lengths() {
+        let secret = [0x5au8; KEY_SIZE];
+        let public = public_key(&secret).unwrap();
+        let prehash = [0x17u8; PREHASH_SIZE];
+        let long = [0x33u8; CONTEXT_MAX + 1];
+        let signature = [0u8; SIGNATURE_SIZE];
+
+        assert_eq!(sign_ctx(&secret, b"", b"m"), Err(Error::InvalidLength(0)));
+        assert_eq!(
+            verify_ctx(&public, b"", b"m", &signature),
+            Err(Error::InvalidLength(0))
+        );
+        assert_eq!(
+            sign_ctx(&secret, &long, b"m"),
+            Err(Error::InvalidLength(256))
+        );
+        assert_eq!(
+            sign_ph(&secret, &long, &prehash),
+            Err(Error::InvalidLength(256))
+        );
+        assert_eq!(
+            verify_ph(&public, &long, &prehash, &signature),
+            Err(Error::InvalidLength(256))
+        );
+
+        for context in [&long[..1], &long[..CONTEXT_MAX]] {
+            let signature = sign_ctx(&secret, context, b"m").unwrap();
+            assert_eq!(verify_ctx(&public, context, b"m", &signature), Ok(()));
+        }
+        for context in [&long[..0], &long[..CONTEXT_MAX]] {
+            let signature = sign_ph(&secret, context, &prehash).unwrap();
+            assert_eq!(
+                verify_ph(&public, context, &prehash, &signature),
+                Ok(())
+            );
+        }
+    }
+
+    /// No variant accepts another's signature over the same bytes,
+    /// and no context accepts another's: the domain prefix is in both
+    /// hashes, so each is a different signature.
+    #[test]
+    fn variants_and_contexts_are_separate() {
+        let secret = [0x61u8; KEY_SIZE];
+        let public = public_key(&secret).unwrap();
+        let bytes = [0x2cu8; PREHASH_SIZE];
+
+        let plain = sign(&secret, &bytes).unwrap();
+        let ctx = sign_ctx(&secret, b"foo", &bytes).unwrap();
+        let ph_empty = sign_ph(&secret, b"", &bytes).unwrap();
+        let ph_foo = sign_ph(&secret, b"foo", &bytes).unwrap();
+
+        let bad = Err(Error::InvalidSignature);
+        assert_eq!(verify_ctx(&public, b"foo", &bytes, &plain), bad);
+        assert_eq!(verify_ph(&public, b"", &bytes, &plain), bad);
+        assert_eq!(verify(&public, &bytes, &ctx), bad);
+        assert_eq!(verify_ctx(&public, b"bar", &bytes, &ctx), bad);
+        assert_eq!(verify_ph(&public, b"foo", &bytes, &ctx), bad);
+        assert_eq!(verify(&public, &bytes, &ph_empty), bad);
+        assert_eq!(verify_ph(&public, b"foo", &bytes, &ph_empty), bad);
+        assert_eq!(verify_ctx(&public, b"foo", &bytes, &ph_foo), bad);
+
+        // Ed25519ph signs the digest it is given, not a hash of it.
+        let hashed = Sha512::digest(&bytes).unwrap();
+        assert_eq!(verify_ph(&public, b"", &hashed, &ph_empty), bad);
+    }
+
+    /// The key types' variants are the free functions with the public
+    /// key already derived.
+    #[test]
+    fn key_types_match_the_variant_functions() {
+        let seed = [0x4eu8; KEY_SIZE];
+        let key = PrivateKey::try_new(&Key::from(seed)).unwrap();
+        let prehash = [0x09u8; PREHASH_SIZE];
+
+        let ctx = key.sign_ctx(b"use", b"message").unwrap();
+        assert_eq!(sign_ctx(&seed, b"use", b"message"), Ok(ctx));
+        assert_eq!(
+            key.public_key().verify_ctx(b"use", b"message", &ctx),
+            Ok(())
+        );
+        assert_eq!(key.sign_ctx(b"", b"message"), Err(Error::InvalidLength(0)));
+
+        let ph = key.sign_ph(b"use", &prehash).unwrap();
+        assert_eq!(sign_ph(&seed, b"use", &prehash), Ok(ph));
+        assert_eq!(key.public_key().verify_ph(b"use", &prehash, &ph), Ok(()));
+        assert_eq!(
+            key.public_key().verify_ph(b"other", &prehash, &ph),
+            Err(Error::InvalidSignature)
+        );
+    }
+
     #[test]
     fn rejects_tampering() {
         let (sk, pk, _, _) = VECTORS[2];
@@ -1165,20 +1754,204 @@ mod tests {
     /// scalar multiplication by the order gives the identity.
     #[test]
     fn point_roundtrip_and_order() {
-        let encoded = Point::BASE.compress();
+        let encoded = BASE.compress();
         let decoded = Point::decompress(&encoded).unwrap();
         assert_eq!(decoded.compress(), encoded);
 
         let mut one = [0u8; 32];
         one[0] = 1;
         let unit = Scalar::from_bytes_reduced(&one);
-        let same = Point::BASE.scalar_mul(&unit);
+        let same = ladder(&BASE, &unit);
         assert_eq!(same.compress(), encoded);
 
         // l * B is the identity, whose encoding is y = 1.
         let zero = Scalar([0; 4]);
-        let identity = Point::BASE.scalar_mul(&zero);
+        let identity = ladder(&BASE, &zero);
         assert_eq!(identity.compress(), Point::IDENTITY.compress());
+    }
+
+    /// Every entry of the comb table is the multiple of `B` it
+    /// stands for: the sum of `2^(i * d) B` over the set bits of its
+    /// index, as `y + x`, `y - x` and `2dxy`. This is what says the
+    /// checked-in table is the curve's and not something else.
+    #[test]
+    fn base_table_is_multiples_of_b() {
+        let mut bases = [BASE; COMB];
+        for i in 1..COMB {
+            let mut p = bases[i - 1];
+            for _ in 0..BLOCK {
+                p = p.double();
+            }
+            bases[i] = p;
+        }
+        assert_eq!(base::BASE.len(), (1 << COMB) - 1);
+        for (j, entry) in base::BASE.iter().enumerate() {
+            let index = j + 1;
+            let mut sum = Point::IDENTITY;
+            for (i, b) in bases.iter().enumerate() {
+                if index >> i & 1 == 1 {
+                    sum = sum.add(b);
+                }
+            }
+            let zinv = sum.z.invert();
+            let x = sum.x.mul(&zinv);
+            let y = sum.y.mul(&zinv);
+            let xy2d = x.mul(&y).mul(&D2);
+            for (want, got) in [
+                (y.add(&x), entry.y_plus_x),
+                (y.sub(&x), entry.y_minus_x),
+                (xy2d, entry.xy2d),
+            ] {
+                assert_eq!(want.to_bytes(), got.to_bytes(), "{index}");
+                // Canonical limbs, which the formulas' bounds assume.
+                assert!(got.0.iter().all(|&limb| limb < 1 << 51));
+            }
+        }
+    }
+
+    /// The comb agrees with the general multiplication over the
+    /// scalars that reach its edges.
+    #[test]
+    fn mul_base_matches_the_general_multiplication() {
+        for k in edge_scalars() {
+            assert_eq!(
+                Point::mul_base(&k).compress(),
+                ladder(&BASE, &k).compress(),
+            );
+        }
+    }
+
+    /// `scalar` times `p`, a bit at a time: slow and plainly right,
+    /// the reference the faster multiplications are held to.
+    fn ladder(p: &Point, scalar: &Scalar) -> Point {
+        let bytes = scalar.to_bytes();
+        let mut acc = Point::IDENTITY;
+        for i in (0..256).rev() {
+            acc = acc.double();
+            if (bytes[i >> 3] >> (i & 7)) & 1 == 1 {
+                acc = acc.add(p);
+            }
+        }
+        acc
+    }
+
+    /// Scalars at the edges of a digit expansion: zero, one, the
+    /// order less one, the top bit a reduced scalar can have, a
+    /// spread of bits that reaches every block and window, and runs
+    /// of ones that carry across the whole width.
+    fn edge_scalars() -> [Scalar; 7] {
+        let mut top = L;
+        top[0] -= 1;
+        let high = [0, 0, 0, 1 << 60];
+        let mut spread = [0u64; 4];
+        for (i, word) in spread.iter_mut().enumerate() {
+            *word = 0x0f1e2d3c4b5a6978u64.rotate_left(i as u32 * 7);
+        }
+        spread[3] &= (1 << 60) - 1;
+        let ones = [u64::MAX, u64::MAX, u64::MAX, (1 << 60) - 1];
+        let mut alternate = [0xaaaa_aaaa_aaaa_aaaa; 4];
+        alternate[3] &= (1 << 60) - 1;
+        [
+            Scalar([0; 4]),
+            Scalar([1, 0, 0, 0]),
+            Scalar(top),
+            Scalar(high),
+            Scalar(spread),
+            Scalar(ones),
+            Scalar(alternate),
+        ]
+    }
+
+    /// The digits have the shape the multiplication relies on, odd
+    /// and bounded and spaced, and add back up to the scalar.
+    #[test]
+    fn naf_digits_are_the_scalar() {
+        for width in [A_WIDTH, B_WIDTH] {
+            for k in edge_scalars() {
+                let digits = naf(&k, width);
+                let bound = 1i16 << (width - 1);
+                let mut last = None;
+                // The sum, in five words of two's complement.
+                let mut sum = [0u64; 5];
+                for (i, &d) in digits.iter().enumerate() {
+                    if d == 0 {
+                        continue;
+                    }
+                    assert_eq!(d & 1, 1, "{width} {i}: even digit");
+                    assert!(i16::from(d).abs() < bound, "{width} {i}");
+                    if let Some(last) = last {
+                        assert!(i - last >= width as usize, "{width} {i}");
+                    }
+                    last = Some(i);
+                    shifted_add(&mut sum, i64::from(d), i);
+                }
+                assert_eq!(sum[..4], k.0, "{width}");
+                assert_eq!(sum[4], 0, "{width}");
+            }
+        }
+    }
+
+    /// `sum += value * 2^shift`, modulo 2^320.
+    fn shifted_add(sum: &mut [u64; 5], value: i64, shift: usize) {
+        // The value sign-extended across all five words, then shifted.
+        let fill = if value < 0 { u64::MAX } else { 0 };
+        let mut wide = [value as u64, fill, fill, fill, fill];
+        for _ in 0..shift {
+            for j in (1..5).rev() {
+                wide[j] = (wide[j] << 1) | (wide[j - 1] >> 63);
+            }
+            wide[0] <<= 1;
+        }
+        let mut carry = 0u64;
+        for (s, w) in sum.iter_mut().zip(wide) {
+            let (a, c1) = s.overflowing_add(w);
+            let (b, c2) = a.overflowing_add(carry);
+            *s = b;
+            carry = u64::from(c1 | c2);
+        }
+    }
+
+    /// Entry `i` of the odd table is `(2i + 1) B`, and every limb is
+    /// canonical, as the addition's bounds assume.
+    #[test]
+    fn odd_table_is_odd_multiples_of_b() {
+        let twice = BASE.double();
+        let mut p = BASE;
+        for (i, entry) in base::ODD.iter().enumerate() {
+            let zinv = p.z.invert();
+            let x = p.x.mul(&zinv);
+            let y = p.y.mul(&zinv);
+            let xy2d = x.mul(&y).mul(&D2);
+            for (want, got) in [
+                (y.add(&x), entry.y_plus_x),
+                (y.sub(&x), entry.y_minus_x),
+                (xy2d, entry.xy2d),
+            ] {
+                assert_eq!(want.to_bytes(), got.to_bytes(), "{i}");
+                assert!(got.0.iter().all(|&limb| limb < 1 << 51));
+            }
+            p = p.add(&twice);
+        }
+    }
+
+    /// The joint multiplication is the sum of the two it replaces,
+    /// over every pair of edge scalars, for the base point itself and
+    /// for a public key from RFC 8032, negated as verification
+    /// negates it.
+    #[test]
+    fn mul_add_base_matches_the_separate_multiplications() {
+        let key = Point::decompress(&unhex32(VECTORS[1].1)).expect("key");
+        for p in [BASE, key.neg()] {
+            for a in edge_scalars() {
+                for b in edge_scalars() {
+                    let want = ladder(&p, &a).add(&ladder(&BASE, &b));
+                    assert_eq!(
+                        p.mul_add_base_vartime(&a, &b).compress(),
+                        want.compress(),
+                    );
+                }
+            }
+        }
     }
 
     /// RFC 8410 section 10: the example private key in both its

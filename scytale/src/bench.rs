@@ -65,7 +65,7 @@ use std::time::Duration;
 use cpu_time::ThreadTime;
 
 use crate::Key;
-use crate::aead::{Aead, ChaCha20Poly1305, Gcm, GcmSiv, Xpn};
+use crate::aead::{Aead, Ccm, ChaCha20Poly1305, Gcm, GcmSiv, Xpn};
 use crate::cipher::chacha20;
 use crate::cipher::mode::{Cbc, Cfb1, Cfb8, Cfb128, Ctr, Kw, Kwp, Ofb, Xts};
 use crate::cipher::mode::{Ff1, Ff3_1};
@@ -90,7 +90,9 @@ use crate::hash::{sha2, sha3};
 use crate::kdf::{hkdf, pbkdf2};
 use crate::kex::{ecdh, x25519};
 use crate::mac::Mac;
+use crate::mac::cmac::Cmac;
 use crate::mac::hmac::Hmac;
+use crate::mac::kmac::Kmac128;
 use crate::mac::poly1305::Poly1305;
 use crate::pke::rsa as oaep;
 use crate::random::CtrDrbg;
@@ -759,13 +761,14 @@ where
 }
 
 /// The rows whose implementation is settled inside them and cannot
-/// be named from out here: SHA-1 has no hardware anywhere, the
-/// generator builds its own cipher, and Poly1305 and the AEAD over
-/// ChaCha20 each take the best the processor has without being asked.
-const DISPATCHING: [&str; 5] = [
+/// be named from out here: SHA-1 picks its own, the generator builds
+/// its own cipher, and Poly1305 and the AEAD over ChaCha20 each take
+/// the best the processor has without being asked.
+const DISPATCHING: [&str; 6] = [
     "sha-1",
     "ctr-drbg",
     "poly1305",
+    "kmac128",
     "chacha20-poly1305-enc",
     "chacha20-poly1305-dec",
 ];
@@ -792,6 +795,7 @@ fn single_section(options: &Options) -> bool {
     // and the automatic ChaCha20 always exists.
     let mut mac = Poly1305::try_new(&Key::from(KEY256)).expect("poly1305");
     let aead = ChaCha20Poly1305::new(&Key::from(KEY256));
+    let mut kmac = Kmac128::new(&KEY256, b"");
     let mut tags = [[0u8; 16]; 2];
     let (enc_tag, dec_tag) = tags.split_at_mut(1);
     let mut tasks: Vec<Task<'_>> = vec![
@@ -815,6 +819,13 @@ fn single_section(options: &Options) -> bool {
                 mac.reset();
                 mac.update(d);
                 black_box(mac.finalize());
+            }),
+        ),
+        (
+            "kmac128",
+            Box::new(|d: &mut [u8]| {
+                kmac.update(d);
+                black_box(Mac::finalize(&mut kmac));
             }),
         ),
         (
@@ -1131,10 +1142,11 @@ fn sig_ops(options: &Options) -> bool {
         return false;
     };
     let ed_secret = KEY256;
-    let (Ok(ed_public), Ok(ed_signature)) = (
-        ed25519::public_key(&ed_secret),
-        ed25519::sign(&ed_secret, MESSAGE),
-    ) else {
+    let Ok(ed_key) = ed25519::PrivateKey::try_new(&Key::from(ed_secret)) else {
+        return false;
+    };
+    let ed_public = ed_key.public_key().bytes();
+    let Ok(ed_signature) = ed_key.sign(MESSAGE) else {
         return false;
     };
     let (Ok(p256), Ok(p384)) = (
@@ -1167,7 +1179,7 @@ fn sig_ops(options: &Options) -> bool {
         (
             "ed25519-sign",
             Box::new(|| {
-                black_box(ed25519::sign(&ed_secret, MESSAGE)).ok();
+                black_box(ed_key.sign(MESSAGE)).ok();
             }),
         ),
         (
@@ -1589,7 +1601,7 @@ fn fpe_ops(options: &Options) -> bool {
 /// they name so that a filter can be applied before any key is
 /// expanded, which is what lets an unsupported implementation be
 /// skipped silently.
-const ALGORITHMS: [&str; 21] = [
+const ALGORITHMS: [&str; 23] = [
     "aes-128-ecb-enc",
     "aes-128-ecb-dec",
     "aes-256-ecb-enc",
@@ -1607,10 +1619,12 @@ const ALGORITHMS: [&str; 21] = [
     "aes-256-gcm-enc",
     "aes-128-gcm-siv-enc",
     "aes-128-xpn-enc",
+    "aes-128-ccm-enc",
     "aes-128-xts-enc",
     "aes-128-xts-dec",
     "aes-128-kw-wrap",
     "aes-128-kwp-wrap",
+    "aes-128-cmac",
 ];
 
 /// Everything an implementation's rows are built from, held together
@@ -1632,16 +1646,18 @@ struct Keys<
     gcm256: Option<Gcm<B>>,
     siv: Option<GcmSiv<A>>,
     xpn: Option<Xpn<A>>,
+    ccm: Option<Ccm<A>>,
     xts: Option<Xts<A>>,
     kw: Kw<A>,
     kwp: Kwp<A>,
+    cmac: Cmac<A>,
     /// Room for a wrapped key, one buffer for each of the two rows
     /// that writes one: the largest input and the eight bytes of
     /// check value that go on the end of it.
     wrapped: [Vec<u8>; 2],
     /// A tag buffer for each row that writes one; separate buffers so
     /// the rows borrow disjointly.
-    tags: [[u8; 16]; 5],
+    tags: [[u8; 16]; 6],
 }
 
 /// Key material. Fixed rather than drawn, so that a run repeats.
@@ -1699,6 +1715,7 @@ where
             gcm256: Gcm::with_implementation(&k256, implementation),
             siv: GcmSiv::with_implementation(&k128, implementation),
             xpn: Xpn::with_implementation(&k128, implementation),
+            ccm: Ccm::with_implementation(&k128, implementation),
             xts: Xts::with_implementation(
                 &Key::from(KEY_XTS_DATA),
                 &Key::from(KEY_XTS_TWEAK),
@@ -1706,11 +1723,12 @@ where
             ),
             kw: Kw::new(&k128),
             kwp: Kwp::new(&k128),
+            cmac: Cmac::new(&k128),
             wrapped: [
                 vec![0u8; SIZES[SIZES.len() - 1] + 8],
                 vec![0u8; SIZES[SIZES.len() - 1] + 8],
             ],
-            tags: [[0u8; 16]; 5],
+            tags: [[0u8; 16]; 6],
         })
     }
 
@@ -1732,18 +1750,21 @@ where
             gcm256,
             siv,
             xpn,
+            ccm,
             xts,
             kw,
             kwp,
+            cmac,
             wrapped,
             tags,
         } = self;
         // Split so that each row that writes a tag borrows its own.
-        let (gmac_tag, tags) = tags.split_first_mut().expect("five tags");
-        let (gcm_tag, tags) = tags.split_first_mut().expect("four tags");
-        let (gcm256_tag, tags) = tags.split_first_mut().expect("three tags");
-        let (siv_tag, tags) = tags.split_first_mut().expect("two tags");
-        let (xpn_tag, _) = tags.split_first_mut().expect("one tag");
+        let (gmac_tag, tags) = tags.split_first_mut().expect("six tags");
+        let (gcm_tag, tags) = tags.split_first_mut().expect("five tags");
+        let (gcm256_tag, tags) = tags.split_first_mut().expect("four tags");
+        let (siv_tag, tags) = tags.split_first_mut().expect("three tags");
+        let (xpn_tag, tags) = tags.split_first_mut().expect("two tags");
+        let (ccm_tag, _) = tags.split_first_mut().expect("one tag");
         let (kw_out, wrapped) = wrapped.split_first_mut().expect("two buffers");
         let (kwp_out, _) = wrapped.split_first_mut().expect("one buffer");
         let mut tasks: Vec<Task<'_>> = Vec::new();
@@ -1872,6 +1893,14 @@ where
                 }),
             ));
         }
+        if let Some(ccm) = ccm {
+            tasks.push((
+                "aes-128-ccm-enc",
+                Box::new(|d: &mut [u8]| {
+                    let _ = ccm.encrypt(&NONCE, &[], d, ccm_tag);
+                }),
+            ));
+        }
         if let Some(xts) = xts {
             tasks.push((
                 "aes-128-xts-enc",
@@ -1898,6 +1927,13 @@ where
             "aes-128-kwp-wrap",
             Box::new(|d: &mut [u8]| {
                 let _ = kwp.wrap(d, &mut kwp_out[..d.len() + 8]);
+            }),
+        ));
+        tasks.push((
+            "aes-128-cmac",
+            Box::new(|d: &mut [u8]| {
+                cmac.update(d);
+                black_box(cmac.finalize());
             }),
         ));
         tasks

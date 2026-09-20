@@ -11,7 +11,7 @@
 //! Some moduli are cheaper than others. The reduction multiplies by
 //! every limb of `n`, and the two NIST prime fields have limbs that
 //! are each a sum of a few powers of two, so those products are
-//! shifts and additions instead. [`Montgomery::new`] recognises the
+//! shifts and additions instead. [`Montgomery::known`] recognises the
 //! two primes and halves the multiplications in every product, which
 //! is what the curve arithmetic spends its time on.
 //!
@@ -22,6 +22,11 @@
 //! subtraction is chosen by a mask, and the exponentiation reads its
 //! table by scanning every entry. The exponent's *width* in limbs is
 //! visible; its value, and where its bits lie, are not.
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod aarch64;
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod x86_64;
 
 use zeroize::Zeroize;
 
@@ -67,6 +72,7 @@ pub(crate) const P384_PRIME: [u64; 6] = [
 
 /// The shape of a modulus, by its limbs: the widths differ, so the
 /// comparison is over slices.
+#[cfg(test)]
 fn shape_of<const LIMBS: usize>(n: &Uint<LIMBS>) -> Shape {
     if n.0[..] == P256_PRIME[..] {
         Shape::P256
@@ -76,6 +82,11 @@ fn shape_of<const LIMBS: usize>(n: &Uint<LIMBS>) -> Shape {
         Shape::General
     }
 }
+
+/// Twice the widest modulus the crate builds a context for, in
+/// limbs: the RSA sizes have their own arithmetic over slices, so
+/// what is left here is the curves and what the tests reach for.
+const WIDEST: usize = 64;
 
 /// The context for arithmetic modulo one odd `n`: the constants that
 /// every product needs, computed once.
@@ -93,7 +104,10 @@ pub(crate) struct Montgomery<const LIMBS: usize> {
 
 impl<const LIMBS: usize> Montgomery<LIMBS> {
     /// A context for the modulus `n`, which must be odd and greater
-    /// than one; `None` otherwise.
+    /// than one; `None` otherwise. The crate's own moduli are all
+    /// known when it is built and take [`known`](Self::known); this
+    /// is what the tests check that against.
+    #[cfg(test)]
     pub(crate) fn new(n: Uint<LIMBS>) -> Option<Self> {
         let (_, borrow) = Uint::one().sub_borrow(&n);
         if !n.is_odd() || borrow == 0 {
@@ -124,20 +138,234 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
         })
     }
 
+    /// The context for a modulus known when the crate is built, made
+    /// when it is built: a curve's prime or order, so that an
+    /// operation does not rebuild it, which is hundreds of modular
+    /// doublings. The same constants [`new`](Self::new) computes, by
+    /// the same method, in the subset of the language a constant
+    /// allows. A modulus that is even or at most one fails the build.
+    pub(crate) const fn known(n: Uint<LIMBS>) -> Self {
+        let limbs = n.0;
+        assert!(limbs[0] & 1 == 1, "modulus must be odd");
+        let mut above_one = limbs[0] > 1;
+        let mut i = 1;
+        while i < LIMBS {
+            above_one |= limbs[i] != 0;
+            i += 1;
+        }
+        assert!(above_one, "modulus must exceed one");
+
+        let n0 = limbs[0];
+        let mut inv = n0;
+        let mut step = 0;
+        while step < 5 {
+            inv = inv.wrapping_mul(2u64.wrapping_sub(n0.wrapping_mul(inv)));
+            step += 1;
+        }
+        let inv = inv.wrapping_neg();
+
+        // R^2 mod n by doubling 1, each doubling reduced by one
+        // conditional subtraction.
+        let mut rr = [0u64; LIMBS];
+        rr[0] = 1;
+        let mut round = 0;
+        while round < 2 * 64 * LIMBS {
+            let mut doubled = [0u64; LIMBS];
+            let mut carry = 0u64;
+            let mut j = 0;
+            while j < LIMBS {
+                doubled[j] = (rr[j] << 1) | carry;
+                carry = rr[j] >> 63;
+                j += 1;
+            }
+            let mut reduced = [0u64; LIMBS];
+            let mut borrow = 0u64;
+            let mut j = 0;
+            while j < LIMBS {
+                let (d, b1) = doubled[j].overflowing_sub(limbs[j]);
+                let (d, b2) = d.overflowing_sub(borrow);
+                reduced[j] = d;
+                borrow = (b1 | b2) as u64;
+                j += 1;
+            }
+            // Below 2n before the subtraction, so it is wanted when
+            // the doubling carried out or did not borrow.
+            rr = if carry == 1 || borrow == 0 {
+                reduced
+            } else {
+                doubled
+            };
+            round += 1;
+        }
+
+        let shape = if Self::same(&limbs, &P256_PRIME) {
+            Shape::P256
+        } else if Self::same(&limbs, &P384_PRIME) {
+            Shape::P384
+        } else {
+            Shape::General
+        };
+        Montgomery {
+            n,
+            shape,
+            inv,
+            rr: Uint(rr),
+        }
+    }
+
+    /// Whether `limbs` are exactly `prime`'s, at whatever width.
+    const fn same(limbs: &[u64; LIMBS], prime: &[u64]) -> bool {
+        if prime.len() != LIMBS {
+            return false;
+        }
+        let mut i = 0;
+        while i < LIMBS {
+            if limbs[i] != prime[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
     /// `a * b / R mod n`, the Montgomery product. `b` must be below
     /// `n`; `a` may be any width-sized value; the result is below
     /// `n`. The shape picks the reduction, which is the same
     /// arithmetic either way: one branch on a public constant, then
     /// a fixed sequence of limb operations.
     pub(crate) fn mul(&self, a: &Uint<LIMBS>, b: &Uint<LIMBS>) -> Uint<LIMBS> {
+        #[cfg(target_arch = "x86_64")]
+        if LIMBS == 4
+            && self.shape == Shape::P256
+            && let Some(adx) = x86_64::probe()
+        {
+            return adx.mul(a, b);
+        }
+        #[cfg(target_arch = "aarch64")]
+        if LIMBS == 4 && self.shape == Shape::P256 {
+            return aarch64::mul(a, b);
+        }
+        self.mul_with(a, b)
+    }
+
+    /// `a a / R mod n`, the Montgomery square.
+    ///
+    /// Every cross product appears twice in a square, so ten
+    /// multiplications make the whole of a four-limb one where the
+    /// general product spends sixteen: the cross products once, then
+    /// doubled, then the squares of the limbs. The reduction
+    /// afterwards is the same as the product's, one word at a time.
+    pub(crate) fn sqr(&self, a: &Uint<LIMBS>) -> Uint<LIMBS> {
+        #[cfg(target_arch = "x86_64")]
+        if LIMBS == 4
+            && self.shape == Shape::P256
+            && let Some(adx) = x86_64::probe()
+        {
+            return adx.sqr(a);
+        }
+        #[cfg(target_arch = "aarch64")]
+        if LIMBS == 4 && self.shape == Shape::P256 {
+            return aarch64::sqr(a);
+        }
+        // The written-out rows keep the whole running value in
+        // registers, so a square that saves six of the sixteen
+        // products but spends them on moves is not ahead; both widths
+        // go through the product.
+        #[cfg(target_arch = "aarch64")]
+        if LIMBS == 6 || LIMBS == 4 {
+            return self.mul(a, a);
+        }
+        // At six limbs, and at four with an unshaped modulus, the
+        // product is written out for the processor and the square is
+        // not, and the ten multiplications a square saves are worth
+        // less than the two carry chains.
+        #[cfg(target_arch = "x86_64")]
+        if (LIMBS == 6 || LIMBS == 4) && x86_64::probe().is_some() {
+            return self.mul(a, a);
+        }
+        let wide = |x: u64, y: u64| u128::from(x) * u128::from(y);
+        // Twice the width, and the widest modulus the crate has.
+        debug_assert!(2 * LIMBS <= WIDEST);
+        let mut t = [0u64; WIDEST];
+
+        // The cross products, each once: limb `i` against every limb
+        // above it, landing at `i + j`.
+        for i in 0..LIMBS {
+            let mut carry = 0u64;
+            for j in i + 1..LIMBS {
+                let v = u128::from(t[i + j])
+                    + wide(a.0[i], a.0[j])
+                    + u128::from(carry);
+                t[i + j] = v as u64;
+                carry = (v >> 64) as u64;
+            }
+            t[i + LIMBS] = carry;
+        }
+
+        // Doubled, which is the other half of every cross product.
+        let mut carry = 0u64;
+        for word in t[..2 * LIMBS].iter_mut() {
+            let doubled = (u128::from(*word) << 1) | u128::from(carry);
+            *word = doubled as u64;
+            carry = (doubled >> 64) as u64;
+        }
+
+        // Then the squares of the limbs, which have no partner.
+        let mut carry = 0u64;
+        for (i, &ai) in a.0.iter().enumerate() {
+            let v = u128::from(t[2 * i]) + wide(ai, ai) + u128::from(carry);
+            t[2 * i] = v as u64;
+            let v = u128::from(t[2 * i + 1]) + (v >> 64);
+            t[2 * i + 1] = v as u64;
+            carry = (v >> 64) as u64;
+        }
+        let mut hi = carry;
+
+        // The reduction, a word at a time as the product does it.
+        let mut mn = [0u128; LIMBS];
+        for i in 0..LIMBS {
+            let m = t[i].wrapping_mul(self.inv);
+            self.products(m, &mut mn);
+            let v = u128::from(t[i]) + mn[0];
+            debug_assert_eq!(v as u64, 0);
+            let mut carry = (v >> 64) as u64;
+            for j in 1..LIMBS {
+                let v = u128::from(t[i + j]) + mn[j] + u128::from(carry);
+                t[i + j] = v as u64;
+                carry = (v >> 64) as u64;
+            }
+            // The carry walks up the words the reduction has not
+            // reached yet, and past them into `hi`. Every word is
+            // visited whatever the carries are: stopping at the first
+            // that does not carry would be a branch on the value.
+            for word in t[i + LIMBS..2 * LIMBS].iter_mut() {
+                let v = u128::from(*word) + u128::from(carry);
+                *word = v as u64;
+                carry = (v >> 64) as u64;
+            }
+            hi += carry;
+        }
+
+        let mut out = Uint::<LIMBS>::ZERO;
+        out.0.copy_from_slice(&t[LIMBS..2 * LIMBS]);
+        let (reduced, borrow) = out.sub_borrow(&self.n);
+        let take = hi | (1 - borrow);
+        let mut result = out;
+        result.cmov(&reduced, take);
+        result
+    }
+
+    /// The multiple of `n` that clears a word, limb by limb, in the
+    /// shape the modulus admits.
+    #[inline(always)]
+    fn products(&self, m: u64, out: &mut [u128; LIMBS]) {
         match self.shape {
-            Shape::General => self.mul_with(a, b, |m, out| {
+            Shape::General => {
                 for (o, &nj) in out.iter_mut().zip(&self.n.0) {
                     *o = u128::from(m) * u128::from(nj);
                 }
-            }),
-            // 2^64 - 1, 2^32 - 1, 0, 2^64 - 2^32 + 1.
-            Shape::P256 => self.mul_with(a, b, |m, out| {
+            }
+            Shape::P256 => {
                 let m = u128::from(m);
                 out.copy_from_slice(&[
                     (m << 64) - m,
@@ -145,9 +373,8 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
                     0,
                     (m << 64) - (m << 32) + m,
                 ]);
-            }),
-            // 2^32 - 1, 2^64 - 2^32, 2^64 - 2, then 2^64 - 1 thrice.
-            Shape::P384 => self.mul_with(a, b, |m, out| {
+            }
+            Shape::P384 => {
                 let m = u128::from(m);
                 out.copy_from_slice(&[
                     (m << 32) - m,
@@ -157,21 +384,54 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
                     (m << 64) - m,
                     (m << 64) - m,
                 ]);
-            }),
+            }
         }
     }
 
-    /// The product by coarsely integrated operand scanning, with
-    /// `products` writing `m * n[j]` for every limb `j`. Inlined
-    /// into each of [`mul`](Self::mul)'s arms, so the shape's
-    /// arithmetic is straight-line rather than a call.
-    #[inline(always)]
-    fn mul_with(
-        &self,
-        a: &Uint<LIMBS>,
-        b: &Uint<LIMBS>,
-        products: impl Fn(u64, &mut [u128; LIMBS]),
-    ) -> Uint<LIMBS> {
+    /// The product by coarsely integrated operand scanning: a row of
+    /// products of one limb of `a` by `b`, then the multiple of `n`
+    /// that clears the low word, which the shape makes cheap.
+    fn mul_with(&self, a: &Uint<LIMBS>, b: &Uint<LIMBS>) -> Uint<LIMBS> {
+        // Six limbs is P-384's width, field and order alike, and the
+        // rows there are written out for the carry-chain
+        // instructions; the shaped reduction below saves multiplies,
+        // but not as many as two chains save cycles.
+        #[cfg(target_arch = "x86_64")]
+        if LIMBS == 6
+            && let Some(adx) = x86_64::probe()
+        {
+            let mut context = [self.inv; 13];
+            context[1..7].copy_from_slice(&self.n.0);
+            context[7..].copy_from_slice(&b.0);
+            return adx.mul6(a, &context, &self.n);
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        if LIMBS == 6 {
+            return aarch64::mul6(a, b, &self.n, self.inv);
+        }
+
+        // Four limbs with an unshaped modulus is either curve's
+        // order, where ECDSA inverts a nonce and a signature's `s`.
+        #[cfg(target_arch = "x86_64")]
+        if LIMBS == 4
+            && let Some(adx) = x86_64::probe()
+        {
+            return adx.mul4(a, b, &self.n, self.inv);
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        if LIMBS == 4 {
+            return aarch64::mul4(a, b, &self.n, self.inv);
+        }
+
+        self.mul_portable(a, b)
+    }
+
+    /// The same product with nothing written out for the processor:
+    /// the definition the blocks above are checked against, and the
+    /// path taken at every width they do not cover.
+    fn mul_portable(&self, a: &Uint<LIMBS>, b: &Uint<LIMBS>) -> Uint<LIMBS> {
         let wide = |x: u64, y: u64| u128::from(x) * u128::from(y);
         let mut t = [0u64; LIMBS];
         // The two words above the array: `hi` in full, and above it
@@ -192,7 +452,7 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
             // Adding this multiple of n clears the low word, so the
             // whole value shifts down one word, exactly.
             let m = t[0].wrapping_mul(self.inv);
-            products(m, &mut mn);
+            self.products(m, &mut mn);
             let v = u128::from(t[0]) + mn[0];
             debug_assert_eq!(v as u64, 0);
             let mut carry = (v >> 64) as u64;
@@ -241,7 +501,76 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
         self.mul(a, &Uint::one())
     }
 
-    /// `base ^ exponent mod n`, with `base` below `n`.
+    /// `base ^ exponent mod n` for an exponent that is public, with
+    /// `base` below `n`.
+    ///
+    /// A sliding window five bits wide over the exponent's bits,
+    /// which are a constant of the crate: the curve primes and group
+    /// orders, less two, and the exponent of a square root. Where the
+    /// exponent is a secret, [`modexp`](Self::modexp) is the one to
+    /// call; it cannot skip a zero window or index a table, and pays
+    /// for both. Here only the base is secret, and nothing here
+    /// depends on it.
+    pub(crate) fn exp_public<const E: usize>(
+        &self,
+        base: &Uint<LIMBS>,
+        exponent: &Uint<E>,
+    ) -> Uint<LIMBS> {
+        const WINDOW: usize = 5;
+        // The odd powers the windows call for: base^1, base^3, ...
+        let mont = self.to_mont(base);
+        let square = self.sqr(&mont);
+        let mut odd = [mont; 1 << (WINDOW - 1)];
+        for i in 1..odd.len() {
+            odd[i] = self.mul(&odd[i - 1], &square);
+        }
+
+        let bit = |i: usize| (exponent.0[i >> 6] >> (i & 63)) & 1;
+        let mut acc = self.from_mont(&self.rr);
+        let mut i = 64 * E;
+        let mut started = false;
+        while i > 0 {
+            i -= 1;
+            if bit(i) == 0 {
+                if started {
+                    acc = self.sqr(&acc);
+                }
+                continue;
+            }
+            // The longest window ending on a set bit, so the odd
+            // power it names is one the table holds.
+            let mut width = 1;
+            for w in 2..=WINDOW.min(i + 1) {
+                if bit(i + 1 - w) == 1 {
+                    width = w;
+                }
+            }
+            let mut digit = 0usize;
+            for j in 0..width {
+                digit = (digit << 1) | (bit(i - j) as usize);
+            }
+            if started {
+                for _ in 0..width {
+                    acc = self.sqr(&acc);
+                }
+                acc = self.mul(&acc, &odd[digit >> 1]);
+            } else {
+                acc = odd[digit >> 1];
+                started = true;
+            }
+            i -= width - 1;
+        }
+        self.from_mont(&acc)
+    }
+
+    /// `base ^ exponent mod n`, with `base` below `n`, for an
+    /// exponent that must not be learned from the timing.
+    ///
+    /// Nothing in the crate has a secret exponent at this width any
+    /// more: RSA has its own arithmetic over slices, and the curves'
+    /// exponents are constants. It stays as what
+    /// [`exp_public`](Self::exp_public) is checked against.
+    #[cfg(test)]
     ///
     /// Fixed four-bit windows over the exponent's full width: the
     /// same doublings, multiplications and whole-table scans
@@ -266,7 +595,7 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
         let mut acc = table[0];
         for window in (0..16 * E).rev() {
             for _ in 0..4 {
-                acc = self.mul(&acc, &acc);
+                acc = self.sqr(&acc);
             }
             let digit = (exponent.0[window >> 4] >> ((window & 15) * 4)) & 15;
             // Read the whole table, keeping the entry whose index
@@ -287,6 +616,45 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The context made when the crate is built is the one made at
+    /// run time, for both curve primes and a general modulus.
+    #[test]
+    fn known_matches_new() {
+        fn check<const L: usize>(n: Uint<L>) {
+            let known = Montgomery::known(n);
+            let new = Montgomery::new(n).expect("odd");
+            assert_eq!(known.n.0, new.n.0);
+            assert_eq!(known.shape, new.shape);
+            assert_eq!(known.inv, new.inv);
+            assert_eq!(known.rr.0, new.rr.0);
+        }
+        check(Uint(P256_PRIME));
+        check(Uint(P384_PRIME));
+        check(Uint::<3>([0x8765432187654321, 0x1234567812345678, 0xabcd]));
+    }
+
+    /// The square is the product of a value with itself, at both
+    /// curve shapes and at a general modulus.
+    #[test]
+    fn square_matches_the_product() {
+        fn check<const L: usize>(n: Uint<L>) {
+            let m = Montgomery::known(n);
+            let mut x = m.to_mont(&Uint::from_limbs(&[3]));
+            for _ in 0..100 {
+                assert_eq!(m.sqr(&x).0, m.mul(&x, &x).0);
+                x = m.mul(&x, &Uint::from_limbs(&[0x9e3779b97f4a7c15]));
+            }
+            let (below, _) = n.sub_borrow(&Uint::one());
+            for edge in [Uint::ZERO, Uint::one(), below] {
+                assert_eq!(m.sqr(&edge).0, m.mul(&edge, &edge).0);
+            }
+        }
+        check(Uint(P256_PRIME));
+        check(Uint(P384_PRIME));
+        check(Uint::<3>([0x8765432187654321, 0x1234567812345678, 0xabcd]));
+        check(Uint::<1>([1000003]));
+    }
 
     #[test]
     fn refuses_even_and_trivial_moduli() {
@@ -319,6 +687,34 @@ mod tests {
         let x = Uint::<3>([0xdeadbeef, 0xcafe, 0x1234]);
         let back = m.from_mont(&m.to_mont(&x));
         assert_eq!(back.0, x.0);
+    }
+
+    /// The public-exponent window agrees with the constant-time
+    /// exponentiation, at the exponents the curves use and at small
+    /// ones that reach its edges.
+    #[test]
+    fn public_exponent_matches_modexp() {
+        fn check<const L: usize>(n: Uint<L>) {
+            let m = Montgomery::known(n);
+            let (less_two, _) = n.sub_borrow(&Uint::from_limbs(&[2]));
+            let (plus_one, _) = n.add_carry(&Uint::one());
+            let exponents = [
+                less_two,
+                plus_one.shr(2),
+                Uint::ZERO,
+                Uint::one(),
+                Uint::from_limbs(&[2]),
+                Uint::from_limbs(&[0xffff_ffff]),
+            ];
+            let mut x = Uint::from_limbs(&[7]);
+            for e in exponents {
+                assert_eq!(m.exp_public(&x, &e).0, m.modexp(&x, &e).0);
+                x = m.mulmod(&x, &Uint::from_limbs(&[0x9e3779b97f4a7c15]));
+            }
+        }
+        check(Uint(P256_PRIME));
+        check(Uint(P384_PRIME));
+        check(Uint::<3>([0x8765432187654321, 0x1234567812345678, 0xabcd]));
     }
 
     #[test]
@@ -396,6 +792,45 @@ mod tests {
     #[test]
     fn p384_reduction_matches_the_general_one() {
         shaped_matches_general(&P384_PRIME);
+    }
+
+    /// The products written out for the processor against the
+    /// portable definition, over both curve primes, both group orders
+    /// and a modulus of neither shape.
+    ///
+    /// Where an architecture writes both the shaped and the general
+    /// reduction out, `shaped_matches_general` compares one block
+    /// with another; this is what compares either with the arithmetic
+    /// they are meant to be.
+    #[test]
+    fn the_processor_product_is_the_portable_one() {
+        fn check<const L: usize>(n: Uint<L>) {
+            let m = Montgomery::known(n);
+            let mut state = 0xb7e151628aed2a6b;
+            for _ in 0..200 {
+                let a = below(&mut state, &n);
+                let b = below(&mut state, &n);
+                assert_eq!(m.mul(&a, &b).0, m.mul_portable(&a, &b).0);
+                assert_eq!(m.sqr(&a).0, m.mul_portable(&a, &a).0);
+            }
+            // The edges the random values will not reach.
+            let (top, _) = n.sub_borrow(&Uint::one());
+            for a in [Uint::ZERO, Uint::one(), top] {
+                for b in [Uint::ZERO, Uint::one(), top] {
+                    assert_eq!(m.mul(&a, &b).0, m.mul_portable(&a, &b).0);
+                }
+            }
+        }
+        check(Uint(P256_PRIME));
+        check(Uint(P384_PRIME));
+        check(crate::math::ec::P256_N);
+        check(crate::math::ec::P384_N);
+        check(Uint::<4>([
+            0x9e3779b97f4a7c15,
+            0x243f6a8885a308d3,
+            0x13198a2e03707344,
+            0xa4093822299f31d1,
+        ]));
     }
 
     /// A modulus of another width, or of the same width and a

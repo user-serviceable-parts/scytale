@@ -32,6 +32,12 @@ pub type Shake128 = Sponge<Keccak, variant::Shake128>;
 /// SHAKE256, portably.
 #[cfg(test)]
 pub type Shake256 = Sponge<Keccak, variant::Shake256>;
+/// The sponge under cSHAKE128, portably.
+#[cfg(test)]
+pub type CShake128 = Sponge<Keccak, variant::CShake128>;
+/// The sponge under cSHAKE256, portably.
+#[cfg(test)]
+pub type CShake256 = Sponge<Keccak, variant::CShake256>;
 
 /// The round constants, one per round, for iota.
 pub(crate) static ROUND_CONSTANTS: [u64; 24] = [
@@ -71,6 +77,10 @@ const ROTATIONS: [u32; LANES] = [
 ];
 
 /// Applies Keccak-f\[1600\] to `a`.
+///
+/// Inlined always, so that the x86-64 build for BMI compiles it
+/// afresh with those instructions allowed.
+#[inline(always)]
 pub(crate) fn keccak_f1600(a: &mut [u64; LANES]) {
     for &rc in &ROUND_CONSTANTS {
         // Theta: each lane takes the parity of two columns.
@@ -119,6 +129,14 @@ impl Permutation for Keccak {
     }
 
     fn permute(self, state: &mut [u64; LANES]) {
+        #[cfg(target_arch = "x86_64")]
+        if super::x86_64::permute(state) {
+            return;
+        }
+        #[cfg(target_arch = "riscv64")]
+        if super::riscv64::permute(state) {
+            return;
+        }
         keccak_f1600(state)
     }
 }
