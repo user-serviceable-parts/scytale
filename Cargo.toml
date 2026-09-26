@@ -2,10 +2,11 @@
 resolver = "2"
 members = [
     "scytale",
+    "scytale-ring",
 ]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.88"
 license = "BSD-2-Clause"
