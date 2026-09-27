@@ -1,0 +1,36 @@
+[package]
+name = "scytale-cli"
+description = "The scytale cryptography library from a shell: AES, ChaCha20, AEAD, hashes, MACs, KDFs, keys, signatures, key agreement, ML-KEM"
+# scytale's version: the two are released together.
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository = "https://github.com/MichaelPaddon/scytale"
+# A binary has no rustdoc; the manual is the documentation.
+documentation = "https://github.com/MichaelPaddon/scytale/blob/main/scytale-cli/scytale.1.md"
+readme = "README.md"
+keywords = ["cryptography", "cli", "encryption", "signature", "post-quantum"]
+categories = ["command-line-utilities", "cryptography"]
+
+[[bin]]
+name = "scytale"
+path = "src/main.rs"
+# The binary's name is the library's, and rustdoc would write both
+# to one place. Its module comments are for readers of the source;
+# the library's are the documentation.
+doc = false
+
+[dependencies]
+# Moves with the workspace version.
+scytale = { path = "../scytale", version = "0.9" }
+zeroize = "1"
+# Only the parser: no colour, no suggestions, no environment lookups,
+# so the binary stays small and its behaviour is what the code says.
+clap = { version = "4", default-features = false, features = [
+    "std",
+    "derive",
+    "help",
+    "usage",
+    "error-context",
+] }

@@ -187,6 +187,7 @@ the machinery behind it:
 | `sig` | signatures | Ed25519, ECDSA over P-256 and P-384, ML-DSA, SLH-DSA, RSA-PSS, RSA PKCS#1 v1.5 |
 | `random` | random numbers | CTR_DRBG over AES-256, and what seeds it |
 | `constant_time` | comparing secrets | equality whose timing says nothing |
+| `codec` | bytes as text | hex, base64 and PEM, in constant time |
 
 ### Ciphers
 
@@ -227,7 +228,7 @@ work.
 
 | Mode | Kind | Notes |
 | --- | --- | --- |
-| CBC | confidentiality | whole blocks only; no padding |
+| CBC | confidentiality | whole blocks only; `cipher::padding` fills the last one |
 | CFB1, CFB8, CFB128 | confidentiality | the three NIST segment sizes |
 | OFB | confidentiality | |
 | CTR | confidentiality | |
@@ -579,12 +580,44 @@ unchanged:
 
 ```toml
 [dependencies]
-ring = { package = "scytale-ring", version = "0.8" }
+ring = { package = "scytale-ring", version = "0.9" }
 ```
 
 rustls and rustls-webpki pass their own test suites on it
 (`scripts/test-ring-downstream`). Its README says where it differs
 from ring, the main difference being deterministic ECDSA signatures.
+
+### From a shell
+
+[`scytale-cli`](scytale-cli) builds a `scytale` command for scripts,
+one subcommand per module of the library:
+
+```sh
+cargo install scytale-cli
+
+scytale random 32 > key.hex
+scytale aead encrypt -a aes-256-gcm -k env:KEY -n hex:$NONCE \
+    --aad str:v1 < report.pdf > report.sealed
+scytale aead decrypt -a aes-256-gcm -k file:key.bin -n hex:$NONCE \
+    --aad str:v1 < report.sealed > report.pdf
+
+scytale key generate -a ml-dsa-65 -o sign.pem
+scytale key public --in sign.pem -o sign.pub
+scytale sig sign -k sign.pem release.tar > release.sig
+scytale sig verify -p sign.pub -s file:release.sig release.tar
+```
+
+Keys and every other byte-valued option are written `hex:`, `file:`,
+`fd:`, `env:` or `str:`, never bare, so a value is never read the
+wrong way, and a key of the wrong length for the algorithm is
+refused rather than padded or cut. Encryption streams, so a pipe of
+any size goes through in fixed memory; authenticated decryption
+writes nothing until the tag has checked. Exit status 1 means a tag,
+signature or padding did not verify, 2 a request that could not be
+carried out as asked, 3 anything else. No configuration file, no
+privileges, and no cryptography of its own: everything it does, the
+library does. `scytale list` prints every algorithm name; `--help`
+on any subcommand says what it takes.
 
 ## Speed
 
