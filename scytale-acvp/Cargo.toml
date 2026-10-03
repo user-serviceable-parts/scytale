@@ -1,0 +1,39 @@
+[package]
+name = "scytale-acvp"
+description = "Runs scytale against the NIST ACVP demo server: registers its capabilities, fetches vector sets, submits answers, reports the verdict"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository = "https://github.com/MichaelPaddon/scytale"
+# A development tool: it needs NIST credentials and a network, and
+# the answers come from the library's own test build. Run from a
+# checkout, never published.
+publish = false
+
+[[bin]]
+name = "scytale-acvp"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+# The TOTP is HMAC-SHA-256 and the seed is base64, both of which the
+# library does; nothing else here is cryptography.
+scytale = { path = "../scytale", version = "0.9" }
+zeroize = "1"
+serde_json = "1"
+# As scytale-cli: only the parser.
+clap = { version = "4", default-features = false, features = [
+    "std",
+    "derive",
+    "help",
+    "usage",
+    "error-context",
+] }
+# HTTPS with a client certificate, which the server requires. The
+# default feature set would add gzip; `json` sends and reads
+# serde_json values directly.
+ureq = { version = "3", default-features = false, features = [
+    "rustls",
+    "json",
+] }

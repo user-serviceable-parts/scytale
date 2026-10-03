@@ -283,8 +283,12 @@ jobs:
 
       - name: Test
         # As `cargo test-extended`, which cannot take a target.
+        # scytale-acvp is left out: it is a network client for a
+        # development host, and its TLS stack has no business on
+        # these targets.
         run: |
-          cargo test --workspace --target ${{ matrix.target }} \
+          cargo test --workspace --exclude scytale-acvp \
+              --target ${{ matrix.target }} \
               -- --include-ignored --skip bench::speed
         env:
           # Per target, because a plain RUSTFLAGS would replace these
@@ -307,7 +311,8 @@ jobs:
         # Some code is built only where there is no hardware backend,
         # and the three targets above never show it to the lints.
         run: |
-          cargo clippy --workspace --all-targets --profile test \
+          cargo clippy --workspace --exclude scytale-acvp \
+              --all-targets --profile test \
               --target ${{ matrix.target }} -- -D warnings
         env:
           CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
