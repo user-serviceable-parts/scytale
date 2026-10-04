@@ -14,10 +14,14 @@
 //! own suites. What is built on top of a primitive is tested once,
 //! on the implementation the processor picks, since a mode, a MAC or
 //! a KDF does not vary with the code underneath it.
+//!
+//! The same drivers answer vector sets drawn by NIST's live server:
+//! see [`live`].
 
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
+mod live;
 mod support;
 
 use support::acvp::{

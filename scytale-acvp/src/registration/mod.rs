@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::Result;
 
 mod sha;
+mod sha3;
 
 /// Choices that change what is registered.
 #[derive(Clone, Copy, Default)]
@@ -19,7 +20,9 @@ pub struct Options {
 
 /// Every capability object, in a stable order.
 pub fn capabilities(options: Options) -> Vec<Value> {
-    sha::capabilities(options)
+    let mut all = sha::capabilities(options);
+    all.extend(sha3::capabilities(options));
+    all
 }
 
 /// The name of a capability object as `--algorithm` takes it: the

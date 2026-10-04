@@ -36,10 +36,14 @@ machine's clock has to be right to within a step.
 
 ## Running
 
-Three steps. The first and last are this tool; the middle one is
-the library's test build, because the code that answers a vector
-set is the code that runs the vendored suites, and it lives inside
-the crate where it can reach every implementation.
+```sh
+scripts/acvp-live --sample
+```
+
+runs the three steps. The first and last are this tool; the middle
+one is the library's test build, because the code that answers a
+vector set is the code that runs the vendored suites, and it lives
+inside the crate where it can reach every implementation. By hand:
 
 ```sh
 cargo run -p scytale-acvp -- register --sample
@@ -50,6 +54,9 @@ SCYTALE_ACVP_SESSION=target/acvp/12345 \
 
 cargo run -p scytale-acvp -- submit 12345
 ```
+
+A relative session path is taken from the checkout, wherever the
+command is run from.
 
 `register --sample` asks for a sample session, for which the server
 also hands over its expected answers; the answering step then

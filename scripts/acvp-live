@@ -1,0 +1,31 @@
+#!/bin/sh
+# Runs the library against NIST's ACVP demo server: registers what
+# it can do, downloads the vector sets the server draws, answers
+# them with the library's own test build, sends the answers back and
+# prints the verdict. Needs the credentials NIST issues, in the
+# environment: ACVP_CLIENT_CERT, ACVP_CLIENT_KEY and ACVP_TOTP_SEED;
+# see scytale-acvp/README.md. On demand only, never from CI.
+#
+# Usage: scripts/acvp-live [register options]
+#   The options are scytale-acvp's: --sample for a session whose
+#   expected answers the server hands over, --algorithm NAME to
+#   register a subset, --large-data for the gigabyte hash tests.
+#
+# Examples:
+#   scripts/acvp-live --sample
+#   scripts/acvp-live --algorithm SHA2-256 --algorithm SHAKE-128
+#
+# Exit status is scytale-acvp's: 0 when every vector set passed, 1
+# when any did not, 2 when the run itself failed. The session stays
+# under target/acvp/<id> for a look afterwards.
+
+set -eu
+
+cd "$(dirname "$0")/.."
+
+id=$(cargo run -q -p scytale-acvp -- register "$@")
+
+SCYTALE_ACVP_SESSION="target/acvp/$id" \
+    cargo test -q -p scytale --lib acvp::live -- --ignored --nocapture
+
+exec cargo run -q -p scytale-acvp -- submit "$id"

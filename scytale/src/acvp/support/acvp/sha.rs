@@ -1,15 +1,23 @@
-//! ACVP-SHA2 1.0 and ACVP-SHA3 2.0, run through the [`Hash`] trait.
-//! One driver serves every variant of both families; the caller
-//! names the file and the family, which decides the revision, how
-//! the last bits of a bit-string message sit in their byte, and the
-//! Monte Carlo chaining.
+//! ACVP-SHA 1.0 (SHA-1 and SHA-2) and ACVP-SHA3 2.0, run through the
+//! [`Hash`] trait. One driver serves every variant of both families;
+//! the caller names the file and the family, which decides the
+//! revision, how the last bits of a bit-string message sit in their
+//! byte, and the Monte Carlo chaining.
+//!
+//! Each test type has one function that answers a case as the
+//! server would receive it. The vendored suites run those answers
+//! against the answers in the file; the live run sends them to the
+//! server. There is no second implementation to drift.
 
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
-use super::{hex, load};
+use super::{check, hex, hex_string, load, response};
 use crate::hash::{BitHash, Hash};
-use serde_json::Value;
+use serde_json::{Value, json};
+
+/// Steps in a Monte Carlo test, each of a thousand hashes.
+const MCT_STEPS: usize = 100;
 
 /// Which standard a file belongs to.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -27,6 +35,37 @@ impl Family {
     }
 }
 
+/// The response to a whole vector set.
+pub fn answer<H: BitHash>(
+    prompt: &Value,
+    family: Family,
+    start: fn() -> H,
+) -> Value
+where
+    H::Output: AsRef<[u8]>,
+{
+    let groups = prompt["testGroups"]
+        .as_array()
+        .expect("testGroups")
+        .iter()
+        .map(|group| {
+            let tests: Vec<Value> = group["tests"]
+                .as_array()
+                .expect("tests")
+                .iter()
+                .map(|t| match group["testType"].as_str() {
+                    Some("AFT") => aft(t, family, start),
+                    Some("MCT") => mct(group, t, family, start),
+                    Some("LDT") => ldt(t, start),
+                    other => panic!("unknown testType {other:?}"),
+                })
+                .collect();
+            json!({"tgId": group["tgId"], "tests": tests})
+        })
+        .collect();
+    response(prompt, groups)
+}
+
 /// Runs the one-shot (AFT) groups against `H`; a no-op without the
 /// vendored vectors.
 pub fn run_aft<H: BitHash>(
@@ -40,7 +79,7 @@ pub fn run_aft<H: BitHash>(
     let Some(groups) = groups(file, algorithm, family, "AFT") else {
         return;
     };
-    let count: usize = groups.iter().map(|g| aft(g, family, start)).sum();
+    let count = run(&groups, |_, t| aft(t, family, start));
     // Guard against a truncated or wrong file passing vacuously.
     assert!(count >= 500, "only {count} AFT cases");
 }
@@ -58,8 +97,8 @@ pub fn run_mct<H: BitHash>(
     let Some(groups) = groups(file, algorithm, family, "MCT") else {
         return;
     };
-    let count: usize = groups.iter().map(|g| mct(g, family, start)).sum();
-    assert!(count >= 100, "only {count} MCT steps");
+    let count = run(&groups, |g, t| mct(g, t, family, start));
+    assert!(count >= 1, "only {count} MCT cases");
 }
 
 /// Runs the large data (LDT) groups against `H`, each of which
@@ -75,7 +114,7 @@ pub fn run_ldt<H: Hash>(
     let Some(groups) = groups(file, algorithm, family, "LDT") else {
         return;
     };
-    let count: usize = groups.iter().map(|g| ldt(g, start)).sum();
+    let count = run(&groups, |_, t| ldt(t, start));
     assert!(count >= 1, "only {count} LDT cases");
 }
 
@@ -95,6 +134,25 @@ fn groups(
         .cloned()
         .collect();
     Some(selected)
+}
+
+/// Answers every case of `groups` with `answer` and holds it to the
+/// file's answer. Returns the cases run.
+pub fn run(
+    groups: &[Value],
+    mut answer: impl FnMut(&Value, &Value) -> Value,
+) -> usize {
+    let mut count = 0;
+    for group in groups {
+        for t in group["tests"].as_array().expect("tests") {
+            let got = answer(group, t);
+            if let Err(why) = check(t, &got) {
+                panic!("tgId {} {why}", group["tgId"]);
+            }
+            count += 1;
+        }
+    }
+    count
 }
 
 /// A message of the vectors: bytes, and a length in bits, which is
@@ -145,30 +203,24 @@ impl Message {
 }
 
 /// Algorithm Functional Test: one message, one digest.
-fn aft<H: BitHash>(group: &Value, family: Family, start: fn() -> H) -> usize
+fn aft<H: BitHash>(t: &Value, family: Family, start: fn() -> H) -> Value
 where
     H::Output: AsRef<[u8]>,
 {
-    let mut count = 0;
-    for t in group["tests"].as_array().expect("tests") {
-        let digest = Message::of(t).digest(start(), family);
-        assert_eq!(
-            digest.as_ref(),
-            hex(&t["md"]),
-            "tgId {} tcId {}",
-            group["tgId"],
-            t["tcId"]
-        );
-        count += 1;
-    }
-    count
+    let digest = Message::of(t).digest(start(), family);
+    json!({"tcId": t["tcId"], "md": hex_string(digest.as_ref())})
 }
 
 /// Monte Carlo Test: 100 steps of 1000 chained hashes. SHA-2 hashes
 /// the previous three digests each time, in the standard version as
 /// they are and in the alternate one cut or padded with zeros to the
 /// length of the seed; SHA-3 hashes just the previous digest.
-fn mct<H: BitHash>(group: &Value, family: Family, start: fn() -> H) -> usize
+fn mct<H: BitHash>(
+    group: &Value,
+    t: &Value,
+    family: Family,
+    start: fn() -> H,
+) -> Value
 where
     H::Output: AsRef<[u8]>,
 {
@@ -177,33 +229,20 @@ where
         Some("alternate") => true,
         other => panic!("unknown mctVersion {other:?}"),
     };
-    let mut count = 0;
-    for t in group["tests"].as_array().expect("tests") {
-        let seed = Message::of(t);
-        assert_eq!(seed.bits % 8, 0, "tcId {}: bit seed", t["tcId"]);
-        let seed = seed.bytes;
-        let steps = t["resultsArray"].as_array().expect("resultsArray");
-        let mut hash = start();
-        let mut md: Vec<u8> = seed.clone();
-        for (i, step) in steps.iter().enumerate() {
-            md = match family {
-                Family::Sha2 => {
-                    sha2_step(&mut hash, &md, seed.len(), alternate)
-                }
-                Family::Sha3 => sha3_step(&mut hash, &md),
-            };
-            let expected = hex(&step["md"]);
-            assert_eq!(
-                md[..expected.len()],
-                expected,
-                "tgId {} tcId {} step {i}",
-                group["tgId"],
-                t["tcId"]
-            );
-            count += 1;
-        }
+    let seed = Message::of(t);
+    assert_eq!(seed.bits % 8, 0, "tcId {}: bit seed", t["tcId"]);
+    let seed = seed.bytes;
+    let mut hash = start();
+    let mut md: Vec<u8> = seed.clone();
+    let mut steps = Vec::with_capacity(MCT_STEPS);
+    for _ in 0..MCT_STEPS {
+        md = match family {
+            Family::Sha2 => sha2_step(&mut hash, &md, seed.len(), alternate),
+            Family::Sha3 => sha3_step(&mut hash, &md),
+        };
+        steps.push(json!({"md": hex_string(&md)}));
     }
-    count
+    json!({"tcId": t["tcId"], "resultsArray": steps})
 }
 
 /// One SHA-2 Monte Carlo step.
@@ -252,38 +291,28 @@ where
 
 /// Large Data Test: a short piece repeated to gigabytes, hashed as
 /// it is generated.
-fn ldt<H: Hash>(group: &Value, start: fn() -> H) -> usize
+fn ldt<H: Hash>(t: &Value, start: fn() -> H) -> Value
 where
     H::Output: AsRef<[u8]>,
 {
-    let mut count = 0;
-    for t in group["tests"].as_array().expect("tests") {
-        let large = &t["largeMsg"];
-        assert_eq!(large["expansionTechnique"], "repeating");
-        let piece = hex(&large["content"]);
-        let piece_bits = large["contentLength"].as_u64().expect("bits");
-        assert_eq!(piece.len() as u64 * 8, piece_bits);
-        let full_bits = large["fullLength"].as_u64().expect("bits");
-        assert_eq!(full_bits % piece_bits, 0);
-        let repeats = full_bits / piece_bits;
-        // Feed in chunks of many pieces to keep the call count sane.
-        let per_chunk = (1 << 20) / piece.len().max(1);
-        let chunk: Vec<u8> = piece.repeat(per_chunk);
-        let mut hash = start();
-        let mut left = repeats;
-        while left > 0 {
-            let n = left.min(per_chunk as u64) as usize;
-            hash.update(&chunk[..n * piece.len()]);
-            left -= n as u64;
-        }
-        assert_eq!(
-            hash.finalize().as_ref(),
-            hex(&t["md"]),
-            "tgId {} tcId {}",
-            group["tgId"],
-            t["tcId"]
-        );
-        count += 1;
+    let large = &t["largeMsg"];
+    assert_eq!(large["expansionTechnique"], "repeating");
+    let piece = hex(&large["content"]);
+    let piece_bits = large["contentLength"].as_u64().expect("bits");
+    assert_eq!(piece.len() as u64 * 8, piece_bits);
+    let full_bits = large["fullLength"].as_u64().expect("bits");
+    assert_eq!(full_bits % piece_bits, 0);
+    let repeats = full_bits / piece_bits;
+    // Feed in chunks of many pieces to keep the call count sane.
+    let per_chunk = (1 << 20) / piece.len().max(1);
+    let chunk: Vec<u8> = piece.repeat(per_chunk);
+    let mut hash = start();
+    let mut left = repeats;
+    while left > 0 {
+        let n = left.min(per_chunk as u64) as usize;
+        hash.update(&chunk[..n * piece.len()]);
+        left -= n as u64;
     }
-    count
+    let digest = hash.finalize();
+    json!({"tcId": t["tcId"], "md": hex_string(digest.as_ref())})
 }
