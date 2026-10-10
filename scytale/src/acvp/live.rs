@@ -34,7 +34,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::support::acvp::{check, sha, shake};
+use super::support::acvp::{
+    aes_cbc, aes_cfb1, aes_cfb8, aes_cfb128, aes_ctr, aes_ecb, aes_ff1,
+    aes_ff3_1, aes_ofb, aes_xts, answer_aes, check, sha, shake,
+};
 use crate::hash::{sha1, sha2, sha3};
 use sha::Family;
 
@@ -83,6 +86,20 @@ fn answer(prompt: &Value) -> Value {
         }
         ("SHAKE-128", "", "1.0") => shake::answer(prompt, sha3::Shake128::new),
         ("SHAKE-256", "", "1.0") => shake::answer(prompt, sha3::Shake256::new),
+        ("ACVP-AES-ECB", "", "1.0") => answer_aes::<aes_ecb::Suite>(prompt),
+        ("ACVP-AES-CBC", "", "1.0") => answer_aes::<aes_cbc::Suite>(prompt),
+        ("ACVP-AES-CFB1", "", "1.0") => answer_aes::<aes_cfb1::Suite>(prompt),
+        ("ACVP-AES-CFB8", "", "1.0") => answer_aes::<aes_cfb8::Suite>(prompt),
+        ("ACVP-AES-CFB128", "", "1.0") => {
+            answer_aes::<aes_cfb128::Suite>(prompt)
+        }
+        ("ACVP-AES-OFB", "", "1.0") => answer_aes::<aes_ofb::Suite>(prompt),
+        ("ACVP-AES-CTR", "", "1.0") => answer_aes::<aes_ctr::Suite>(prompt),
+        ("ACVP-AES-XTS", "", "1.0" | "2.0") => {
+            answer_aes::<aes_xts::Suite>(prompt)
+        }
+        ("ACVP-AES-FF1", "", "1.0") => answer_aes::<aes_ff1::Suite>(prompt),
+        ("ACVP-AES-FF3-1", "", "1.0") => answer_aes::<aes_ff3_1::Suite>(prompt),
         _ => panic!(
             "{algorithm}/{mode} {revision}: nothing here answers it, \
              yet scytale-acvp registered it"

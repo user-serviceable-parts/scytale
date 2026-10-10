@@ -42,7 +42,8 @@ pub mod xecdh;
 
 use crate::KeyType;
 use crate::cipher::BlockCipher;
-use serde_json::Value;
+use crate::cipher::aes::Aes;
+use serde_json::{Value, json};
 
 pub fn hex(v: &Value) -> Vec<u8> {
     let s = v.as_str().expect("hex string");
@@ -149,6 +150,69 @@ pub fn cipher_of<C: BlockCipher>(bytes: &[u8]) -> Option<C> {
     key_of::<C>(bytes).map(|key| C::new(&key))
 }
 
+/// How one AES suite answers a group, as a type rather than a
+/// function so that the live run can name the key width's cipher
+/// for it: a vector set carries every width, and each is its own
+/// type.
+pub trait Answers {
+    /// The response to each test of `group`, in order.
+    fn tests<C: BlockCipher<Block = [u8; 16]>>(
+        group: &Value,
+        encrypt: bool,
+    ) -> Vec<Value>;
+}
+
+/// The response to an AES vector set: every group answered at its
+/// key width, on the cipher this processor picks.
+pub fn answer_aes<A: Answers>(prompt: &Value) -> Value {
+    let groups = prompt["testGroups"]
+        .as_array()
+        .expect("testGroups")
+        .iter()
+        .map(|group| {
+            let encrypt = encrypts(group);
+            let tests = match group["keyLen"].as_u64() {
+                Some(128) => A::tests::<Aes<16>>(group, encrypt),
+                Some(192) => A::tests::<Aes<24>>(group, encrypt),
+                Some(256) => A::tests::<Aes<32>>(group, encrypt),
+                other => panic!("keyLen {other:?}"),
+            };
+            json!({"tgId": group["tgId"], "tests": tests})
+        })
+        .collect();
+    response(prompt, groups)
+}
+
+/// Whether a group is the encrypt direction.
+pub fn encrypts(group: &Value) -> bool {
+    match group["direction"].as_str() {
+        Some("encrypt") => true,
+        Some("decrypt") => false,
+        other => panic!("unknown direction {other:?}"),
+    }
+}
+
+/// Answers every group with `tests` and holds each answer to the
+/// file's. Returns the cases run.
+pub fn run_groups(
+    groups: &[(Value, bool)],
+    mut tests: impl FnMut(&Value, bool) -> Vec<Value>,
+) -> usize {
+    let mut count = 0;
+    for (group, encrypt) in groups {
+        let expected = group["tests"].as_array().expect("tests");
+        let got = tests(group, *encrypt);
+        assert_eq!(got.len(), expected.len(), "tgId {}", group["tgId"]);
+        for (want, answer) in expected.iter().zip(&got) {
+            if let Err(why) = check(want, answer) {
+                panic!("tgId {} {why}", group["tgId"]);
+            }
+            count += 1;
+        }
+    }
+    count
+}
+
 /// The groups of one test type in a suite for the key width of `C`,
 /// each paired with whether it is the encrypt direction. `None` if
 /// the vectors are not vendored in this copy, or define nothing at
@@ -166,14 +230,9 @@ pub fn groups<C: KeyType>(
         if group["keyLen"].as_u64().is_some_and(|len| len != bits) {
             continue;
         }
-        let encrypt = match group["direction"].as_str() {
-            Some("encrypt") => true,
-            Some("decrypt") => false,
-            other => panic!("unknown direction {other:?}"),
-        };
         match group["testType"].as_str() {
             Some(t) if t == test_type => {
-                selected.push((group.clone(), encrypt))
+                selected.push((group.clone(), encrypts(group)))
             }
             Some("AFT") | Some("MCT") => {}
             other => panic!("unknown testType {other:?}"),

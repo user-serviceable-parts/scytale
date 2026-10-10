@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use crate::Result;
 
+mod aes;
 mod sha;
 mod sha3;
 
@@ -22,6 +23,7 @@ pub struct Options {
 pub fn capabilities(options: Options) -> Vec<Value> {
     let mut all = sha::capabilities(options);
     all.extend(sha3::capabilities(options));
+    all.extend(aes::capabilities(options));
     all
 }
 

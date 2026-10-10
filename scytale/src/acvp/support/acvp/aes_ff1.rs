@@ -7,13 +7,26 @@
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
-use super::{groups as suite_groups, hex, key_of};
+use super::aes_ff3_1::{symbols, text};
+use super::{Answers, groups as suite_groups, hex, key_of, run_groups};
 use crate::KeyType;
 use crate::cipher::BlockCipher;
 use crate::cipher::mode::Ff1;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const FILE: &str = "ACVP-AES-FF1-1.0/internalProjection.json";
+
+/// The suite, for [`answer_aes`](super::answer_aes).
+pub struct Suite;
+
+impl Answers for Suite {
+    fn tests<C: BlockCipher<Block = [u8; 16]>>(
+        group: &Value,
+        encrypt: bool,
+    ) -> Vec<Value> {
+        tests::<C>(group, encrypt)
+    }
+}
 
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
@@ -21,10 +34,7 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     let Some(groups) = groups::<C>("AFT") else {
         return;
     };
-    let count: usize = groups
-        .iter()
-        .map(|(group, encrypt)| aft::<C>(group, *encrypt))
-        .sum();
+    let count = run_groups(&groups, tests::<C>);
     assert!(count >= 233, "only {count} AFT cases");
 }
 
@@ -32,54 +42,31 @@ fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
     suite_groups::<C>(FILE, "ACVP-AES-FF1", "1.0", test_type)
 }
 
-/// Turns text into symbol values, by position in the alphabet.
-fn symbols(text: &str, alphabet: &str) -> Vec<u16> {
-    text.chars()
-        .map(|c| {
-            alphabet
-                .chars()
-                .position(|a| a == c)
-                .unwrap_or_else(|| panic!("{c:?} is not in the alphabet"))
-                as u16
-        })
-        .collect()
-}
-
-/// Turns symbol values back into text.
-fn text(values: &[u16], alphabet: &str) -> String {
-    let letters: Vec<char> = alphabet.chars().collect();
-    values.iter().map(|&v| letters[v as usize]).collect()
-}
-
-fn aft<C: BlockCipher<Block = [u8; 16]>>(
+/// The response to each test of a group.
+fn tests<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
-) -> usize {
+) -> Vec<Value> {
+    assert_eq!(group["testType"], "AFT", "tgId {}", group["tgId"]);
     let alphabet = group["alphabet"].as_str().expect("alphabet");
     let radix = group["radix"].as_u64().expect("radix") as u32;
-    let mut count = 0;
-
-    for t in group["tests"].as_array().expect("tests") {
-        let label = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-        let Some(key) = key_of::<C>(&hex(&t["key"])) else {
-            continue;
-        };
-        let ff1 = Ff1::<C>::try_new(&key, radix).expect("radix");
-        let tweak = hex(&t["tweak"]);
-
-        let (input, expected) = if encrypt {
-            (t["pt"].as_str().unwrap(), t["ct"].as_str().unwrap())
-        } else {
-            (t["ct"].as_str().unwrap(), t["pt"].as_str().unwrap())
-        };
-        let mut data = symbols(input, alphabet);
-        if encrypt {
-            ff1.encrypt(&tweak, &mut data).expect("encrypt");
-        } else {
-            ff1.decrypt(&tweak, &mut data).expect("decrypt");
-        }
-        assert_eq!(text(&data, alphabet), expected, "{label}");
-        count += 1;
-    }
-    count
+    let (input, output) = if encrypt { ("pt", "ct") } else { ("ct", "pt") };
+    group["tests"]
+        .as_array()
+        .expect("tests")
+        .iter()
+        .map(|t| {
+            let key = key_of::<C>(&hex(&t["key"])).expect("key width");
+            let ff1 = Ff1::<C>::try_new(&key, radix).expect("radix");
+            let tweak = hex(&t["tweak"]);
+            let message = t[input].as_str().expect("text");
+            let mut data = symbols(message, alphabet);
+            if encrypt {
+                ff1.encrypt(&tweak, &mut data).expect("encrypt");
+            } else {
+                ff1.decrypt(&tweak, &mut data).expect("decrypt");
+            }
+            json!({"tcId": t["tcId"], output: text(&data, alphabet)})
+        })
+        .collect()
 }

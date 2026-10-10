@@ -7,19 +7,22 @@
 //! Counter mode is defined for any number of bits, the final
 //! keystream block simply being cut short. [`Ctr`] works in whole
 //! bytes, which is what callers want, so a length that is not a
-//! multiple of eight is checked over its significant bits only: the
+//! multiple of eight is answered over its significant bits only: the
 //! bits past the end are ours to leave as we like, and the vectors
-//! record them as zero.
+//! record them as zero, so that is what is sent.
 
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
-use super::{groups as suite_groups, hex, key_of};
+use super::{
+    Answers, groups as suite_groups, hex, hex_string, key_of, run_groups,
+};
 use crate::KeyType;
 use crate::cipher::BlockCipher;
 use crate::cipher::mode::Ctr;
 use crate::cipher::mode::ctr;
-use serde_json::Value;
+use crate::implementation::Implementation;
+use serde_json::{Value, json};
 
 /// The IV as the cipher's block type.
 fn block<C: BlockCipher<Block = [u8; 16]>>(bytes: &[u8]) -> C::Block {
@@ -29,6 +32,19 @@ fn block<C: BlockCipher<Block = [u8; 16]>>(bytes: &[u8]) -> C::Block {
 }
 
 const FILE: &str = "ACVP-AES-CTR-1.0/internalProjection.json";
+
+/// The suite, for [`answer_aes`](super::answer_aes): the mode on
+/// the implementation this processor picks.
+pub struct Suite;
+
+impl Answers for Suite {
+    fn tests<C: BlockCipher<Block = [u8; 16]>>(
+        group: &Value,
+        encrypt: bool,
+    ) -> Vec<Value> {
+        tests::<C>(group, encrypt, None)
+    }
+}
 
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
@@ -49,9 +65,9 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
             continue;
         }
         engines += 1;
-        for (group, encrypt) in &groups {
-            count += aft::<C>(group, *encrypt, implementation);
-        }
+        count += run_groups(&groups, |group, encrypt| {
+            tests::<C>(group, encrypt, Some(implementation))
+        });
     }
     assert!(engines >= 1, "no implementation to test");
     // Guard against a truncated or wrong file passing vacuously.
@@ -62,50 +78,49 @@ fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
     suite_groups::<C>(FILE, "ACVP-AES-CTR", "1.0", test_type)
 }
 
-/// Zeroes every bit past `bits`, so that two answers can be compared
-/// over the part the vector actually specifies.
+/// Zeroes every bit past `bits`.
 fn truncate(data: &mut [u8], bits: usize) {
     for i in bits..8 * data.len() {
         data[i / 8] &= !(1 << (7 - i % 8));
     }
 }
 
-fn aft<C: BlockCipher<Block = [u8; 16]>>(
+/// The response to each test of a group.
+fn tests<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
-    implementation: crate::implementation::Implementation,
-) -> usize {
-    let mut count = 0;
-    for t in group["tests"].as_array().expect("tests") {
-        let Some(key) = key_of::<C>(&hex(&t["key"])) else {
-            continue;
-        };
-        let ctr = Ctr::<C>::with_implementation(&key, implementation)
-            .expect("implementation");
-        let counter = hex(&t["iv"]);
-        let bits = t["payloadLen"].as_u64().expect("payloadLen") as usize;
-        let (input, expected) = if encrypt {
-            (hex(&t["pt"]), hex(&t["ct"]))
-        } else {
-            (hex(&t["ct"]), hex(&t["pt"]))
-        };
+    implementation: Option<Implementation>,
+) -> Vec<Value> {
+    assert_eq!(group["testType"], "AFT", "tgId {}", group["tgId"]);
+    group["tests"]
+        .as_array()
+        .expect("tests")
+        .iter()
+        .map(|t| aft::<C>(t, encrypt, implementation))
+        .collect()
+}
 
-        let mut data = input;
-        if encrypt {
-            ctr.encrypt(&block::<C>(&counter), &mut data);
-        } else {
-            ctr.decrypt(&block::<C>(&counter), &mut data);
-        }
-
-        let mut expected = expected;
-        truncate(&mut data, bits);
-        truncate(&mut expected, bits);
-        assert_eq!(
-            data, expected,
-            "tgId {} tcId {} ({bits} bits)",
-            group["tgId"], t["tcId"]
-        );
-        count += 1;
+fn aft<C: BlockCipher<Block = [u8; 16]>>(
+    t: &Value,
+    encrypt: bool,
+    implementation: Option<Implementation>,
+) -> Value {
+    let (input, output) = if encrypt { ("pt", "ct") } else { ("ct", "pt") };
+    let key = key_of::<C>(&hex(&t["key"])).expect("key width");
+    let ctr = match implementation {
+        None => Ctr::<C>::new(&key),
+        Some(i) => Ctr::with_implementation(&key, i).expect("implementation"),
+    };
+    let counter = block::<C>(&hex(&t["iv"]));
+    let mut data = hex(&t[input]);
+    if encrypt {
+        ctr.encrypt(&counter, &mut data);
+    } else {
+        ctr.decrypt(&counter, &mut data);
     }
-    count
+    // Only the most significant payloadLen bits are the answer.
+    if let Some(bits) = t["payloadLen"].as_u64() {
+        truncate(&mut data, bits as usize);
+    }
+    json!({"tcId": t["tcId"], output: hex_string(&data)})
 }

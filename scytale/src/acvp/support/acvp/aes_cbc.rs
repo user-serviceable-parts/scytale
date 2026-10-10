@@ -3,12 +3,15 @@
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
-use super::{groups as suite_groups, hex, key_of};
+use super::{
+    Answers, groups as suite_groups, hex, hex_string, key_of, run_groups,
+};
 use crate::KeyType;
 use crate::cipher::BlockCipher;
 use crate::cipher::mode::Cbc;
 use crate::cipher::mode::cbc;
-use serde_json::Value;
+use crate::implementation::Implementation;
+use serde_json::{Value, json};
 
 /// The IV as the cipher's block type.
 fn block<C: BlockCipher<Block = [u8; 16]>>(bytes: &[u8]) -> C::Block {
@@ -19,8 +22,24 @@ fn block<C: BlockCipher<Block = [u8; 16]>>(bytes: &[u8]) -> C::Block {
 
 const FILE: &str = "ACVP-AES-CBC-1.0/internalProjection.json";
 
+/// Steps in a Monte Carlo test.
+const MCT_STEPS: usize = 100;
+
 /// Iterations of each Monte Carlo step (ACVP AES MCT).
 const MCT_ITERATIONS: usize = 1000;
+
+/// The suite, for [`answer_aes`](super::answer_aes): the mode on
+/// the implementation this processor picks.
+pub struct Suite;
+
+impl Answers for Suite {
+    fn tests<C: BlockCipher<Block = [u8; 16]>>(
+        group: &Value,
+        encrypt: bool,
+    ) -> Vec<Value> {
+        tests::<C>(group, encrypt, None)
+    }
+}
 
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
@@ -32,19 +51,7 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     let Some(groups) = groups::<C>("AFT") else {
         return;
     };
-    let mut count = 0;
-    let mut engines = 0;
-    for &implementation in cbc::CHOICES {
-        if Cbc::<C>::with_implementation(&C::zero_key(), implementation)
-            .is_none()
-        {
-            continue;
-        }
-        engines += 1;
-        for (group, encrypt) in &groups {
-            count += aft::<C>(group, *encrypt, implementation);
-        }
-    }
+    let (count, engines) = every_implementation::<C>(&groups);
     assert!(engines >= 1, "no implementation to test");
     // Guard against a truncated or wrong file passing vacuously.
     assert!(count >= 500, "only {count} AFT cases");
@@ -56,18 +63,29 @@ pub fn run_mct<C: BlockCipher<Block = [u8; 16]>>() {
     let Some(groups) = groups::<C>("MCT") else {
         return;
     };
+    let (count, _) = every_implementation::<C>(&groups);
+    assert!(count >= 2, "only {count} MCT cases");
+}
+
+/// Runs `groups` on each implementation the processor has; the
+/// cases run and the implementations tried.
+fn every_implementation<C: BlockCipher<Block = [u8; 16]>>(
+    groups: &[(Value, bool)],
+) -> (usize, usize) {
     let mut count = 0;
+    let mut engines = 0;
     for &implementation in cbc::CHOICES {
         if Cbc::<C>::with_implementation(&C::zero_key(), implementation)
             .is_none()
         {
             continue;
         }
-        for (group, encrypt) in &groups {
-            count += mct::<C>(group, *encrypt, implementation);
-        }
+        engines += 1;
+        count += run_groups(groups, |group, encrypt| {
+            tests::<C>(group, encrypt, Some(implementation))
+        });
     }
-    assert!(count >= 200, "only {count} MCT steps");
+    (count, engines)
 }
 
 /// The groups of one test type; `None` without the vectors.
@@ -75,92 +93,100 @@ fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
     suite_groups::<C>(FILE, "ACVP-AES-CBC", "1.0", test_type)
 }
 
+/// The mode under `key`, on `implementation` or on the one the
+/// processor picks.
 fn cbc<C: BlockCipher<Block = [u8; 16]>>(
     key: &[u8],
-    implementation: crate::implementation::Implementation,
-) -> Option<Cbc<C>> {
-    Cbc::with_implementation(&key_of::<C>(key)?, implementation)
+    implementation: Option<Implementation>,
+) -> Cbc<C> {
+    let key = key_of::<C>(key).expect("key width");
+    match implementation {
+        None => Cbc::new(&key),
+        Some(i) => Cbc::with_implementation(&key, i).expect("implementation"),
+    }
+}
+
+/// The response to each test of a group.
+fn tests<C: BlockCipher<Block = [u8; 16]>>(
+    group: &Value,
+    encrypt: bool,
+    implementation: Option<Implementation>,
+) -> Vec<Value> {
+    group["tests"]
+        .as_array()
+        .expect("tests")
+        .iter()
+        .map(|t| match group["testType"].as_str() {
+            Some("AFT") => aft::<C>(t, encrypt, implementation),
+            Some("MCT") => mct::<C>(t, encrypt, implementation),
+            other => panic!("unknown testType {other:?}"),
+        })
+        .collect()
+}
+
+/// The names of a direction's input and output.
+fn names(encrypt: bool) -> (&'static str, &'static str) {
+    if encrypt { ("pt", "ct") } else { ("ct", "pt") }
 }
 
 /// Algorithm Functional Test: one message, one IV.
 fn aft<C: BlockCipher<Block = [u8; 16]>>(
-    group: &Value,
+    t: &Value,
     encrypt: bool,
-    implementation: crate::implementation::Implementation,
-) -> usize {
-    let mut count = 0;
-    for t in group["tests"].as_array().expect("tests") {
-        let Some(cbc) = cbc::<C>(&hex(&t["key"]), implementation) else {
-            continue;
-        };
-        let iv = hex(&t["iv"]);
-        let (input, expected) = if encrypt {
-            (hex(&t["pt"]), hex(&t["ct"]))
-        } else {
-            (hex(&t["ct"]), hex(&t["pt"]))
-        };
-        let mut data = input;
-        if encrypt {
-            cbc.encrypt(&block::<C>(&iv), &mut data)
-                .expect("whole blocks");
-        } else {
-            cbc.decrypt(&block::<C>(&iv), &mut data)
-                .expect("whole blocks");
-        }
-        assert_eq!(data, expected, "tgId {} tcId {}", group["tgId"], t["tcId"]);
-        count += 1;
+    implementation: Option<Implementation>,
+) -> Value {
+    let (input, output) = names(encrypt);
+    let cbc = cbc::<C>(&hex(&t["key"]), implementation);
+    let iv = block::<C>(&hex(&t["iv"]));
+    let mut data = hex(&t[input]);
+    if encrypt {
+        cbc.encrypt(&iv, &mut data).expect("whole blocks");
+    } else {
+        cbc.decrypt(&iv, &mut data).expect("whole blocks");
     }
-    count
+    json!({"tcId": t["tcId"], output: hex_string(&data)})
 }
 
 /// Monte Carlo Test. Each of 100 steps runs 1000 single-block
 /// operations whose inputs chain into one another, then derives the
-/// next key, IV and input from the last two outputs.
+/// next key, IV and input from the last two outputs. Each step
+/// reports its key, IV, input and last output.
 fn mct<C: BlockCipher<Block = [u8; 16]>>(
-    group: &Value,
+    t: &Value,
     encrypt: bool,
-    implementation: crate::implementation::Implementation,
-) -> usize {
-    let (input_name, output_name) =
-        if encrypt { ("pt", "ct") } else { ("ct", "pt") };
-    let mut count = 0;
-    for t in group["tests"].as_array().expect("tests") {
-        let steps = t["resultsArray"].as_array().expect("resultsArray");
-        let mut key = hex(&t["key"]);
-        if key_of::<C>(&key).is_none() {
-            continue;
+    implementation: Option<Implementation>,
+) -> Value {
+    let (input_name, output_name) = names(encrypt);
+    let mut key = hex(&t["key"]);
+    let mut iv = hex(&t["iv"]);
+    let mut input = hex(&t[input_name]);
+    let mut steps = Vec::with_capacity(MCT_STEPS);
+    for _ in 0..MCT_STEPS {
+        let mut step = json!({
+            "key": hex_string(&key),
+            "iv": hex_string(&iv),
+            input_name: hex_string(&input),
+        });
+        let cbc = cbc::<C>(&key, implementation);
+        let (last, previous) = if encrypt {
+            step_encrypt(&cbc, &iv, &input)
+        } else {
+            step_decrypt(&cbc, &iv, &input)
+        };
+        step[output_name] = json!(hex_string(&last));
+        steps.push(step);
+
+        // Next key: xor with the tail of the last two outputs.
+        let mut tail = previous.clone();
+        tail.extend_from_slice(&last);
+        let tail = &tail[tail.len() - key.len()..];
+        for (k, t) in key.iter_mut().zip(tail) {
+            *k ^= t;
         }
-        let mut iv = hex(&t["iv"]);
-        let mut input = hex(&t[input_name]);
-
-        for (i, step) in steps.iter().enumerate() {
-            let tag =
-                format!("tgId {} tcId {} step {i}", group["tgId"], t["tcId"]);
-            assert_eq!(key, hex(&step["key"]), "{tag} key");
-            assert_eq!(iv, hex(&step["iv"]), "{tag} iv");
-            assert_eq!(input, hex(&step[input_name]), "{tag} input");
-
-            let cbc = cbc::<C>(&key, implementation).expect("width");
-            let (last, previous) = if encrypt {
-                step_encrypt(&cbc, &iv, &input)
-            } else {
-                step_decrypt(&cbc, &iv, &input)
-            };
-            assert_eq!(last, hex(&step[output_name]), "{tag} output");
-
-            // Next key: xor with the tail of the last two outputs.
-            let mut tail = previous.clone();
-            tail.extend_from_slice(&last);
-            let tail = &tail[tail.len() - key.len()..];
-            for (k, t) in key.iter_mut().zip(tail) {
-                *k ^= t;
-            }
-            iv = last;
-            input = previous;
-            count += 1;
-        }
+        iv = last;
+        input = previous;
     }
-    count
+    json!({"tcId": t["tcId"], "resultsArray": steps})
 }
 
 /// One encryption step. Each iteration encrypts one block, and the
