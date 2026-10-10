@@ -35,8 +35,9 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::support::acvp::{
-    aes_cbc, aes_cfb1, aes_cfb8, aes_cfb128, aes_ctr, aes_ecb, aes_ff1,
-    aes_ff3_1, aes_ofb, aes_xts, answer_aes, check, sha, shake,
+    aes_cbc, aes_ccm, aes_cfb1, aes_cfb8, aes_cfb128, aes_ctr, aes_ecb,
+    aes_ff1, aes_ff3_1, aes_gcm, aes_gcm_siv, aes_gmac, aes_kw, aes_kwp,
+    aes_ofb, aes_xpn, aes_xts, answer_aes, check, sha, shake,
 };
 use crate::hash::{sha1, sha2, sha3};
 use sha::Family;
@@ -100,6 +101,14 @@ fn answer(prompt: &Value) -> Value {
         }
         ("ACVP-AES-FF1", "", "1.0") => answer_aes::<aes_ff1::Suite>(prompt),
         ("ACVP-AES-FF3-1", "", "1.0") => answer_aes::<aes_ff3_1::Suite>(prompt),
+        ("ACVP-AES-GCM", "", "1.0") => answer_aes::<aes_gcm::Suite>(prompt),
+        ("ACVP-AES-GMAC", "", "1.0") => answer_aes::<aes_gmac::Suite>(prompt),
+        // The vendored GCM-SIV file predates the revision field.
+        ("ACVP-AES-GCM-SIV", "", "" | "1.0") => aes_gcm_siv::answer(prompt),
+        ("ACVP-AES-XPN", "", "1.0") => answer_aes::<aes_xpn::Suite>(prompt),
+        ("ACVP-AES-CCM", "", "1.0") => answer_aes::<aes_ccm::Suite>(prompt),
+        ("ACVP-AES-KW", "", "1.0") => answer_aes::<aes_kw::Suite>(prompt),
+        ("ACVP-AES-KWP", "", "1.0") => answer_aes::<aes_kwp::Suite>(prompt),
         _ => panic!(
             "{algorithm}/{mode} {revision}: nothing here answers it, \
              yet scytale-acvp registered it"

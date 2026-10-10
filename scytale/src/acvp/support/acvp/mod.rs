@@ -213,6 +213,13 @@ pub fn run_groups(
     count
 }
 
+/// How many of `answers` report a rejected tag or wrapping. The
+/// suites hold that to a floor, so the rejection cases cannot
+/// quietly disappear from a file.
+pub fn rejected(answers: &[Value]) -> usize {
+    answers.iter().filter(|a| a["testPassed"] == false).count()
+}
+
 /// The groups of one test type in a suite for the key width of `C`,
 /// each paired with whether it is the encrypt direction. `None` if
 /// the vectors are not vendored in this copy, or define nothing at

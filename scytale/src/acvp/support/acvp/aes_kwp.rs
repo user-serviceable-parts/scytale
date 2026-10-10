@@ -10,14 +10,30 @@
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
-use super::{groups as suite_groups, hex, key_of};
+use super::aes_kw::forward;
+use super::{
+    Answers, groups as suite_groups, hex, hex_string, key_of, rejected,
+    run_groups,
+};
 use crate::Error;
 use crate::KeyType;
 use crate::cipher::BlockCipher;
 use crate::cipher::mode::Kwp;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const FILE: &str = "ACVP-AES-KWP-1.0/internalProjection.json";
+
+/// The suite, for [`answer_aes`](super::answer_aes).
+pub struct Suite;
+
+impl Answers for Suite {
+    fn tests<C: BlockCipher<Block = [u8; 16]>>(
+        group: &Value,
+        encrypt: bool,
+    ) -> Vec<Value> {
+        tests::<C>(group, encrypt)
+    }
+}
 
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
@@ -25,13 +41,12 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     let Some(groups) = groups::<C>("AFT") else {
         return;
     };
-    let mut cases = 0;
     let mut rejections = 0;
-    for (group, encrypt) in &groups {
-        let (n, r) = aft::<C>(group, *encrypt);
-        cases += n;
-        rejections += r;
-    }
+    let cases = run_groups(&groups, |group, encrypt| {
+        let answers = tests::<C>(group, encrypt);
+        rejections += rejected(&answers);
+        answers
+    });
     // Guard against a truncated or wrong file passing vacuously, and
     // against the rejection cases quietly disappearing.
     assert!(cases >= 1666, "only {cases} AFT cases");
@@ -42,56 +57,41 @@ fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
     suite_groups::<C>(FILE, "ACVP-AES-KWP", "1.0", test_type)
 }
 
-/// Returns the cases run and, of those, the ones that had to fail.
-fn aft<C: BlockCipher<Block = [u8; 16]>>(
+/// The response to each test of a group.
+fn tests<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
-) -> (usize, usize) {
-    // The standard lets the wrapping be built on either direction of
-    // the cipher, and the suite exercises both.
-    let forward = match group["kwCipher"].as_str() {
-        Some("cipher") => true,
-        Some("inverse") => false,
-        other => panic!("unknown kwCipher {other:?}"),
-    };
-    let mut cases = 0;
-    let mut rejections = 0;
-
-    for t in group["tests"].as_array().expect("tests") {
-        let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-        let Some(key) = key_of::<C>(&hex(&t["key"])) else {
-            continue;
-        };
-        let kwp = if forward {
-            Kwp::<C>::new(&key)
-        } else {
-            Kwp::<C>::new_inverse(&key)
-        };
-
-        if encrypt {
-            let plain = hex(&t["pt"]);
-            let mut got = vec![0u8; plain.len().next_multiple_of(8) + 8];
-            let n = kwp.wrap(&plain, &mut got).expect("wrap");
-            assert_eq!(got[..n], hex(&t["ct"])[..], "{tag}");
-        } else {
-            // A case marked as not passing carries a wrapping that
-            // must be refused.
-            let should_pass = t["testPassed"].as_bool().unwrap_or(true);
+) -> Vec<Value> {
+    assert_eq!(group["testType"], "AFT", "tgId {}", group["tgId"]);
+    let forward = forward(group);
+    group["tests"]
+        .as_array()
+        .expect("tests")
+        .iter()
+        .map(|t| {
+            let key = key_of::<C>(&hex(&t["key"])).expect("key width");
+            let kwp = if forward {
+                Kwp::<C>::new(&key)
+            } else {
+                Kwp::<C>::new_inverse(&key)
+            };
+            if encrypt {
+                let plain = hex(&t["pt"]);
+                let mut out = vec![0u8; plain.len().next_multiple_of(8) + 8];
+                let n = kwp.wrap(&plain, &mut out).expect("wrap");
+                return json!({"tcId": t["tcId"], "ct": hex_string(&out[..n])});
+            }
             let wrapped = hex(&t["ct"]);
-            let mut got = vec![0u8; wrapped.len()];
-            match kwp.unwrap(&wrapped, &mut got) {
+            let mut out = vec![0u8; wrapped.len()];
+            match kwp.unwrap(&wrapped, &mut out) {
                 Ok(n) => {
-                    assert!(should_pass, "{tag} accepted a bad wrapping");
-                    assert_eq!(got[..n], hex(&t["pt"])[..], "{tag}");
+                    json!({"tcId": t["tcId"], "pt": hex_string(&out[..n])})
                 }
                 Err(Error::AuthenticationFailed) => {
-                    assert!(!should_pass, "{tag} refused a good wrapping");
-                    rejections += 1;
+                    json!({"tcId": t["tcId"], "testPassed": false})
                 }
-                Err(e) => panic!("{tag}: {e}"),
+                Err(e) => panic!("tcId {}: {e}", t["tcId"]),
             }
-        }
-        cases += 1;
-    }
-    (cases, rejections)
+        })
+        .collect()
 }
