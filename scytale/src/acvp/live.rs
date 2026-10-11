@@ -37,8 +37,8 @@ use serde_json::Value;
 use super::support::acvp::{
     aes_cbc, aes_ccm, aes_cfb1, aes_cfb8, aes_cfb128, aes_ctr, aes_ecb,
     aes_ff1, aes_ff3_1, aes_gcm, aes_gcm_siv, aes_gmac, aes_kw, aes_kwp,
-    aes_ofb, aes_xpn, aes_xts, answer_aes, check, cmac_aes, cshake, hmac, kmac,
-    sha, shake,
+    aes_ofb, aes_xpn, aes_xts, answer_aes, check, cmac_aes, cshake, ctr_drbg,
+    hmac, kda_hkdf, kmac, pbkdf, sha, shake,
 };
 use crate::hash::sha3::{Auto, variant};
 use crate::hash::{sha1, sha2, sha3};
@@ -114,6 +114,9 @@ fn answer(prompt: &Value) -> Value {
         }
         ("KMAC-128", "", "1.0") => kmac::answer::<Kmac128>(prompt),
         ("KMAC-256", "", "1.0") => kmac::answer::<Kmac256>(prompt),
+        ("ctrDRBG", "", "1.0") => ctr_drbg::answer(prompt),
+        ("PBKDF", "", "1.0") => pbkdf::answer(prompt),
+        ("KDA", "HKDF", "Sp800-56Cr2") => kda_hkdf::answer(prompt),
         ("ACVP-AES-ECB", "", "1.0") => answer_aes::<aes_ecb::Suite>(prompt),
         ("ACVP-AES-CBC", "", "1.0") => answer_aes::<aes_cbc::Suite>(prompt),
         ("ACVP-AES-CFB1", "", "1.0") => answer_aes::<aes_cfb1::Suite>(prompt),

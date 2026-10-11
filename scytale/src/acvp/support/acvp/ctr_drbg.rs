@@ -31,12 +31,29 @@
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
-use super::{hex, load};
+use super::{check, hex, hex_string, load, response};
 use crate::Random;
 use crate::random::{CtrDrbg, SEED};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const FILE: &str = "ctrDRBG-1.0/internalProjection.json";
+
+/// The response to a whole vector set. Only AES-256 is registered,
+/// so any other mode here is a registration gone wrong.
+pub fn answer(prompt: &Value) -> Value {
+    let groups = prompt["testGroups"]
+        .as_array()
+        .expect("testGroups")
+        .iter()
+        .map(|group| {
+            if let Some(why) = skip_reason(group) {
+                panic!("tgId {}: {why}", group["tgId"]);
+            }
+            json!({"tgId": group["tgId"], "tests": tests(group)})
+        })
+        .collect();
+    response(prompt, groups)
+}
 
 /// Runs the one-shot (AFT) groups; a no-op without the vendored
 /// vectors.
@@ -46,9 +63,16 @@ pub fn run_aft() {
     };
     let mut cases = 0;
     for group in doc["testGroups"].as_array().expect("testGroups") {
-        match skip_reason(group) {
-            None => cases += aft(group),
-            Some(why) => eprintln!("tgId {}: {why}; skipping", group["tgId"]),
+        if let Some(why) = skip_reason(group) {
+            eprintln!("tgId {}: {why}; skipping", group["tgId"]);
+            continue;
+        }
+        let expected = group["tests"].as_array().expect("tests");
+        for (want, got) in expected.iter().zip(tests(group)) {
+            if let Err(why) = check(want, &got) {
+                panic!("tgId {} {why}", group["tgId"]);
+            }
+            cases += 1;
         }
     }
     // Guard against a truncated or wrong file passing vacuously.
@@ -67,15 +91,22 @@ fn skip_reason(group: &Value) -> Option<&'static str> {
     None
 }
 
-/// Returns the cases run.
-fn aft(group: &Value) -> usize {
+/// The response to each test of a group: the bits of its last
+/// request.
+fn tests(group: &Value) -> Vec<Value> {
     let bits = group["returnedBitsLen"].as_u64().expect("returnedBitsLen");
     let derivation = group["derFunc"] == true;
-    let mut cases = 0;
+    group["tests"]
+        .as_array()
+        .expect("tests")
+        .iter()
+        .map(|t| aft(t, bits as usize, derivation))
+        .collect()
+}
 
-    for t in group["tests"].as_array().expect("tests") {
-        let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-
+fn aft(t: &Value, bits: usize, derivation: bool) -> Value {
+    let tag = format!("tcId {}", t["tcId"]);
+    {
         let mut rng = if derivation {
             // Instantiation takes the entropy, the nonce and the
             // personalization string as one run of material, which is
@@ -94,7 +125,7 @@ fn aft(group: &Value) -> usize {
                 .expect("instantiate")
         };
 
-        let mut out = vec![0u8; bits as usize / 8];
+        let mut out = vec![0u8; bits / 8];
         for other in t["otherInput"].as_array().expect("otherInput") {
             let entropy = hex(&other["entropyInput"]);
             let additional = hex(&other["additionalInput"]);
@@ -115,9 +146,7 @@ fn aft(group: &Value) -> usize {
                 other => panic!("{tag}: unknown intendedUse {other:?}"),
             }
         }
-        // The bits compared are those of the last request.
-        assert_eq!(out, hex(&t["returnedBits"]), "{tag}");
-        cases += 1;
+        // The bits answered are those of the last request.
+        json!({"tcId": t["tcId"], "returnedBits": hex_string(&out)})
     }
-    cases
 }
