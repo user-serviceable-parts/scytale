@@ -37,9 +37,12 @@ use serde_json::Value;
 use super::support::acvp::{
     aes_cbc, aes_ccm, aes_cfb1, aes_cfb8, aes_cfb128, aes_ctr, aes_ecb,
     aes_ff1, aes_ff3_1, aes_gcm, aes_gcm_siv, aes_gmac, aes_kw, aes_kwp,
-    aes_ofb, aes_xpn, aes_xts, answer_aes, check, sha, shake,
+    aes_ofb, aes_xpn, aes_xts, answer_aes, check, cmac_aes, cshake, hmac, kmac,
+    sha, shake,
 };
+use crate::hash::sha3::{Auto, variant};
 use crate::hash::{sha1, sha2, sha3};
+use crate::mac::kmac::{Kmac128, Kmac256};
 use sha::Family;
 
 /// Names the session directory.
@@ -87,6 +90,30 @@ fn answer(prompt: &Value) -> Value {
         }
         ("SHAKE-128", "", "1.0") => shake::answer(prompt, sha3::Shake128::new),
         ("SHAKE-256", "", "1.0") => shake::answer(prompt, sha3::Shake256::new),
+        ("HMAC-SHA-1", "", "1.0") => hmac::answer::<sha1::Sha1>(prompt),
+        ("HMAC-SHA2-224", "", "1.0") => hmac::answer::<sha2::Sha224>(prompt),
+        ("HMAC-SHA2-256", "", "1.0") => hmac::answer::<sha2::Sha256>(prompt),
+        ("HMAC-SHA2-384", "", "1.0") => hmac::answer::<sha2::Sha384>(prompt),
+        ("HMAC-SHA2-512", "", "1.0") => hmac::answer::<sha2::Sha512>(prompt),
+        ("HMAC-SHA2-512/224", "", "1.0") => {
+            hmac::answer::<sha2::Sha512_224>(prompt)
+        }
+        ("HMAC-SHA2-512/256", "", "1.0") => {
+            hmac::answer::<sha2::Sha512_256>(prompt)
+        }
+        ("HMAC-SHA3-224", "", "1.0") => hmac::answer::<sha3::Sha3_224>(prompt),
+        ("HMAC-SHA3-256", "", "1.0") => hmac::answer::<sha3::Sha3_256>(prompt),
+        ("HMAC-SHA3-384", "", "1.0") => hmac::answer::<sha3::Sha3_384>(prompt),
+        ("HMAC-SHA3-512", "", "1.0") => hmac::answer::<sha3::Sha3_512>(prompt),
+        ("CMAC-AES", "", "1.0") => cmac_aes::answer(prompt),
+        ("cSHAKE-128", "", "1.0") => {
+            cshake::answer(prompt, Auto::<variant::CShake128>::new)
+        }
+        ("cSHAKE-256", "", "1.0") => {
+            cshake::answer(prompt, Auto::<variant::CShake256>::new)
+        }
+        ("KMAC-128", "", "1.0") => kmac::answer::<Kmac128>(prompt),
+        ("KMAC-256", "", "1.0") => kmac::answer::<Kmac256>(prompt),
         ("ACVP-AES-ECB", "", "1.0") => answer_aes::<aes_ecb::Suite>(prompt),
         ("ACVP-AES-CBC", "", "1.0") => answer_aes::<aes_cbc::Suite>(prompt),
         ("ACVP-AES-CFB1", "", "1.0") => answer_aes::<aes_cfb1::Suite>(prompt),

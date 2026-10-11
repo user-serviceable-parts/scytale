@@ -12,12 +12,12 @@
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
 use super::cshake::to_top;
-use super::{hex, load};
+use super::{check, hex, hex_string, load, rejected, response};
 use crate::Error;
 use crate::constant_time;
 use crate::hash::XofReader;
 use crate::mac::kmac::{Kmac128, Kmac256};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// What the driver needs of either width.
 pub trait Width: Sized {
@@ -93,6 +93,17 @@ macro_rules! width {
 width!(Kmac128);
 width!(Kmac256);
 
+/// The response to a whole vector set.
+pub fn answer<K: Width>(prompt: &Value) -> Value {
+    let groups = prompt["testGroups"]
+        .as_array()
+        .expect("testGroups")
+        .iter()
+        .map(|group| json!({"tgId": group["tgId"], "tests": tests::<K>(group)}))
+        .collect();
+    response(prompt, groups)
+}
+
 /// Runs every case against `K`; a no-op without the vendored vectors.
 pub fn run_aft<K: Width>(file: &str, algorithm: &str) {
     let Some(doc) = load(file, algorithm, "1.0") else {
@@ -101,15 +112,38 @@ pub fn run_aft<K: Width>(file: &str, algorithm: &str) {
     let mut cases = 0;
     let mut rejections = 0;
     for group in doc["testGroups"].as_array().expect("testGroups") {
-        let xof = group["xof"].as_bool().expect("xof");
-        let verify = match group["testType"].as_str() {
-            Some("AFT") => false,
-            Some("MVT") => true,
-            other => panic!("unknown testType {other:?}"),
-        };
-        let hex_custom = group["hexCustomization"].as_bool() == Some(true);
-        for t in group["tests"].as_array().expect("tests") {
-            let name = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
+        let answers = tests::<K>(group);
+        rejections += rejected(&answers);
+        let expected = group["tests"].as_array().expect("tests");
+        for (want, got) in expected.iter().zip(&answers) {
+            if let Err(why) = check(want, got) {
+                panic!("tgId {} {why}", group["tgId"]);
+            }
+            cases += 1;
+        }
+    }
+    // Guard against a truncated or wrong file passing vacuously, and
+    // against the rejection cases quietly disappearing.
+    assert!(cases >= 800, "only {cases} cases");
+    assert!(rejections >= 190, "only {rejections} rejections");
+}
+
+/// The response to each test of a group: the tag for an AFT, the
+/// verdict for an MVT.
+fn tests<K: Width>(group: &Value) -> Vec<Value> {
+    let xof = group["xof"].as_bool().expect("xof");
+    let verify = match group["testType"].as_str() {
+        Some("AFT") => false,
+        Some("MVT") => true,
+        other => panic!("unknown testType {other:?}"),
+    };
+    let hex_custom = group["hexCustomization"].as_bool() == Some(true);
+    group["tests"]
+        .as_array()
+        .expect("tests")
+        .iter()
+        .map(|t| {
+            let name = format!("tcId {}", t["tcId"]);
             let custom = if hex_custom {
                 hex(&t["customizationHex"])
             } else {
@@ -125,8 +159,6 @@ pub fn run_aft<K: Width>(file: &str, algorithm: &str) {
             let msg_bits = length(t, "msgLen");
             let msg = from_top(hex(&t["msg"]), msg_bits);
             let (whole, last, extra) = split(&msg, msg_bits);
-            let expected = hex(&t["mac"]);
-            assert_eq!(expected.len(), mac_bits.div_ceil(8), "{name}");
 
             let mut kmac =
                 K::try_new_bits(&key, key_bits, &custom).expect("key");
@@ -135,39 +167,30 @@ pub fn run_aft<K: Width>(file: &str, algorithm: &str) {
             if !verify {
                 if xof {
                     kmac.xof_bits(last, extra, &mut out).expect("xof");
+                    to_top(&mut out, mac_bits);
                 } else {
                     kmac.finalize_bits_to(last, extra, &mut out, mac_bits)
                         .expect("mac");
                 }
-                if xof {
-                    to_top(&mut out, mac_bits);
-                }
-                assert_eq!(out, expected, "{name} mac");
-            } else {
-                let should_pass = t["testPassed"].as_bool().expect("pass");
-                let passed = if xof {
-                    kmac.xof_bits(last, extra, &mut out).expect("xof");
-                    to_top(&mut out, mac_bits);
-                    constant_time::equal(&out, &expected)
-                } else {
-                    match kmac.verify_bits(last, extra, &expected, mac_bits) {
-                        Ok(()) => true,
-                        Err(Error::AuthenticationFailed) => false,
-                        Err(e) => panic!("{name}: {e}"),
-                    }
-                };
-                assert_eq!(passed, should_pass, "{name} verdict");
-                if !passed {
-                    rejections += 1;
-                }
+                return json!({"tcId": t["tcId"], "mac": hex_string(&out)});
             }
-            cases += 1;
-        }
-    }
-    // Guard against a truncated or wrong file passing vacuously, and
-    // against the rejection cases quietly disappearing.
-    assert!(cases >= 800, "only {cases} cases");
-    assert!(rejections >= 190, "only {rejections} rejections");
+            let given = hex(&t["mac"]);
+            let passed = if given.len() != out.len() {
+                false
+            } else if xof {
+                kmac.xof_bits(last, extra, &mut out).expect("xof");
+                to_top(&mut out, mac_bits);
+                constant_time::equal(&out, &given)
+            } else {
+                match kmac.verify_bits(last, extra, &given, mac_bits) {
+                    Ok(()) => true,
+                    Err(Error::AuthenticationFailed) => false,
+                    Err(e) => panic!("{name}: {e}"),
+                }
+            };
+            json!({"tcId": t["tcId"], "testPassed": passed})
+        })
+        .collect()
 }
 
 fn length(t: &Value, field: &str) -> usize {

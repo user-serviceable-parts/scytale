@@ -11,11 +11,38 @@
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
 use super::sha::{Family, Message};
-use super::{hex, load};
+use super::{check, hex, hex_string, load, response};
 use crate::hash::XofReader;
 use crate::hash::sha3::SuffixXof;
 use crate::hash::sha3::cshake::Core;
-use serde_json::Value;
+use serde_json::{Value, json};
+
+/// Steps in a Monte Carlo test as the server runs it. The vendored
+/// file keeps only the first few.
+const MCT_STEPS: usize = 100;
+
+/// The response to a whole vector set over the sponge `X`.
+pub fn answer<X: SuffixXof>(prompt: &Value, start: fn() -> X) -> Value {
+    let groups = prompt["testGroups"]
+        .as_array()
+        .expect("testGroups")
+        .iter()
+        .map(|group| {
+            let tests: Vec<Value> = group["tests"]
+                .as_array()
+                .expect("tests")
+                .iter()
+                .map(|t| match group["testType"].as_str() {
+                    Some("AFT") => aft(group, t, start),
+                    Some("MCT") => mct(group, t, MCT_STEPS, start),
+                    other => panic!("unknown testType {other:?}"),
+                })
+                .collect();
+            json!({"tgId": group["tgId"], "tests": tests})
+        })
+        .collect();
+    response(prompt, groups)
+}
 
 /// Runs the one-shot groups against the sponge `X`; a no-op without
 /// the vendored vectors.
@@ -29,33 +56,32 @@ pub fn run_aft<X: SuffixXof>(file: &str, algorithm: &str, start: fn() -> X) {
             continue;
         }
         for t in group["tests"].as_array().expect("tests") {
-            let bits = t["outLen"].as_u64().expect("outLen") as usize;
-            let name = text(&t["functionName"]);
-            let custom = customization(group, t);
-            let out = squeeze(&Message::of(t), &name, &custom, bits, start);
-            assert_eq!(
-                out,
-                hex(&t["md"]),
-                "tgId {} tcId {}",
-                group["tgId"],
-                t["tcId"]
-            );
+            if let Err(why) = check(t, &aft(group, t, start)) {
+                panic!("tgId {} {why}", group["tgId"]);
+            }
             count += 1;
         }
     }
     assert!(count >= 100, "only {count} cases");
 }
 
-/// Runs the Monte Carlo groups against `X`; a no-op without the
-/// vendored vectors.
+/// Runs the Monte Carlo groups against `X`, for as many steps as
+/// the file keeps; a no-op without the vendored vectors.
 pub fn run_mct<X: SuffixXof>(file: &str, algorithm: &str, start: fn() -> X) {
     let Some(doc) = load(file, algorithm, "1.0") else {
         return;
     };
     let mut count = 0;
     for group in doc["testGroups"].as_array().expect("testGroups") {
-        if group["testType"] == "MCT" {
-            count += mct(group, start);
+        if group["testType"] != "MCT" {
+            continue;
+        }
+        for t in group["tests"].as_array().expect("tests") {
+            let steps = t["resultsArray"].as_array().expect("steps").len();
+            if let Err(why) = check(t, &mct(group, t, steps, start)) {
+                panic!("tgId {} {why}", group["tgId"]);
+            }
+            count += steps;
         }
     }
     assert!(count >= 3, "only {count} MCT steps");
@@ -73,6 +99,15 @@ fn customization(group: &Value, t: &Value) -> Vec<u8> {
     } else {
         text(&t["customization"])
     }
+}
+
+/// One message, `outLen` bits of output.
+fn aft<X: SuffixXof>(group: &Value, t: &Value, start: fn() -> X) -> Value {
+    let bits = t["outLen"].as_u64().expect("outLen") as usize;
+    let name = text(&t["functionName"]);
+    let custom = customization(group, t);
+    let out = squeeze(&Message::of(t), &name, &custom, bits, start);
+    json!({"tcId": t["tcId"], "md": hex_string(&out), "outLen": bits})
 }
 
 /// cSHAKE of `message` under `name` and `custom`, `bits` of output,
@@ -110,46 +145,52 @@ pub fn to_top(out: &mut [u8], bits: usize) {
 /// The ACVP cSHAKE Monte Carlo test: 1000 rounds a step, each
 /// hashing the first 128 bits of the last output, with the next
 /// output length and customization taken from the last 16 bits of
-/// the output and the input.
-fn mct<X: SuffixXof>(group: &Value, start: fn() -> X) -> usize {
+/// the output and the input. Each step reports its last output and
+/// that output's length.
+fn mct<X: SuffixXof>(
+    group: &Value,
+    t: &Value,
+    steps: usize,
+    start: fn() -> X,
+) -> Value {
     let min_bits = group["minOutLen"].as_u64().expect("minOutLen") as usize;
     let max_bits = group["maxOutLen"].as_u64().expect("maxOutLen") as usize;
     let increment =
         group["outLenIncrement"].as_u64().expect("outLenIncrement") as usize;
     let range = max_bits - min_bits + 1;
-    let mut count = 0;
-    for t in group["tests"].as_array().expect("tests") {
-        // The seed's lengths are strings in this group, and it is
-        // always whole bytes, so only the bytes are read.
-        let mut output = hex(&t["msg"]);
-        let mut out_bits = max_bits;
-        let mut custom: Vec<u8> = Vec::new();
-        let steps = t["resultsArray"].as_array().expect("resultsArray");
-        for (i, step) in steps.iter().enumerate() {
-            for _ in 0..1000 {
-                let mut inner = output.clone();
-                inner.resize(16, 0);
-                let message = Message {
-                    bytes: inner.clone(),
-                    bits: 128,
-                };
-                output = squeeze(&message, b"", &custom, out_bits, start);
-                let right = rightmost_16(&output, out_bits);
-                out_bits =
-                    min_bits + (right as usize % range) / increment * increment;
-                custom = inner
-                    .iter()
-                    .chain(&right.to_be_bytes())
-                    .map(|byte| byte % 26 + 65)
-                    .collect();
-            }
-            let tag =
-                format!("tgId {} tcId {} step {i}", group["tgId"], t["tcId"]);
-            assert_eq!(output, hex(&step["md"]), "{tag}");
-            count += 1;
+    // The seed's lengths are strings in this group, and it is
+    // always whole bytes, so only the bytes are read.
+    let mut output = hex(&t["msg"]);
+    let mut out_bits = max_bits;
+    let mut custom: Vec<u8> = Vec::new();
+    let mut results = Vec::with_capacity(steps);
+    for _ in 0..steps {
+        // The length of the last output, which is not whole bytes.
+        let mut produced = out_bits;
+        for _ in 0..1000 {
+            let mut inner = output.clone();
+            inner.resize(16, 0);
+            let message = Message {
+                bytes: inner.clone(),
+                bits: 128,
+            };
+            output = squeeze(&message, b"", &custom, out_bits, start);
+            produced = out_bits;
+            let right = rightmost_16(&output, out_bits);
+            out_bits =
+                min_bits + (right as usize % range) / increment * increment;
+            custom = inner
+                .iter()
+                .chain(&right.to_be_bytes())
+                .map(|byte| byte % 26 + 65)
+                .collect();
         }
+        results.push(json!({
+            "md": hex_string(&output),
+            "outLen": produced,
+        }));
     }
-    count
+    json!({"tcId": t["tcId"], "resultsArray": results})
 }
 
 /// The last 16 bits of a bit string `bits` long, laid out as ACVP
