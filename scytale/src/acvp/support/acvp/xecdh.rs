@@ -1,23 +1,90 @@
-//! XECDH shared-secret computation and key generation (RFC 7748):
-//! the Curve25519 groups, each party's keys given, the shared secret
-//! checked from both sides.
+//! XECDH key generation, key verification and shared-secret
+//! computation (RFC 7748) for Curve25519; Curve448 is not
+//! implemented and never registered.
 //!
-//! The keyVer suite is deliberately not run. RFC 7748 masks the top
-//! bit and accepts any 32-byte string as a public key, so ACVP's only
-//! Curve25519 failures there are keys of 31 and 33 bytes, which
-//! `[u8; 32]` refuses at the type level. Its one remaining reason,
-//! a set most significant bit, is a passing case whose public key is
-//! not derived from the private key it is given, so it cannot serve
-//! as extra keyGen coverage either.
+//! The vendored shared-secret file gives each party's keys, and the
+//! secret is checked from both sides. The live server gives only its
+//! own public key, and the implementation draws a key per case and
+//! reports its public half with the secret, as it does for keyGen.
+//!
+//! RFC 7748 masks the top bit and accepts any 32-byte string as a
+//! public key, so the only key the library can refuse is one of
+//! another length, and that is what keyVer here reports. The file
+//! for it is not vendored: its failures are all lengths, which the
+//! type refuses before any arithmetic, and its one other reason, a
+//! set top bit, is a passing case.
 
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
-use super::{hex, load};
+use super::{check, hex, hex_string, load, response};
 use crate::kex::x25519;
+use crate::random::CtrDrbg;
+use serde_json::{Value, json};
+
+const CURVE: &str = "Curve25519";
+
+fn secret() -> [u8; 32] {
+    let mut rng = CtrDrbg::from_system().expect("generator");
+    x25519::PrivateKey::generate(&mut rng)
+        .expect("generate")
+        .secret_bytes()
+}
+
+/// The response to a whole vector set, by its mode.
+pub fn answer(prompt: &Value) -> Value {
+    let mode = prompt["mode"].as_str().expect("mode");
+    let groups = prompt["testGroups"]
+        .as_array()
+        .expect("testGroups")
+        .iter()
+        .map(|group| {
+            assert_eq!(group["curve"], CURVE, "tgId {}", group["tgId"]);
+            let tests: Vec<Value> = group["tests"]
+                .as_array()
+                .expect("tests")
+                .iter()
+                .map(|t| match mode {
+                    "keyGen" => key_gen(t),
+                    "keyVer" => key_ver(t),
+                    "SSC" => shared_secret(t, &secret()),
+                    other => panic!("unknown mode {other}"),
+                })
+                .collect();
+            json!({"tgId": group["tgId"], "tests": tests})
+        })
+        .collect();
+    response(prompt, groups)
+}
+
+fn key_gen(t: &Value) -> Value {
+    let secret = secret();
+    json!({
+        "tcId": t["tcId"],
+        "privateKey": hex_string(&secret),
+        "publicKey": hex_string(&x25519::public_key(&secret)),
+    })
+}
+
+fn key_ver(t: &Value) -> Value {
+    let usable = hex(&t["publicKey"]).len() == 32;
+    json!({"tcId": t["tcId"], "testPassed": usable})
+}
+
+/// The shared secret with the server's public key, under `secret`,
+/// whose public half is reported beside it.
+fn shared_secret(t: &Value, secret: &[u8; 32]) -> Value {
+    let server: [u8; 32] = hex(&t["publicServer"]).try_into().expect("key");
+    json!({
+        "tcId": t["tcId"],
+        "publicIut": hex_string(&x25519::public_key(secret)),
+        "z": hex_string(&x25519::x25519(secret, &server)),
+    })
+}
 
 /// Runs the shared-secret suite; a no-op without the vendored
-/// vectors.
+/// vectors. The file gives the implementation's key, so the answer
+/// is checked from its side and then from the server's.
 pub fn run() {
     let file = "XECDH-SSC-RFC7748/internalProjection.json";
     let Some(doc) = load(file, "XECDH", "RFC7748") else {
@@ -25,7 +92,7 @@ pub fn run() {
     };
     let mut cases = 0;
     for group in doc["testGroups"].as_array().expect("testGroups") {
-        if group["curve"] != "Curve25519" {
+        if group["curve"] != CURVE {
             continue;
         }
         for t in group["tests"].as_array().expect("tests") {
@@ -33,12 +100,13 @@ pub fn run() {
             let key = |name: &str| -> [u8; 32] {
                 hex(&t[name]).try_into().expect("key")
             };
-            let z = key("z");
-            let iut = x25519::x25519(&key("privateIut"), &key("publicServer"));
+            let answered = shared_secret(t, &key("privateIut"));
+            if let Err(why) = check(t, &answered) {
+                panic!("{tag} {why}");
+            }
             let server =
                 x25519::x25519(&key("privateServer"), &key("publicIut"));
-            assert_eq!(iut, z, "{tag} IUT side");
-            assert_eq!(server, z, "{tag} server side");
+            assert_eq!(server, key("z"), "{tag} server side");
             cases += 1;
         }
     }
@@ -46,7 +114,8 @@ pub fn run() {
 }
 
 /// Runs the key generation suite; a no-op without the vendored
-/// vectors. Curve448 is not implemented, so those groups are skipped.
+/// vectors. The file's keys cannot be drawn again, so each is
+/// checked by deriving its public half from its secret.
 pub fn run_key_gen() {
     let file = "XECDH-keyGen-RFC7748/internalProjection.json";
     let Some(doc) = load(file, "XECDH", "RFC7748") else {
@@ -55,7 +124,7 @@ pub fn run_key_gen() {
     assert_eq!(doc["mode"], "keyGen");
     let mut cases = 0;
     for group in doc["testGroups"].as_array().expect("testGroups") {
-        if group["curve"] != "Curve25519" {
+        if group["curve"] != CURVE {
             eprintln!(
                 "tgId {}: {} not implemented; skipping",
                 group["tgId"], group["curve"]

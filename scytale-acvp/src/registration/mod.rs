@@ -10,6 +10,7 @@ use crate::Result;
 
 mod aead;
 mod aes;
+mod curves;
 mod kdf;
 mod mac;
 mod sha;
@@ -30,6 +31,7 @@ pub fn capabilities(options: Options) -> Vec<Value> {
     all.extend(aead::capabilities(options));
     all.extend(mac::capabilities(options));
     all.extend(kdf::capabilities(options));
+    all.extend(curves::capabilities(options));
     all
 }
 
