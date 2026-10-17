@@ -1,30 +1,57 @@
 //! The two RSA component suites, which drive the primitives on
 //! their own rather than through a scheme.
 //!
-//! `RSA-SignaturePrimitive` is the one place where NIST supplies
-//! private keys with expected answers, so it is the only external
-//! check that a value this crate *produces* under a private exponent
-//! is the right one. Everything else about RSA signing is verified
-//! rather than generated. It runs at all three widths in both the
-//! plain and the Chinese remainder key forms.
+//! `RSA-SignaturePrimitive` hands over private keys with messages,
+//! and is the one place where NIST supplies expected answers under a
+//! private exponent, so it is the only external check that a value
+//! this crate *produces* with one is the right one. It runs at all
+//! three widths in both the plain and the Chinese remainder key
+//! forms, and a message at or above the modulus has to be refused.
 //!
-//! `RSA-decryptionPrimitive` supplies no private exponent: its
-//! entries are public moduli with a ciphertext, so what it checks is
-//! the public direction and the refusal of a representative at or
-//! above the modulus.
+//! `RSA-decryptionPrimitive` hands over ciphertexts alone. The live
+//! server has the implementation draw a key for each and decrypt,
+//! reporting the key with the result, or that the ciphertext was at
+//! or above the modulus; the server checks the result through the
+//! public exponent. The vendored file supplies public keys with
+//! each entry's answer and no private exponent, so what it checks is
+//! the public direction and the refusal.
 
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
-use super::{hex, load};
+use super::{check, hex, hex_string, load, response};
 use crate::Error;
-use crate::pke::rsa::PublicKey as PkePublicKey;
+use crate::pke::rsa::{PrivateKey as PkePrivateKey, PublicKey as PkePublicKey};
+use crate::random::CtrDrbg;
 use crate::sig::rsa::PrivateKey;
-use serde_json::Value;
+use serde_json::{Value, json};
 
-/// One signature-primitive case. Returns whether the case was one
-/// that had to be refused.
-fn signature_case(group: &Value, t: &Value, tag: &str) -> bool {
+/// The modulus the decryption primitive is defined for.
+const DECRYPTION_BITS: usize = 2048;
+
+/// The response to a signature primitive vector set.
+pub fn answer_signature(prompt: &Value) -> Value {
+    let groups = prompt["testGroups"]
+        .as_array()
+        .expect("testGroups")
+        .iter()
+        .map(|group| {
+            let tests: Vec<Value> = group["tests"]
+                .as_array()
+                .expect("tests")
+                .iter()
+                .map(|t| signature_case(group, t))
+                .collect();
+            json!({"tgId": group["tgId"], "tests": tests})
+        })
+        .collect();
+    response(prompt, groups)
+}
+
+/// One signature-primitive case: the signature, or that the message
+/// could not be signed.
+fn signature_case(group: &Value, t: &Value) -> Value {
+    let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
     let n = hex(&t["n"]);
     let e = hex(&t["e"]);
     let key = match group["keyMode"].as_str().expect("keyMode") {
@@ -46,11 +73,9 @@ fn signature_case(group: &Value, t: &Value, tag: &str) -> bool {
 
     let message = hex(&t["message"]);
     let len = key.modulus_len();
-    match t["testPassed"].as_bool().expect("testPassed") {
-        true => {
-            let mut signature = vec![0u8; len];
-            key.sign_primitive(&message, &mut signature).expect("sign");
-            assert_eq!(signature, hex(&t["signature"]), "{tag}");
+    let mut signature = vec![0u8; len];
+    match key.sign_primitive(&message, &mut signature) {
+        Ok(()) => {
             // The public direction must undo it, which also proves
             // the answer is a representative and not a stray value.
             let mut back = vec![0u8; len];
@@ -58,21 +83,14 @@ fn signature_case(group: &Value, t: &Value, tag: &str) -> bool {
                 .verify_primitive(&signature, &mut back)
                 .expect("verify");
             assert_eq!(back, message, "{tag} round trip");
-            false
+            json!({"tcId": t["tcId"], "signature": hex_string(&signature)})
         }
-        // The failing cases carry no signature at all. What makes
-        // them fail is a representative at or above the modulus,
-        // which the primitive is what refuses.
-        false => {
-            assert!(t["signature"].is_null(), "{tag} has a signature");
-            let mut signature = vec![0u8; len];
-            assert_eq!(
-                key.sign_primitive(&message, &mut signature),
-                Err(Error::MessageTooLong),
-                "{tag}"
-            );
-            true
+        // A representative at or above the modulus, which the
+        // primitive is what refuses.
+        Err(Error::MessageTooLong) => {
+            json!({"tcId": t["tcId"], "testPassed": false})
         }
+        Err(e) => panic!("{tag}: {e}"),
     }
 }
 
@@ -94,9 +112,17 @@ pub fn run_signature_primitive() {
         }
         let is_crt = group["keyMode"] == "crt";
         for t in group["tests"].as_array().expect("tests") {
-            let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-            let out_of_range = signature_case(group, t, &tag);
-            if out_of_range {
+            let got = signature_case(group, t);
+            if let Err(why) = check(t, &got) {
+                panic!("tgId {} {why}", group["tgId"]);
+            }
+            if got["testPassed"] == false {
+                // The failing cases carry no signature at all.
+                assert!(
+                    t["signature"].is_null(),
+                    "{} has a signature",
+                    t["tcId"]
+                );
                 refused += 1;
             } else {
                 signed += 1;
@@ -113,8 +139,58 @@ pub fn run_signature_primitive() {
     assert!(crt >= 39, "only {crt} through the primes");
 }
 
-/// Runs the decryption primitive suite; a no-op without the vendored
-/// vectors.
+/// The response to a decryption primitive vector set: each
+/// ciphertext decrypted under a key drawn for it.
+pub fn answer_decryption(prompt: &Value) -> Value {
+    let mut rng = CtrDrbg::from_system().expect("generator");
+    let groups = prompt["testGroups"]
+        .as_array()
+        .expect("testGroups")
+        .iter()
+        .map(|group| {
+            assert_eq!(group["modulo"], DECRYPTION_BITS, "modulus length");
+            let tests: Vec<Value> = group["tests"]
+                .as_array()
+                .expect("tests")
+                .iter()
+                .map(|t| {
+                    let entries: Vec<Value> = t["resultsArray"]
+                        .as_array()
+                        .expect("resultsArray")
+                        .iter()
+                        .map(|r| decryption_entry(&mut rng, r))
+                        .collect();
+                    json!({"tcId": t["tcId"], "resultsArray": entries})
+                })
+                .collect();
+            json!({"tgId": group["tgId"], "tests": tests})
+        })
+        .collect();
+    response(prompt, groups)
+}
+
+/// One entry: a fresh key, and the ciphertext taken through its
+/// private exponent, or refused for being at or above the modulus.
+fn decryption_entry<R: crate::Random>(rng: &mut R, r: &Value) -> Value {
+    let key = PkePrivateKey::generate(rng, DECRYPTION_BITS).expect("generate");
+    let public = key.public_key();
+    let mut n = vec![0u8; public.modulus_len()];
+    public.modulus_bytes(&mut n).expect("modulus");
+    let e = public.exponent_bytes();
+    let start = e.iter().position(|&b| b != 0).unwrap_or(e.len());
+    let mut entry = json!({"n": hex_string(&n), "e": hex_string(&e[start..])});
+    let ciphertext = hex(&r["cipherText"]);
+    let mut plain = vec![0u8; key.modulus_len()];
+    match key.decrypt_primitive(&ciphertext, &mut plain) {
+        Ok(()) => entry["plainText"] = json!(hex_string(&plain)),
+        Err(Error::DecryptionFailed) => entry["testPassed"] = json!(false),
+        Err(e) => panic!("decrypt: {e}"),
+    }
+    entry
+}
+
+/// Runs the decryption primitive suite over the file's public keys;
+/// a no-op without the vendored vectors.
 pub fn run_decryption_primitive() {
     let file = "RSA-decryptionPrimitive-1.0/internalProjection.json";
     let Some(doc) = load(file, "RSA", "1.0") else {

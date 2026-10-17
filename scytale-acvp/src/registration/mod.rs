@@ -13,6 +13,7 @@ mod aes;
 mod curves;
 mod kdf;
 mod mac;
+mod rsa;
 mod sha;
 mod sha3;
 
@@ -32,11 +33,13 @@ pub fn capabilities(options: Options) -> Vec<Value> {
     all.extend(mac::capabilities(options));
     all.extend(kdf::capabilities(options));
     all.extend(curves::capabilities(options));
+    all.extend(rsa::capabilities(options));
     all
 }
 
 /// The name of a capability object as `--algorithm` takes it: the
-/// algorithm, and `/mode` when it has one.
+/// algorithm, and `/mode` when it has one. Two revisions of one
+/// mode share a name and are registered together.
 pub fn name(capability: &Value) -> String {
     let algorithm = capability["algorithm"].as_str().unwrap_or("?");
     match capability["mode"].as_str() {
@@ -84,9 +87,11 @@ mod tests {
     }
 
     #[test]
-    fn names_are_unique() {
-        let mut names: Vec<String> =
-            capabilities(Options::default()).iter().map(name).collect();
+    fn names_are_unique_within_a_revision() {
+        let mut names: Vec<String> = capabilities(Options::default())
+            .iter()
+            .map(|c| format!("{} {}", name(c), c["revision"]))
+            .collect();
         let count = names.len();
         names.sort();
         names.dedup();

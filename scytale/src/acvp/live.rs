@@ -38,7 +38,8 @@ use super::support::acvp::{
     aes_cbc, aes_ccm, aes_cfb1, aes_cfb8, aes_cfb128, aes_ctr, aes_ecb,
     aes_ff1, aes_ff3_1, aes_gcm, aes_gcm_siv, aes_gmac, aes_kw, aes_kwp,
     aes_ofb, aes_xpn, aes_xts, answer_aes, check, cmac_aes, cshake, ctr_drbg,
-    ecdsa, eddsa, hmac, kda_hkdf, kmac, pbkdf, sha, shake, xecdh,
+    ecdsa, eddsa, hmac, kda_hkdf, kmac, kts_ifc, pbkdf, rsa_primitive, rsa_sig,
+    sha, shake, xecdh,
 };
 use crate::hash::sha3::{Auto, variant};
 use crate::hash::{sha1, sha2, sha3};
@@ -120,6 +121,15 @@ fn answer(prompt: &Value) -> Value {
         ("ECDSA" | "DetECDSA", _, "FIPS186-5") => ecdsa::answer(prompt),
         ("EDDSA", _, "1.0") => eddsa::answer(prompt),
         ("XECDH", _, "RFC7748") => xecdh::answer(prompt),
+        ("RSA", "sigGen" | "sigVer", "FIPS186-5") => rsa_sig::answer(prompt),
+        ("RSA", "sigVer", "FIPS186-4") => rsa_sig::answer(prompt),
+        ("RSA", "signaturePrimitive", "2.0") => {
+            rsa_primitive::answer_signature(prompt)
+        }
+        ("RSA", "decryptionPrimitive", "1.0") => {
+            rsa_primitive::answer_decryption(prompt)
+        }
+        ("KTS-IFC", "", "Sp800-56Br2") => kts_ifc::answer(prompt),
         ("ACVP-AES-ECB", "", "1.0") => answer_aes::<aes_ecb::Suite>(prompt),
         ("ACVP-AES-CBC", "", "1.0") => answer_aes::<aes_cbc::Suite>(prompt),
         ("ACVP-AES-CFB1", "", "1.0") => answer_aes::<aes_cfb1::Suite>(prompt),

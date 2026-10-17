@@ -94,8 +94,14 @@ fn run(args: Args) -> Result<ExitCode> {
     match args.command {
         Command::List => {
             let options = registration::Options { large_data: false };
+            let mut last = String::new();
             for c in registration::capabilities(options) {
-                println!("{}", registration::name(&c));
+                // Two revisions of one mode print once.
+                let name = registration::name(&c);
+                if name != last {
+                    println!("{name}");
+                }
+                last = name;
             }
             Ok(ExitCode::SUCCESS)
         }
