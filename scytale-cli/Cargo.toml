@@ -1,14 +1,13 @@
 [package]
 name = "scytale-cli"
 description = "The scytale cryptography library from a shell: AES, ChaCha20, AEAD, hashes, MACs, KDFs, keys, signatures, key agreement, ML-KEM"
-# scytale's version: the two are released together.
-version.workspace = true
+version = "0.10.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-repository = "https://github.com/MichaelPaddon/scytale"
+repository = "https://github.com/user-serviceable-parts/scytale"
 # A binary has no rustdoc; the manual is the documentation.
-documentation = "https://github.com/MichaelPaddon/scytale/blob/main/scytale-cli/scytale.1.md"
+documentation = "https://github.com/user-serviceable-parts/scytale/blob/main/scytale-cli/scytale.1.md"
 readme = "README.md"
 keywords = ["cryptography", "cli", "encryption", "signature", "post-quantum"]
 categories = ["command-line-utilities", "cryptography"]
@@ -22,15 +21,17 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-# Moves with the workspace version.
-scytale = { path = "../scytale", version = "0.9" }
+# The oldest release with everything this crate uses.
+scytale = { path = "../scytale", version = "0.10.0" }
 zeroize = "1"
-# Only the parser: no colour, no suggestions, no environment lookups,
-# so the binary stays small and its behaviour is what the code says.
+# The parser and its "did you mean" for a mistyped option: no colour
+# and no environment lookups, so the binary stays small and its
+# behaviour is what the code says.
 clap = { version = "4", default-features = false, features = [
     "std",
     "derive",
     "help",
     "usage",
     "error-context",
+    "suggestions",
 ] }

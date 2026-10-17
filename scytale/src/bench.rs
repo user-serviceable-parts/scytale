@@ -1067,13 +1067,15 @@ fn kdf_ops(options: &Options) -> bool {
     ops_section("kdf", jobs, options)
 }
 
-const KEX_JOBS: [&str; 6] = [
+const KEX_JOBS: [&str; 8] = [
     "x25519-keygen",
     "x25519-agree",
     "ecdh-p256-keygen",
     "ecdh-p256-agree",
     "ecdh-p384-keygen",
     "ecdh-p384-agree",
+    "ecdh-p521-keygen",
+    "ecdh-p521-agree",
 ];
 
 /// Key agreement: deriving a public key from a secret, and the
@@ -1084,8 +1086,8 @@ fn kex_ops(options: &Options) -> bool {
     }
     // A generator each, since two rows draw at once and one
     // borrow of each is all a closure can hold.
-    let (Ok(mut build), Ok(mut rng256), Ok(mut rng384)) =
-        (seeded(), seeded(), seeded())
+    let (Ok(mut build), Ok(mut rng256), Ok(mut rng384), Ok(mut rng521)) =
+        (seeded(), seeded(), seeded(), seeded())
     else {
         return false;
     };
@@ -1099,8 +1101,15 @@ fn kex_ops(options: &Options) -> bool {
     ) else {
         return false;
     };
+    let (Ok(p521), Ok(p521_peer)) = (
+        ecdh::p521::PrivateKey::generate(&mut build),
+        ecdh::p521::PrivateKey::generate(&mut build),
+    ) else {
+        return false;
+    };
     let p256_public = p256_peer.public_key();
     let p384_public = p384_peer.public_key();
+    let p521_public = p521_peer.public_key();
     let jobs: Vec<Job<'_>> = vec![
         (
             "x25519-keygen",
@@ -1138,11 +1147,23 @@ fn kex_ops(options: &Options) -> bool {
                 black_box(p384.shared_secret(p384_public));
             }),
         ),
+        (
+            "ecdh-p521-keygen",
+            Box::new(|| {
+                black_box(ecdh::p521::PrivateKey::generate(&mut rng521)).ok();
+            }),
+        ),
+        (
+            "ecdh-p521-agree",
+            Box::new(|| {
+                black_box(p521.shared_secret(p521_public));
+            }),
+        ),
     ];
     ops_section("kex", jobs, options)
 }
 
-const SIG_JOBS: [&str; 11] = [
+const SIG_JOBS: [&str; 14] = [
     "ed25519-keygen",
     "ed25519-sign",
     "ed25519-verify",
@@ -1152,6 +1173,9 @@ const SIG_JOBS: [&str; 11] = [
     "ecdsa-p384-keygen",
     "ecdsa-p384-sign",
     "ecdsa-p384-verify",
+    "ecdsa-p521-keygen",
+    "ecdsa-p521-sign",
+    "ecdsa-p521-verify",
     "rsa-2048-pss-sign",
     "rsa-2048-pss-verify",
 ];
@@ -1163,24 +1187,26 @@ fn sig_ops(options: &Options) -> bool {
     if !any_wanted("sig", &SIG_JOBS, options) {
         return false;
     }
-    let (Ok(mut build), Ok(mut rng256), Ok(mut rng384)) =
-        (seeded(), seeded(), seeded())
+    let (Ok(mut build), Ok(mut rng256), Ok(mut rng384), Ok(mut rng521)) =
+        (seeded(), seeded(), seeded(), seeded())
     else {
         return false;
     };
     let ed_secret = KEY256;
     let ed_key = ed25519::PrivateKey::new(&Key::from(ed_secret));
     let ed_public = ed_key.public_key().bytes();
-    let ed_signature = ed_key.sign(MESSAGE);
-    let (Ok(p256), Ok(p384)) = (
+    let ed_signature = ed_key.sign_deterministic(MESSAGE);
+    let (Ok(p256), Ok(p384), Ok(p521)) = (
         ecdsa::p256::PrivateKey::generate(&mut build),
         ecdsa::p384::PrivateKey::generate(&mut build),
+        ecdsa::p521::PrivateKey::generate(&mut build),
     ) else {
         return false;
     };
-    let (Ok(sig256), Ok(sig384)) = (
-        p256.sign::<sha2::Sha256>(MESSAGE),
-        p384.sign::<sha2::Sha384>(MESSAGE),
+    let (Ok(sig256), Ok(sig384), Ok(sig521)) = (
+        p256.sign_deterministic::<sha2::Sha256>(MESSAGE),
+        p384.sign_deterministic::<sha2::Sha384>(MESSAGE),
+        p521.sign_deterministic::<sha2::Sha512>(MESSAGE),
     ) else {
         return false;
     };
@@ -1202,7 +1228,7 @@ fn sig_ops(options: &Options) -> bool {
         (
             "ed25519-sign",
             Box::new(|| {
-                black_box(ed_key.sign(MESSAGE));
+                black_box(ed_key.sign_deterministic(MESSAGE));
             }),
         ),
         (
@@ -1221,7 +1247,8 @@ fn sig_ops(options: &Options) -> bool {
         (
             "ecdsa-p256-sign",
             Box::new(|| {
-                black_box(p256.sign::<sha2::Sha256>(MESSAGE)).ok();
+                black_box(p256.sign_deterministic::<sha2::Sha256>(MESSAGE))
+                    .ok();
             }),
         ),
         (
@@ -1242,7 +1269,8 @@ fn sig_ops(options: &Options) -> bool {
         (
             "ecdsa-p384-sign",
             Box::new(|| {
-                black_box(p384.sign::<sha2::Sha384>(MESSAGE)).ok();
+                black_box(p384.sign_deterministic::<sha2::Sha384>(MESSAGE))
+                    .ok();
             }),
         ),
         (
@@ -1250,6 +1278,28 @@ fn sig_ops(options: &Options) -> bool {
             Box::new(|| {
                 black_box(
                     p384.public_key().verify::<sha2::Sha384>(MESSAGE, &sig384),
+                )
+                .ok();
+            }),
+        ),
+        (
+            "ecdsa-p521-keygen",
+            Box::new(|| {
+                black_box(ecdsa::p521::PrivateKey::generate(&mut rng521)).ok();
+            }),
+        ),
+        (
+            "ecdsa-p521-sign",
+            Box::new(|| {
+                black_box(p521.sign_deterministic::<sha2::Sha512>(MESSAGE))
+                    .ok();
+            }),
+        ),
+        (
+            "ecdsa-p521-verify",
+            Box::new(|| {
+                black_box(
+                    p521.public_key().verify::<sha2::Sha512>(MESSAGE, &sig521),
                 )
                 .ok();
             }),
