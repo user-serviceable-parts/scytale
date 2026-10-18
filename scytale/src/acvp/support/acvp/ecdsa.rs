@@ -1,14 +1,16 @@
 //! ECDSA keyGen, keyVer, sigGen, sigVer and the deterministic
-//! sigGen, for the P-256 and P-384 groups: the other curves are not
-//! implemented, and the SHAKE groups are skipped since ECDSA over an
-//! XOF is not offered.
+//! sigGen, for the P-256, P-384 and P-521 groups: the P-224 and
+//! binary-curve groups are not implemented, and the SHAKE groups are
+//! skipped since ECDSA over an XOF is not offered.
 //!
-//! Signing here is RFC 6979, so the deterministic suite is the exact
-//! check on it, and the random-nonce suite in the vendored file can
-//! only be verified. The live server asks for more than the file
-//! can: keyGen has the implementation draw its keys, and both
-//! signing modes have it draw a key per group and report the public
-//! half, which the server then verifies the signatures against.
+//! The deterministic suite is the exact check on signing, since RFC
+//! 6979 fixes the nonce. The random-nonce suite in the vendored file
+//! can only be verified; the live run answers it with hedged
+//! signatures, which the server can only verify too. The live server
+//! asks for more than the file can: keyGen has the implementation
+//! draw its keys, and both signing modes have it draw a key per
+//! group and report the public half, which the server then verifies
+//! the signatures against.
 //! Both suites also carry SP 800-106 groups, whose message is
 //! randomized before hashing; that scheme is not offered, so those
 //! groups are skipped and never registered.
@@ -25,7 +27,7 @@ use crate::hash::sha2::{
 };
 use crate::hash::sha3::{Sha3_224, Sha3_256, Sha3_384, Sha3_512};
 use crate::random::CtrDrbg;
-use crate::sig::ecdsa::{p256, p384};
+use crate::sig::ecdsa::{p256, p384, p521};
 use serde_json::{Value, json};
 
 /// One curve's key types, so a driver can be written once.
@@ -39,9 +41,12 @@ pub trait Curve {
     fn secret_of(key: &Self::Private) -> Vec<u8>;
     fn public(sec1: &[u8]) -> Result<Self::Public, Error>;
     fn public_of(key: &Self::Private) -> Vec<u8>;
+    /// RFC 6979 when `deterministic`, hedged with fresh noise
+    /// otherwise.
     fn sign<H: Hash + Clone + BlockType + Default>(
         key: &Self::Private,
         message: &[u8],
+        deterministic: bool,
     ) -> Vec<u8>;
     fn verify<H: Hash + Clone + BlockType + Default>(
         key: &Self::Public,
@@ -78,8 +83,15 @@ macro_rules! curve {
             fn sign<H: Hash + Clone + BlockType + Default>(
                 key: &Self::Private,
                 message: &[u8],
+                deterministic: bool,
             ) -> Vec<u8> {
-                key.sign::<H>(message).expect("sign").to_vec()
+                let sig = if deterministic {
+                    key.sign_deterministic::<H>(message)
+                } else {
+                    let mut rng = CtrDrbg::from_system().expect("generator");
+                    key.sign::<H, _>(&mut rng, message)
+                };
+                sig.expect("sign").to_vec()
             }
             fn verify<H: Hash + Clone + BlockType + Default>(
                 key: &Self::Public,
@@ -97,6 +109,7 @@ macro_rules! curve {
 
 curve!(P256, p256, "P-256", 32);
 curve!(P384, p384, "P-384", 48);
+curve!(P521, p521, "P-521", 66);
 
 /// A big-endian value left-padded to `width`, or `None` when it is
 /// wider, which a keyVer case may deliberately be.
@@ -162,6 +175,7 @@ macro_rules! with_curve {
         match $curve {
             Some(P256::NAME) => Some($f::<P256>($($arg),*)),
             Some(P384::NAME) => Some($f::<P384>($($arg),*)),
+            Some(P521::NAME) => Some($f::<P521>($($arg),*)),
             _ => None,
         }
     };
@@ -181,7 +195,9 @@ pub fn answer(prompt: &Value) -> Value {
             let answered = match mode {
                 "keyGen" => with_curve!(curve, key_gen_group(group)),
                 "keyVer" => with_curve!(curve, key_ver_group(group)),
-                "sigGen" => with_curve!(curve, sig_gen_group(group)),
+                "sigGen" => {
+                    with_curve!(curve, sig_gen_group(group, deterministic))
+                }
                 "sigVer" => with_curve!(curve, sig_ver_group(group)),
                 other => panic!("unknown mode {other}"),
             };
@@ -239,13 +255,16 @@ fn key_ver_group<C: Curve>(group: &Value) -> Option<Value> {
 /// Draws the group's key, signs every message with it, and reports
 /// the public half beside the signatures. `None` for a hash or a
 /// conformance the scheme does not take here.
-fn sig_gen_group<C: Curve>(group: &Value) -> Option<Value> {
+fn sig_gen_group<C: Curve>(
+    group: &Value,
+    deterministic: bool,
+) -> Option<Value> {
     if group["conformance"] == "SP800-106" || group["componentTest"] == true {
         return None;
     }
     let hash = group["hashAlg"].as_str().expect("hashAlg");
     let key = C::generate();
-    let tests = with_hash!(hash, sign_tests::<C>(&key, group))?;
+    let tests = with_hash!(hash, sign_tests::<C>(&key, group, deterministic))?;
     let (qx, qy) = coordinates(&C::public_of(&key), C::WIDTH);
     // The server will verify these against the coordinates reported;
     // do the same here, so a slip in the encoding is caught before
@@ -301,7 +320,7 @@ pub fn run_key_gen() {
             cases += 1;
         }
     }
-    assert!(cases >= 10, "only {cases} keyGen cases");
+    assert!(cases >= 18, "only {cases} keyGen cases");
 }
 
 fn key_gen_check<C: Curve>(t: &Value, tag: &str) {
@@ -328,7 +347,7 @@ pub fn run_key_ver() {
         cases += c;
         rejections += r;
     }
-    assert!(cases >= 6, "only {cases} keyVer cases");
+    assert!(cases >= 9, "only {cases} keyVer cases");
     assert!(rejections >= 4, "only {rejections} rejections");
 }
 
@@ -355,7 +374,7 @@ pub fn run_sig_ver() {
         cases += c;
         rejections += r;
     }
-    assert!(cases >= 60, "only {cases} sigVer cases");
+    assert!(cases >= 105, "only {cases} sigVer cases");
     assert!(rejections >= 40, "only {rejections} rejections");
 }
 
@@ -400,13 +419,14 @@ fn verify_tests<C: Curve, H: Hash + Clone + BlockType + Default>(
 fn sign_tests<C: Curve, H: Hash + Clone + BlockType + Default>(
     key: &C::Private,
     group: &Value,
+    deterministic: bool,
 ) -> Vec<Value> {
     group["tests"]
         .as_array()
         .expect("tests")
         .iter()
         .map(|t| {
-            let sig = C::sign::<H>(key, &hex(&t["message"]));
+            let sig = C::sign::<H>(key, &hex(&t["message"]), deterministic);
             let (r, s) = sig.split_at(C::WIDTH);
             json!({"tcId": t["tcId"], "r": hex_string(r), "s": hex_string(s)})
         })
@@ -430,7 +450,7 @@ pub fn run_sig_gen() {
         let ran = with_curve!(curve, sig_gen_verified(group, hash));
         cases += ran.flatten().unwrap_or(0);
     }
-    assert!(cases >= 200, "only {cases} sigGen cases");
+    assert!(cases >= 300, "only {cases} sigGen cases");
 }
 
 /// One random-nonce group: the key from `d` must give the group's
@@ -472,7 +492,7 @@ pub fn run_det_sig_gen() {
         let ran = with_curve!(curve, det_sig_gen_exact(group, hash));
         cases += ran.flatten().unwrap_or(0);
     }
-    assert!(cases >= 220, "only {cases} deterministic sigGen cases");
+    assert!(cases >= 330, "only {cases} deterministic sigGen cases");
 }
 
 /// One deterministic group under the file's key: the signatures
@@ -486,6 +506,6 @@ fn det_sig_gen_exact<C: Curve>(group: &Value, hash: &str) -> Option<usize> {
         "tgId {}",
         group["tgId"]
     );
-    let answered = with_hash!(hash, sign_tests::<C>(&key, group))?;
+    let answered = with_hash!(hash, sign_tests::<C>(&key, group, true))?;
     Some(hold(group, &Value::Array(answered)).0)
 }

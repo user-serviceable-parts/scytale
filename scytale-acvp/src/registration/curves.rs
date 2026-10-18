@@ -3,17 +3,18 @@
 //! draft-celi-acvp-eddsa at 1.0, and XECDH from
 //! draft-vandersmissen-acvp-xecdh at RFC7748.
 //!
-//! ECDSA is offered over P-256 and P-384 with the SHA-2 and SHA-3
-//! hashes, not the SHAKEs; its keys are drawn by rejection sampling,
-//! which FIPS 186-5 calls testing candidates. EdDSA is Ed25519 in
-//! its plain and pre-hashed forms, with a context of any length.
-//! XECDH is Curve25519. The other curves are not implemented.
+//! ECDSA is offered over P-256, P-384 and P-521 with the SHA-2 and
+//! SHA-3 hashes, not the SHAKEs; its keys are drawn by rejection
+//! sampling, which FIPS 186-5 calls testing candidates. EdDSA is
+//! Ed25519 in its plain and pre-hashed forms, with a context of any
+//! length. XECDH is Curve25519. The other curves are not
+//! implemented.
 
 use serde_json::{Value, json};
 
 use super::Options;
 
-const CURVES: &[&str] = &["P-256", "P-384"];
+const CURVES: &[&str] = &["P-256", "P-384", "P-521"];
 
 const HASHES: &[&str] = &[
     "SHA2-224",

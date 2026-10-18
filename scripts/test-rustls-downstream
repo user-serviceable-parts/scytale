@@ -1,0 +1,77 @@
+#!/bin/sh
+# Runs rustls's own tests with rustls-scytale as the provider: the
+# API suite, twelve thousand lines of it; the HPKE test, against the
+# RFC 9180 vectors and against aws-lc-rs's HPKE in both directions;
+# and BoGo, BoringSSL's TLS test runner, which rustls gates its own
+# providers on and which is the check against an implementation
+# other than rustls, Encrypted Client Hello included. rustls's
+# tests are not in the published crate, so rustls is cloned at the
+# commit the release was cut from, into target/rustls-downstream,
+# refreshed each run.
+#
+# Both know two providers by name. The patch beside this script
+# teaches them a third: for the API suite, a provider_scytale!
+# macro and a module block that runs every test file under it, and,
+# where a test encodes what a provider offers, that rustls-scytale
+# offers what aws-lc-rs does there (the X25519MLKEM768 hybrid first,
+# and P-521 signatures); for BoGo, a provider the shim can select
+# and the list of tests it cannot pass and why. A patch that no
+# longer applies stops the run.
+#
+# BoGo needs Go, a C compiler and cpp: the shim links all three
+# providers, though it runs only the one selected.
+#
+# The patch also gives rustls's benchmark tool a scytale provider,
+# which this script builds nothing of and runs nothing with. To time
+# the provider with rustls's own harness, after a run:
+#
+#   cd target/rustls-downstream/rustls
+#   cargo run --release -p rustls-bench --no-default-features \
+#       --features scytale -- bulk
+#
+# and the same with --features ring or aws-lc-rs to compare.
+#
+# Usage: scripts/test-rustls-downstream
+
+set -eu
+
+# rustls 0.24.0-dev.2.
+RUSTLS_COMMIT=8a1f33461e8230f5adea6bb44cd8c6885ea26581
+
+cd "$(dirname "$0")/.."
+repo=$(pwd)
+work=target/rustls-downstream
+rm -rf "$work"
+mkdir -p "$work/rustls"
+cd "$work/rustls"
+
+git init -q
+git fetch -q --depth 1 https://github.com/rustls/rustls.git "$RUSTLS_COMMIT"
+git checkout -q FETCH_HEAD
+
+patch="$repo/scripts/rustls-downstream/rustls-test.patch"
+git apply --check "$patch"
+git apply "$patch"
+
+# Only this provider: with ring or aws-lc-rs in the build, a test
+# could pass on theirs and prove nothing about this one.
+features=scytale,brotli,zlib,tracing
+if cargo tree -p rustls-test --no-default-features --features "$features" \
+        -e normal,dev --prefix none |
+        grep -E '^(ring|aws-lc-rs|aws-lc-sys|rustls-ring|rustls-aws-lc-rs) '
+then
+    echo "another provider is in the build" >&2
+    exit 1
+fi
+
+cargo test -p rustls-test --no-default-features --features "$features"
+
+# aws-lc-rs is in this one on purpose: it is the other side.
+cargo test -p rustls-provider-test
+
+command -v go > /dev/null || {
+    echo "BoGo needs Go on the path" >&2
+    exit 1
+}
+cd bogo
+BOGO_SHIM_PROVIDER=scytale ./runme

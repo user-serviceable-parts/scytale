@@ -1,15 +1,13 @@
 [package]
 name = "scytale"
-description = "Correct, fast, portable no_std cryptography: AES, ChaCha20, SHA-2, SHA-3, HMAC, CMAC, KMAC, Poly1305, HKDF, PBKDF2, X25519, ECDH, RSA, ECDSA, Ed25519, ML-KEM, ML-DSA, SLH-DSA"
-version.workspace = true
+description = "Correct, fast, portable no_std cryptography: AES, ChaCha20, SHA-2, SHA-3, HMAC, CMAC, KMAC, Poly1305, HKDF, PBKDF2, TLS 1.2 PRF, X25519, ECDH, HPKE, RSA, ECDSA, Ed25519, ML-KEM, ML-DSA, SLH-DSA"
+version = "0.10.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-repository = "https://github.com/MichaelPaddon/scytale"
+repository = "https://github.com/user-serviceable-parts/scytale"
 documentation = "https://docs.rs/scytale"
-# The README lives at the workspace root; cargo only looks in the
-# package directory on its own.
-readme = "../README.md"
+readme = "README.md"
 keywords = ["encryption", "hash", "mac", "signature", "post-quantum"]
 categories = [
     "cryptography",

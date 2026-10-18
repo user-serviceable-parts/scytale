@@ -1,13 +1,17 @@
-//! The NIST prime curves, P-256 and P-384: the arithmetic under both
-//! ECDH and ECDSA, and the key handling the two schemes share.
+//! The NIST prime curves, P-256, P-384 and P-521: the arithmetic
+//! under both ECDH and ECDSA, and the key handling the two schemes
+//! share.
 //!
 //! Each curve is `y^2 = x^3 - 3x + b` over a prime field, with a
 //! base point of prime order `n`, so every point but the identity
 //! generates the whole group and there is no cofactor to clear. The
 //! field and the scalar ring both run on [`Montgomery`], which is
 //! generic over the width; nothing here is specialised to a curve
-//! beyond its constants and the table of multiples of its base
-//! point in [`base`], so a third curve is those two things away.
+//! beyond its constants, its width in bits, and the table of
+//! multiples of its base point in [`base`]. P-521's width is not a
+//! whole number of limbs or bytes, which is why the bits are a
+//! constant of their own: key generation and the RFC 6979 nonce
+//! sample exactly that many, and encodings are 66 bytes wide.
 //!
 //! # Constant time
 //!
@@ -68,9 +72,13 @@ use crate::hash::Hash;
 use crate::mac::Mac;
 use crate::mac::hmac::Hmac;
 
-/// A curve's constants, each as a big-endian hex string of the
-/// curve's width, and the OID that names it in a certificate.
+/// A curve's constants, each as a big-endian hex string of `16 L`
+/// digits, and the OID that names it in a certificate.
 pub(crate) struct Curve<const L: usize> {
+    /// The bits in `p` and `n`, which is the width of a coordinate
+    /// or scalar. The limbs hold a multiple of 64 and the bytes a
+    /// multiple of 8; P-521 fills neither.
+    bits: usize,
     p: Uint<L>,
     b: Uint<L>,
     n: Uint<L>,
@@ -140,7 +148,7 @@ impl<const L: usize> Affine<L> {
 
 /// Positions a signed form of the widest scalar here needs: a digit
 /// for every bit, and one past the top for the carry.
-const DIGITS: usize = 64 * 6 + 1;
+const DIGITS: usize = 64 * 9 + 1;
 
 /// The non-adjacent form of `k`, five bits wide: a signed odd digit
 /// at about one position in six and zero elsewhere, least significant
@@ -269,9 +277,18 @@ const fn from_hex<const L: usize>(hex: &str) -> Uint<L> {
     Uint(limbs)
 }
 
-/// The width of a coordinate or scalar in bytes.
-pub(crate) const fn width<const L: usize>() -> usize {
-    8 * L
+impl<const L: usize> Curve<L> {
+    /// The width of a coordinate or scalar in bytes.
+    pub(crate) const fn width(&self) -> usize {
+        self.bits.div_ceil(8)
+    }
+
+    /// The bits of the top byte of a scalar that are in use, as a
+    /// mask: all of them unless the width is not a whole number of
+    /// bytes.
+    const fn top_mask(&self) -> u8 {
+        0xff >> (8 * self.width() - self.bits)
+    }
 }
 
 /// The P-256 field prime.
@@ -286,6 +303,7 @@ pub(crate) const P256_N: Uint<4> = from_hex(
 
 /// P-256, secp256r1, prime256v1: FIPS 186-5 and SEC 2.
 pub(crate) const P256: Curve<4> = Curve {
+    bits: 256,
     p: P256_P,
     b: from_hex(
         "5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b",
@@ -319,6 +337,7 @@ pub(crate) const P384_N: Uint<6> = from_hex(
 
 /// P-384, secp384r1.
 pub(crate) const P384: Curve<6> = Curve {
+    bits: 384,
     p: P384_P,
     b: from_hex(
         "b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875a\
@@ -340,6 +359,49 @@ pub(crate) const P384: Curve<6> = Curve {
     order: Montgomery::known(P384_N),
     // 1.3.132.0.34
     oid: &[0x2b, 0x81, 0x04, 0x00, 0x22],
+};
+
+/// The P-521 field prime, `2^521 - 1`.
+const P521_P: Uint<9> = from_hex(
+    "00000000000001ffffffffffffffffffffffffffffffffffffffffffffffffff\
+     ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\
+     ffffffffffffffff",
+);
+
+/// The P-521 group order.
+pub(crate) const P521_N: Uint<9> = from_hex(
+    "00000000000001ffffffffffffffffffffffffffffffffffffffffffffffffff\
+     fffffffffffffffa51868783bf2f966b7fcc0148f709a5d03bb5c9b8899c47ae\
+     bb6fb71e91386409",
+);
+
+/// P-521, secp521r1.
+pub(crate) const P521: Curve<9> = Curve {
+    bits: 521,
+    p: P521_P,
+    b: from_hex(
+        "0000000000000051953eb9618e1c9a1f929a21a0b68540eea2da725b99b315f3\
+         b8b489918ef109e156193951ec7e937b1652c0bd3bb1bf073573df883d2c34f1\
+         ef451fd46b503f00",
+    ),
+    n: P521_N,
+    gx: from_hex(
+        "00000000000000c6858e06b70404e9cd9e3ecb662395b4429c648139053fb521\
+         f828af606b4d3dbaa14b5e77efe75928fe1dc127a2ffa8de3348b3c1856a429b\
+         f97e7e31c2e5bd66",
+    ),
+    gy: from_hex(
+        "000000000000011839296a789a3bc0045c8a5fb42c7d1bd998f54449579b4468\
+         17afbd17273e662c97ee72995ef42640c550b9013fad0761353c7086a272c240\
+         88be94769fd16650",
+    ),
+    base: &base::P521_BASE,
+    // Combs only, as for P-384.
+    windows: &[],
+    field: Montgomery::known(P521_P),
+    order: Montgomery::known(P521_N),
+    // 1.3.132.0.35
+    oid: &[0x2b, 0x81, 0x04, 0x00, 0x23],
 };
 
 /// The contents of the OID `id-ecPublicKey`, 1.2.840.10045.2.1,
@@ -846,6 +908,14 @@ impl<'a, const L: usize> Engine<'a, L> {
     /// divisible by `2^(W w)` while `n` is odd and `|m|` is at most
     /// two for scalars below the order.
     ///
+    /// That last step says nothing at the lowest window, where
+    /// `2^(W w)` is one: there the collision is a scalar
+    /// `k = n + 2 d[0]` with `d[0]` negative, which exists when the
+    /// order's low bits recode to the right digit. P-256's do not,
+    /// for either window width here, and P-384's do not; P-521's do,
+    /// at `k = n - 18`. So every caller hands the lowest window to
+    /// the addition that takes the double alongside.
+    ///
     /// [`jacobian_add`]: Self::jacobian_add
     fn jacobian_add_affine(
         &self,
@@ -1046,11 +1116,15 @@ impl<'a, const L: usize> Engine<'a, L> {
                 z: chosen.z,
             };
             chosen.cmov(&negated, sign);
-            // Nothing is handed to the case of two equal points,
-            // which cannot arise here: the argument is the one
-            // `jacobian_add_affine` sets out, and the accumulator is
-            // the higher windows of the same scalar.
-            acc = self.jacobian_add(&acc, &chosen, &self.jacobian_identity());
+            // Two equal points cannot arise above the lowest window,
+            // by the argument `jacobian_add_affine` sets out; at the
+            // lowest they can, and the double is what that sum is.
+            let twice = if window == 0 {
+                self.jacobian_double(&chosen)
+            } else {
+                self.jacobian_identity()
+            };
+            acc = self.jacobian_add(&acc, &chosen, &twice);
         }
         let mut out = self.projective(&acc);
         // The table cannot hold the identity, so a point that is one
@@ -1320,7 +1394,19 @@ impl<'a, const L: usize> Engine<'a, L> {
                 y: self.sub(&Uint::ZERO, &chosen.y),
             };
             chosen.cmov(&negated, sign);
-            let sum = self.jacobian_add_affine(&acc, &chosen);
+            // The lowest window is the one where the accumulator can
+            // equal the entry, as `jacobian_add_affine` explains.
+            let sum = if window == 0 {
+                let lifted = Jacobian {
+                    x: chosen.x,
+                    y: chosen.y,
+                    z: self.one,
+                };
+                let twice = self.jacobian_double(&lifted);
+                self.jacobian_add(&acc, &lifted, &twice)
+            } else {
+                self.jacobian_add_affine(&acc, &chosen)
+            };
             // A digit of zero names no entry and adds nothing.
             acc.cmov(&sum, (digit | digit.wrapping_neg()) >> 63);
         }
@@ -1357,8 +1443,10 @@ impl<'a, const L: usize> Engine<'a, L> {
         self.order.exp_public(a, &exponent)
     }
 
-    /// A value below `2^(64 L)` reduced modulo `n`, which takes one
-    /// conditional subtraction because `n` is above half the width.
+    /// A value below `2^bits` reduced modulo `n`, which takes one
+    /// conditional subtraction because `n` is above `2^(bits - 1)`
+    /// on every curve here. Everything reduced is a coordinate,
+    /// below `p`, or a digest cut to the curve's bits.
     fn reduce_scalar(&self, a: &Uint<L>) -> Uint<L> {
         let (reduced, borrow) = a.sub_borrow(&self.curve.n);
         let mut out = *a;
@@ -1372,12 +1460,14 @@ impl<'a, const L: usize> Engine<'a, L> {
         !a.is_zero() && a.less_than(&self.curve.n) == 1
     }
 
-    /// The leftmost `8 L` bytes of a digest as a scalar, as FIPS
-    /// 186-5 section 6.4.1 and RFC 6979's `bits2int` both define;
-    /// a shorter digest is the whole of it.
+    /// The leftmost `bits` of a digest as a scalar, as FIPS 186-5
+    /// section 6.4.1 and RFC 6979's `bits2int` both define; a
+    /// shorter digest is the whole of it.
     fn hash_to_scalar(&self, digest: &[u8]) -> Uint<L> {
-        let take = digest.len().min(width::<L>());
-        self.reduce_scalar(&Uint::from_be_bytes(&digest[..take]))
+        let take = digest.len().min(self.curve.width());
+        let value = Uint::from_be_bytes(&digest[..take]);
+        let excess = (8 * take).saturating_sub(self.curve.bits);
+        self.reduce_scalar(&value.shr(excess))
     }
 }
 
@@ -1401,14 +1491,14 @@ pub(crate) struct Public<const L: usize> {
 }
 
 /// The tries key generation makes before giving up, each failing
-/// with probability below 2^-32 on either curve.
+/// with probability below 2^-32 on every curve.
 const GENERATE_TRIES: usize = 100;
 
 impl<const L: usize> Secret<L> {
     /// A scalar from its big-endian bytes, exactly the curve's
     /// width, refused unless in `[1, n - 1]`.
     pub(crate) fn try_new(e: &Engine<L>, bytes: &[u8]) -> Result<Self, Error> {
-        if bytes.len() != width::<L>() {
+        if bytes.len() != e.curve.width() {
             return Err(Error::InvalidKeyLength(bytes.len()));
         }
         let d = Uint::from_be_bytes(bytes);
@@ -1418,22 +1508,26 @@ impl<const L: usize> Secret<L> {
         Ok(Secret { d })
     }
 
-    /// A fresh scalar, by rejection: random bytes of the width,
-    /// kept when in range, which nearly always they are.
+    /// A fresh scalar, by rejection: random bytes of the width, the
+    /// bits past the curve's cleared, kept when in range, which
+    /// nearly always they are.
     pub(crate) fn generate<R: Random>(
         e: &Engine<L>,
         rng: &mut R,
     ) -> Result<Self, Error> {
         let mut buf = [[0u8; 8]; L];
+        let width = e.curve.width();
         for _ in 0..GENERATE_TRIES {
             // Wiped on every way out, not only the accepted one: a
             // refused candidate and a source that failed part way
             // through both leave bytes the generator has committed.
-            if let Err(e) = rng.fill(buf.as_flattened_mut()) {
+            let bytes = &mut buf.as_flattened_mut()[..width];
+            if let Err(e) = rng.fill(bytes) {
                 buf.zeroize();
                 return Err(e);
             }
-            let d = Uint::from_be_bytes(buf.as_flattened());
+            bytes[0] &= e.curve.top_mask();
+            let d = Uint::from_be_bytes(bytes);
             if e.scalar_in_range(&d) {
                 buf.zeroize();
                 return Ok(Secret { d });
@@ -1445,7 +1539,6 @@ impl<const L: usize> Secret<L> {
 
     /// The scalar, big-endian, into `out` of the curve's width.
     pub(crate) fn bytes(&self, out: &mut [u8]) {
-        debug_assert_eq!(out.len(), width::<L>());
         self.d.to_be_bytes(out);
     }
 
@@ -1455,7 +1548,7 @@ impl<const L: usize> Secret<L> {
         // A scalar in range times a generator of prime order is
         // never the identity, which is the only point `to_affine`
         // has no affine form for. Falling back to a fixed pair
-        // would hand out (0, 0) -- not a point on either curve --
+        // would hand out (0, 0) -- not a point on any curve here --
         // as a public key, and nothing downstream would object.
         let Some((x, y)) = e.to_affine(&p) else {
             unreachable!("the public point is the identity");
@@ -1490,23 +1583,29 @@ impl<const L: usize> Secret<L> {
     }
 
     /// An ECDSA signature over `message`, `r || s` into `out` of
-    /// twice the curve's width, with the nonce from RFC 6979.
+    /// twice the curve's width, with the nonce from RFC 6979; hedged,
+    /// as draft-irtf-cfrg-det-sigs-with-noise-05 section 4 has it,
+    /// when `noise` holds the curve's width of random bytes.
     pub(crate) fn sign<H: Hash + Clone + BlockType + Default>(
         &self,
         e: &Engine<L>,
         message: &[u8],
+        noise: Option<&[u8]>,
         out: &mut [u8],
     ) -> Result<(), Error> {
-        debug_assert_eq!(out.len(), 2 * width::<L>());
+        let width = e.curve.width();
+        debug_assert_eq!(out.len(), 2 * width);
         let z = e.hash_to_scalar(H::digest(message).as_ref());
 
+        // `int2octets(x)` and `bits2octets(h1)`, each of the width.
         let mut d_bytes = [[0u8; 8]; L];
-        self.d.to_be_bytes(d_bytes.as_flattened_mut());
+        self.d.to_be_bytes(&mut d_bytes.as_flattened_mut()[..width]);
         let mut z_bytes = [[0u8; 8]; L];
-        z.to_be_bytes(z_bytes.as_flattened_mut());
+        z.to_be_bytes(&mut z_bytes.as_flattened_mut()[..width]);
         let mut nonce = Nonce::<H>::try_new(
-            d_bytes.as_flattened(),
-            z_bytes.as_flattened(),
+            &d_bytes.as_flattened()[..width],
+            &z_bytes.as_flattened()[..width],
+            noise,
         )?;
         d_bytes.zeroize();
 
@@ -1528,7 +1627,7 @@ impl<const L: usize> Secret<L> {
             if r.is_zero() || s.is_zero() {
                 continue;
             }
-            let (r_out, s_out) = out.split_at_mut(width::<L>());
+            let (r_out, s_out) = out.split_at_mut(width);
             r.to_be_bytes(r_out);
             s.to_be_bytes(s_out);
             return Ok(());
@@ -1564,7 +1663,7 @@ impl<const L: usize> Public<L> {
         e: &Engine<L>,
         sec1: &[u8],
     ) -> Result<Self, Error> {
-        let width = width::<L>();
+        let width = e.curve.width();
         match sec1 {
             [0x04, rest @ ..] if rest.len() == 2 * width => {
                 let (x, y) = rest.split_at(width);
@@ -1596,8 +1695,8 @@ impl<const L: usize> Public<L> {
 
     /// The uncompressed SEC 1 encoding, `04 || x || y`, into `out`
     /// of one more than twice the curve's width.
-    pub(crate) fn sec1(&self, out: &mut [u8]) {
-        let width = width::<L>();
+    pub(crate) fn sec1(&self, e: &Engine<L>, out: &mut [u8]) {
+        let width = e.curve.width();
         debug_assert_eq!(out.len(), 1 + 2 * width);
         out[0] = 0x04;
         self.x.to_be_bytes(&mut out[1..1 + width]);
@@ -1611,7 +1710,7 @@ impl<const L: usize> Public<L> {
         message: &[u8],
         signature: &[u8],
     ) -> Result<(), Error> {
-        let width = width::<L>();
+        let width = e.curve.width();
         if signature.len() != 2 * width {
             return Err(Error::InvalidSignature);
         }
@@ -1635,19 +1734,45 @@ impl<const L: usize> Public<L> {
     }
 }
 
+/// Feeds `n` zero bytes to `mac`, whatever the hash's block size.
+fn zero_pad<H: Hash + Clone + BlockType + Default>(
+    mac: &mut Hmac<H>,
+    mut n: usize,
+) {
+    let zeros = [0u8; 64];
+    while n > 0 {
+        let take = n.min(zeros.len());
+        mac.update(&zeros[..take]);
+        n -= take;
+    }
+}
+
 /// The nonce generator of RFC 6979 section 3.2: HMAC-DRBG over the
 /// signature's hash, seeded with the private key and the message's
 /// digest, so the same key and message always give the same nonce
 /// and nothing else can.
+///
+/// Hedged, random bytes `Z` go in as well, laid out as
+/// draft-irtf-cfrg-det-sigs-with-noise-05 section 4 lays them out:
+/// `V || tag || Z`, then the private key from the start of a fresh
+/// hash block, then the digest from the start of another. A fault
+/// that would make two deterministic signatures share a nonce
+/// computation no longer can, since `Z` differs between them; and if
+/// the random source is weak, the nonce is still at least as good as
+/// RFC 6979's, because the key and the digest are still in it.
 struct Nonce<H: Hash + Clone + BlockType + Default> {
     k: H::Output,
     v: H::Output,
 }
 
 impl<H: Hash + Clone + BlockType + Default> Nonce<H> {
-    /// Steps b through g, given `int2octets(x)` and
-    /// `bits2octets(h1)`.
-    fn try_new(x: &[u8], h: &[u8]) -> Result<Self, Error> {
+    /// Steps b through g, given `int2octets(x)`, `bits2octets(h1)`
+    /// and, hedged, `Z`.
+    fn try_new(
+        x: &[u8],
+        h: &[u8],
+        noise: Option<&[u8]>,
+    ) -> Result<Self, Error> {
         // V starts as 0x01 repeated and K as 0x00 repeated. A digest
         // is the only `H::Output` generic code can make; its value
         // is gone before either is used.
@@ -1656,41 +1781,64 @@ impl<H: Hash + Clone + BlockType + Default> Nonce<H> {
         let mut k = v;
         k.as_mut().fill(0x00);
         let mut nonce = Nonce { k, v };
-        nonce.seed(0x00, x, h)?;
-        nonce.seed(0x01, x, h)?;
+        nonce.seed(0x00, x, h, noise)?;
+        nonce.seed(0x01, x, h, noise)?;
         Ok(nonce)
     }
 
-    /// `K = HMAC_K(V || tag || x || h)`, then `V = HMAC_K(V)`.
-    fn seed(&mut self, tag: u8, x: &[u8], h: &[u8]) -> Result<(), Error> {
+    /// `K = HMAC_K(V || tag || x || h)`, or hedged
+    /// `K = HMAC_K(V || tag || Z || 0... || x || 0... || h)`, then
+    /// `V = HMAC_K(V)`.
+    fn seed(
+        &mut self,
+        tag: u8,
+        x: &[u8],
+        h: &[u8],
+        noise: Option<&[u8]>,
+    ) -> Result<(), Error> {
         let mut mac = Hmac::<H>::new(self.k.as_ref());
         mac.update(self.v.as_ref());
         mac.update(&[tag]);
-        mac.update(x);
+        if let Some(z) = noise {
+            // The zeros fill each part out to the hash's block, so
+            // that the key is hashed in blocks of its own.
+            let block = size_of::<H::Block>();
+            let head = size_of::<H::Output>() + 1 + z.len();
+            mac.update(z);
+            zero_pad(&mut mac, (block - head % block) % block);
+            mac.update(x);
+            zero_pad(&mut mac, (block - x.len() % block) % block);
+        } else {
+            mac.update(x);
+        }
         mac.update(h);
         self.k = mac.finalize();
         self.v = Hmac::<H>::mac(self.k.as_ref(), self.v.as_ref());
         Ok(())
     }
 
-    /// The next candidate in `[1, n - 1]`, step h; a candidate out
-    /// of range is skipped as the RFC says, and a previous one that
-    /// the signature rejected has been skipped the same way.
+    /// The next candidate in `[1, n - 1]`, step h: the width's bytes
+    /// of output, cut to the curve's bits as `bits2int` says. A
+    /// candidate out of range is skipped as the RFC says, and a
+    /// previous one that the signature rejected has been skipped
+    /// the same way.
     fn next<const L: usize>(
         &mut self,
         e: &Engine<L>,
     ) -> Result<Uint<L>, Error> {
+        let width = e.curve.width();
         loop {
             let mut t = [[0u8; 8]; L];
             let mut filled = 0;
-            while filled < width::<L>() {
+            while filled < width {
                 self.v = Hmac::<H>::mac(self.k.as_ref(), self.v.as_ref());
-                let out = &mut t.as_flattened_mut()[filled..];
+                let out = &mut t.as_flattened_mut()[filled..width];
                 let take = out.len().min(size_of::<H::Output>());
                 out[..take].copy_from_slice(&self.v.as_ref()[..take]);
                 filled += take;
             }
-            let k = Uint::from_be_bytes(t.as_flattened());
+            let k = Uint::from_be_bytes(&t.as_flattened()[..width])
+                .shr(8 * width - e.curve.bits);
             t.zeroize();
             self.seed_again()?;
             if e.scalar_in_range(&k) {
@@ -1702,7 +1850,8 @@ impl<H: Hash + Clone + BlockType + Default> Nonce<H> {
     /// `K = HMAC_K(V || 0x00)`, `V = HMAC_K(V)`: what follows every
     /// candidate, taken or not.
     fn seed_again(&mut self) -> Result<(), Error> {
-        self.seed(0x00, &[], &[])
+        // Step h.3 has no provided data, hedged or not.
+        self.seed(0x00, &[], &[], None)
     }
 }
 
@@ -1760,8 +1909,8 @@ impl<const L: usize> Public<L> {
         out: &mut [u8],
     ) -> Result<usize, Error> {
         let mut sec1 = [0u8; SCRATCH];
-        let sec1 = &mut sec1[..1 + 2 * width::<L>()];
-        self.sec1(sec1);
+        let sec1 = &mut sec1[..1 + 2 * e.curve.width()];
+        self.sec1(e, sec1);
         der::write_spki_with(
             out,
             |w| algorithm_identifier(e.curve, w),
@@ -1885,18 +2034,20 @@ impl<const L: usize> Secret<L> {
         public: &Public<L>,
         out: &mut [u8],
     ) -> Result<usize, Error> {
+        let width = e.curve.width();
         let mut d = [[0u8; 8]; L];
-        self.d.to_be_bytes(d.as_flattened_mut());
+        let d_bytes = &mut d.as_flattened_mut()[..width];
+        self.d.to_be_bytes(d_bytes);
         let mut sec1 = [0u8; SCRATCH];
-        let sec1 = &mut sec1[..1 + 2 * width::<L>()];
-        public.sec1(sec1);
+        let sec1 = &mut sec1[..1 + 2 * width];
+        public.sec1(e, sec1);
         let result = der::write_pkcs8_with(
             out,
             |w| algorithm_identifier(e.curve, w),
             |w| {
                 w.sequence(|w| {
                     w.integer(&[1]);
-                    w.octet_string(d.as_flattened());
+                    w.octet_string(&d.as_flattened()[..width]);
                     w.context(1, |w| w.bit_string(sec1));
                 })
             },
@@ -1990,11 +2141,11 @@ macro_rules! key_types {
         use crate::math::ec::{Engine, Public, Secret};
 
         /// The length of a private key.
-        pub const KEY_SIZE: usize = 8 * $limbs;
+        pub const KEY_SIZE: usize = $constants.width();
 
         /// The length of a public key in its uncompressed SEC 1
         /// form, `04 || x || y`.
-        pub const PUBLIC_KEY_SIZE: usize = 1 + 16 * $limbs;
+        pub const PUBLIC_KEY_SIZE: usize = 1 + 2 * KEY_SIZE;
 
         /// The length of a private key's DER encoding, a PKCS#8
         /// `PrivateKeyInfo` around an RFC 5915 `ECPrivateKey` that
@@ -2098,6 +2249,18 @@ macro_rules! key_types {
                 Ok((Self::from_secret(secret, public), form))
             }
 
+            /// A key from a bare `ECPrivateKey` (RFC 5915), the DER
+            /// inside an `EC PRIVATE KEY` PEM block, as
+            /// `openssl ec` writes it. The parameters, when
+            /// present, must name this curve, and a carried public
+            /// point is checked against the secret's own; the
+            /// errors are as for [`try_from_der`](Self::try_from_der).
+            pub fn try_from_sec1_der(der: &[u8]) -> Result<Self, Error> {
+                let e = Engine::new(&$constants);
+                let (secret, public) = Secret::from_sec1_der(&e, der)?;
+                Ok(Self::from_secret(secret, public))
+            }
+
             /// Writes the key as a `PrivateKeyInfo` into the front of
             /// `out`, returning the length, always [`DER_SIZE`]; a
             /// buffer too small gets [`Error::OutputTooSmall`]. The
@@ -2143,8 +2306,9 @@ macro_rules! key_types {
 
             /// The uncompressed SEC 1 encoding, `04 || x || y`.
             pub fn sec1_bytes(&self) -> [u8; PUBLIC_KEY_SIZE] {
+                let e = Engine::new(&$constants);
                 let mut out = [0u8; PUBLIC_KEY_SIZE];
-                self.point.sec1(&mut out);
+                self.point.sec1(&e, &mut out);
                 out
             }
 
@@ -2191,7 +2355,9 @@ pub(crate) use key_types;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hash::sha2::{Sha256, Sha384};
+    use crate::hash::sha2::{Sha256, Sha384, Sha512};
+    use std::vec;
+    use std::vec::Vec;
 
     /// The generator, in the field's domain. Only the tests need
     /// it by itself: every multiplication of it goes through the
@@ -2259,6 +2425,7 @@ mod tests {
         }
         check(&P256);
         check(&P384);
+        check(&P521);
     }
 
     /// The dedicated doubling agrees with adding a point to
@@ -2279,6 +2446,7 @@ mod tests {
         }
         check(&P256);
         check(&P384);
+        check(&P521);
     }
 
     /// The bases each comb's table is built from: block `j` of comb
@@ -2572,6 +2740,7 @@ mod tests {
         }
         check(&P256);
         check(&P384);
+        check(&P521);
     }
 
     /// Prints the tables in the form `base.rs` holds them. Ignored:
@@ -2611,6 +2780,7 @@ mod tests {
         }
         print("P256_BASE", &P256);
         print("P384_BASE", &P384);
+        print("P521_BASE", &P521);
 
         let e = Engine::new(&P256);
         let tables = window_entries(&e);
@@ -2682,6 +2852,7 @@ mod tests {
         }
         check(&P256);
         check(&P384);
+        check(&P521);
     }
 
     /// The variable-time double multiplication agrees with the
@@ -2719,6 +2890,7 @@ mod tests {
         }
         check(&P256);
         check(&P384);
+        check(&P521);
     }
 
     /// The fixed-base multiplication agrees with the general one,
@@ -2746,6 +2918,7 @@ mod tests {
         }
         check(&P256);
         check(&P384);
+        check(&P521);
     }
 
     /// Public keys from the ACVP ECDSA keyGen sample, one per curve,
@@ -2765,7 +2938,7 @@ mod tests {
         .unwrap();
         let public = d.public(&e);
         let mut sec1 = [0u8; 65];
-        public.sec1(&mut sec1);
+        public.sec1(&e, &mut sec1);
         let mut expected = [0u8; 65];
         unhex(
             "04c6e20135457dc6f738e60cf6999d2416f31d7c12afea248434a547a9aa8a34b0\
@@ -2791,7 +2964,7 @@ mod tests {
         .unwrap();
         let public = d.public(&e);
         let mut sec1 = [0u8; 97];
-        public.sec1(&mut sec1);
+        public.sec1(&e, &mut sec1);
         let mut expected = [0u8; 97];
         unhex(
             "0419f324cf1cbc7d17c1284f1d887eecafb1e11f4c9709566b3094fe3152f63fdb\
@@ -2809,12 +2982,12 @@ mod tests {
         fn check<const L: usize>(curve: &Curve<L>) {
             let e = Engine::new(curve);
             let mut rng = crate::random::CtrDrbg::from_system().unwrap();
-            let mut sec1 = [0u8; 97];
-            let w = width::<L>();
+            let mut sec1 = [0u8; 133];
+            let w = curve.width();
             for _ in 0..4 {
                 let public = Secret::generate(&e, &mut rng).unwrap().public(&e);
-                public.sec1(&mut sec1[..1 + 2 * w]);
-                let mut compressed = [0u8; 49];
+                public.sec1(&e, &mut sec1[..1 + 2 * w]);
+                let mut compressed = [0u8; 67];
                 compressed[..1 + w].copy_from_slice(&sec1[..1 + w]);
                 compressed[0] = 0x02 | (sec1[2 * w] & 1);
                 let back =
@@ -2838,12 +3011,12 @@ mod tests {
             // the rest decompress to points that re-encode.
             let mut refused = 0;
             for x in 1..20u8 {
-                let mut compressed = [0u8; 49];
+                let mut compressed = [0u8; 67];
                 compressed[0] = 0x02;
                 compressed[w] = x;
                 match Public::try_from_sec1(&e, &compressed[..1 + w]) {
                     Ok(p) => {
-                        p.sec1(&mut sec1[..1 + 2 * w]);
+                        p.sec1(&e, &mut sec1[..1 + 2 * w]);
                         assert_eq!(sec1[1..1 + w], compressed[1..1 + w]);
                         assert_eq!(sec1[2 * w] & 1, 0);
                     }
@@ -2855,6 +3028,102 @@ mod tests {
         }
         check(&P256);
         check(&P384);
+        check(&P521);
+    }
+
+    /// The scalars `n - 2 j` for every digit magnitude `j`, which
+    /// are where the lowest window's entry can equal the accumulator
+    /// in a windowed multiplication; P-521 at `j = 9` is Wycheproof's
+    /// CVE-2017-10176 case. Each product must be `-2 j G`.
+    #[test]
+    fn near_order_scalars_multiply_correctly() {
+        fn check<const L: usize>(curve: &Curve<L>) {
+            let e = Engine::new(curve);
+            let g = generator(&e);
+            for j in 1..=64u64 {
+                let (k, _) = curve.n.sub_borrow(&Uint::from_limbs(&[2 * j]));
+                let want = affine(&e, &e.point_mul_complete(&g, &k));
+                assert_eq!(affine(&e, &e.point_mul(&g, &k)), want, "{j}");
+                assert_eq!(affine(&e, &e.mul_base(&k)), want, "{j}");
+            }
+        }
+        check(&P256);
+        check(&P384);
+        check(&P521);
+    }
+
+    /// The hedged seeding, rebuilt by hand from the draft's text
+    /// (draft-irtf-cfrg-det-sigs-with-noise-05 section 4, steps d and
+    /// f) as one padded buffer each, against the generator's state:
+    /// for SHA-256's 64-byte blocks with P-256's 32-byte key, and for
+    /// SHA-512's 128-byte blocks with P-521's 66-byte one. The draft
+    /// has no vectors yet, so this is what pins the layout.
+    #[test]
+    fn hedged_nonce_layout() {
+        fn by_hand<H: Hash + Clone + BlockType + Default>(
+            x: &[u8],
+            h: &[u8],
+            z: &[u8],
+        ) -> (Vec<u8>, Vec<u8>) {
+            let block = size_of::<H::Block>();
+            let out = size_of::<H::Output>();
+            let mut k = vec![0u8; out];
+            let mut v = vec![1u8; out];
+            for tag in [0u8, 1] {
+                let mut data = v.clone();
+                data.push(tag);
+                data.extend_from_slice(z);
+                while !data.len().is_multiple_of(block) {
+                    data.push(0);
+                }
+                let mut key = x.to_vec();
+                while !key.len().is_multiple_of(block) {
+                    key.push(0);
+                }
+                data.extend_from_slice(&key);
+                data.extend_from_slice(h);
+                k = Hmac::<H>::mac(&k, &data).as_ref().to_vec();
+                v = Hmac::<H>::mac(&k, &v).as_ref().to_vec();
+            }
+            (k, v)
+        }
+        let (x, h, z) = ([7u8; 32], [9u8; 32], [3u8; 32]);
+        let nonce = Nonce::<Sha256>::try_new(&x, &h, Some(&z)).unwrap();
+        let (k, v) = by_hand::<Sha256>(&x, &h, &z);
+        assert_eq!((nonce.k.as_ref(), nonce.v.as_ref()), (&k[..], &v[..]));
+        let (x, h, z) = ([7u8; 66], [9u8; 66], [3u8; 66]);
+        let nonce = Nonce::<Sha512>::try_new(&x, &h, Some(&z)).unwrap();
+        let (k, v) = by_hand::<Sha512>(&x, &h, &z);
+        assert_eq!((nonce.k.as_ref(), nonce.v.as_ref()), (&k[..], &v[..]));
+        // Without noise it is RFC 6979's seeding, which differs.
+        let plain = Nonce::<Sha512>::try_new(&x, &h, None).unwrap();
+        assert_ne!(plain.k.as_ref(), &k[..]);
+    }
+
+    /// A hedged signature verifies, and differs from the
+    /// deterministic one and from another hedged with other noise.
+    #[test]
+    fn hedged_signatures_verify() {
+        let mut buf = [0u8; 48];
+        let e = Engine::new(&P256);
+        let d = Secret::try_new(&e, unhex(&"42".repeat(32), &mut buf)).unwrap();
+        let mut plain = [0u8; 64];
+        d.sign::<Sha256>(&e, b"m", None, &mut plain).unwrap();
+        let mut a = [0u8; 64];
+        d.sign::<Sha256>(&e, b"m", Some(&[1; 32]), &mut a).unwrap();
+        let mut b = [0u8; 64];
+        d.sign::<Sha256>(&e, b"m", Some(&[2; 32]), &mut b).unwrap();
+        for sig in [&plain, &a, &b] {
+            d.public(&e).verify::<Sha256>(&e, b"m", sig).unwrap();
+        }
+        assert_ne!(a, plain);
+        assert_ne!(a, b);
+        // The same noise gives the same signature: the randomness is
+        // the only thing that varies.
+        let mut again = [0u8; 64];
+        d.sign::<Sha256>(&e, b"m", Some(&[1; 32]), &mut again)
+            .unwrap();
+        assert_eq!(a, again);
     }
 
     /// RFC 6979 appendix A.2.5 and A.2.6: deterministic signatures
@@ -2873,7 +3142,7 @@ mod tests {
         )
         .unwrap();
         let mut sig = [0u8; 64];
-        d.sign::<Sha256>(&e, b"sample", &mut sig).unwrap();
+        d.sign::<Sha256>(&e, b"sample", None, &mut sig).unwrap();
         let mut expected = [0u8; 64];
         unhex(
             "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716\
@@ -2882,7 +3151,7 @@ mod tests {
         );
         assert_eq!(sig, expected);
         d.public(&e).verify::<Sha256>(&e, b"sample", &sig).unwrap();
-        d.sign::<Sha256>(&e, b"test", &mut sig).unwrap();
+        d.sign::<Sha256>(&e, b"test", None, &mut sig).unwrap();
         unhex(
             "f1abb023518351cd71d881567b1ea663ed3efcf6c5132b354f28d3b0b7d38367\
              019f4113742a2b14bd25926b49c649155f267e60d3814b4c0cc84250e46f0083",
@@ -2902,7 +3171,7 @@ mod tests {
         )
         .unwrap();
         let mut sig = [0u8; 96];
-        d.sign::<Sha384>(&e, b"sample", &mut sig).unwrap();
+        d.sign::<Sha384>(&e, b"sample", None, &mut sig).unwrap();
         let mut expected = [0u8; 96];
         unhex(
             "94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad133c\
@@ -2923,7 +3192,7 @@ mod tests {
         let d = Secret::generate(&e, &mut rng).unwrap();
         let public = d.public(&e);
         let mut sig = [0u8; 64];
-        d.sign::<Sha256>(&e, b"message", &mut sig).unwrap();
+        d.sign::<Sha256>(&e, b"message", None, &mut sig).unwrap();
         public.verify::<Sha256>(&e, b"message", &sig).unwrap();
         let bad = |s: &[u8], m: &[u8]| {
             assert_eq!(

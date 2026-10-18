@@ -339,7 +339,8 @@ jobs:
         # ring-tests holds ring's own files, under ring's rules, so
         # only the shim's sources are held to this repository's.
         run: |
-          long=$(find scytale scytale-cli scytale-ring/src -name '*.rs' \
+          long=$(find scytale scytale-cli scytale-ring/src rustls-scytale \
+              -name '*.rs' \
               -exec awk 'length > 80 {print FILENAME": "FNR}' {} +)
           if [ -n "$long" ]; then
               echo "lines over 80 columns:" >&2
@@ -350,7 +351,8 @@ jobs:
       - name: ASCII only
         run: |
           if grep -rnP --include='*.rs' '[^\x00-\x7F]' \
-              scytale/src scytale-cli/src scytale-ring/src; then
+              scytale/src scytale-cli/src scytale-ring/src \
+              rustls-scytale/src rustls-scytale/tests; then
               echo "non-ASCII characters found" >&2
               exit 1
           fi
@@ -381,6 +383,47 @@ jobs:
       - name: Test
         run: scripts/test-ring-downstream
 
+  # rustls's own API suite and BoGo, BoringSSL's TLS test runner, with
+  # rustls-scytale as the provider. Neither is in the published
+  # crate, so the script clones rustls at the release's commit.
+  rustls-downstream:
+    name: test (rustls and BoGo on rustls-scytale)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      - name: Test
+        run: scripts/test-rustls-downstream
+
+  # Every rustls-scytale suite against OpenSSL, both ways. BoGo cannot
+  # reach the AES-CCM suites, BoringSSL having none, so this is where
+  # another implementation reads their records.
+  openssl-interop:
+    name: test (rustls-scytale against OpenSSL)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+
+      - name: Test
+        run: |
+          openssl version
+          scripts/test-openssl-interop
+
   # The published crate omits the vendored vectors, so check that it
   # still builds and that nothing else went missing.
   package:
@@ -395,9 +438,19 @@ jobs:
           rustup default stable
 
       - name: Package and build the crates as published
-        # scytale-ring is built against scytale as published, not the
-        # copy beside it, which is what anyone who installs it gets.
-        run: cargo package -p scytale -p scytale-ring
+        # Packaged together, each crate is built against scytale as it
+        # will be published, not the copy beside it, which is what
+        # anyone who installs it gets; a crate that uses library code
+        # the release would not carry fails here, not at publish.
+        #
+        # Without the lock file: the provider and the tool ship one,
+        # and between releases it names a scytale version crates.io
+        # already has, so the check would build against that rather
+        # than the code being packaged. At a release the version is
+        # new and the lock file is harmless.
+        run: |
+          cargo package --exclude-lockfile -p scytale -p scytale-ring \
+              -p rustls-scytale -p scytale-cli
 
       - name: Report crate size
         run: ls -lh target/package/*.crate

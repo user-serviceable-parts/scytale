@@ -39,7 +39,7 @@ use super::support::acvp::{
     aes_ff1, aes_ff3_1, aes_gcm, aes_gcm_siv, aes_gmac, aes_kw, aes_kwp,
     aes_ofb, aes_xpn, aes_xts, answer_aes, check, cmac_aes, cshake, ctr_drbg,
     ecdsa, eddsa, hmac, kda_hkdf, kmac, kts_ifc, ml_dsa, ml_kem, pbkdf,
-    rsa_primitive, rsa_sig, sha, shake, slh_dsa, xecdh,
+    rsa_primitive, rsa_sig, sha, shake, slh_dsa, tls12_kdf, xecdh,
 };
 use crate::hash::sha3::{Auto, variant};
 use crate::hash::{sha1, sha2, sha3};
@@ -118,6 +118,7 @@ fn answer(prompt: &Value) -> Value {
         ("ctrDRBG", "", "1.0") => ctr_drbg::answer(prompt),
         ("PBKDF", "", "1.0") => pbkdf::answer(prompt),
         ("KDA", "HKDF", "Sp800-56Cr2") => kda_hkdf::answer(prompt),
+        ("TLS-v1.2", "KDF", "RFC7627") => tls12_kdf::answer(prompt),
         ("ECDSA" | "DetECDSA", _, "FIPS186-5") => ecdsa::answer(prompt),
         ("EDDSA", _, "1.0") => eddsa::answer(prompt),
         ("XECDH", _, "RFC7748") => xecdh::answer(prompt),
@@ -187,11 +188,17 @@ fn read(path: &Path) -> Value {
 /// Answers every vector set of the session named by the
 /// environment, and holds the answers to the server's where it sent
 /// them.
+///
+/// With no session named there is nothing to answer, and the test
+/// says so and passes: `cargo test-extended` and the jobs that run
+/// every ignored test reach it too, and none of them has a session.
 #[test]
 #[ignore]
 fn answer_session() {
-    let dir = std::env::var(SESSION)
-        .unwrap_or_else(|_| panic!("{SESSION} names the session directory"));
+    let Ok(dir) = std::env::var(SESSION) else {
+        eprintln!("{SESSION} is not set; no session to answer");
+        return;
+    };
     // Cargo runs a test in its crate's directory; a relative path
     // is meant from the checkout, where scytale-acvp keeps sessions.
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");

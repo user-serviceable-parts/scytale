@@ -9,14 +9,14 @@
 //!
 //! This release presents ring 0.17's API, checked against ring 0.17.14,
 //! and is tested with rustls 0.23.45 and rustls-webpki 0.103.15. The
-//! version number is scytale's, not ring's; the README keeps a table of
-//! which ring each release presents.
+//! version number is this crate's own, not ring's; the README keeps a
+//! table of which ring each release presents.
 //!
 //! Switch a crate over in its own manifest:
 //!
 //! ```toml
 //! [dependencies]
-//! ring = { package = "scytale-ring", version = "0.8" }
+//! ring = { package = "scytale-ring", version = "0.10" }
 //! ```
 //!
 //! That reaches the crate whose manifest it is. It cannot reach a

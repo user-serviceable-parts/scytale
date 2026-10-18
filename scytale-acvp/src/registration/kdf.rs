@@ -1,6 +1,8 @@
 //! The generator and the key derivation functions: ctrDRBG from
-//! draft-vassilev-acvp-drbg, PBKDF from draft-celi-acvp-pbkdf, and
-//! KDA HKDF from draft-hammett-acvp-kas-kdf-hkdf at Sp800-56Cr2.
+//! draft-vassilev-acvp-drbg, PBKDF from draft-celi-acvp-pbkdf, KDA
+//! HKDF from draft-hammett-acvp-kas-kdf-hkdf at Sp800-56Cr2, and the
+//! TLS 1.2 KDF with the extended master secret from
+//! draft-celi-acvp-kdf-tls at RFC7627.
 //!
 //! The generator is AES-256 and nothing else, so one mode is
 //! registered, in both constructions: through the derivation
@@ -103,6 +105,12 @@ pub fn capabilities(_: Options) -> Vec<Value> {
             "usesHybridSharedSecret": true,
             "auxSharedSecretLen": bytes(112, 65536),
             "performMultiExpansionTests": true,
+        }),
+        json!({
+            "algorithm": "TLS-v1.2",
+            "mode": "KDF",
+            "revision": "RFC7627",
+            "hashAlg": ["SHA2-256", "SHA2-384", "SHA2-512"],
         }),
     ]
 }

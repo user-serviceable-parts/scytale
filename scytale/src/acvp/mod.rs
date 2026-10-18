@@ -1133,6 +1133,11 @@ mod pke {
     use super::*;
 
     #[test]
+    fn cfrg_hpke() {
+        support::cfrg::run();
+    }
+
+    #[test]
     fn acvp_kts_ifc() {
         support::acvp::kts_ifc::run();
     }
@@ -1283,6 +1288,17 @@ mod hkdf {
     #[test]
     fn acvp_kda_hkdf() {
         support::acvp::kda_hkdf::run();
+    }
+}
+
+/// The TLS 1.2 PRF, as RFC 7627's extended master secret and the key
+/// block.
+mod tls12 {
+    use super::*;
+
+    #[test]
+    fn acvp_tls12_kdf() {
+        support::acvp::tls12_kdf::run();
     }
 }
 

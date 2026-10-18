@@ -60,6 +60,7 @@ checksum = "ec0797fb7aeb1406c84efac526901f7ec3ead2124f946b494e72879d4b54704d"
 dependencies = [
  "anstyle",
  "clap_lex",
+ "strsim",
 ]
 
 [[package]]
@@ -397,6 +398,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "pin-project-lite"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
 name = "potential_utf"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -459,8 +466,21 @@ dependencies = [
  "once_cell",
  "ring",
  "rustls-pki-types",
- "rustls-webpki",
+ "rustls-webpki 0.103.15",
  "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "rustls"
+version = "0.24.0-dev.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7d0e095ff3f79172e5985922dbde4cb5bd98eb72518551589688502eab011de"
+dependencies = [
+ "rustls-pki-types",
+ "rustls-webpki 0.104.0-alpha.7",
+ "subtle",
+ "tracing",
  "zeroize",
 ]
 
@@ -470,6 +490,17 @@ version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2f4925028c7eb5d1fcdaf196971378ed9d2c1c4efc7dc5d011256f76c99c0a96"
 dependencies = [
+ "zeroize",
+]
+
+[[package]]
+name = "rustls-scytale"
+version = "0.10.0-dev.2"
+dependencies = [
+ "rustls 0.24.0-dev.2",
+ "rustls-pki-types",
+ "scytale",
+ "webpki-roots",
  "zeroize",
 ]
 
@@ -485,6 +516,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustls-webpki"
+version = "0.104.0-alpha.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bea702cca24d344fc70973022bf7eb920c224e318466eb49784272337dd24b1a"
+dependencies = [
+ "rustls-pki-types",
+ "untrusted",
+]
+
+[[package]]
 name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -492,7 +533,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "scytale"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "cpu-time",
  "getrandom 0.4.3",
@@ -502,7 +543,7 @@ dependencies = [
 
 [[package]]
 name = "scytale-acvp"
-version = "0.9.0"
+version = "0.0.0"
 dependencies = [
  "clap",
  "scytale",
@@ -513,7 +554,7 @@ dependencies = [
 
 [[package]]
 name = "scytale-cli"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "clap",
  "scytale",
@@ -522,7 +563,7 @@ dependencies = [
 
 [[package]]
 name = "scytale-ring"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "scytale",
  "untrusted",
@@ -531,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "scytale-ring-tests"
-version = "0.9.0"
+version = "0.0.0"
 dependencies = [
  "scytale-ring",
  "untrusted",
@@ -596,6 +637,12 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "strsim"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "subtle"
@@ -677,6 +724,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing"
+version = "0.1.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
+dependencies = [
+ "pin-project-lite",
+ "tracing-core",
+]
+
+[[package]]
+name = "tracing-core"
+version = "0.1.36"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -698,7 +761,7 @@ dependencies = [
  "cookie_store",
  "log",
  "percent-encoding",
- "rustls",
+ "rustls 0.23.46",
  "rustls-pki-types",
  "serde",
  "serde_json",
