@@ -4,16 +4,17 @@
 //! random source that hands back exactly those bytes; decapsulation
 //! runs from the seed form and the expanded form alike, and its
 //! damaged ciphertexts must come out as the implicitly rejected
-//! secret the file gives.
+//! secret the file gives. The live server sends the same inputs, so
+//! the answers are the same computations written out.
 
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
-use super::{hex, load};
+use super::{check, hex, hex_string, load, response};
 use crate::Error;
 use crate::Random;
 use crate::kem::ml_kem::{ml_kem_512, ml_kem_768, ml_kem_1024};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// A random source that yields fixed bytes, so a vector's `d`, `z`
 /// or `m` reaches the scheme through the same call a caller makes.
@@ -107,6 +108,70 @@ macro_rules! with_set {
     };
 }
 
+/// The response to a whole vector set, keyGen or encapDecap.
+pub fn answer(prompt: &Value) -> Value {
+    let groups = prompt["testGroups"]
+        .as_array()
+        .expect("testGroups")
+        .iter()
+        .map(|group| json!({"tgId": group["tgId"], "tests": tests(group)}))
+        .collect();
+    response(prompt, groups)
+}
+
+/// The response to each test of a group, by the group's function;
+/// a keyGen group has none.
+fn tests(group: &Value) -> Vec<Value> {
+    let set = group["parameterSet"].as_str().expect("parameterSet");
+    let function = group["function"].as_str().unwrap_or("keyGen");
+    let seed = group["keyFormat"] == "seed";
+    group["tests"]
+        .as_array()
+        .expect("tests")
+        .iter()
+        .map(|t| match function {
+            "keyGen" => with_set!(set, key_gen(t)),
+            "encapsulation" => with_set!(set, encapsulation(t)),
+            "decapsulation" => with_set!(set, decapsulation(t, seed)),
+            "decapsulationKeyCheck" => {
+                let ok = with_set!(set, private_ok(&hex(&t["dk"])));
+                json!({"tcId": t["tcId"], "testPassed": ok})
+            }
+            "encapsulationKeyCheck" => {
+                let ok = with_set!(set, public_ok(&hex(&t["ek"])));
+                json!({"tcId": t["tcId"], "testPassed": ok})
+            }
+            other => panic!("unknown function {other}"),
+        })
+        .collect()
+}
+
+fn private_ok<S: Set>(dk: &[u8]) -> bool {
+    S::private_ok(dk)
+}
+
+fn public_ok<S: Set>(ek: &[u8]) -> bool {
+    S::public_ok(ek)
+}
+
+/// Holds each answered test of `group` to the file's. Returns the
+/// cases and, of those, the verdicts that were rejections.
+fn hold(group: &Value) -> (usize, usize) {
+    let expected = group["tests"].as_array().expect("tests");
+    let answered = tests(group);
+    assert_eq!(expected.len(), answered.len(), "tgId {}", group["tgId"]);
+    let mut rejections = 0;
+    for (want, got) in expected.iter().zip(&answered) {
+        if let Err(why) = check(want, got) {
+            panic!("tgId {} {why}: {}", group["tgId"], want["reason"]);
+        }
+        if got["testPassed"] == false {
+            rejections += 1;
+        }
+    }
+    (expected.len(), rejections)
+}
+
 /// Runs the key generation suite; a no-op without the vendored
 /// vectors.
 pub fn run_key_gen() {
@@ -116,22 +181,17 @@ pub fn run_key_gen() {
     };
     let mut cases = 0;
     for group in doc["testGroups"].as_array().expect("testGroups") {
-        let set = group["parameterSet"].as_str().expect("parameterSet");
-        for t in group["tests"].as_array().expect("tests") {
-            let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-            with_set!(set, key_gen(t, &tag));
-            cases += 1;
-        }
+        cases += hold(group).0;
     }
     assert!(cases >= 75, "only {cases} keyGen cases");
 }
 
-fn key_gen<S: Set>(t: &Value, tag: &str) {
+/// Both halves from the case's `d` and `z`.
+fn key_gen<S: Set>(t: &Value) -> Value {
     let mut seed = hex(&t["d"]);
     seed.extend(hex(&t["z"]));
     let (ek, dk) = S::key_gen(&seed);
-    assert_eq!(ek, hex(&t["ek"]), "{tag} ek");
-    assert_eq!(dk, hex(&t["dk"]), "{tag} dk");
+    json!({"tcId": t["tcId"], "ek": hex_string(&ek), "dk": hex_string(&dk)})
 }
 
 /// Runs the encapsulation and decapsulation suite; a no-op without
@@ -146,43 +206,25 @@ pub fn run_encap_decap() {
     let mut rejections = 0;
     let mut checks = 0;
     for group in doc["testGroups"].as_array().expect("testGroups") {
-        let set = group["parameterSet"].as_str().expect("parameterSet");
-        let function = group["function"].as_str().expect("function");
-        for t in group["tests"].as_array().expect("tests") {
-            let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-            match function {
-                "encapsulation" => {
-                    with_set!(set, encapsulation(t, &tag));
-                    encapsulations += 1;
-                }
-                "decapsulation" => {
-                    let seed = group["keyFormat"] == "seed";
-                    with_set!(set, decapsulation(t, seed, &tag));
-                    decapsulations += 1;
-                    let reason = t["reason"].as_str().unwrap_or("");
-                    if reason.contains("modified") {
-                        rejections += 1;
-                    }
-                }
-                "decapsulationKeyCheck" | "encapsulationKeyCheck" => {
-                    let expected =
-                        t["testPassed"].as_bool().expect("testPassed");
-                    let ok = if function.starts_with("decaps") {
-                        with_set!(set, private_ok(&hex(&t["dk"])))
-                    } else {
-                        with_set!(set, public_ok(&hex(&t["ek"])))
-                    };
-                    fn private_ok<S: Set>(dk: &[u8]) -> bool {
-                        S::private_ok(dk)
-                    }
-                    fn public_ok<S: Set>(ek: &[u8]) -> bool {
-                        S::public_ok(ek)
-                    }
-                    assert_eq!(ok, expected, "{tag}: {}", t["reason"]);
-                    checks += 1;
-                }
-                other => panic!("unknown function {other}"),
+        let (cases, _) = hold(group);
+        match group["function"].as_str().expect("function") {
+            "encapsulation" => encapsulations += cases,
+            "decapsulation" => {
+                decapsulations += cases;
+                // A damaged ciphertext is answered with the implicit
+                // rejection secret, and the file says which those are.
+                rejections += group["tests"]
+                    .as_array()
+                    .expect("tests")
+                    .iter()
+                    .filter(|t| {
+                        t["reason"]
+                            .as_str()
+                            .is_some_and(|r| r.contains("modified"))
+                    })
+                    .count();
             }
+            _ => checks += cases,
         }
     }
     assert!(encapsulations >= 75, "only {encapsulations} encapsulations");
@@ -191,20 +233,28 @@ pub fn run_encap_decap() {
     assert!(checks >= 30, "only {checks} key checks");
 }
 
-fn encapsulation<S: Set>(t: &Value, tag: &str) {
+/// The ciphertext and secret from `ek` and the case's `m`.
+fn encapsulation<S: Set>(t: &Value) -> Value {
     let (c, k) = S::encapsulate(&hex(&t["ek"]), &hex(&t["m"]));
-    assert_eq!(c, hex(&t["c"]), "{tag} c");
-    assert_eq!(k, hex(&t["k"]), "{tag} k");
+    json!({"tcId": t["tcId"], "c": hex_string(&c), "k": hex_string(&k)})
 }
 
-fn decapsulation<S: Set>(t: &Value, seed: bool, tag: &str) {
+/// The secret from the key, in the group's format, and `c`. The
+/// server sends a seed as one `seed`; the vendored file as `d` and
+/// `z`.
+fn decapsulation<S: Set>(t: &Value, seed: bool) -> Value {
     let c = hex(&t["c"]);
     let k = if seed {
-        let mut seed = hex(&t["d"]);
-        seed.extend(hex(&t["z"]));
+        let seed = if t["seed"].is_null() {
+            let mut seed = hex(&t["d"]);
+            seed.extend(hex(&t["z"]));
+            seed
+        } else {
+            hex(&t["seed"])
+        };
         S::decapsulate_seed(&seed, &c)
     } else {
         S::decapsulate(&hex(&t["dk"]), &c)
     };
-    assert_eq!(k, hex(&t["k"]), "{tag}: {}", t["reason"]);
+    json!({"tcId": t["tcId"], "k": hex_string(&k)})
 }

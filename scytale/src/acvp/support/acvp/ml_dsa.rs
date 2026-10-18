@@ -10,11 +10,11 @@
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
-use super::{hex, load};
+use super::{check, hex, hex_string, load, response};
 use crate::Error;
 use crate::Random;
 use crate::sig::ml_dsa::{ml_dsa_44, ml_dsa_65, ml_dsa_87};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// A random source that yields fixed bytes.
 struct Fixed(Vec<u8>);
@@ -127,6 +127,69 @@ fn pure_external(group: &Value) -> bool {
         && group["externalMu"] != true
 }
 
+/// The response to a whole vector set, by its mode. A group the
+/// pure external interface cannot run is a registration gone wrong.
+pub fn answer(prompt: &Value) -> Value {
+    let mode = prompt["mode"].as_str().expect("mode");
+    let groups = prompt["testGroups"]
+        .as_array()
+        .expect("testGroups")
+        .iter()
+        .map(|group| {
+            if mode != "keyGen" && !pure_external(group) {
+                panic!(
+                    "tgId {}: not the pure external interface",
+                    group["tgId"]
+                );
+            }
+            json!({"tgId": group["tgId"], "tests": tests(mode, group)})
+        })
+        .collect();
+    response(prompt, groups)
+}
+
+/// The response to each test of a group, by the set's mode.
+fn tests(mode: &str, group: &Value) -> Vec<Value> {
+    let set = group["parameterSet"].as_str().expect("parameterSet");
+    let deterministic = group["deterministic"] == true;
+    let seed = group["keyFormat"] == "seed";
+    group["tests"]
+        .as_array()
+        .expect("tests")
+        .iter()
+        .map(|t| match mode {
+            "keyGen" => with_set!(set, key_gen(t)),
+            "sigGen" => {
+                let sig = with_set!(set, sig_gen(t, deterministic, seed));
+                json!({"tcId": t["tcId"], "signature": hex_string(&sig)})
+            }
+            "sigVer" => {
+                let passed = with_set!(set, sig_ver(t));
+                json!({"tcId": t["tcId"], "testPassed": passed})
+            }
+            other => panic!("unknown mode {other}"),
+        })
+        .collect()
+}
+
+/// Holds each answered test of `group` to the file's. Returns the
+/// cases and, of those, the verdicts that were rejections.
+fn hold(mode: &str, group: &Value) -> (usize, usize) {
+    let expected = group["tests"].as_array().expect("tests");
+    let answered = tests(mode, group);
+    assert_eq!(expected.len(), answered.len(), "tgId {}", group["tgId"]);
+    let mut rejections = 0;
+    for (want, got) in expected.iter().zip(&answered) {
+        if let Err(why) = check(want, got) {
+            panic!("tgId {} {why}: {}", group["tgId"], want["reason"]);
+        }
+        if got["testPassed"] == false {
+            rejections += 1;
+        }
+    }
+    (expected.len(), rejections)
+}
+
 /// Runs the key generation suite; a no-op without the vendored
 /// vectors.
 pub fn run_key_gen() {
@@ -136,20 +199,14 @@ pub fn run_key_gen() {
     };
     let mut cases = 0;
     for group in doc["testGroups"].as_array().expect("testGroups") {
-        let set = group["parameterSet"].as_str().expect("parameterSet");
-        for t in group["tests"].as_array().expect("tests") {
-            let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-            with_set!(set, key_gen(t, &tag));
-            cases += 1;
-        }
+        cases += hold("keyGen", group).0;
     }
     assert!(cases >= 75, "only {cases} keyGen cases");
 }
 
-fn key_gen<S: Set>(t: &Value, tag: &str) {
+fn key_gen<S: Set>(t: &Value) -> Value {
     let (pk, sk) = S::key_gen(&hex(&t["seed"]));
-    assert_eq!(pk, hex(&t["pk"]), "{tag} pk");
-    assert_eq!(sk, hex(&t["sk"]), "{tag} sk");
+    json!({"tcId": t["tcId"], "pk": hex_string(&pk), "sk": hex_string(&sk)})
 }
 
 /// Runs the signature generation suite; a no-op without the
@@ -165,35 +222,28 @@ pub fn run_sig_gen() {
         if !pure_external(group) {
             continue;
         }
-        let set = group["parameterSet"].as_str().expect("parameterSet");
-        let deterministic = group["deterministic"] == true;
-        let seed = group["keyFormat"] == "seed";
-        for t in group["tests"].as_array().expect("tests") {
-            let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-            with_set!(set, sig_gen(t, deterministic, seed, &tag));
-            cases += 1;
-            if !deterministic {
-                hedged += 1;
-            }
+        let (ran, _) = hold("sigGen", group);
+        cases += ran;
+        if group["deterministic"] != true {
+            hedged += ran;
         }
     }
     assert!(cases >= 180, "only {cases} sigGen cases");
     assert!(hedged >= 90, "only {hedged} hedged cases");
 }
 
-fn sig_gen<S: Set>(t: &Value, deterministic: bool, seed: bool, tag: &str) {
+fn sig_gen<S: Set>(t: &Value, deterministic: bool, seed: bool) -> Vec<u8> {
     // Only the fields a group uses are present in its cases.
     let rnd = (!deterministic).then(|| hex(&t["rnd"]));
     let seed_bytes = seed.then(|| hex(&t["seed"]));
     let sk = if seed { Vec::new() } else { hex(&t["sk"]) };
-    let sig = S::sign(
+    S::sign(
         seed_bytes.as_deref(),
         &sk,
         rnd.as_deref(),
         &hex(&t["context"]),
         &hex(&t["message"]),
-    );
-    assert_eq!(sig, hex(&t["signature"]), "{tag}");
+    )
 }
 
 /// Runs the signature verification suite; a no-op without the
@@ -209,17 +259,9 @@ pub fn run_sig_ver() {
         if !pure_external(group) {
             continue;
         }
-        let set = group["parameterSet"].as_str().expect("parameterSet");
-        for t in group["tests"].as_array().expect("tests") {
-            let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-            let accepted = with_set!(set, sig_ver(t));
-            let should_pass = t["testPassed"].as_bool().expect("testPassed");
-            assert_eq!(accepted, should_pass, "{tag}: {}", t["reason"]);
-            cases += 1;
-            if !should_pass {
-                rejections += 1;
-            }
-        }
+        let (ran, refused) = hold("sigVer", group);
+        cases += ran;
+        rejections += refused;
     }
     assert!(cases >= 45, "only {cases} sigVer cases");
     assert!(rejections >= 20, "only {rejections} rejections");

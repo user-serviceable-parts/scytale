@@ -13,6 +13,7 @@ mod aes;
 mod curves;
 mod kdf;
 mod mac;
+mod pqc;
 mod rsa;
 mod sha;
 mod sha3;
@@ -34,6 +35,7 @@ pub fn capabilities(options: Options) -> Vec<Value> {
     all.extend(kdf::capabilities(options));
     all.extend(curves::capabilities(options));
     all.extend(rsa::capabilities(options));
+    all.extend(pqc::capabilities(options));
     all
 }
 
