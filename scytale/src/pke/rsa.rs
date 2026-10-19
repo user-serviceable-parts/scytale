@@ -12,7 +12,7 @@
 //! [`encrypt_primitive`](PublicKey::encrypt_primitive) and
 //! [`decrypt_primitive`](PrivateKey::decrypt_primitive), are public
 //! for building a scheme this crate does not have and for the ACVP
-//! component suites; they pad nothing and check nothing. And
+//! sample vectors' component tests; they pad nothing and check nothing. And
 //! OAEP is for moving keys, not data: a message must fit inside one
 //! modulus less the padding, and each decryption costs a private
 //! exponentiation, so encrypt a symmetric key and let a cipher carry
