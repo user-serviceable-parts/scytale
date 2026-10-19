@@ -87,13 +87,14 @@ use crate::Random;
 use crate::hash::sha1::Sha1;
 use crate::hash::{Hash, Xof, XofReader};
 use crate::hash::{sha2, sha3};
-use crate::kdf::{hkdf, pbkdf2};
+use crate::kdf::{hkdf, pbkdf2, tls12};
 use crate::kex::{ecdh, x25519};
 use crate::mac::Mac;
 use crate::mac::cmac::Cmac;
 use crate::mac::hmac::Hmac;
 use crate::mac::kmac::Kmac128;
 use crate::mac::poly1305::Poly1305;
+use crate::pke::hpke;
 use crate::pke::rsa as oaep;
 use crate::random::CtrDrbg;
 use crate::sig::{ecdsa, ed25519, rsa};
@@ -1002,16 +1003,18 @@ fn per_call(seconds: f64) -> String {
     }
 }
 
-const KDF_JOBS: [&str; 4] = [
+const KDF_JOBS: [&str; 5] = [
     "hkdf-sha-256",
     "hkdf-sha-512",
     "pbkdf2-sha-256",
     "pbkdf2-sha-512",
+    "tls12-prf-sha-256",
 ];
 
 /// Key derivation: one derivation of a 32-byte key, which is what a
 /// caller asks for. HKDF's cost is two hashes of a short input;
-/// PBKDF2's is its iteration count, and nothing else.
+/// PBKDF2's is its iteration count, and nothing else. The TLS 1.2
+/// PRF is measured making a master secret, 48 bytes from two randoms.
 fn kdf_ops(options: &Options) -> bool {
     if !any_wanted("kdf", &KDF_JOBS, options) {
         return false;
@@ -1059,6 +1062,19 @@ fn kdf_ops(options: &Options) -> bool {
                 let mut out = [0u8; 32];
                 let _ = pbkdf2::pbkdf2::<sha2::Sha512>(
                     &KEY128, &KEY128, ITERATIONS, &mut out,
+                );
+                black_box(out);
+            }),
+        ),
+        (
+            "tls12-prf-sha-256",
+            Box::new(|| {
+                let mut out = [0u8; 48];
+                tls12::prf::<sha2::Sha256>(
+                    &KEY256,
+                    b"master secret",
+                    &[&KEY256, &KEY256],
+                    &mut out,
                 );
                 black_box(out);
             }),
@@ -1163,26 +1179,39 @@ fn kex_ops(options: &Options) -> bool {
     ops_section("kex", jobs, options)
 }
 
-const SIG_JOBS: [&str; 14] = [
+const SIG_JOBS: [&str; 25] = [
     "ed25519-keygen",
     "ed25519-sign",
+    "ed25519-sign-hedged",
     "ed25519-verify",
     "ecdsa-p256-keygen",
     "ecdsa-p256-sign",
+    "ecdsa-p256-sign-hedged",
     "ecdsa-p256-verify",
     "ecdsa-p384-keygen",
     "ecdsa-p384-sign",
+    "ecdsa-p384-sign-hedged",
     "ecdsa-p384-verify",
     "ecdsa-p521-keygen",
     "ecdsa-p521-sign",
+    "ecdsa-p521-sign-hedged",
     "ecdsa-p521-verify",
+    "rsa-2048-pkcs1-sign",
     "rsa-2048-pss-sign",
     "rsa-2048-pss-verify",
+    "rsa-3072-pkcs1-sign",
+    "rsa-3072-pss-sign",
+    "rsa-3072-pss-verify",
+    "rsa-4096-pkcs1-sign",
+    "rsa-4096-pss-sign",
+    "rsa-4096-pss-verify",
 ];
 
 /// The signature schemes with a classical hardness assumption.
 /// Signing dominates for RSA and verification for the curves, which
-/// is the whole shape of the choice between them.
+/// is the whole shape of the choice between them. The plain `sign`
+/// rows are the deterministic form; the `hedged` rows add the draw
+/// from the generator that `sign` makes, which is what a caller pays.
 fn sig_ops(options: &Options) -> bool {
     if !any_wanted("sig", &SIG_JOBS, options) {
         return false;
@@ -1190,6 +1219,12 @@ fn sig_ops(options: &Options) -> bool {
     let (Ok(mut build), Ok(mut rng256), Ok(mut rng384), Ok(mut rng521)) =
         (seeded(), seeded(), seeded(), seeded())
     else {
+        return false;
+    };
+    let (Ok(mut hedge25519), Ok(mut hedge256)) = (seeded(), seeded()) else {
+        return false;
+    };
+    let (Ok(mut hedge384), Ok(mut hedge521)) = (seeded(), seeded()) else {
         return false;
     };
     let ed_secret = KEY256;
@@ -1210,15 +1245,27 @@ fn sig_ops(options: &Options) -> bool {
     ) else {
         return false;
     };
-    let Ok(rsa_key) = rsa::PrivateKey::generate(&mut build, 2048) else {
-        return false;
-    };
-    let Ok(rsa_signature) =
-        rsa_key.sign_pss_with_salt::<sha2::Sha256>(MESSAGE, &KEY256)
-    else {
-        return false;
-    };
-    let jobs: Vec<Job<'_>> = vec![
+    // Generated only when one of their rows is wanted: a 4096-bit key
+    // takes seconds to find.
+    let mut rsa_keys = Vec::new();
+    for bits in [2048, 3072, 4096] {
+        if !SIG_JOBS.iter().any(|name| {
+            name.starts_with(&format!("rsa-{bits}-"))
+                && options.wants("sig", name)
+        }) {
+            continue;
+        }
+        let Ok(key) = rsa::PrivateKey::generate(&mut build, bits) else {
+            return false;
+        };
+        let Ok(signature) =
+            key.sign_pss_with_salt::<sha2::Sha256>(MESSAGE, &KEY256)
+        else {
+            return false;
+        };
+        rsa_keys.push((bits, key, signature));
+    }
+    let mut jobs: Vec<Job<'_>> = vec![
         (
             "ed25519-keygen",
             Box::new(|| {
@@ -1229,6 +1276,12 @@ fn sig_ops(options: &Options) -> bool {
             "ed25519-sign",
             Box::new(|| {
                 black_box(ed_key.sign_deterministic(MESSAGE));
+            }),
+        ),
+        (
+            "ed25519-sign-hedged",
+            Box::new(|| {
+                black_box(ed_key.sign(&mut hedge25519, MESSAGE)).ok();
             }),
         ),
         (
@@ -1248,6 +1301,13 @@ fn sig_ops(options: &Options) -> bool {
             "ecdsa-p256-sign",
             Box::new(|| {
                 black_box(p256.sign_deterministic::<sha2::Sha256>(MESSAGE))
+                    .ok();
+            }),
+        ),
+        (
+            "ecdsa-p256-sign-hedged",
+            Box::new(|| {
+                black_box(p256.sign::<sha2::Sha256, _>(&mut hedge256, MESSAGE))
                     .ok();
             }),
         ),
@@ -1274,6 +1334,13 @@ fn sig_ops(options: &Options) -> bool {
             }),
         ),
         (
+            "ecdsa-p384-sign-hedged",
+            Box::new(|| {
+                black_box(p384.sign::<sha2::Sha384, _>(&mut hedge384, MESSAGE))
+                    .ok();
+            }),
+        ),
+        (
             "ecdsa-p384-verify",
             Box::new(|| {
                 black_box(
@@ -1296,6 +1363,13 @@ fn sig_ops(options: &Options) -> bool {
             }),
         ),
         (
+            "ecdsa-p521-sign-hedged",
+            Box::new(|| {
+                black_box(p521.sign::<sha2::Sha512, _>(&mut hedge521, MESSAGE))
+                    .ok();
+            }),
+        ),
+        (
             "ecdsa-p521-verify",
             Box::new(|| {
                 black_box(
@@ -1304,33 +1378,59 @@ fn sig_ops(options: &Options) -> bool {
                 .ok();
             }),
         ),
-        (
-            "rsa-2048-pss-sign",
-            Box::new(|| {
-                black_box(
-                    rsa_key
-                        .sign_pss_with_salt::<sha2::Sha256>(MESSAGE, &KEY256),
-                )
-                .ok();
-            }),
-        ),
-        (
-            "rsa-2048-pss-verify",
-            Box::new(|| {
-                black_box(
-                    rsa_key
-                        .public_key()
-                        .verify_pss_with_salt_len::<sha2::Sha256>(
-                            MESSAGE,
-                            rsa_signature.as_ref(),
-                            KEY256.len(),
-                        ),
-                )
-                .ok();
-            }),
-        ),
     ];
+    for (bits, key, signature) in &rsa_keys {
+        jobs.extend(rsa_rows(*bits, key, signature.as_ref()));
+    }
     ops_section("sig", jobs, options)
+}
+
+/// The three RSA rows at one width, under the names `SIG_JOBS` gives
+/// them, which list them in this order.
+fn rsa_rows<'a>(
+    bits: usize,
+    key: &'a rsa::PrivateKey,
+    signature: &'a [u8],
+) -> Vec<Job<'a>> {
+    let prefix = format!("rsa-{bits}-");
+    let names: Vec<&'static str> = SIG_JOBS
+        .iter()
+        .copied()
+        .filter(|name| name.starts_with(&prefix))
+        .collect();
+    let [pkcs1, pss, verify] = names[..] else {
+        return Vec::new();
+    };
+    vec![
+        (
+            pkcs1,
+            Box::new(move || {
+                black_box(key.sign_pkcs1::<sha2::Sha256>(MESSAGE)).ok();
+            }) as Once<'_>,
+        ),
+        (
+            pss,
+            Box::new(move || {
+                black_box(
+                    key.sign_pss_with_salt::<sha2::Sha256>(MESSAGE, &KEY256),
+                )
+                .ok();
+            }),
+        ),
+        (
+            verify,
+            Box::new(move || {
+                black_box(
+                    key.public_key().verify_pss_with_salt_len::<sha2::Sha256>(
+                        MESSAGE,
+                        signature,
+                        KEY256.len(),
+                    ),
+                )
+                .ok();
+            }),
+        ),
+    ]
 }
 
 /// A post-quantum signing key and one signature from it, bound in
@@ -1373,20 +1473,22 @@ macro_rules! pq_sig_rows {
     };
 }
 
-const PQ_SIG_JOBS: [&str; 5] = [
+const PQ_SIG_JOBS: [&str; 7] = [
     "ml-dsa-44",
     "ml-dsa-65",
     "ml-dsa-87",
     "slh-dsa-sha2-128s",
     "slh-dsa-sha2-128f",
+    "slh-dsa-shake-128s",
+    "slh-dsa-shake-128f",
 ];
 
 /// The post-quantum signature schemes. Signing is measured in its
 /// deterministic form, which is the same work as the hedged one
 /// without a draw from the generator in the middle of it. SLH-DSA
-/// has twelve parameter sets; the two here are the small and the
-/// fast end of the 128-bit ones, and the rest fall between the
-/// pattern they show.
+/// has twelve parameter sets; the four here are the small and the
+/// fast end of the 128-bit ones over each hash, SHA-2 and SHAKE, and
+/// the rest fall between the pattern they show.
 fn pq_sig_ops(options: &Options) -> bool {
     if !PQ_SIG_JOBS
         .iter()
@@ -1399,7 +1501,9 @@ fn pq_sig_ops(options: &Options) -> bool {
     else {
         return false;
     };
-    let (Ok(mut r4), Ok(mut r5)) = (seeded(), seeded()) else {
+    let (Ok(mut r4), Ok(mut r5), Ok(mut r6), Ok(mut r7)) =
+        (seeded(), seeded(), seeded(), seeded())
+    else {
         return false;
     };
     pq_sig_key!(
@@ -1431,6 +1535,18 @@ fn pq_sig_ops(options: &Options) -> bool {
         slh128f_sig,
         &mut build,
         crate::sig::slh_dsa::sha2_128f::PrivateKey
+    );
+    pq_sig_key!(
+        shake128s,
+        shake128s_sig,
+        &mut build,
+        crate::sig::slh_dsa::shake_128s::PrivateKey
+    );
+    pq_sig_key!(
+        shake128f,
+        shake128f_sig,
+        &mut build,
+        crate::sig::slh_dsa::shake_128f::PrivateKey
     );
     let mut jobs: Vec<Job<'_>> = Vec::new();
     pq_sig_rows!(
@@ -1472,6 +1588,22 @@ fn pq_sig_ops(options: &Options) -> bool {
         &mut r5,
         crate::sig::slh_dsa::sha2_128f::PrivateKey,
         "slh-dsa-sha2-128f"
+    );
+    pq_sig_rows!(
+        jobs,
+        shake128s,
+        shake128s_sig,
+        &mut r6,
+        crate::sig::slh_dsa::shake_128s::PrivateKey,
+        "slh-dsa-shake-128s"
+    );
+    pq_sig_rows!(
+        jobs,
+        shake128f,
+        shake128f_sig,
+        &mut r7,
+        crate::sig::slh_dsa::shake_128f::PrivateKey,
+        "slh-dsa-shake-128f"
     );
     ops_section("sig-pq", jobs, options)
 }
@@ -1581,20 +1713,46 @@ fn kem_ops(options: &Options) -> bool {
     ops_section("kem", jobs, options)
 }
 
-const PKE_JOBS: [&str; 2] = ["rsa-2048-oaep-encrypt", "rsa-2048-oaep-decrypt"];
+const PKE_JOBS: [&str; 4] = [
+    "rsa-2048-oaep-encrypt",
+    "rsa-2048-oaep-decrypt",
+    "hpke-x25519-seal",
+    "hpke-x25519-open",
+];
+
+/// The HPKE suite measured: X25519, HKDF-SHA256 and AES-128-GCM.
+type HpkeContext = hpke::Context<sha2::Sha256, Gcm<aes::Aes128>>;
 
 /// Public-key encryption. The encryption key is a different type
-/// from the signing one, since a key does one job.
+/// from the signing one, since a key does one job. An HPKE row is a
+/// whole single-shot message: setting up the context, which is the
+/// key agreement and the schedule, then one short message through it.
 fn pke_ops(options: &Options) -> bool {
     if !any_wanted("pke", &PKE_JOBS, options) {
         return false;
     }
-    let (Ok(mut build), Ok(mut rng)) = (seeded(), seeded()) else {
+    let (Ok(mut build), Ok(mut rng), Ok(mut ephemeral)) =
+        (seeded(), seeded(), seeded())
+    else {
         return false;
     };
     let Ok(key) = oaep::PrivateKey::generate(&mut build, 2048) else {
         return false;
     };
+    let Ok(recipient) = hpke::x25519::PrivateKey::generate(&mut build) else {
+        return false;
+    };
+    let recipient_public = *recipient.public_key();
+    let Ok((enc, mut context)) = recipient_public
+        .sender::<sha2::Sha256, Gcm<aes::Aes128>, _>(&mut build, b"bench")
+    else {
+        return false;
+    };
+    let mut sealed = MESSAGE.to_vec();
+    let mut sealed_tag = [0u8; hpke::TAG_SIZE];
+    if context.encrypt(&[], &mut sealed, &mut sealed_tag).is_err() {
+        return false;
+    }
     let Ok(ciphertext) = key.public_key().encrypt_oaep::<sha2::Sha256, _>(
         &mut build,
         &[],
@@ -1624,6 +1782,35 @@ fn pke_ops(options: &Options) -> bool {
                     &mut out,
                 ))
                 .ok();
+            }),
+        ),
+        (
+            "hpke-x25519-seal",
+            Box::new(|| {
+                let sent: Result<(_, HpkeContext), _> =
+                    recipient_public.sender(&mut ephemeral, b"bench");
+                let Ok((enc, mut context)) = sent else {
+                    return;
+                };
+                let mut data = [0u8; MESSAGE.len()];
+                data.copy_from_slice(MESSAGE);
+                let mut tag = [0u8; hpke::TAG_SIZE];
+                context.encrypt(&[], &mut data, &mut tag).ok();
+                black_box((enc, data, tag));
+            }),
+        ),
+        (
+            "hpke-x25519-open",
+            Box::new(|| {
+                let opened: Result<HpkeContext, _> =
+                    recipient.recipient(&enc, b"bench");
+                let Ok(mut context) = opened else {
+                    return;
+                };
+                let mut data = [0u8; MESSAGE.len()];
+                data.copy_from_slice(&sealed);
+                context.decrypt(&[], &mut data, &sealed_tag).ok();
+                black_box(data);
             }),
         ),
     ];
