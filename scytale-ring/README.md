@@ -25,11 +25,12 @@ different implementation:
   per processor: AES-128-GCM runs at 14 GB/s with VAES and SHA-256
   at 2.4 GB/s with SHA-NI on a laptop core, with figures for every
   algorithm and implementation published in [its README][speed].
-- **Testing.** scytale is checked against the NIST ACVP vectors and
-  Project Wycheproof, more than 88,000 cases, on every implementation
-  of every primitive, on x86-64, ARM64 and RISC-V hardware and on
-  eleven emulated processors. This crate then runs ring's own test
-  suite and the test suites of rustls and rustls-webpki on top.
+- **Testing.** scytale is checked against the NIST ACVP sample
+  vectors, run offline, and Project Wycheproof, more than 88,000
+  cases, on every implementation of every primitive, on x86-64, ARM64
+  and RISC-V hardware and on eleven emulated processors. This crate
+  then runs ring's own test suite and the test suites of rustls and
+  rustls-webpki on top.
 - **A second implementation.** Two independent implementations of one
   API let you compare them, test against each other, or keep one as
   a fallback. Switching between ring and this crate is one line of

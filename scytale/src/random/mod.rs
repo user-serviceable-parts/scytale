@@ -190,8 +190,9 @@
 //!
 //! # Assurance
 //!
-//! The generator is checked against NIST's ACVP vectors for CTR_DRBG,
-//! alongside the rest of the library. The entropy sources are not:
+//! The generator is checked against NIST's ACVP sample vectors for
+//! CTR_DRBG, alongside the rest of the library; that is a test, not a
+//! CAVP validation. The entropy sources are not checked that way:
 //! there is nothing deterministic in a noise source to check. What is
 //! tested there is the health testing, against sample streams with
 //! known faults in them.

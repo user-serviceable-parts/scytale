@@ -235,10 +235,10 @@ the nonce, as RFC 6979 and RFC 8032 define them.
   continues.
 - One request is capped at `MAX_REQUEST` (65536) bytes;
   `Error::RequestTooLarge` otherwise.
-- The generator is checked against the ACVP CTR_DRBG vectors. The
-  entropy sources are not, since there is nothing deterministic to
-  check; the health tests are checked against streams with known
-  faults.
+- The generator is checked against NIST's ACVP sample vectors for
+  CTR_DRBG. The entropy sources are not, since there is nothing
+  deterministic to check; the health tests are checked against
+  streams with known faults.
 
 ## RNG across fork, virtual machines and snapshots
 
@@ -394,9 +394,9 @@ and this is what it promises about them.
   scheme has a context string (ML-DSA, SLH-DSA) and the caller uses
   it; key agreement outputs must go through HKDF; ordering, replay
   and identity binding are the protocol's job.
-- **Bugs.** The library is checked against NIST ACVP and Wycheproof
-  vectors for every algorithm, and every accelerated implementation
-  is tested against the portable one at every length. That catches
-  wrong answers; it does not prove constant time and it does not
-  prove the absence of every bug. It has not had a third-party
-  audit.
+- **Bugs.** The library is checked against NIST's ACVP sample
+  vectors and Wycheproof's for every algorithm, and every
+  accelerated implementation is tested against the portable one at
+  every length. That catches wrong answers; it does not prove
+  constant time and it does not prove the absence of every bug. It
+  has not had a third-party audit.

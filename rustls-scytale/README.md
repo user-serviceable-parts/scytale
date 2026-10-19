@@ -15,10 +15,10 @@ This crate is not part of the rustls project, nor endorsed by it in any way.
   this crate builds wherever `rustc` does.
 - **Post-quantum by default.** The first key share offered is
   X25519MLKEM768, and ML-DSA certificates are accepted and served.
-- **Testing.** scytale is tested against the NIST ACVP vectors,
-  Project Wycheproof and the CFRG's HPKE vectors. This crate then
-  passes rustls's own API test suite and BoGo, BoringSSL's TLS
-  conformance runner.
+- **Testing.** scytale is tested against the NIST ACVP sample vectors,
+  run offline, Project Wycheproof and the CFRG's HPKE vectors. This
+  crate then passes rustls's own API test suite and BoGo, BoringSSL's
+  TLS conformance runner.
 
 ## Using it
 
@@ -161,7 +161,7 @@ in a new rustls-scytale minor version, and a row here says so.
 
 - Unit tests against published vectors: RFC 5869 for HKDF, RFC 8439
   for ChaCha20-Poly1305, and RFC 9001 for QUIC. The TLS 1.2 PRF and
-  HPKE are scytale's, checked there against the IETF and ACVP
+  HPKE are scytale's, checked there against the IETF and ACVP sample
   vectors and the CFRG's.
 - Full handshakes with this provider on both ends, over certificates
   and keys OpenSSL made (`tests/data/generate`): every suite with

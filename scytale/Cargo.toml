@@ -15,9 +15,9 @@ categories = [
     "no-std::no-alloc",
     "algorithms",
 ]
-# ACVP vectors are vendored for development but not shipped, to keep
-# the crate small; without them the ACVP suites skip and the built-in
-# vectors in the unit tests remain.
+# NIST's ACVP sample vectors are vendored for development but not
+# shipped, to keep the crate small; without them those suites skip and
+# the built-in vectors in the unit tests remain.
 exclude = ["tests/vectors"]
 
 [dependencies]

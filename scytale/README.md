@@ -54,21 +54,22 @@ its constant-time claims are written down, file by file, in
 [SECURITY.md][security]; and its performance is competitive,
 although there is more work to be done.
 
-The algorithm set is complete enough to build serious applications
-on: encryption and authenticated encryption, hashes and MACs, key
+The algorithm set is complete enough to build serious applications on:
+encryption and authenticated encryption, hashes and MACs, key
 derivation, key agreement, public-key encryption, signatures, the
-three post-quantum families, a validated random generator, and the
-key formats other software stores keys in.
+three post-quantum families, the SP 800-90A CTR_DRBG, and the key
+formats other software stores keys in.
 
 It is tested to the same extent. The standards' own vectors are built
-into the unit tests, and on top of them run the NIST [ACVP][acvp]
-suites and the [Project Wycheproof][wycheproof] files, more than
-eighty-eight thousand vector cases before the Monte Carlo suites add
-several million chained calls of their own. Every implementation of a
-primitive is put through the whole vector set for it, at every key
-size, and the whole suite runs on x86-64, aarch64 and riscv64 hardware
-rather than on the machine that happens to be to hand. The Goals
-section below says exactly what that means.
+into the unit tests, and on top of them run the sample vector files
+NIST publishes for [ACVP][acvp] and the [Project
+Wycheproof][wycheproof] files, more than eighty-eight thousand vector
+cases before the Monte Carlo suites add several million chained calls
+of their own. Every implementation of a primitive is put through the
+whole vector set for it, at every key size, and the whole suite runs
+on x86-64, aarch64 and riscv64 hardware rather than on the machine
+that happens to be to hand. The Goals section below says exactly what
+that means.
 
 Work from here will focus on speed and algorithms that are still
 missing. The API is still being stabilized, and the version number is
@@ -81,20 +82,24 @@ with or without an operating system under it.
 
 ## Goals
 
-**Correct.** Every implementation is checked against the standard
-test vectors, against the NIST Automated Cryptographic Validation
-Program (ACVP) vectors, and against Project Wycheproof, whose cases
-are chosen to break implementations rather than to exercise them.
-The corpus is 121 files holding 88,222 cases, and every case this
-build can run is run; the Monte Carlo groups chain a thousand cipher
-calls per case, with the key re-derived at each step. Every
+**Correct.** Every implementation is checked against the standard test
+vectors, against the sample vectors NIST publishes for its Automated
+Cryptographic Validation Protocol (ACVP), and against Project
+Wycheproof, whose cases are chosen to break implementations rather
+than to exercise them. The ACVP vectors are the files in NIST's
+ACVP-Server repository, each holding the prompts and the expected
+answers, and they are checked offline. That is not the ACVP protocol
+run against NIST's servers, and it is not a CAVP validation: scytale
+has none. The corpus is 121 files holding 88,222 cases, and every case
+this build can run is run; the Monte Carlo groups chain a thousand
+cipher calls per case, with the key re-derived at each step. Every
 implementation is put through the whole vector set for its primitive,
 at every key size, the modes and the AEADs included: each engine
-written for a particular instruction set is validated as itself
-rather than only the one this processor would pick. Every
-implementation is also compared byte for byte against the portable
-one across a range of buffer lengths, so the paths that only some
-processors take get the same scrutiny as the rest.
+written for a particular instruction set is tested as itself rather
+than only the one this processor would pick. Every implementation is
+also compared byte for byte against the portable one across a range of
+buffer lengths, so the paths that only some processors take get the
+same scrutiny as the rest.
 
 What a given machine actually ran, and what it skipped for want of
 instructions, is a command away in a checkout of the
@@ -262,7 +267,7 @@ encryption keys are distinct types: a key does one job.
 | RSA-PSS, RSA PKCS#1 v1.5 (RFC 8017) | `sig` | any width; CRT signing and key generation |
 | ML-DSA (FIPS 204), all three sets | `sig` | post-quantum; hedged or deterministic; context strings |
 | SLH-DSA (FIPS 205), all twelve sets | `sig` | post-quantum, hash-based; hedged or deterministic; context strings |
-| RSA primitives (RFC 8017) | `sig`, `pke` | raw, unpadded; for building schemes and for validation |
+| RSA primitives (RFC 8017) | `sig`, `pke` | raw, unpadded; for building schemes and for testing |
 
 Every key reads and writes the formats other software stores it in:
 a public key as a DER `SubjectPublicKeyInfo`, a private key as
@@ -291,14 +296,14 @@ rng.fill(&mut nonce)?;
 
 `CtrDrbg` is named for what it is, the CTR_DRBG of NIST SP 800-90A:
 AES-256 driven by a counter, with its key and counter replaced after
-every request, checked against the ACVP vectors for that mechanism
-alongside everything else. Seed material of any length and any
-density is condensed by the standard's derivation function, so
-entropy from a slow or biased source is worth its full weight. The
-generator takes additional input at a reseeding or a single request,
-to bind the output to something the caller knows, and `below` draws
-an unbiased number under a bound, so an index or a shuffle never
-comes from a byte reduced modulo something.
+every request, checked against the ACVP sample vectors for it
+alongside everything else. Seed material of any length and any density
+is condensed by the standard's derivation function, so entropy from a
+slow or biased source is worth its full weight. The generator takes
+additional input at a reseeding or a single request, to bind the
+output to something the caller knows, and `below` draws an unbiased
+number under a bound, so an index or a shuffle never comes from a byte
+reduced modulo something.
 
 `from_system` asks this machine for the seed, which is what almost
 every caller wants, and it is one call with one shape on every
@@ -565,26 +570,26 @@ running on battery, expect about half of each figure.
 The suites live inside the crate, under `#[cfg(test)]`, rather than
 in `tests/`: an integration test is a separate crate and would see
 only the public types, and each implementation behind them is meant
-to be validated in its own right.
+to be tested in its own right.
 
 The standards' own vectors are built into the unit tests, so
 `cargo test` on the published crate checks every primitive against
-them. The ACVP, Project Wycheproof and CFRG HPKE vectors are not
-shipped, to keep the crate small; the suites that read them run from
-a checkout of the [repository][repo], whose README says how, and in
-its continuous integration on every push, natively on x86-64, arm64
-and riscv64.
+them. The ACVP sample vectors, Project Wycheproof and CFRG HPKE
+vectors are not shipped, to keep the crate small; the suites that read
+them run from a checkout of the [repository][repo], whose README says
+how, and in its continuous integration on every push, natively on
+x86-64, arm64 and riscv64.
 
-The public-key algorithms and the KDFs run against both: ACVP's
-ML-KEM, ML-DSA, SLH-DSA, RSA, KTS-IFC, ECDSA, EDDSA, XECDH, KDA and
-TLS 1.2 KDF suites, the CFRG's HPKE vectors, and Wycheproof's ML-KEM,
-ML-DSA, ECDH, ECDSA, X25519, Ed25519, RSA signature and RSA-OAEP
-files, whose deliberately twisted cases are the point. The
-deterministic ECDSA suite checks signatures byte for byte, since RFC
-6979 fixes the nonce. RSA is the one algorithm whose raw primitives
-NIST publishes vectors for, and those run too: they are the only
-external check on a value the crate produces under a private exponent
-rather than merely verifies.
+The public-key algorithms and the KDFs run against both: the ACVP
+sample vectors for ML-KEM, ML-DSA, SLH-DSA, RSA, KTS-IFC, ECDSA,
+EDDSA, XECDH, KDA and the TLS 1.2 KDF, the CFRG's HPKE vectors, and
+Wycheproof's ML-KEM, ML-DSA, ECDH, ECDSA, X25519, Ed25519, RSA
+signature and RSA-OAEP files, whose deliberately twisted cases are the
+point. The deterministic ECDSA suite checks signatures byte for byte,
+since RFC 6979 fixes the nonce. RSA is the one algorithm whose raw
+primitives NIST publishes vectors for, and those run too: they are the
+only external check on a value the crate produces under a private
+exponent rather than merely verifies.
 
 The library is also the cryptography under three other crates in the
 repository, and their tests are a check on it too: rustls and
