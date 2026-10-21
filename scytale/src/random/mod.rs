@@ -8,9 +8,13 @@
 //! by a counter, its key and counter replaced after every request so
 //! that nothing already handed out can be worked backwards from what
 //! comes next. It is named for the construction rather than for its
-//! category, so that the next generator can sit beside it under its
-//! own name; what code takes is the [`Random`] trait, not either of
-//! them.
+//! category, so that the others can sit beside it under their own
+//! names; what code takes is the [`Random`] trait, not any of them.
+//!
+//! [`HmacDrbg`] and [`HashDrbg`] are the standard's other two shapes,
+//! built on a hash instead of a block cipher. Everything below about
+//! seeding, copies and running out holds for them as it does for
+//! `CtrDrbg`, with the same constructors and limits.
 //!
 //! ```
 //! use scytale::Random;
@@ -190,14 +194,16 @@
 //!
 //! # Assurance
 //!
-//! The generator is checked against NIST's ACVP sample vectors for
-//! CTR_DRBG, alongside the rest of the library; that is a test, not a
-//! CAVP validation. The entropy sources are not checked that way:
-//! there is nothing deterministic in a noise source to check. What is
-//! tested there is the health testing, against sample streams with
-//! known faults in them.
+//! The generators are checked against NIST's ACVP sample vectors for
+//! CTR_DRBG, Hash_DRBG and HMAC_DRBG, alongside the rest of the
+//! library; that is a test, not a CAVP validation. The entropy
+//! sources are not checked that way: there is nothing deterministic
+//! in a noise source to check. What is tested there is the health
+//! testing, against sample streams with known faults in them.
 
 pub mod entropy;
+mod hash_drbg;
+mod hmac_drbg;
 // Only the processor's generator is health tested here, and it is
 // built only where `entropy` says: an operating system tests its own.
 #[cfg(any(target_os = "none", test))]
@@ -211,6 +217,9 @@ use crate::cipher::OneBlock;
 use crate::cipher::aes::{Aes256, BLOCK_SIZE};
 use crate::cipher::mode::Ctr;
 use crate::{Error, Key, Random};
+
+pub use hash_drbg::HashDrbg;
+pub use hmac_drbg::HmacDrbg;
 
 /// AES-256: the key length the generator uses, in bytes.
 const KEY: usize = 32;

@@ -26,6 +26,7 @@ pub mod cshake;
 pub mod ctr_drbg;
 pub mod ecdsa;
 pub mod eddsa;
+pub mod hash_drbg;
 pub mod hmac;
 pub mod kda_hkdf;
 pub mod kmac;
