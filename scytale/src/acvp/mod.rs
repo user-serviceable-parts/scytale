@@ -1320,6 +1320,51 @@ mod hkdf {
     }
 }
 
+/// The one-step KDF of SP 800-56Cr2, with and without its counter,
+/// and the ANSI X9.63 KDF.
+mod one_step {
+    use super::*;
+    use support::acvp::kda_one_step;
+
+    #[test]
+    fn acvp_kda_one_step() {
+        kda_one_step::run(
+            "KDA-OneStep-Sp800-56Cr2/internalProjection.json",
+            "OneStep",
+        );
+    }
+
+    #[test]
+    fn acvp_kda_one_step_no_counter() {
+        kda_one_step::run(
+            "KDA-OneStepNoCounter-Sp800-56Cr2/internalProjection.json",
+            "OneStepNoCounter",
+        );
+    }
+
+    #[test]
+    fn acvp_x963() {
+        kda_one_step::run_x963();
+    }
+}
+
+/// The SP 800-108 KDFs: counter, feedback and double-pipeline modes
+/// over HMAC and CMAC, and KDF-KMAC.
+mod sp800_108 {
+    use super::*;
+    use support::acvp::kdf108;
+
+    #[test]
+    fn acvp_kdf() {
+        kdf108::run();
+    }
+
+    #[test]
+    fn acvp_kdf_kmac() {
+        kdf108::run_kmac();
+    }
+}
+
 /// The TLS 1.2 PRF, as RFC 7627's extended master secret and the key
 /// block.
 mod tls12 {

@@ -87,7 +87,7 @@ use crate::Random;
 use crate::hash::sha1::Sha1;
 use crate::hash::{Hash, Xof, XofReader};
 use crate::hash::{sha2, sha3};
-use crate::kdf::{hkdf, pbkdf2, tls12};
+use crate::kdf::{hkdf, one_step, pbkdf2, sp800_108, tls12, x963};
 use crate::kex::{ecdh, x25519};
 use crate::mac::Mac;
 use crate::mac::cmac::Cmac;
@@ -1027,12 +1027,16 @@ fn per_call(seconds: f64) -> String {
     }
 }
 
-const KDF_JOBS: [&str; 5] = [
+const KDF_JOBS: [&str; 9] = [
     "hkdf-sha-256",
     "hkdf-sha-512",
     "pbkdf2-sha-256",
     "pbkdf2-sha-512",
     "tls12-prf-sha-256",
+    "sp800-108-hmac-sha-256",
+    "kdf-kmac128",
+    "one-step-sha-256",
+    "x963-sha-256",
 ];
 
 /// Key derivation: one derivation of a 32-byte key, which is what a
@@ -1100,6 +1104,50 @@ fn kdf_ops(options: &Options) -> bool {
                     &[&KEY256, &KEY256],
                     &mut out,
                 );
+                black_box(out);
+            }),
+        ),
+        (
+            "sp800-108-hmac-sha-256",
+            Box::new(|| {
+                let mut out = [0u8; 32];
+                let mut prf = Hmac::<sha2::Sha256>::new(&KEY256);
+                let _ = sp800_108::counter(
+                    &mut prf,
+                    32,
+                    0,
+                    &[b"label", &[0], &KEY128, &[0, 0, 1, 0]],
+                    &mut out,
+                );
+                black_box(out);
+            }),
+        ),
+        (
+            "kdf-kmac128",
+            Box::new(|| {
+                let mut out = [0u8; 32];
+                sp800_108::kmac128(&KEY256, b"label", &KEY128, &mut out);
+                black_box(out);
+            }),
+        ),
+        (
+            "one-step-sha-256",
+            Box::new(|| {
+                let mut out = [0u8; 32];
+                let _ = one_step::hash::<sha2::Sha256>(
+                    &KEY256,
+                    &[&KEY128, &[0, 0, 1, 0]],
+                    &mut out,
+                );
+                black_box(out);
+            }),
+        ),
+        (
+            "x963-sha-256",
+            Box::new(|| {
+                let mut out = [0u8; 32];
+                let _ =
+                    x963::derive::<sha2::Sha256>(&KEY256, &[&KEY128], &mut out);
                 black_box(out);
             }),
         ),

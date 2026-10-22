@@ -63,7 +63,7 @@ formats other software stores keys in.
 It is tested to the same extent. The standards' own vectors are built
 into the unit tests, and on top of them run the sample vector files
 NIST publishes for [ACVP][acvp] and the [Project
-Wycheproof][wycheproof] files, more than ninety thousand vector
+Wycheproof][wycheproof] files, more than a hundred thousand vector
 cases before the Monte Carlo suites add several million chained calls
 of their own. Every implementation of a primitive is put through the
 whole vector set for it, at every key size, and the whole suite runs
@@ -90,7 +90,7 @@ than to exercise them. The ACVP vectors are the files in NIST's
 ACVP-Server repository, each holding the prompts and the expected
 answers, and they are checked offline. That is not the ACVP protocol
 run against NIST's servers, and it is not a CAVP validation: scytale
-has none. The corpus is 125 files holding 90,202 cases, and every case
+has none. The corpus is 130 files holding 103,312 cases, and every case
 this build can run is run; the Monte Carlo groups chain a thousand
 cipher calls per case, with the key re-derived at each step. Every
 implementation is put through the whole vector set for its primitive,
@@ -140,7 +140,7 @@ the machinery behind it:
 | `cipher` | encryption | AES, ChaCha20, and the modes built on them |
 | `hash` | digests | SHA-2, SHA-3, SHAKE, cSHAKE; SHA-1 for what still names it |
 | `mac` | message authentication | HMAC, CMAC, KMAC, Poly1305 |
-| `kdf` | key derivation | HKDF, PBKDF2, TLS 1.2 PRF |
+| `kdf` | key derivation | HKDF, PBKDF2, TLS 1.2 PRF, SP 800-108, SP 800-56C one-step, ANSI X9.63 |
 | `kem` | key encapsulation | ML-KEM-512, -768 and -1024 |
 | `kex` | key agreement | X25519, ECDH over P-256, P-384 and P-521 |
 | `pke` | public-key encryption | HPKE, RSA-OAEP |
@@ -249,6 +249,10 @@ define them.
 | HKDF (RFC 5869) | over any hash; from a secret that is already random |
 | PBKDF2 (SP 800-132) | over any hash; from a password |
 | TLS 1.2 PRF (RFC 5246) | over any hash; for implementations of that protocol |
+| SP 800-108 counter, feedback and double-pipeline modes | over any MAC; the counter any width the standard allows, anywhere it allows |
+| KDF-KMAC (SP 800-108r1) | KMAC128 and KMAC256 |
+| One-step KDF (SP 800-56C) | over a hash, HMAC or KMAC; with or without the counter |
+| ANSI X9.63 | over any hash; for ECIES and the protocols that name it |
 
 ### Key encapsulation, key agreement, public-key encryption and signatures
 

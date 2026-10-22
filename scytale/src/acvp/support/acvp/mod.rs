@@ -29,6 +29,8 @@ pub mod eddsa;
 pub mod hash_drbg;
 pub mod hmac;
 pub mod kda_hkdf;
+pub mod kda_one_step;
+pub mod kdf108;
 pub mod kmac;
 pub mod kts_ifc;
 pub mod ml_dsa;
