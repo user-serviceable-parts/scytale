@@ -12,7 +12,7 @@
 //! | --- | --- |
 //! | [`aead`] | GCM, GCM-SIV, XPN, CCM and ChaCha20-Poly1305 |
 //! | [`cipher`] | AES, ChaCha20, and the modes built on them |
-//! | [`hash`] | SHA-2, SHA-3, SHAKE, cSHAKE, and SHA-1 for old protocols |
+//! | [`hash`] | SHA-2, SHA-3, SHAKE, cSHAKE, TupleHash, and legacy SHA-1 |
 //! | [`mac`] | HMAC, CMAC, KMAC and Poly1305 |
 //! | [`kdf`] | HKDF, PBKDF2, the TLS 1.2 PRF, SP 800-108, one-step and X9.63 |
 //! | [`kem`] | ML-KEM key encapsulation |
