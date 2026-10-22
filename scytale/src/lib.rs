@@ -18,7 +18,7 @@
 //! | [`kem`] | ML-KEM key encapsulation |
 //! | [`kex`] | X25519 and ECDH key agreement |
 //! | [`pke`] | HPKE and RSA-OAEP public-key encryption |
-//! | [`random`] | a CTR_DRBG generator and the entropy that seeds it |
+//! | [`random`] | the SP 800-90A generators and the entropy that seeds them |
 //! | [`constant_time`] | comparing secrets without timing them |
 //! | [`codec`] | hex, base64 and PEM, in constant time |
 //! | [`sig`] | Ed25519, ECDSA, ML-DSA, SLH-DSA and RSA signatures |

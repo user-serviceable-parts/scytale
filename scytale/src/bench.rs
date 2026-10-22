@@ -96,7 +96,7 @@ use crate::mac::kmac::Kmac128;
 use crate::mac::poly1305::Poly1305;
 use crate::pke::hpke;
 use crate::pke::rsa as oaep;
-use crate::random::CtrDrbg;
+use crate::random::{CtrDrbg, HashDrbg, HmacDrbg};
 use crate::sig::{ecdsa, ed25519, rsa};
 
 /// Buffer sizes reported, the ones `openssl speed` uses.
@@ -792,11 +792,13 @@ where
 
 /// The rows whose implementation is settled inside them and cannot
 /// be named from out here: SHA-1 picks its own, the generator builds
-/// its own cipher, and Poly1305 and the AEAD over ChaCha20 each take
+/// its own cipher or hash, and Poly1305 and the AEAD over ChaCha20 each take
 /// the best the processor has without being asked.
-const DISPATCHING: [&str; 6] = [
+const DISPATCHING: [&str; 8] = [
     "sha-1",
     "ctr-drbg",
+    "hash-drbg-sha-256",
+    "hmac-drbg-sha-256",
     "poly1305",
     "kmac128",
     "chacha20-poly1305-enc",
@@ -819,6 +821,16 @@ fn single_section(options: &Options) -> bool {
     let Ok(mut rng) = CtrDrbg::from_seed(&[0x5au8; 64]) else {
         return false;
     };
+    let Ok(mut hash_rng) =
+        HashDrbg::<sha2::Sha256, _>::from_seed(&[0x5au8; 64])
+    else {
+        return false;
+    };
+    let Ok(mut hmac_rng) =
+        HmacDrbg::<sha2::Sha256, _>::from_seed(&[0x5au8; 64])
+    else {
+        return false;
+    };
     // Neither of these can fail to build: the key is the right width
     // and the automatic ChaCha20 always exists.
     let mut mac = Poly1305::new(&Key::from(KEY256));
@@ -839,6 +851,18 @@ fn single_section(options: &Options) -> bool {
             "ctr-drbg",
             Box::new(|d: &mut [u8]| {
                 let _ = rng.fill(d);
+            }),
+        ),
+        (
+            "hash-drbg-sha-256",
+            Box::new(|d: &mut [u8]| {
+                let _ = hash_rng.fill(d);
+            }),
+        ),
+        (
+            "hmac-drbg-sha-256",
+            Box::new(|d: &mut [u8]| {
+                let _ = hmac_rng.fill(d);
             }),
         ),
         (

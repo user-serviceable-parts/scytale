@@ -433,6 +433,39 @@ mod ctr_drbg {
     }
 }
 
+/// Hash_DRBG and HMAC_DRBG (SP 800-90A), each in both revisions of
+/// its suite, over every hash the files name.
+mod hash_drbgs {
+    use super::*;
+    use support::acvp::hash_drbg;
+
+    #[test]
+    fn acvp_hash_drbg() {
+        hash_drbg::run_hash("hashDRBG-1.0/internalProjection.json", "1.0");
+    }
+
+    #[test]
+    fn acvp_hash_drbg_r1() {
+        hash_drbg::run_hash(
+            "hashDRBG-SP800-90Ar1/internalProjection.json",
+            "SP800-90Ar1",
+        );
+    }
+
+    #[test]
+    fn acvp_hmac_drbg() {
+        hash_drbg::run_hmac("hmacDRBG-1.0/internalProjection.json", "1.0");
+    }
+
+    #[test]
+    fn acvp_hmac_drbg_r1() {
+        hash_drbg::run_hmac(
+            "hmacDRBG-SP800-90Ar1/internalProjection.json",
+            "SP800-90Ar1",
+        );
+    }
+}
+
 /// Defines the SHA-2 suites for one implementation of one variant.
 /// The hardware ones skip, saying so, when the processor cannot.
 macro_rules! sha2_suites {

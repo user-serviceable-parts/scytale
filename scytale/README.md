@@ -57,13 +57,13 @@ although there is more work to be done.
 The algorithm set is complete enough to build serious applications on:
 encryption and authenticated encryption, hashes and MACs, key
 derivation, key agreement, public-key encryption, signatures, the
-three post-quantum families, the SP 800-90A CTR_DRBG, and the key
+three post-quantum families, the three SP 800-90A generators, and the key
 formats other software stores keys in.
 
 It is tested to the same extent. The standards' own vectors are built
 into the unit tests, and on top of them run the sample vector files
 NIST publishes for [ACVP][acvp] and the [Project
-Wycheproof][wycheproof] files, more than eighty-eight thousand vector
+Wycheproof][wycheproof] files, more than ninety thousand vector
 cases before the Monte Carlo suites add several million chained calls
 of their own. Every implementation of a primitive is put through the
 whole vector set for it, at every key size, and the whole suite runs
@@ -90,7 +90,7 @@ than to exercise them. The ACVP vectors are the files in NIST's
 ACVP-Server repository, each holding the prompts and the expected
 answers, and they are checked offline. That is not the ACVP protocol
 run against NIST's servers, and it is not a CAVP validation: scytale
-has none. The corpus is 121 files holding 88,222 cases, and every case
+has none. The corpus is 125 files holding 90,202 cases, and every case
 this build can run is run; the Monte Carlo groups chain a thousand
 cipher calls per case, with the key re-derived at each step. Every
 implementation is put through the whole vector set for its primitive,
@@ -145,7 +145,7 @@ the machinery behind it:
 | `kex` | key agreement | X25519, ECDH over P-256, P-384 and P-521 |
 | `pke` | public-key encryption | HPKE, RSA-OAEP |
 | `sig` | signatures | Ed25519, ECDSA over P-256, P-384 and P-521, ML-DSA, SLH-DSA, RSA-PSS, RSA PKCS#1 v1.5 |
-| `random` | random numbers | CTR_DRBG over AES-256, and what seeds it |
+| `random` | random numbers | CTR_DRBG, Hash_DRBG and HMAC_DRBG, and what seeds them |
 | `constant_time` | comparing secrets | equality whose timing says nothing |
 | `codec` | bytes as text | hex, base64 and PEM, in constant time |
 
@@ -304,6 +304,12 @@ additional input at a reseeding or a single request, to bind the
 output to something the caller knows, and `below` draws an unbiased
 number under a bound, so an index or a shuffle never comes from a byte
 reduced modulo something.
+
+`HmacDrbg` and `HashDrbg` are the standard's other two generators,
+over any of the crate's hashes, with the same constructors, limits
+and rules. They are for a build or a policy that wants a generator
+built on a hash rather than a block cipher; anything else should
+take `CtrDrbg`.
 
 `from_system` asks this machine for the seed, which is what almost
 every caller wants, and it is one call with one shape on every

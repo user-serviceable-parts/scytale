@@ -74,6 +74,7 @@ excluded.
 | KW, KWP | over the cipher | the integrity check value is compared with `constant_time::equal` |
 | GCM, GCM-SIV, XPN, CCM, ChaCha20-Poly1305 | over the above | tag compared whole with `constant_time::equal`; plaintext never released on failure |
 | CTR_DRBG | AES-256 | as AES; the state is a `Key` |
+| Hash_DRBG, HMAC_DRBG | over the hashes | as the hash; the state is wiped on drop, and Hash_DRBG's additions carry through every byte |
 | `constant_time::equal` | `constant_time.rs` | reads every byte of both operands; the accumulator goes through `black_box` so the compiler cannot reintroduce an early exit; a length mismatch returns early, since lengths are not secret |
 
 ### Public key
@@ -235,8 +236,8 @@ the nonce, as RFC 6979 and RFC 8032 define them.
   continues.
 - One request is capped at `MAX_REQUEST` (65536) bytes;
   `Error::RequestTooLarge` otherwise.
-- The generator is checked against NIST's ACVP sample vectors for
-  CTR_DRBG. The entropy sources are not, since there is nothing
+- The generators are checked against NIST's ACVP sample vectors for
+  CTR_DRBG, Hash_DRBG and HMAC_DRBG. The entropy sources are not, since there is nothing
   deterministic to check; the health tests are checked against
   streams with known faults.
 
