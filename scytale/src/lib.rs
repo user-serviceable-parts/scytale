@@ -14,7 +14,7 @@
 //! | [`cipher`] | AES, ChaCha20, and the modes built on them |
 //! | [`hash`] | SHA-2, SHA-3, SHAKE, cSHAKE, and SHA-1 for old protocols |
 //! | [`mac`] | HMAC, CMAC, KMAC and Poly1305 |
-//! | [`kdf`] | HKDF, PBKDF2 and the TLS 1.2 PRF |
+//! | [`kdf`] | HKDF, PBKDF2, the TLS 1.2 PRF, SP 800-108, one-step and X9.63 |
 //! | [`kem`] | ML-KEM key encapsulation |
 //! | [`kex`] | X25519 and ECDH key agreement |
 //! | [`pke`] | HPKE and RSA-OAEP public-key encryption |
