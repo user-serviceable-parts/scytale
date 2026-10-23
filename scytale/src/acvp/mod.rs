@@ -28,6 +28,7 @@ use support::acvp::{
     aes_xpn as xpn, aes_xts as xts, cmac_aes as cmac, cshake as cshake_vectors,
     ctr_drbg as drbg, hmac as hmac_vectors, kmac as kmac_vectors,
     pbkdf as pbkdf_vectors, sha as sha_vectors, shake as shake_vectors,
+    tuple_hash as tuple_hash_vectors,
 };
 
 /// Defines the suites for an implementation that is always
@@ -837,6 +838,28 @@ mod kmac_256 {
         kmac_vectors::run_aft::<crate::mac::kmac::Kmac256>(
             "KMAC-256-1.0/internalProjection.json",
             "KMAC-256",
+        );
+    }
+}
+
+/// TupleHash128 and TupleHash256 (SP 800-185), both forms.
+mod tuple_hash {
+    use super::*;
+    use crate::hash::sha3::{TupleHash128, TupleHash256};
+
+    #[test]
+    fn acvp_tuplehash_128() {
+        tuple_hash_vectors::run::<TupleHash128>(
+            "TupleHash-128-1.0/internalProjection.json",
+            "TupleHash-128",
+        );
+    }
+
+    #[test]
+    fn acvp_tuplehash_256() {
+        tuple_hash_vectors::run::<TupleHash256>(
+            "TupleHash-256-1.0/internalProjection.json",
+            "TupleHash-256",
         );
     }
 }
