@@ -85,6 +85,7 @@ use crate::BlockType;
 use crate::Error;
 use crate::Random;
 use crate::hash::sha1::Sha1;
+use crate::hash::sha3::TupleHash128;
 use crate::hash::{Hash, Xof, XofReader};
 use crate::hash::{sha2, sha3};
 use crate::kdf::{hkdf, one_step, pbkdf2, sp800_108, tls12, x963};
@@ -794,13 +795,14 @@ where
 /// be named from out here: SHA-1 picks its own, the generator builds
 /// its own cipher or hash, and Poly1305 and the AEAD over ChaCha20 each take
 /// the best the processor has without being asked.
-const DISPATCHING: [&str; 8] = [
+const DISPATCHING: [&str; 9] = [
     "sha-1",
     "ctr-drbg",
     "hash-drbg-sha-256",
     "hmac-drbg-sha-256",
     "poly1305",
     "kmac128",
+    "tuplehash128",
     "chacha20-poly1305-enc",
     "chacha20-poly1305-dec",
 ];
@@ -836,6 +838,8 @@ fn single_section(options: &Options) -> bool {
     let mut mac = Poly1305::new(&Key::from(KEY256));
     let aead = ChaCha20Poly1305::new(&Key::from(KEY256));
     let mut kmac = Kmac128::new(&KEY256, b"");
+    let mut tuple = TupleHash128::new(b"");
+    let mut tuple_out = [0u8; 32];
     let mut tags = [[0u8; 16]; 2];
     let (enc_tag, dec_tag) = tags.split_at_mut(1);
     let mut tasks: Vec<Task<'_>> = vec![
@@ -878,6 +882,16 @@ fn single_section(options: &Options) -> bool {
             Box::new(|d: &mut [u8]| {
                 kmac.update(d);
                 black_box(Mac::finalize(&mut kmac));
+            }),
+        ),
+        // The buffer as one string, as a message is one for the
+        // other hashes.
+        (
+            "tuplehash128",
+            Box::new(|d: &mut [u8]| {
+                tuple.push(d);
+                tuple.finalize_to(&mut tuple_out);
+                black_box(&tuple_out);
             }),
         ),
         (

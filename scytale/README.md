@@ -90,7 +90,7 @@ than to exercise them. The ACVP vectors are the files in NIST's
 ACVP-Server repository, each holding the prompts and the expected
 answers, and they are checked offline. That is not the ACVP protocol
 run against NIST's servers, and it is not a CAVP validation: scytale
-has none. The corpus is 130 files holding 103,312 cases, and every case
+has none. The corpus is 132 files holding 103,716 cases, and every case
 this build can run is run; the Monte Carlo groups chain a thousand
 cipher calls per case, with the key re-derived at each step. Every
 implementation is put through the whole vector set for its primitive,
@@ -138,7 +138,7 @@ the machinery behind it:
 | --- | --- | --- |
 | `aead` | authenticated encryption | GCM, GCM-SIV, XPN, CCM, ChaCha20-Poly1305 |
 | `cipher` | encryption | AES, ChaCha20, and the modes built on them |
-| `hash` | digests | SHA-2, SHA-3, SHAKE, cSHAKE; SHA-1 for what still names it |
+| `hash` | digests | SHA-2, SHA-3, SHAKE, cSHAKE, TupleHash; SHA-1 for what still names it |
 | `mac` | message authentication | HMAC, CMAC, KMAC, Poly1305 |
 | `kdf` | key derivation | HKDF, PBKDF2, TLS 1.2 PRF, SP 800-108, SP 800-56C one-step, ANSI X9.63 |
 | `kem` | key encapsulation | ML-KEM-512, -768 and -1024 |
@@ -228,10 +228,14 @@ too.
 | SHA3-224 to SHA3-512 (FIPS 202) | 28 to 64 bytes | no length extension |
 | SHAKE128, SHAKE256 | any length | extendable output |
 | cSHAKE128, cSHAKE256 (SP 800-185) | any length | SHAKE with a function name and customization |
+| TupleHash128, TupleHash256 (SP 800-185) | any length | a sequence of strings, each boundary counted; TupleHashXOF; whole bytes |
 | SHA-1 (FIPS 180-4) | 20 bytes | broken for collisions; for HMAC, HKDF and OAEP in old protocols only |
 
-All of them take bit strings as well as bytes, as the standards
-define them.
+All of them but TupleHash take bit strings as well as bytes, as
+the standards define them. ParallelHash (SP 800-185) is left out:
+the standard and NIST's validation vectors disagree on how a
+message's trailing bits are blocked, and the question is open with
+NIST.
 
 ### Message authentication
 
@@ -394,9 +398,9 @@ state is wiped when the generator is dropped.
 | aarch64 | ARMv8 SHA512 extension | SHA-512 |
 | riscv64 | vector cryptography (Zvknha, Zvknhb) | SHA-256, SHA-512 |
 | riscv64 | scalar cryptography (Zknh) | SHA-256, SHA-512 |
-| aarch64 | ARMv8 SHA3 extension | SHA-3, SHAKE, cSHAKE, KMAC |
-| x86-64 | BMI1 and BMI2 | SHA-3, SHAKE, cSHAKE, KMAC |
-| riscv64 | scalar bit manipulation (Zbb) | SHA-3, SHAKE, cSHAKE, KMAC |
+| aarch64 | ARMv8 SHA3 extension | SHA-3, SHAKE, cSHAKE, TupleHash, KMAC |
+| x86-64 | BMI1 and BMI2 | SHA-3, SHAKE, cSHAKE, TupleHash, KMAC |
+| riscv64 | scalar bit manipulation (Zbb) | SHA-3, SHAKE, cSHAKE, TupleHash, KMAC |
 | x86-64 | BMI2 and ADX | RSA, P-256 and P-384 field arithmetic |
 | x86-64 | AVX2 | ChaCha20 |
 | aarch64 | NEON | ChaCha20 |
@@ -418,8 +422,8 @@ multiply instruction it costs more than the cipher does. SHA-224 and
 SHA-384 and the SHA-512/t pair use the SHA-256 and SHA-512 code, so
 whatever accelerates those accelerates them. x86-64 has no SHA-512
 instruction in common use, so SHA-512 is portable there. Every SHA-3,
-SHAKE and cSHAKE function, and KMAC, is the one Keccak permutation,
-which only AArch64 has instructions for. On x86-64 the portable
+SHAKE, cSHAKE and TupleHash function, and KMAC, is the one Keccak
+permutation, which only AArch64 has instructions for. On x86-64 the portable
 permutation is compiled a second time for BMI1 and BMI2, whose
 `andn` and `rorx` are chi and rho in fewer instructions, and on
 RISC-V for Zbb, whose `andn` and `rori` are the same two; elsewhere

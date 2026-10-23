@@ -42,6 +42,7 @@ pub mod sha;
 pub mod shake;
 pub mod slh_dsa;
 pub mod tls12_kdf;
+pub mod tuple_hash;
 pub mod xecdh;
 
 use crate::KeyType;
