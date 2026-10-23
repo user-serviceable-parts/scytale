@@ -2804,11 +2804,19 @@ impl Clock {
 /// alone, user mode only, through `perf_event_open`. It follows the
 /// thread from core to core and stops while the thread is off the
 /// processor, so it counts the work and not the waiting.
+///
+/// A hybrid processor has a PMU per kind of core, and an event opened
+/// without naming one counts on the first kind alone: a thread on an
+/// efficiency core reads zero. So one event is opened per core PMU
+/// the kernel lists, each told which PMU it is for, and the count is
+/// their sum.
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 mod cycles {
+    use std::fs;
     use std::io;
     use std::string::{String, ToString};
+    use std::vec::Vec;
 
     /// The first 64 bytes of the kernel's `perf_event_attr`, which is
     /// `PERF_ATTR_SIZE_VER0` and the layout every kernel accepts when
@@ -2830,12 +2838,14 @@ mod cycles {
 
     const PERF_TYPE_HARDWARE: u32 = 0;
     const PERF_COUNT_HW_CPU_CYCLES: u64 = 0;
+    /// Where a hardware event's `config` names the PMU it is for.
+    const PERF_PMU_TYPE_SHIFT: u32 = 32;
     /// `exclude_kernel` and `exclude_hv`: bits 5 and 6 of the flags.
     const EXCLUDE_KERNEL_AND_HV: u64 = (1 << 5) | (1 << 6);
     const PERF_FLAG_FD_CLOEXEC: libc::c_ulong = 1 << 3;
 
     pub struct Counter {
-        fd: libc::c_int,
+        fds: Vec<libc::c_int>,
     }
 
     impl Counter {
@@ -2844,60 +2854,101 @@ mod cycles {
         /// process, and a virtual machine usually has no counter to
         /// give.
         pub fn try_open() -> Result<Self, String> {
-            const _: () = assert!(size_of::<Attr>() == 64);
-            let attr = Attr {
-                kind: PERF_TYPE_HARDWARE,
-                size: 64,
-                config: PERF_COUNT_HW_CPU_CYCLES,
-                sample_period: 0,
-                sample_type: 0,
-                read_format: 0,
-                flags: EXCLUDE_KERNEL_AND_HV,
-                wakeup_events: 0,
-                bp_type: 0,
-                config1: 0,
-            };
-            // SAFETY: the attributes outlive the call and the kernel
-            // reads the `size` bytes it is told about. Process 0 is
-            // the calling thread, CPU -1 is any, and there is no
-            // group.
-            let fd = unsafe {
-                libc::syscall(
-                    libc::SYS_perf_event_open,
-                    &raw const attr,
-                    0 as libc::pid_t,
-                    -1 as libc::c_int,
-                    -1 as libc::c_int,
-                    PERF_FLAG_FD_CLOEXEC,
-                )
-            };
-            if fd < 0 {
-                return Err(io::Error::last_os_error().to_string());
+            let mut pmus = core_pmus();
+            // A kernel too old to list its PMUs has one, unnamed.
+            if pmus.is_empty() {
+                pmus.push(0);
             }
-            Ok(Counter {
-                fd: fd as libc::c_int,
-            })
+            let fds =
+                pmus.into_iter().map(open).collect::<Result<Vec<_>, _>>()?;
+            Ok(Counter { fds })
         }
 
-        /// The count so far.
+        /// The count so far: the sum over the PMUs.
         pub fn read(&self) -> Option<u64> {
-            let mut count: u64 = 0;
-            // SAFETY: the buffer is the eight bytes a counter's read
-            // delivers.
-            let got = unsafe {
-                libc::read(self.fd, (&raw mut count).cast(), size_of::<u64>())
-            };
-            (got == size_of::<u64>() as isize).then_some(count)
+            let mut total: u64 = 0;
+            for &fd in &self.fds {
+                let mut count: u64 = 0;
+                // SAFETY: the buffer is the eight bytes a counter's
+                // read delivers.
+                let got = unsafe {
+                    libc::read(fd, (&raw mut count).cast(), size_of::<u64>())
+                };
+                if got != size_of::<u64>() as isize {
+                    return None;
+                }
+                total = total.saturating_add(count);
+            }
+            Some(total)
         }
     }
 
     impl Drop for Counter {
         fn drop(&mut self) {
-            // SAFETY: the descriptor is ours and closed once.
-            unsafe {
-                libc::close(self.fd);
+            for &fd in &self.fds {
+                // SAFETY: the descriptor is ours and closed once.
+                unsafe {
+                    libc::close(fd);
+                }
             }
         }
+    }
+
+    /// The types of the PMUs that count on cores, which are the
+    /// event sources with a `cpus` file: `cpu` on most machines,
+    /// `cpu_core` and `cpu_atom` on a hybrid one, and one per cluster
+    /// on an asymmetric Arm.
+    fn core_pmus() -> Vec<u64> {
+        let Ok(devices) = fs::read_dir("/sys/bus/event_source/devices") else {
+            return Vec::new();
+        };
+        let mut types: Vec<u64> = devices
+            .flatten()
+            .filter(|device| device.path().join("cpus").is_file())
+            .filter_map(|device| {
+                let text =
+                    fs::read_to_string(device.path().join("type")).ok()?;
+                text.trim().parse().ok()
+            })
+            .collect();
+        types.sort_unstable();
+        types
+    }
+
+    /// Opens the cycle event on one PMU, or on the kernel's default
+    /// where `pmu` is zero.
+    fn open(pmu: u64) -> Result<libc::c_int, String> {
+        const _: () = assert!(size_of::<Attr>() == 64);
+        let attr = Attr {
+            kind: PERF_TYPE_HARDWARE,
+            size: 64,
+            config: (pmu << PERF_PMU_TYPE_SHIFT) | PERF_COUNT_HW_CPU_CYCLES,
+            sample_period: 0,
+            sample_type: 0,
+            read_format: 0,
+            flags: EXCLUDE_KERNEL_AND_HV,
+            wakeup_events: 0,
+            bp_type: 0,
+            config1: 0,
+        };
+        // SAFETY: the attributes outlive the call and the kernel
+        // reads the `size` bytes it is told about. Process 0 is
+        // the calling thread, CPU -1 is any, and there is no
+        // group.
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_perf_event_open,
+                &raw const attr,
+                0 as libc::pid_t,
+                -1 as libc::c_int,
+                -1 as libc::c_int,
+                PERF_FLAG_FD_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error().to_string());
+        }
+        Ok(fd as libc::c_int)
     }
 }
 
