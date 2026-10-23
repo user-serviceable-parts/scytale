@@ -76,6 +76,7 @@ scripts/test-ring-downstream   # rustls and rustls-webpki on scytale-ring
 scripts/test-rustls-downstream # rustls's tests and BoGo on rustls-scytale
 scripts/test-openssl-interop   # every rustls-scytale suite against OpenSSL
 scripts/bench                  # measures rather than checks
+scripts/bench-quiet            # settles a core first, as root
 ```
 
 Each crate's README says what it is tested against. The ACVP,
