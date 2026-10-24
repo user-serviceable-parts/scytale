@@ -14,7 +14,7 @@
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
-use super::{hex, load};
+use super::{check, hex, hex_string, load, response};
 use crate::hash::Hash;
 use crate::hash::sha1::Sha1;
 use crate::hash::sha2::{Sha224, Sha256, Sha384, Sha512};
@@ -22,7 +22,7 @@ use crate::hash::sha2::{Sha512_224, Sha512_256};
 use crate::hash::sha3::{Sha3_224, Sha3_256, Sha3_384, Sha3_512};
 use crate::random::{HashDrbg, HmacDrbg, entropy::External};
 use crate::{BlockType, Random};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// What the driver needs of either generator.
 trait Drbg: Random + Sized {
@@ -50,24 +50,41 @@ macro_rules! drbg {
 drbg!(HashDrbg, Hash + Default);
 drbg!(HmacDrbg, Hash + Clone + BlockType + Default);
 
-/// Runs one group through the generator `$ty` over the group's hash.
+/// Answers one group through the generator `$ty` over the group's
+/// hash.
 macro_rules! dispatch {
-    ($ty:ident, $mode:expr, $group:expr) => {
-        match $mode {
-            "SHA-1" => aft::<$ty<Sha1, External>>($group),
-            "SHA2-224" => aft::<$ty<Sha224, External>>($group),
-            "SHA2-256" => aft::<$ty<Sha256, External>>($group),
-            "SHA2-384" => aft::<$ty<Sha384, External>>($group),
-            "SHA2-512" => aft::<$ty<Sha512, External>>($group),
-            "SHA2-512/224" => aft::<$ty<Sha512_224, External>>($group),
-            "SHA2-512/256" => aft::<$ty<Sha512_256, External>>($group),
-            "SHA3-224" => aft::<$ty<Sha3_224, External>>($group),
-            "SHA3-256" => aft::<$ty<Sha3_256, External>>($group),
-            "SHA3-384" => aft::<$ty<Sha3_384, External>>($group),
-            "SHA3-512" => aft::<$ty<Sha3_512, External>>($group),
+    ($ty:ident, $group:expr) => {
+        match mode($group) {
+            "SHA-1" => tests::<$ty<Sha1, External>>($group),
+            "SHA2-224" => tests::<$ty<Sha224, External>>($group),
+            "SHA2-256" => tests::<$ty<Sha256, External>>($group),
+            "SHA2-384" => tests::<$ty<Sha384, External>>($group),
+            "SHA2-512" => tests::<$ty<Sha512, External>>($group),
+            "SHA2-512/224" => tests::<$ty<Sha512_224, External>>($group),
+            "SHA2-512/256" => tests::<$ty<Sha512_256, External>>($group),
+            "SHA3-224" => tests::<$ty<Sha3_224, External>>($group),
+            "SHA3-256" => tests::<$ty<Sha3_256, External>>($group),
+            "SHA3-384" => tests::<$ty<Sha3_384, External>>($group),
+            "SHA3-512" => tests::<$ty<Sha3_512, External>>($group),
             other => panic!("unknown hash {other}"),
         }
     };
+}
+
+/// The response to a hashDRBG vector set.
+pub fn answer_hash(prompt: &Value) -> Value {
+    let groups = groups(prompt)
+        .map(|g| json!({"tgId": g["tgId"], "tests": dispatch!(HashDrbg, g)}))
+        .collect();
+    response(prompt, groups)
+}
+
+/// The response to an hmacDRBG vector set.
+pub fn answer_hmac(prompt: &Value) -> Value {
+    let groups = groups(prompt)
+        .map(|g| json!({"tgId": g["tgId"], "tests": dispatch!(HmacDrbg, g)}))
+        .collect();
+    response(prompt, groups)
 }
 
 /// Runs a hashDRBG file; a no-op without the vendored vectors.
@@ -77,7 +94,7 @@ pub fn run_hash(file: &str, revision: &str) {
     };
     let mut cases = 0;
     for group in groups(&doc) {
-        cases += dispatch!(HashDrbg, mode(group), group);
+        cases += checked(group, dispatch!(HashDrbg, group));
     }
     assert!(cases >= 300, "only {cases} cases in {file}");
 }
@@ -89,9 +106,21 @@ pub fn run_hmac(file: &str, revision: &str) {
     };
     let mut cases = 0;
     for group in groups(&doc) {
-        cases += dispatch!(HmacDrbg, mode(group), group);
+        cases += checked(group, dispatch!(HmacDrbg, group));
     }
     assert!(cases >= 300, "only {cases} cases in {file}");
+}
+
+/// Holds a group's answers to the file's, returning how many there
+/// were.
+fn checked(group: &Value, answers: Vec<Value>) -> usize {
+    let expected = group["tests"].as_array().expect("tests");
+    for (want, got) in expected.iter().zip(&answers) {
+        if let Err(why) = check(want, got) {
+            panic!("tgId {} {why}", group["tgId"]);
+        }
+    }
+    answers.len()
 }
 
 /// The groups, each checked to be one this driver understands.
@@ -110,39 +139,42 @@ fn mode(group: &Value) -> &str {
     group["mode"].as_str().expect("mode")
 }
 
-/// Returns the cases run.
-fn aft<D: Drbg>(group: &Value) -> usize {
+/// The response to each test of a group: the bits of its last
+/// request.
+fn tests<D: Drbg>(group: &Value) -> Vec<Value> {
     let bits = group["returnedBitsLen"].as_u64().expect("returnedBitsLen");
-    let mut cases = 0;
-    for t in group["tests"].as_array().expect("tests") {
-        let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-        // Instantiation takes the entropy, the nonce and the
-        // personalization string as one run of material.
-        let mut material = hex(&t["entropyInput"]);
-        material.extend(hex(&t["nonce"]));
-        material.extend(hex(&t["persoString"]));
-        let mut rng = D::from_seed(&material);
+    group["tests"]
+        .as_array()
+        .expect("tests")
+        .iter()
+        .map(|t| {
+            let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
+            // Instantiation takes the entropy, the nonce and the
+            // personalization string as one run of material.
+            let mut material = hex(&t["entropyInput"]);
+            material.extend(hex(&t["nonce"]));
+            material.extend(hex(&t["persoString"]));
+            let mut rng = D::from_seed(&material);
 
-        let mut out = vec![0u8; bits as usize / 8];
-        for other in t["otherInput"].as_array().expect("otherInput") {
-            let entropy = hex(&other["entropyInput"]);
-            let additional = hex(&other["additionalInput"]);
-            match other["intendedUse"].as_str() {
-                Some("reSeed") => rng.reseed_with(&entropy, &additional),
-                // Prediction resistance is a reseeding from fresh
-                // entropy and the additional input, then a request
-                // carrying nothing further.
-                Some("generate") if !entropy.is_empty() => {
-                    rng.reseed_with(&entropy, &additional);
-                    rng.fill(&mut out).expect("generate");
+            let mut out = vec![0u8; bits as usize / 8];
+            for other in t["otherInput"].as_array().expect("otherInput") {
+                let entropy = hex(&other["entropyInput"]);
+                let additional = hex(&other["additionalInput"]);
+                match other["intendedUse"].as_str() {
+                    Some("reSeed") => rng.reseed_with(&entropy, &additional),
+                    // Prediction resistance is a reseeding from fresh
+                    // entropy and the additional input, then a request
+                    // carrying nothing further.
+                    Some("generate") if !entropy.is_empty() => {
+                        rng.reseed_with(&entropy, &additional);
+                        rng.fill(&mut out).expect("generate");
+                    }
+                    Some("generate") => rng.fill_with(&mut out, &additional),
+                    other => panic!("{tag}: unknown intendedUse {other:?}"),
                 }
-                Some("generate") => rng.fill_with(&mut out, &additional),
-                other => panic!("{tag}: unknown intendedUse {other:?}"),
             }
-        }
-        // The bits compared are those of the last request.
-        assert_eq!(out, hex(&t["returnedBits"]), "{tag}");
-        cases += 1;
-    }
-    cases
+            // The bits answered are those of the last request.
+            json!({"tcId": t["tcId"], "returnedBits": hex_string(&out)})
+        })
+        .collect()
 }

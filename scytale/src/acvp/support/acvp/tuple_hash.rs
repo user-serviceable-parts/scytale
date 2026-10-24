@@ -8,10 +8,38 @@
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
 use super::cshake::{customization, rightmost_16};
-use super::{hex, load};
+use super::{check, hex, hex_string, load, response};
 use crate::hash::XofReader;
 use crate::hash::sha3::{TupleHash128, TupleHash256};
-use serde_json::Value;
+use serde_json::{Value, json};
+
+/// Steps in a Monte Carlo test as the server runs it. The vendored
+/// file keeps only the first few.
+const MCT_STEPS: usize = 100;
+
+/// The response to a whole vector set over `T`.
+pub fn answer<T: Tuple>(prompt: &Value) -> Value {
+    let groups = prompt["testGroups"]
+        .as_array()
+        .expect("testGroups")
+        .iter()
+        .map(|group| {
+            let xof = group["xof"].as_bool().expect("xof");
+            let tests: Vec<Value> = group["tests"]
+                .as_array()
+                .expect("tests")
+                .iter()
+                .map(|t| match group["testType"].as_str() {
+                    Some("AFT") => aft::<T>(group, t, xof),
+                    Some("MCT") => mct::<T>(group, t, xof, MCT_STEPS),
+                    other => panic!("unknown testType {other:?}"),
+                })
+                .collect();
+            json!({"tgId": group["tgId"], "tests": tests})
+        })
+        .collect();
+    response(prompt, groups)
+}
 
 /// The two widths, as the driver drives them.
 pub trait Tuple {
@@ -87,61 +115,70 @@ pub fn run<T: Tuple>(file: &str, algorithm: &str) {
     let mut steps = 0;
     for group in doc["testGroups"].as_array().expect("testGroups") {
         let xof = group["xof"].as_bool().expect("xof");
-        if group["testType"] == "MCT" {
-            steps += mct::<T>(group, xof);
-            continue;
-        }
         for t in group["tests"].as_array().expect("tests") {
-            let bits = t["outLen"].as_u64().expect("outLen") as usize;
-            let custom = customization(group, t);
-            let out = hash::<T>(&tuple_of(t), &custom, xof, bits);
-            let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-            assert_eq!(out, hex(&t["md"]), "{tag}");
-            cases += 1;
+            let got = if group["testType"] == "MCT" {
+                let kept = t["resultsArray"].as_array().expect("steps").len();
+                steps += kept;
+                mct::<T>(group, t, xof, kept)
+            } else {
+                cases += 1;
+                aft::<T>(group, t, xof)
+            };
+            if let Err(why) = check(t, &got) {
+                panic!("tgId {} {why}", group["tgId"]);
+            }
         }
     }
     assert!(cases >= 200, "only {cases} cases");
     assert!(steps >= 6, "only {steps} MCT steps");
 }
 
+/// One tuple, `outLen` bits of output.
+fn aft<T: Tuple>(group: &Value, t: &Value, xof: bool) -> Value {
+    let bits = t["outLen"].as_u64().expect("outLen") as usize;
+    let custom = customization(group, t);
+    let out = hash::<T>(&tuple_of(t), &custom, xof, bits);
+    json!({"tcId": t["tcId"], "md": hex_string(&out), "outLen": bits})
+}
+
 /// The ACVP TupleHash Monte Carlo test, as the server runs it: 1000
 /// rounds a step, each hashing one to four strings cut evenly from
 /// the first 288 bits of the last output, their count from its first
-/// three bits.
-fn mct<T: Tuple>(group: &Value, xof: bool) -> usize {
+/// three bits. Each step reports its last output and that output's
+/// length.
+fn mct<T: Tuple>(group: &Value, t: &Value, xof: bool, steps: usize) -> Value {
     let min_bits = group["minOutLen"].as_u64().expect("minOutLen") as usize;
     let max_bits = group["maxOutLen"].as_u64().expect("maxOutLen") as usize;
     let increment =
         group["outLenIncrement"].as_u64().expect("outLenIncrement") as usize;
     let range = max_bits - min_bits + 1;
-    let mut count = 0;
-    for t in group["tests"].as_array().expect("tests") {
-        let mut output = tuple_of(t).swap_remove(0);
-        let mut out_bits = max_bits;
-        let mut custom: Vec<u8> = Vec::new();
-        let steps = t["resultsArray"].as_array().expect("resultsArray");
-        for (i, step) in steps.iter().enumerate() {
-            for _ in 0..1000 {
-                let mut working = output.clone();
-                working.resize(36, 0);
-                let size = usize::from(working[0] >> 5) % 4 + 1;
-                let tuple: Vec<Vec<u8>> =
-                    working.chunks(36 / size).map(<[u8]>::to_vec).collect();
-                output = hash::<T>(&tuple, &custom, xof, out_bits);
-                let right = rightmost_16(&output, out_bits);
-                out_bits =
-                    min_bits + (right as usize % range) / increment * increment;
-                custom = tuple[0]
-                    .iter()
-                    .chain(&right.to_be_bytes())
-                    .map(|byte| byte % 26 + 65)
-                    .collect();
-            }
-            let tag =
-                format!("tgId {} tcId {} step {i}", group["tgId"], t["tcId"]);
-            assert_eq!(output, hex(&step["md"]), "{tag}");
-            count += 1;
+    let mut output = tuple_of(t).swap_remove(0);
+    let mut out_bits = max_bits;
+    let mut custom: Vec<u8> = Vec::new();
+    let mut results = Vec::with_capacity(steps);
+    for _ in 0..steps {
+        let mut produced = out_bits;
+        for _ in 0..1000 {
+            let mut working = output.clone();
+            working.resize(36, 0);
+            let size = usize::from(working[0] >> 5) % 4 + 1;
+            let tuple: Vec<Vec<u8>> =
+                working.chunks(36 / size).map(<[u8]>::to_vec).collect();
+            output = hash::<T>(&tuple, &custom, xof, out_bits);
+            produced = out_bits;
+            let right = rightmost_16(&output, out_bits);
+            out_bits =
+                min_bits + (right as usize % range) / increment * increment;
+            custom = tuple[0]
+                .iter()
+                .chain(&right.to_be_bytes())
+                .map(|byte| byte % 26 + 65)
+                .collect();
         }
+        results.push(json!({
+            "md": hex_string(&output),
+            "outLen": produced,
+        }));
     }
-    count
+    json!({"tcId": t["tcId"], "resultsArray": results})
 }

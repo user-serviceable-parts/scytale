@@ -38,10 +38,11 @@ use super::support::acvp::{
     aes_cbc, aes_ccm, aes_cfb1, aes_cfb8, aes_cfb128, aes_ctr, aes_ecb,
     aes_ff1, aes_ff3_1, aes_gcm, aes_gcm_siv, aes_gmac, aes_kw, aes_kwp,
     aes_ofb, aes_xpn, aes_xts, answer_aes, check, cmac_aes, cshake, ctr_drbg,
-    ecdsa, eddsa, hmac, kda_hkdf, kmac, kts_ifc, ml_dsa, ml_kem, pbkdf,
-    rsa_primitive, rsa_sig, sha, shake, slh_dsa, tls12_kdf, xecdh,
+    ecdsa, eddsa, hash_drbg, hmac, kda_hkdf, kda_one_step, kdf108, kmac,
+    kts_ifc, ml_dsa, ml_kem, pbkdf, rsa_primitive, rsa_sig, sha, shake,
+    slh_dsa, tls12_kdf, tuple_hash, xecdh,
 };
-use crate::hash::sha3::{Auto, variant};
+use crate::hash::sha3::{Auto, TupleHash128, TupleHash256, variant};
 use crate::hash::{sha1, sha2, sha3};
 use crate::mac::kmac::{Kmac128, Kmac256};
 use sha::Family;
@@ -115,9 +116,29 @@ fn answer(prompt: &Value) -> Value {
         }
         ("KMAC-128", "", "1.0") => kmac::answer::<Kmac128>(prompt),
         ("KMAC-256", "", "1.0") => kmac::answer::<Kmac256>(prompt),
+        ("TupleHash-128", "", "1.0") => {
+            tuple_hash::answer::<TupleHash128>(prompt)
+        }
+        ("TupleHash-256", "", "1.0") => {
+            tuple_hash::answer::<TupleHash256>(prompt)
+        }
         ("ctrDRBG", "", "1.0") => ctr_drbg::answer(prompt),
+        ("hashDRBG", "", "1.0" | "SP800-90Ar1") => {
+            hash_drbg::answer_hash(prompt)
+        }
+        ("hmacDRBG", "", "1.0" | "SP800-90Ar1") => {
+            hash_drbg::answer_hmac(prompt)
+        }
         ("PBKDF", "", "1.0") => pbkdf::answer(prompt),
+        ("KDF", "", "1.0") => kdf108::answer(prompt),
+        ("KDF", "KMAC", "Sp800-108r1") => kdf108::answer_kmac(prompt),
         ("KDA", "HKDF", "Sp800-56Cr2") => kda_hkdf::answer(prompt),
+        ("KDA", "OneStep" | "OneStepNoCounter", "Sp800-56Cr2") => {
+            kda_one_step::answer(prompt)
+        }
+        ("kdf-components", "ansix9.63", "1.0") => {
+            kda_one_step::answer_x963(prompt)
+        }
         ("TLS-v1.2", "KDF", "RFC7627") => tls12_kdf::answer(prompt),
         ("ECDSA" | "DetECDSA", _, "FIPS186-5") => ecdsa::answer(prompt),
         ("EDDSA", _, "1.0") => eddsa::answer(prompt),

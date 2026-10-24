@@ -11,7 +11,7 @@
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
-use super::{hex, load};
+use super::{check, hex, hex_string, load, rejected, response};
 use crate::BlockType;
 use crate::hash::Hash;
 use crate::hash::sha1::Sha1;
@@ -20,7 +20,7 @@ use crate::hash::sha2::{Sha512_224, Sha512_256};
 use crate::hash::sha3::{Sha3_224, Sha3_256, Sha3_384, Sha3_512};
 use crate::kdf::{one_step, x963};
 use crate::mac::hmac::Hmac;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// Calls `$f::<H>` for the hash `$alg` names.
 macro_rules! with_hash {
@@ -51,6 +51,25 @@ struct Inputs<'a> {
     counter: bool,
 }
 
+/// The response to a OneStep or OneStepNoCounter vector set, which
+/// the prompt's mode tells apart.
+pub fn answer(prompt: &Value) -> Value {
+    let counter = match prompt["mode"].as_str() {
+        Some("OneStep") => true,
+        Some("OneStepNoCounter") => false,
+        other => panic!("unknown mode {other:?}"),
+    };
+    let groups = prompt["testGroups"]
+        .as_array()
+        .expect("testGroups")
+        .iter()
+        .map(|group| {
+            json!({"tgId": group["tgId"], "tests": tests(group, counter)})
+        })
+        .collect();
+    response(prompt, groups)
+}
+
 /// Runs a one-step file, with the counter or without; a no-op
 /// without the vendored vectors.
 pub fn run(file: &str, mode: &str) {
@@ -62,11 +81,38 @@ pub fn run(file: &str, mode: &str) {
     let mut cases = 0;
     let mut rejections = 0;
     for group in doc["testGroups"].as_array().expect("testGroups") {
-        let cfg = &group["kdfConfiguration"];
-        assert_eq!(cfg["fixedInfoPattern"], "t||uPartyInfo||vPartyInfo||l");
-        assert_eq!(cfg["fixedInfoEncoding"], "concatenation");
-        let aux = cfg["auxFunction"].as_str().expect("auxFunction");
-        for t in group["tests"].as_array().expect("tests") {
+        let answers = tests(group, counter);
+        rejections += rejected(&answers);
+        let expected = group["tests"].as_array().expect("tests");
+        for (want, got) in expected.iter().zip(&answers) {
+            if let Err(why) = check(want, got) {
+                panic!("tgId {} {why}", group["tgId"]);
+            }
+            cases += 1;
+        }
+    }
+    assert!(cases >= 500, "only {cases} cases in {file}");
+    assert!(rejections >= 20, "only {rejections} rejections in {file}");
+}
+
+/// The response to each test of a group: the derived key material
+/// for a derivation (AFT), the verdict on supplied material for a
+/// validation (VAL).
+fn tests(group: &Value, counter: bool) -> Vec<Value> {
+    let cfg = &group["kdfConfiguration"];
+    assert_eq!(cfg["fixedInfoPattern"], "t||uPartyInfo||vPartyInfo||l");
+    assert_eq!(cfg["fixedInfoEncoding"], "concatenation");
+    let aux = cfg["auxFunction"].as_str().expect("auxFunction");
+    let validate = match group["testType"].as_str() {
+        Some("AFT") => false,
+        Some("VAL") => true,
+        other => panic!("unknown testType {other:?}"),
+    };
+    group["tests"]
+        .as_array()
+        .expect("tests")
+        .iter()
+        .map(|t| {
             let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
             let param = &t["kdfParameter"];
             let bits = param["l"].as_u64().expect("l") as u32;
@@ -102,16 +148,13 @@ pub fn run(file: &str, mode: &str) {
                     alg => with_hash!(alg, hash(inputs)),
                 },
             }
-            let should_pass = t["testPassed"].as_bool().unwrap_or(true);
-            assert_eq!(out == hex(&t["dkm"]), should_pass, "{tag}");
-            cases += 1;
-            if !should_pass {
-                rejections += 1;
+            if validate {
+                let passed = out == hex(&t["dkm"]);
+                return json!({"tcId": t["tcId"], "testPassed": passed});
             }
-        }
-    }
-    assert!(cases >= 500, "only {cases} cases in {file}");
-    assert!(rejections >= 20, "only {rejections} rejections in {file}");
+            json!({"tcId": t["tcId"], "dkm": hex_string(&out)})
+        })
+        .collect()
 }
 
 fn hash<H: Hash + Default>(i: Inputs<'_>) {
@@ -147,6 +190,17 @@ fn kmac(aux: &str, i: Inputs<'_>) {
     kdf(i.salt, i.z, &fixed, i.out);
 }
 
+/// The response to an ANSI X9.63 vector set.
+pub fn answer_x963(prompt: &Value) -> Value {
+    let groups = prompt["testGroups"]
+        .as_array()
+        .expect("testGroups")
+        .iter()
+        .map(|group| json!({"tgId": group["tgId"], "tests": x963_tests(group)}))
+        .collect();
+    response(prompt, groups)
+}
+
 /// Runs the ANSI X9.63 file; a no-op without the vendored vectors.
 pub fn run_x963() {
     let file = "kdf-components-ansix9.63-1.0/internalProjection.json";
@@ -156,19 +210,33 @@ pub fn run_x963() {
     assert_eq!(doc["mode"], "ansix9.63");
     let mut cases = 0;
     for group in doc["testGroups"].as_array().expect("testGroups") {
-        assert_eq!(group["testType"], "AFT");
-        let alg = group["hashAlg"].as_str().expect("hashAlg");
-        let bits = group["keyDataLength"].as_u64().expect("keyDataLength");
-        assert_eq!(bits % 8, 0, "tgId {}: a length in bits", group["tgId"]);
-        for t in group["tests"].as_array().expect("tests") {
-            let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-            let mut out = vec![0u8; bits as usize / 8];
-            with_hash!(alg, x963_case(t, &mut out));
-            assert_eq!(out, hex(&t["keyData"]), "{tag}");
+        let expected = group["tests"].as_array().expect("tests");
+        for (want, got) in expected.iter().zip(x963_tests(group)) {
+            if let Err(why) = check(want, &got) {
+                panic!("tgId {} {why}", group["tgId"]);
+            }
             cases += 1;
         }
     }
     assert!(cases >= 900, "only {cases} cases");
+}
+
+/// The response to each test of an X9.63 group: the key data.
+fn x963_tests(group: &Value) -> Vec<Value> {
+    assert_eq!(group["testType"], "AFT");
+    let alg = group["hashAlg"].as_str().expect("hashAlg");
+    let bits = group["keyDataLength"].as_u64().expect("keyDataLength");
+    assert_eq!(bits % 8, 0, "tgId {}: a length in bits", group["tgId"]);
+    group["tests"]
+        .as_array()
+        .expect("tests")
+        .iter()
+        .map(|t| {
+            let mut out = vec![0u8; bits as usize / 8];
+            with_hash!(alg, x963_case(t, &mut out));
+            json!({"tcId": t["tcId"], "keyData": hex_string(&out)})
+        })
+        .collect()
 }
 
 fn x963_case<H: Hash + Default>(t: &Value, out: &mut [u8]) {

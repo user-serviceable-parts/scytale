@@ -11,11 +11,17 @@
 //! The fixed data comes whole, the output length already encoded in
 //! it, so an output that is not a whole number of bytes is the bytes
 //! it needs with the bits past its end cleared.
+//!
+//! The server defers the fixed data to the implementation: the
+//! vendored file records what its own run chose, and a live session
+//! sends none, so [`answer`] draws it afresh and returns it with the
+//! key, which is how the server checks the derivation.
 
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
-use super::{hex, key_of, load};
+use super::{check, hex, hex_string, key_of, load, response};
+use crate::Random;
 use crate::cipher::aes::{Aes128, Aes192, Aes256};
 use crate::hash::sha1::Sha1;
 use crate::hash::sha2::{Sha224, Sha256, Sha384, Sha512};
@@ -25,7 +31,33 @@ use crate::kdf::sp800_108::{self, Counter};
 use crate::mac::Mac;
 use crate::mac::cmac::Cmac;
 use crate::mac::hmac::Hmac;
-use serde_json::Value;
+use crate::random::CtrDrbg;
+use serde_json::{Value, json};
+
+/// Bits of fixed data drawn for a case the server leaves to us.
+const FIXED_BITS: usize = 256;
+
+/// The response to a KDF 1.0 vector set.
+pub fn answer(prompt: &Value) -> Value {
+    let groups = prompt["testGroups"]
+        .as_array()
+        .expect("testGroups")
+        .iter()
+        .map(|group| json!({"tgId": group["tgId"], "tests": tests(group)}))
+        .collect();
+    response(prompt, groups)
+}
+
+/// The response to a KDF-KMAC vector set.
+pub fn answer_kmac(prompt: &Value) -> Value {
+    let groups = prompt["testGroups"]
+        .as_array()
+        .expect("testGroups")
+        .iter()
+        .map(|group| json!({"tgId": group["tgId"], "tests": kmac_tests(group)}))
+        .collect();
+    response(prompt, groups)
+}
 
 /// Runs KDF 1.0; a no-op without the vendored vectors.
 pub fn run() {
@@ -35,13 +67,32 @@ pub fn run() {
     };
     let mut cases = 0;
     for group in doc["testGroups"].as_array().expect("testGroups") {
-        assert_eq!(group["testType"], "AFT");
-        let mac = group["macMode"].as_str().expect("macMode");
-        if mac == "CMAC-TDES" {
+        if group["macMode"] == "CMAC-TDES" {
             eprintln!("tgId {}: no Triple DES; skipping", group["tgId"]);
             continue;
         }
-        for t in group["tests"].as_array().expect("tests") {
+        let expected = group["tests"].as_array().expect("tests");
+        for (want, got) in expected.iter().zip(tests(group)) {
+            if let Err(why) = check(want, &got) {
+                panic!("tgId {} {why}", group["tgId"]);
+            }
+            cases += 1;
+        }
+    }
+    // Guard against a truncated or wrong file passing vacuously.
+    assert!(cases >= 10_000, "only {cases} cases");
+}
+
+/// The response to each test of a group: the key, with the fixed
+/// data it was derived under and where the counter broke it.
+fn tests(group: &Value) -> Vec<Value> {
+    assert_eq!(group["testType"], "AFT");
+    let mac = group["macMode"].as_str().expect("macMode");
+    group["tests"]
+        .as_array()
+        .expect("tests")
+        .iter()
+        .map(|t| {
             let key = hex(&t["keyIn"]);
             match mac {
                 "CMAC-AES128" => cmac::<Aes128>(&key, group, t),
@@ -60,21 +111,18 @@ pub fn run() {
                 "HMAC-SHA3-512" => hmac::<Sha3_512>(&key, group, t),
                 other => panic!("unknown macMode {other}"),
             }
-            cases += 1;
-        }
-    }
-    // Guard against a truncated or wrong file passing vacuously.
-    assert!(cases >= 10_000, "only {cases} cases");
+        })
+        .collect()
 }
 
-fn hmac<H>(key: &[u8], group: &Value, t: &Value)
+fn hmac<H>(key: &[u8], group: &Value, t: &Value) -> Value
 where
     H: crate::hash::Hash + Clone + crate::BlockType + Default,
 {
     case(&mut Hmac::<H>::new(key), group, t)
 }
 
-fn cmac<C>(key: &[u8], group: &Value, t: &Value)
+fn cmac<C>(key: &[u8], group: &Value, t: &Value) -> Value
 where
     C: crate::cipher::BlockCipher<Block = [u8; 16]>,
 {
@@ -82,13 +130,30 @@ where
     case(&mut Cmac::<C>::new(&key), group, t)
 }
 
-/// One derivation, compared against the file's output.
-fn case<M: Mac>(prf: &mut M, group: &Value, t: &Value) {
-    let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
+/// The fixed data of a case: the file's where it has one, otherwise
+/// fresh random bytes, since the server leaves the choice to us. The
+/// break for a counter in the middle is the file's too, or halfway.
+fn fixed_data(t: &Value) -> (Vec<u8>, usize) {
+    if t["fixedData"].is_null() {
+        let mut fixed = vec![0u8; FIXED_BITS / 8];
+        let mut rng = CtrDrbg::from_system().expect("generator");
+        rng.fill(&mut fixed).expect("random fixed data");
+        return (fixed, FIXED_BITS / 2);
+    }
     let fixed = hex(&t["fixedData"]);
+    let at = t["breakLocation"].as_u64().unwrap_or(0) as usize;
+    (fixed, at)
+}
+
+/// One derivation: the key, the fixed data and, for a counter in
+/// the middle, where it went.
+fn case<M: Mac>(prf: &mut M, group: &Value, t: &Value) -> Value {
+    let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
+    let (fixed, break_at) = fixed_data(t);
     let bits = group["keyOutLength"].as_u64().expect("keyOutLength") as usize;
     let width = group["counterLength"].as_u64().expect("counterLength") as u32;
     let end = 8 * fixed.len();
+    let middle = group["counterLocation"] == "middle fixed data";
     let counter = match group["counterLocation"].as_str() {
         Some("none") => Counter::None,
         Some("before iterator") => Counter::BeforeIterator(width),
@@ -99,7 +164,7 @@ fn case<M: Mac>(prf: &mut M, group: &Value, t: &Value) {
         },
         Some("middle fixed data") => Counter::InFixed {
             bits: width,
-            at: t["breakLocation"].as_u64().expect("breakLocation") as usize,
+            at: break_at,
         },
         other => panic!("{tag}: unknown counterLocation {other:?}"),
     };
@@ -128,7 +193,15 @@ fn case<M: Mac>(prf: &mut M, group: &Value, t: &Value) {
     {
         *last &= 0xffu8 << (8 - bits % 8);
     }
-    assert_eq!(out, hex(&t["keyOut"]), "{tag}");
+    let mut answer = json!({
+        "tcId": t["tcId"],
+        "fixedData": hex_string(&fixed),
+        "keyOut": hex_string(&out),
+    });
+    if middle {
+        answer["breakLocation"] = json!(break_at);
+    }
+    answer
 }
 
 /// Runs KDF-KMAC; a no-op without the vendored vectors.
@@ -140,13 +213,30 @@ pub fn run_kmac() {
     assert_eq!(doc["mode"], "KMAC");
     let mut cases = 0;
     for group in doc["testGroups"].as_array().expect("testGroups") {
-        assert_eq!(group["testType"], "AFT");
-        let kdf = match group["macMode"].as_str() {
-            Some("KMAC-128") => sp800_108::kmac128,
-            Some("KMAC-256") => sp800_108::kmac256,
-            other => panic!("unknown macMode {other:?}"),
-        };
-        for t in group["tests"].as_array().expect("tests") {
+        let expected = group["tests"].as_array().expect("tests");
+        for (want, got) in expected.iter().zip(kmac_tests(group)) {
+            if let Err(why) = check(want, &got) {
+                panic!("tgId {} {why}", group["tgId"]);
+            }
+            cases += 1;
+        }
+    }
+    assert!(cases >= 100, "only {cases} cases");
+}
+
+/// The response to each test of a KDF-KMAC group: the derived key.
+fn kmac_tests(group: &Value) -> Vec<Value> {
+    assert_eq!(group["testType"], "AFT");
+    let kdf = match group["macMode"].as_str() {
+        Some("KMAC-128") => sp800_108::kmac128,
+        Some("KMAC-256") => sp800_108::kmac256,
+        other => panic!("unknown macMode {other:?}"),
+    };
+    group["tests"]
+        .as_array()
+        .expect("tests")
+        .iter()
+        .map(|t| {
             let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
             let bits = t["derivedKeyLength"].as_u64().expect("length");
             assert_eq!(bits % 8, 0, "{tag}: a length in bits");
@@ -157,9 +247,7 @@ pub fn run_kmac() {
                 &hex(&t["context"]),
                 &mut out,
             );
-            assert_eq!(out, hex(&t["derivedKey"]), "{tag}");
-            cases += 1;
-        }
-    }
-    assert!(cases >= 100, "only {cases} cases");
+            json!({"tcId": t["tcId"], "derivedKey": hex_string(&out)})
+        })
+        .collect()
 }
