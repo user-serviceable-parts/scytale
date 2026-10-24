@@ -92,8 +92,19 @@ jobs:
 
       - name: Measure
         # Through the environment rather than spliced into the command
-        # line: the inputs are free text.
+        # line: the inputs are free text. A shared runner is a virtual
+        # machine without a cycle counter to open, so the harness
+        # falls back to its clock and the figures here are rates alone.
         env:
           ROWS: ${{ inputs.rows }}
           SECONDS_EACH: ${{ inputs.seconds }}
-        run: scripts/bench $ROWS --seconds "$SECONDS_EACH"
+          SCYTALE_BENCH_COMMIT: ${{ github.sha }}
+        run: |
+          scripts/bench $ROWS --seconds "$SECONDS_EACH" \
+              --json "bench-${{ matrix.arch }}.json"
+
+      - name: Keep the figures
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-${{ matrix.arch }}
+          path: bench-${{ matrix.arch }}.json

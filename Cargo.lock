@@ -207,6 +207,7 @@ version = "0.10.0"
 dependencies = [
  "cpu-time",
  "getrandom",
+ "libc",
  "serde_json",
  "zeroize",
 ]
