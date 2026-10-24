@@ -427,11 +427,19 @@ mod tests {
             // No such instruction on this particular processor.
             return;
         };
-        let first = sampler.draw().expect("first");
-        let second = sampler.draw().expect("second");
+        // Two words to a sample: one word matches another by chance
+        // once in 2^64 draws, too often for a test to bet on, and two
+        // together once in 2^128.
+        let draw = || -> u128 {
+            let high = sampler.draw().expect("draw");
+            let low = sampler.draw().expect("draw");
+            (u128::from(high) << 64) | u128::from(low)
+        };
+        let first = draw();
+        let second = draw();
         assert_ne!(first, second);
         assert_ne!(first, 0);
-        assert_ne!(first, u64::MAX);
+        assert_ne!(first, u128::MAX);
     }
 
     /// Enough draws in a row to seed a generator many times over must
@@ -446,11 +454,18 @@ mod tests {
         let Ok(sampler) = Sampler::try_new() else {
             return;
         };
-        let mut previous = 0;
-        for n in 0..512 {
-            let word = sampler.draw().unwrap_or_else(|e| panic!("{n}: {e}"));
-            assert_ne!(word, previous, "{n}: repeated");
-            previous = word;
+        // Compared two words at a time, as above: 512 comparisons of
+        // single words would fail by chance once in 2^55 runs.
+        let mut previous = 0u128;
+        for n in 0..256 {
+            let mut pair = 0u128;
+            for _ in 0..2 {
+                let word =
+                    sampler.draw().unwrap_or_else(|e| panic!("{n}: {e}"));
+                pair = (pair << 64) | u128::from(word);
+            }
+            assert_ne!(pair, previous, "{n}: repeated");
+            previous = pair;
         }
     }
 

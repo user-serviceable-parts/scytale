@@ -15,9 +15,9 @@ categories = [
     "no-std::no-alloc",
     "algorithms",
 ]
-# ACVP vectors are vendored for development but not shipped, to keep
-# the crate small; without them the ACVP suites skip and the built-in
-# vectors in the unit tests remain.
+# NIST's ACVP sample vectors are vendored for development but not
+# shipped, to keep the crate small; without them those suites skip and
+# the built-in vectors in the unit tests remain.
 exclude = ["tests/vectors"]
 
 [dependencies]
@@ -33,6 +33,12 @@ serde_json = "1"
 # the benchmark.
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 cpu-time = "1"
+
+# Also only the benchmark, for the processor's cycle counter through
+# perf_event_open, and for the thread's CPU affinity. Already built as
+# cpu-time's own dependency, so this adds no crate.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"
 
 # Only where there is something to ask. A bare metal target has
 # nobody, and takes the processor's own generator instead; the same

@@ -64,8 +64,8 @@ excluded.
 | GHASH, accelerated | `pclmulqdq`, `pmull`, Zvbc/Zbc/Zvkg | carry-less multiply instructions are data-independent |
 | POLYVAL (GCM-SIV) | over the GHASH multiply | same |
 | Poly1305, portable and x86-64 | limb arithmetic, final reduction chosen by mask | no branch or index on key or message |
-| SHA-1, SHA-2, SHA-3, SHAKE, cSHAKE | all backends | no data-dependent control flow; hashing a secret leaks only its length |
-| HMAC, HKDF, PBKDF2, TLS 1.2 PRF | over the hashes | as the hash; `Mac::verify` compares with `constant_time::equal` |
+| SHA-1, SHA-2, SHA-3, SHAKE, cSHAKE, TupleHash | all backends | no data-dependent control flow; hashing a secret leaks only its length |
+| HMAC, HKDF, PBKDF2, TLS 1.2 PRF, SP 800-108, one-step, X9.63 | over the hashes and MACs | as the hash; `Mac::verify` compares with `constant_time::equal` |
 | KMAC | over cSHAKE | as the hash; `verify_tag`, `verify_bits` and `Mac::verify` compare with `constant_time::equal` |
 | CTR, CBC, CFB, OFB, XTS | over the cipher | as the cipher; the modes themselves have no padding |
 | PKCS#7 padding | `cipher/padding/pkcs7.rs` | `unpad` reads the whole last block and combines the checks by mask; one error for every failure, documented as the padding oracle it would be if shown to an attacker |
@@ -74,6 +74,7 @@ excluded.
 | KW, KWP | over the cipher | the integrity check value is compared with `constant_time::equal` |
 | GCM, GCM-SIV, XPN, CCM, ChaCha20-Poly1305 | over the above | tag compared whole with `constant_time::equal`; plaintext never released on failure |
 | CTR_DRBG | AES-256 | as AES; the state is a `Key` |
+| Hash_DRBG, HMAC_DRBG | over the hashes | as the hash; the state is wiped on drop, and Hash_DRBG's additions carry through every byte |
 | `constant_time::equal` | `constant_time.rs` | reads every byte of both operands; the accumulator goes through `black_box` so the compiler cannot reintroduce an early exit; a length mismatch returns early, since lengths are not secret |
 
 ### Public key
@@ -235,10 +236,10 @@ the nonce, as RFC 6979 and RFC 8032 define them.
   continues.
 - One request is capped at `MAX_REQUEST` (65536) bytes;
   `Error::RequestTooLarge` otherwise.
-- The generator is checked against the ACVP CTR_DRBG vectors. The
-  entropy sources are not, since there is nothing deterministic to
-  check; the health tests are checked against streams with known
-  faults.
+- The generators are checked against NIST's ACVP sample vectors for
+  CTR_DRBG, Hash_DRBG and HMAC_DRBG. The entropy sources are not, since there is nothing
+  deterministic to check; the health tests are checked against
+  streams with known faults.
 
 ## RNG across fork, virtual machines and snapshots
 
@@ -394,9 +395,9 @@ and this is what it promises about them.
   scheme has a context string (ML-DSA, SLH-DSA) and the caller uses
   it; key agreement outputs must go through HKDF; ordering, replay
   and identity binding are the protocol's job.
-- **Bugs.** The library is checked against NIST ACVP and Wycheproof
-  vectors for every algorithm, and every accelerated implementation
-  is tested against the portable one at every length. That catches
-  wrong answers; it does not prove constant time and it does not
-  prove the absence of every bug. It has not had a third-party
-  audit.
+- **Bugs.** The library is checked against NIST's ACVP sample
+  vectors and Wycheproof's for every algorithm, and every
+  accelerated implementation is tested against the portable one at
+  every length. That catches wrong answers; it does not prove
+  constant time and it does not prove the absence of every bug. It
+  has not had a third-party audit.

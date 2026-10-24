@@ -32,6 +32,7 @@ use support::acvp::{
     aes_xpn as xpn, aes_xts as xts, cmac_aes as cmac, cshake as cshake_vectors,
     ctr_drbg as drbg, hmac as hmac_vectors, kmac as kmac_vectors,
     pbkdf as pbkdf_vectors, sha as sha_vectors, shake as shake_vectors,
+    tuple_hash as tuple_hash_vectors,
 };
 
 /// Defines the suites for an implementation that is always
@@ -437,6 +438,39 @@ mod ctr_drbg {
     }
 }
 
+/// Hash_DRBG and HMAC_DRBG (SP 800-90A), each in both revisions of
+/// its suite, over every hash the files name.
+mod hash_drbgs {
+    use super::*;
+    use support::acvp::hash_drbg;
+
+    #[test]
+    fn acvp_hash_drbg() {
+        hash_drbg::run_hash("hashDRBG-1.0/internalProjection.json", "1.0");
+    }
+
+    #[test]
+    fn acvp_hash_drbg_r1() {
+        hash_drbg::run_hash(
+            "hashDRBG-SP800-90Ar1/internalProjection.json",
+            "SP800-90Ar1",
+        );
+    }
+
+    #[test]
+    fn acvp_hmac_drbg() {
+        hash_drbg::run_hmac("hmacDRBG-1.0/internalProjection.json", "1.0");
+    }
+
+    #[test]
+    fn acvp_hmac_drbg_r1() {
+        hash_drbg::run_hmac(
+            "hmacDRBG-SP800-90Ar1/internalProjection.json",
+            "SP800-90Ar1",
+        );
+    }
+}
+
 /// Defines the SHA-2 suites for one implementation of one variant.
 /// The hardware ones skip, saying so, when the processor cannot.
 macro_rules! sha2_suites {
@@ -808,6 +842,28 @@ mod kmac_256 {
         kmac_vectors::run_aft::<crate::mac::kmac::Kmac256>(
             "KMAC-256-1.0/internalProjection.json",
             "KMAC-256",
+        );
+    }
+}
+
+/// TupleHash128 and TupleHash256 (SP 800-185), both forms.
+mod tuple_hash {
+    use super::*;
+    use crate::hash::sha3::{TupleHash128, TupleHash256};
+
+    #[test]
+    fn acvp_tuplehash_128() {
+        tuple_hash_vectors::run::<TupleHash128>(
+            "TupleHash-128-1.0/internalProjection.json",
+            "TupleHash-128",
+        );
+    }
+
+    #[test]
+    fn acvp_tuplehash_256() {
+        tuple_hash_vectors::run::<TupleHash256>(
+            "TupleHash-256-1.0/internalProjection.json",
+            "TupleHash-256",
         );
     }
 }
@@ -1288,6 +1344,51 @@ mod hkdf {
     #[test]
     fn acvp_kda_hkdf() {
         support::acvp::kda_hkdf::run();
+    }
+}
+
+/// The one-step KDF of SP 800-56Cr2, with and without its counter,
+/// and the ANSI X9.63 KDF.
+mod one_step {
+    use super::*;
+    use support::acvp::kda_one_step;
+
+    #[test]
+    fn acvp_kda_one_step() {
+        kda_one_step::run(
+            "KDA-OneStep-Sp800-56Cr2/internalProjection.json",
+            "OneStep",
+        );
+    }
+
+    #[test]
+    fn acvp_kda_one_step_no_counter() {
+        kda_one_step::run(
+            "KDA-OneStepNoCounter-Sp800-56Cr2/internalProjection.json",
+            "OneStepNoCounter",
+        );
+    }
+
+    #[test]
+    fn acvp_x963() {
+        kda_one_step::run_x963();
+    }
+}
+
+/// The SP 800-108 KDFs: counter, feedback and double-pipeline modes
+/// over HMAC and CMAC, and KDF-KMAC.
+mod sp800_108 {
+    use super::*;
+    use support::acvp::kdf108;
+
+    #[test]
+    fn acvp_kdf() {
+        kdf108::run();
+    }
+
+    #[test]
+    fn acvp_kdf_kmac() {
+        kdf108::run_kmac();
     }
 }
 

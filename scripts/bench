@@ -4,23 +4,288 @@
 # the implementations behind the public types, so it runs as an
 # ignored test rather than as a `cargo bench` target.
 #
-# Usage: scripts/bench [word ...] [--seconds N] [--self-test]
+# Usage: scripts/bench [word ...] [options]
 #   Words filter the rows: a row runs when every word appears in its
 #   section or its name, and a word may offer alternatives separated
-#   by commas. With no arguments, everything runs.
+#   by commas. With no words, everything runs.
+#
+#   --cpu N             pin the run to CPU N (default: the fastest core)
+#   --save NAME         also keep scytale/benchmarks/NAME.md and NAME.json
+#   --compare OLD NEW   compare two JSON documents instead of measuring
+#   Every other option goes to the harness: --seconds N, --json PATH,
+#   --self-test and --help.
 #
 # Examples:
 #   scripts/bench                    # everything
 #   scripts/bench gcm aesni          # rows matching both
 #   scripts/bench --seconds 0.25     # a quicker sweep
+#   scripts/bench --save i7-1355u    # a pass to keep, as this machine
+#   scripts/bench --compare a.json b.json
 #   scripts/bench --self-test        # check the harness
+#
+# The run is pinned to one CPU, so that two runs measure the same core
+# and not wherever the scheduler put each row, and the header of a
+# saved file records what else the machine was doing: the governor and
+# turbo, how busy the core's other thread was, power, load and
+# throttling. scripts/bench-quiet, as root, settles those.
 
 set -eu
-
 cd "$(dirname "$0")/.."
 
-SCYTALE_BENCH="$*"
-export SCYTALE_BENCH
+die() {
+    echo "bench: $*" >&2
+    exit 2
+}
 
-exec cargo test --release --lib -- \
-    --ignored --nocapture --exact bench::speed
+warn() {
+    echo "bench: $*" >&2
+}
+
+# A path as given, made absolute from this directory.
+absolute() {
+    case $1 in
+        /*) echo "$1" ;;
+        *) echo "$PWD/$1" ;;
+    esac
+}
+
+cpu=
+save=
+# Options that measure nothing need no pinning and no header.
+passive=
+rest=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --cpu)
+            [ $# -ge 2 ] || die "--cpu wants a CPU number"
+            cpu=$2
+            shift 2
+            ;;
+        --save)
+            [ $# -ge 2 ] || die "--save wants a name for the files"
+            save=$2
+            shift 2
+            ;;
+        --compare)
+            [ $# -ge 3 ] || die "--compare wants two JSON paths"
+            rest="$rest $1 $2 $3"
+            passive=yes
+            shift 3
+            ;;
+        --self-test | --help | -h)
+            rest="$rest $1"
+            passive=yes
+            shift
+            ;;
+        --json)
+            # Cargo runs the harness inside the crate's directory, so
+            # a relative path would land there rather than here.
+            [ $# -ge 2 ] || die "--json wants a path"
+            rest="$rest $1 $(absolute "$2")"
+            shift 2
+            ;;
+        *)
+            rest="$rest $1"
+            shift
+            ;;
+    esac
+done
+
+harness() {
+    SCYTALE_BENCH="$rest" cargo test --release --lib -p scytale -- \
+        --ignored --nocapture --exact bench::speed
+}
+
+if [ -n "$passive" ]; then
+    harness
+    exit
+fi
+
+# The CPU with the highest clock, and the lowest number among equals,
+# so a hybrid processor is measured on a performance core and every
+# other processor on CPU 0. scripts/bench-quiet chooses the same way.
+fastest_cpu() {
+    best=
+    best_freq=-1
+    for dir in /sys/devices/system/cpu/cpu[0-9]*; do
+        n=${dir##*cpu}
+        [ "$(cat "$dir/online" 2> /dev/null || echo 1)" = 1 ] || continue
+        freq=$(cat "$dir/cpufreq/cpuinfo_max_freq" 2> /dev/null || echo 0)
+        if [ "$freq" -gt "$best_freq" ] ||
+            { [ "$freq" -eq "$best_freq" ] && [ "$n" -lt "$best" ]; }; then
+            best=$n
+            best_freq=$freq
+        fi
+    done
+    echo "${best:-0}"
+}
+
+# A sysfs or procfs value, or the given default where there is none.
+read_or() {
+    cat "$1" 2> /dev/null || echo "$2"
+}
+
+# The other CPU sharing this core, if the core has two threads.
+sibling_of() {
+    read_or "/sys/devices/system/cpu/cpu$1/topology/thread_siblings_list" "" |
+        tr ',-' '\n\n' | grep -vx "$1" | head -n 1
+}
+
+# Percent of the interval two /proc/stat lines span that the CPU was
+# not idle. The ten counters after the name are user, nice, system,
+# idle, iowait, irq, softirq, steal, guest and guest_nice.
+busy_percent() {
+    echo "$1" "$2" | awk '{
+        before = 0; for (i = 2; i <= 11; i++) before += $i
+        after = 0; for (i = 13; i <= 22; i++) after += $i
+        idle = ($16 + $17) - ($5 + $6)
+        span = after - before
+        if (span <= 0) print 0; else printf "%d\n", 100 * (span - idle) / span
+    }'
+}
+
+stat_of() {
+    grep "^cpu$1 " /proc/stat || echo "cpu$1 0 0 0 0 0 0 0 0 0 0"
+}
+
+[ -n "$cpu" ] || cpu=$(fastest_cpu)
+sibling=$(sibling_of "$cpu")
+cpu_sys=/sys/devices/system/cpu/cpu$cpu
+pin=
+if command -v taskset > /dev/null; then
+    pin="taskset -c $cpu"
+else
+    warn "taskset is not installed, so the run is not pinned"
+fi
+
+# What would spoil the figures, said before the minutes are spent.
+paranoid=$(read_or /proc/sys/kernel/perf_event_paranoid 0)
+if [ "$paranoid" -gt 2 ]; then
+    warn "kernel.perf_event_paranoid is $paranoid, so the cycle counter" \
+        "cannot be opened and only rates will be measured;" \
+        "'sudo sysctl kernel.perf_event_paranoid=2' allows it"
+fi
+if [ -n "$sibling" ]; then
+    before=$(stat_of "$sibling")
+    sleep 1
+    busy=$(busy_percent "$before" "$(stat_of "$sibling")")
+    if [ "$busy" -gt 5 ]; then
+        warn "CPU $sibling, the other thread of this core, is $busy% busy;" \
+            "it shares the core's units with the run"
+    fi
+fi
+governor=$(read_or "$cpu_sys/cpufreq/scaling_governor" unknown)
+if [ -n "$save" ] && [ -f "scytale/benchmarks/$save.json" ]; then
+    was=$(sed -n 's/.*"governor": *"\([^"]*\)".*/\1/p' \
+        "scytale/benchmarks/$save.json" | head -n 1)
+    if [ -n "$was" ] && [ "$was" != "$governor" ]; then
+        warn "the governor is $governor; the saved run used $was"
+    fi
+fi
+
+commit=$(git rev-parse HEAD 2> /dev/null || echo unknown)
+if [ -n "$(git status --porcelain --untracked-files=no 2> /dev/null)" ]; then
+    commit="$commit-dirty"
+fi
+export SCYTALE_BENCH_COMMIT="$commit"
+
+if [ -z "$save" ]; then
+    SCYTALE_BENCH="$rest" exec $pin cargo test --release --lib -p scytale -- \
+        --ignored --nocapture --exact bench::speed
+fi
+
+# A pass to keep: the figures as JSON beside the table as printed,
+# under a header saying what the machine was doing at the time. Built
+# first, so that the build is not what the header describes.
+cargo test --release --lib -p scytale --no-run
+mkdir -p scytale/benchmarks
+json=scytale/benchmarks/$save.json
+md=scytale/benchmarks/$save.md
+rest="$rest --json $(absolute "$json")"
+text=$(mktemp)
+trap 'rm -f "$text"' EXIT
+
+throttle_file=$cpu_sys/thermal_throttle/core_throttle_count
+started=$(date -Iseconds)
+load=$(cut -d ' ' -f 1-3 /proc/loadavg)
+throttles_before=$(read_or "$throttle_file" 0)
+[ -n "$sibling" ] && sibling_before=$(stat_of "$sibling")
+
+# `set -e` would stop here on a failed run, before the header; the
+# status is kept and the files are written either way, since a partial
+# table is still worth seeing.
+status=0
+SCYTALE_BENCH="$rest" $pin cargo test --release --lib -p scytale -- \
+    --ignored --nocapture --exact bench::speed 2>&1 | tee "$text" || status=$?
+
+finished=$(date -Iseconds)
+throttles=$(($(read_or "$throttle_file" 0) - throttles_before))
+if [ -n "$sibling" ]; then
+    busy=$(busy_percent "$sibling_before" "$(stat_of "$sibling")")
+    other="CPU $sibling, $busy% busy during the run"
+else
+    other="none"
+fi
+processor=$(sed -n 's/^\(model name\|uarch\|Model\|Hardware\)[ \t]*: *//p' \
+    /proc/cpuinfo | head -n 1)
+processor=$(echo "${processor:-unknown}" | sed 's/(R)//g; s/(TM)//g')
+if [ -f /sys/devices/system/cpu/intel_pstate/no_turbo ]; then
+    case $(cat /sys/devices/system/cpu/intel_pstate/no_turbo) in
+        1) turbo=off ;;
+        *) turbo=on ;;
+    esac
+else
+    case $(read_or /sys/devices/system/cpu/cpufreq/boost none) in
+        0) turbo=off ;;
+        1) turbo=on ;;
+        *) turbo=unknown ;;
+    esac
+fi
+preference=$(read_or "$cpu_sys/cpufreq/energy_performance_preference" none)
+power=mains
+for supply in /sys/class/power_supply/*; do
+    [ "$(read_or "$supply/type" "")" = Battery ] || continue
+    case $(read_or "$supply/status" "") in
+        Discharging) power=battery ;;
+    esac
+done
+clock=$(sed -n 's/.*"clock": *"\([^"]*\)".*/\1/p' "$json" 2> /dev/null |
+    head -n 1)
+
+{
+    echo "# Benchmarks: $processor"
+    echo
+    echo "One pass of \`scripts/bench --save $save\`, saved as it was printed."
+    echo "Rerunning replaces it, so the header says which commit and what"
+    echo "state of the machine these numbers belong to. \`$save.json\` beside"
+    echo "it holds every figure with its spread, for \`scripts/bench --compare\`."
+    echo
+    echo "| | |"
+    echo "| --- | --- |"
+    echo "| Started | $started |"
+    echo "| Finished | $finished |"
+    echo "| Commit | \`$commit\` |"
+    echo "| Processor | $processor |"
+    echo "| Pinned to | CPU $cpu |"
+    echo "| Other thread of the core | $other |"
+    echo "| Governor | \`$governor\` |"
+    echo "| Turbo | $turbo |"
+    echo "| Energy preference | \`$preference\` |"
+    echo "| Power | $power |"
+    echo "| Load average at start | $load |"
+    echo "| Throttle events during the run | $throttles |"
+    echo "| Kernel | $(uname -r) |"
+    echo "| Toolchain | $(rustc --version), release profile |"
+    echo "| Clock | ${clock:-unknown} |"
+    echo
+    echo "Cycles a byte is the figure to compare between commits; the rates"
+    echo "depend on the clock the run saw, which the JSON records cell by"
+    echo "cell. The module documentation at the top of \`scytale/src/bench.rs\`"
+    echo "says how to read the table."
+    echo
+    echo '```text'
+    cat "$text"
+    echo '```'
+} > "$md"
+echo "bench: kept $md and $json" >&2
+exit $status

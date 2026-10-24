@@ -14,7 +14,7 @@
 //! [`sign_primitive`](PrivateKey::sign_primitive) and
 //! [`verify_primitive`](PublicKey::verify_primitive), are public for
 //! building an encoding this crate does not have and for the ACVP
-//! component suites; they encode nothing and check nothing.
+//! sample vectors' component tests; they encode nothing and check nothing.
 //!
 //! The keys here only sign. RSA encryption is a different job with
 //! its own keys, under [`pke::rsa`](crate::pke::rsa), and a key

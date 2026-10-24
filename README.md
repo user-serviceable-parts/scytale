@@ -76,11 +76,16 @@ scripts/test-ring-downstream   # rustls and rustls-webpki on scytale-ring
 scripts/test-rustls-downstream # rustls's tests and BoGo on rustls-scytale
 scripts/test-openssl-interop   # every rustls-scytale suite against OpenSSL
 scripts/bench                  # measures rather than checks
+scripts/bench-quiet            # settles a core first, as root
 ```
 
 Each crate's README says what it is tested against. The ACVP,
 Wycheproof and HPKE vectors are in `scytale/tests/vectors` and ring's
 suite in `scytale-ring/ring-tests`; neither is in a published crate.
+The ACVP vectors are the sample files NIST publishes in its
+ACVP-Server repository, prompts and expected answers together, checked
+offline. Nothing here runs the ACVP protocol against NIST's servers,
+and none of this is a CAVP validation.
 
 `scripts/test-all-arches` runs the host architecture directly and the
 others with [cross](https://github.com/cross-rs/cross), which needs
@@ -108,8 +113,8 @@ rustls provider adds, and how to report a vulnerability.
 BSD 2-Clause. See [LICENSE](LICENSE).
 
 The test vectors under `scytale/tests/vectors` are others' work,
-unmodified, each set with its notice beside it: the NIST
-[ACVP-Server][acvp-server] project's, Project
+unmodified, each set with its notice beside it: sample vector files
+from the NIST [ACVP-Server][acvp-server] repository, Project
 [Wycheproof][wycheproof]'s under the Apache License 2.0, and the
 CFRG's for [HPKE][hpke]. ring's test suite, vendored in
 `scytale-ring/ring-tests`, is under ring's licence, which is beside

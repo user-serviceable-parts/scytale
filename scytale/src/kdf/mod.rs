@@ -33,7 +33,17 @@
 //! If the input came from a human, use `pbkdf2`; if it came from a
 //! machine, use `hkdf`. Running HKDF over a password gives a key that
 //! is exactly as guessable as the password was.
+//!
+//! The rest do the first job in the shapes NIST and ANSI define it,
+//! for the protocols and policies that name them:
+//! [`sp800_108`] derives keys from a key already held, over any MAC
+//! or KMAC; [`one_step`] is SP 800-56C's KDF for a key agreement's
+//! shared secret, the single-step alternative to HKDF; and [`x963`]
+//! is the ANSI X9.63 KDF that ECIES uses.
 
 pub mod hkdf;
+pub mod one_step;
 pub mod pbkdf2;
+pub mod sp800_108;
 pub mod tls12;
+pub mod x963;

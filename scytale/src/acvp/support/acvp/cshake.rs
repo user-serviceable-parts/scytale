@@ -93,7 +93,7 @@ fn text(v: &Value) -> Vec<u8> {
 }
 
 /// The customization, given as text or, in a hex group, as hex.
-fn customization(group: &Value, t: &Value) -> Vec<u8> {
+pub fn customization(group: &Value, t: &Value) -> Vec<u8> {
     if group["hexCustomization"].as_bool() == Some(true) {
         hex(&t["customizationHex"])
     } else {
@@ -196,7 +196,7 @@ fn mct<X: SuffixXof>(
 /// The last 16 bits of a bit string `bits` long, laid out as ACVP
 /// lays it out, read as a number with the first of them most
 /// significant.
-fn rightmost_16(out: &[u8], bits: usize) -> u16 {
+pub fn rightmost_16(out: &[u8], bits: usize) -> u16 {
     (bits - 16..bits).fold(0u16, |acc, p| {
         acc << 1 | u16::from(out[p / 8] >> (7 - p % 8) & 1)
     })
