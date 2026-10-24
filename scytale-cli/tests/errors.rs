@@ -195,7 +195,9 @@ fn wrong_options_name_the_right_ones() {
     assert!(e.contains("--padding is required for cbc: pkcs7"), "{e}");
     let e = usage(&["hash", "sha256", "--length", "3"], b"");
     assert!(
-        e.ends_with("sha256 takes no --length; that is for shake and cshake"),
+        e.ends_with(
+            "sha256 takes no --length; that is for shake, cshake and tuplehash"
+        ),
         "{e}"
     );
     let e = usage(&["hash", "shake128"], b"");
@@ -218,6 +220,135 @@ fn wrong_options_name_the_right_ones() {
     assert!(e.contains("takes no --context"), "{e}");
     let e = usage(&["hash", "sha256", "--raw", "/dev/null", "/dev/null"], b"");
     assert!(e.contains("--raw with 2 files"), "{e}");
+}
+
+#[test]
+fn tuplehash_and_kdf_options_name_their_owners() {
+    let e = usage(&["hash", "sha256", "--element", "str:a"], b"");
+    assert!(e.ends_with("sha256 takes no --element; that is tuplehash's"));
+    let e = usage(&["hash", "tuplehash128", "-l", "8"], b"");
+    assert!(e.ends_with("give each as --element"), "{e}");
+    let e = usage(
+        &["hash", "tuplehash128", "-l", "8", "--element", "str:a", "f"],
+        b"",
+    );
+    assert!(e.contains("not files; file:PATH makes a file one element"));
+    let e = usage(
+        &[
+            "hash",
+            "tuplehash128",
+            "-l",
+            "8",
+            "--element",
+            "str:a",
+            "--function-name",
+            "str:f",
+        ],
+        b"",
+    );
+    assert!(e.ends_with("takes no --function-name; that is cshake's"));
+    let e = usage(&["hash", "sha256", "--customization", "str:c"], b"");
+    assert!(e.ends_with("that is for cshake and tuplehash"), "{e}");
+
+    let k = [
+        "kdf",
+        "sp800-108",
+        "hmac-sha256",
+        "-k",
+        "hex:0b",
+        "-l",
+        "16",
+    ];
+    let with = |extra: &[&str]| {
+        let mut args = k.to_vec();
+        args.extend_from_slice(extra);
+        usage(&args, b"")
+    };
+    let e = with(&["--label", "str:x"]);
+    assert!(e.ends_with("--label and --context are KDF-KMAC's"), "{e}");
+    let e = with(&["--iv", "hex:00"]);
+    assert!(e.ends_with("--iv is feedback's; counter mode has none"));
+    let e = with(&["--counter-bits", "7"]);
+    assert!(e.ends_with("--counter-bits 7: 8, 16, 24 or 32"), "{e}");
+    let e = with(&["--counter-at", "none"]);
+    assert!(e.contains("counter mode is its counter"), "{e}");
+    let e = with(&["--counter-at", "before"]);
+    assert!(e.contains("no chaining value to go before"), "{e}");
+    let e = with(&["--fixed", "str:ab", "--counter-at", "17"]);
+    assert!(e.ends_with("the fixed input is 16 bits long"), "{e}");
+    let e = usage(
+        &[
+            "kdf",
+            "sp800-108",
+            "hmac-sha256",
+            "-k",
+            "hex:0b",
+            "--counter-bits",
+            "8",
+            "--fixed",
+            "str:f",
+            "-l",
+            "8200",
+        ],
+        b"",
+    );
+    assert!(e.contains("257 blocks of 32 bytes"), "{e}");
+    assert!(e.ends_with("a counter of 8 bits numbers 255"), "{e}");
+    let e = usage(
+        &[
+            "kdf",
+            "sp800-108",
+            "kmac256",
+            "-k",
+            "hex:0b",
+            "--fixed",
+            "str:x",
+            "-l",
+            "16",
+        ],
+        b"",
+    );
+    assert!(e.contains("KDF-KMAC, which takes --label and --context"));
+    let e = usage(
+        &["kdf", "sp800-108", "poly1305", "-k", KEY32, "-l", "16"],
+        b"",
+    );
+    assert!(e.contains("keyed once per message, so it is no PRF"), "{e}");
+
+    let e = usage(
+        &[
+            "kdf", "one-step", "sha256", "--secret", "hex:5a", "--salt",
+            "hex:00", "-l", "16",
+        ],
+        b"",
+    );
+    assert!(e.ends_with("a salt keys hmac-sha256 or kmac"), "{e}");
+    let e = usage(
+        &[
+            "kdf",
+            "one-step",
+            "sha256",
+            "--secret",
+            "hex:5a",
+            "--no-counter",
+            "-l",
+            "33",
+        ],
+        b"",
+    );
+    assert!(e.ends_with("gives one block, 32 bytes, at most"), "{e}");
+    let e = usage(
+        &[
+            "kdf", "one-step", "sha256", "--secret", "str:zz", "-l", "16",
+        ],
+        b"",
+    );
+    assert!(e.contains("not for a key"), "{e}");
+    let e = usage(
+        &["kdf", "x963", "sha256", "--secret", "str:zz", "-l", "16"],
+        b"",
+    );
+    assert!(e.contains("not for a key"), "{e}");
 }
 
 #[test]
