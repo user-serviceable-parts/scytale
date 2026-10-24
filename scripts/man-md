@@ -11,6 +11,11 @@ cd "$(dirname "$0")/.."
     echo
     echo "# scytale(1)"
     echo
-    pandoc -f man -t gfm scytale-cli/scytale.1 \
-        | sed 's/^# /## /'
+    # Unwrapped, and with the space that `.BI` leaves inside a bold
+    # span moved outside it: pandoc 3.1 writes `**-k ***key*` where
+    # 3.7 writes `**-k** *key*`, and wraps lines around the choice.
+    # Both are Debian's at some time, and the file must come out the
+    # same from either.
+    pandoc -f man -t gfm --wrap=none scytale-cli/scytale.1 \
+        | sed 's/^# /## /; s/ \*\*\*/** */g'
 } > scytale-cli/scytale.1.md
