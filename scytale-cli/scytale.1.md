@@ -94,18 +94,24 @@ Prints the algorithm names each command takes, one per line, for a script to che
 
 ## hash
 
-**scytale hash** *algorithm* \[*-l length*\] \[*--function-name value*\] \[*--customization value*\] \[**--hex**\|**--raw**\] \[*file...*\]
+**scytale hash** *algorithm* \[*-l length*\] \[*--function-name value*\] \[*--customization value*\] \[*--element value*...\] \[**--hex**\|**--raw**\] \[*file...*\]
 
-A digest of each file, or of standard input, as hex followed by two spaces and the file's name, in the layout of **sha256sum**(1); standard input is named **-**. With **--raw** the digest alone, for one file at most.
+A digest of each file, or of standard input, as hex followed by two spaces and the file's name, in the layout of **sha256sum**(1); standard input is named **-**. With **--raw** the digest alone, for one file at most. TupleHash digests the **--element** values instead, as one tuple, and writes the digest alone.
 
 *algorithm*  
-One of **sha1**, **sha224**, **sha256**, **sha384**, **sha512**, **sha512-224**, **sha512-256**, **sha3-224**, **sha3-256**, **sha3-384**, **sha3-512**, or an extendable-output function, **shake128**, **shake256**, **cshake128** or **cshake256**.
+One of **sha1**, **sha224**, **sha256**, **sha384**, **sha512**, **sha512-224**, **sha512-256**, **sha3-224**, **sha3-256**, **sha3-384**, **sha3-512**, an extendable-output function, **shake128**, **shake256**, **cshake128** or **cshake256**, or a hash of a tuple of strings (SP 800-185), **tuplehash128** or **tuplehash256**.
 
 **-l, --length** *bytes*  
-The output length, required for an extendable-output function and refused otherwise.
+The output length, required for an extendable-output function and for TupleHash, and refused otherwise. TupleHash absorbs the length, so a shorter output is not a prefix of a longer one.
 
-**--function-name** *value***, --customization** *value*  
-The cSHAKE function name and customization string, as **VALUES**; empty without them, refused for the other hashes.
+**--function-name** *value*  
+The cSHAKE function name, as **VALUES**; empty without it, refused for the other hashes.
+
+**--customization** *value*  
+The cSHAKE or TupleHash customization string, as **VALUES**; empty without it, refused for the other hashes.
+
+**--element** *value*  
+One string of the tuple, for TupleHash, which hashes the strings in the order given with each one's length ahead of it, so that **str:ab** and **str:c** differ from **str:a** and **str:bc**. At least one is required, and a file is given as **file:**; the files that the other hashes take are refused.
 
 ## mac tag, mac verify
 
@@ -198,7 +204,40 @@ PBKDF2 (RFC 8018) over *hash*: a key from a password, which is guessable, at a c
 
 **scytale kdf tls12** *hash* **--secret** *value* **--label** *value* **--seed** *value***...** **-l** *bytes* \[**--hex**\|**--raw**\] \[*-o file*\]
 
-The TLS 1.2 PRF (RFC 5246) over *hash*, the cipher suite's: the master secret from the premaster secret, or the key block from the master secret, with the label the derivation names, such as **str:master secret** or **str:key expansion**, and the seed it names, such as the two randoms in order. **--seed** may repeat; the values are concatenated in order. The secret may not be given as **str:**. Hex without a flag.
+The TLS 1.2 PRF (RFC 5246) over *hash*, the cipher suite's: the master secret from the premaster secret, or the key block from the master secret, with the label the derivation names, such as **str:master secret** or **str:key expansion**, and the seed it names, such as the two randoms in order. **--seed** may repeat; the values are concatenated in order. The secret may not be given as **str:**.
+
+## kdf sp800-108
+
+**scytale kdf sp800-108** *mac* **-k** *key* \[*--mode mode*\] \[*--fixed value*...\] \[*--counter-bits bits*\] \[*--counter-at place*\] \[*--iv value*\] **-l** *bytes* \[**--hex**\|**--raw**\] \[*-o file*\]  
+**scytale kdf sp800-108** **kmac128**\|**kmac256** **-k** *key* \[*--label value*\] \[*--context value*\] **-l** *bytes* \[**--hex**\|**--raw**\] \[*-o file*\]
+
+The key-based KDFs of SP 800-108r1: keys from a key-derivation key, which is already a key, under the pseudorandom function *mac*, any **hmac-***hash* or **cmac-aes-***width* of **scytale list mac**. The *fixed* input names the key being derived; the standard leaves its layout to the protocol, commonly a label, a zero byte, a context and the output length in bits, so it is given in parts, which are concatenated in order. Hex without a flag.
+
+**--mode** *mode*  
+**counter**, the default, where each block is the PRF over the fixed input with the counter in it; **feedback**, where each block is the PRF over the previous block, the counter and the fixed input, the first block chaining from **--iv**; or **double-pipeline**, where a second chain of PRF outputs stands in for the previous block.
+
+**--counter-bits** *bits*  
+The width of the counter, 8, 16, 24 or 32; 32 without it. The output may not need more blocks than the counter can number.
+
+**--counter-at** *place*  
+Where the counter goes: a count of bits into the fixed input, 0 (ahead of it) without the option, and the fixed input's whole length for after it. In the feedback and double-pipeline modes also **before**, ahead of the chaining value, or **none**, for no counter at all.
+
+**--iv** *value*  
+The first chaining value of the feedback mode, which may be empty and is without the option; refused for the other modes.
+
+**kmac128** and **kmac256** are KDF-KMAC (section 4.4 of the standard), which has no mode and no counter to place: the output is KMAC under the key with the **--label** as its customization string over the **--context**, both as **VALUES** and empty without them.
+
+## kdf one-step
+
+**scytale kdf one-step** *algorithm* **--secret** *value* \[*--salt value*\] \[*--info value*...\] \[**--no-counter**\] **-l** *bytes* \[**--hex**\|**--raw**\] \[*-o file*\]
+
+The one-step key derivation of SP 800-56C r2 (section 4): keys from the shared secret **Z** of a key agreement, such as **kex agree** gives. Each block is *algorithm*(counter **\|\| Z \|\|** *info*), the counter 32 bits from one, under one of the plain hashes of **scytale list kdf**, or under **hmac-***hash* or **kmac128**\|**kmac256** of **scytale list mac** keyed with the **--salt**, which the standard defaults to all zeros when there is none, and which a plain hash refuses. The fixed *info* names the key being derived, typically the parties and the length; the parts are concatenated in order. With **--no-counter** the counter is left out and one block, a digest or a tag, is the most that can be asked for, except under KMAC, which gives any length. The secret may not be given as **str:**. Hex without a flag.
+
+## kdf x963
+
+**scytale kdf x963** *hash* **--secret** *value* \[*--info value*...\] **-l** *bytes* \[**--hex**\|**--raw**\] \[*-o file*\]
+
+The ANSI X9.63 KDF, the one SEC 1 gives ECIES, over *hash*: each block is *hash*(*Z \|\|* *counter* **\|\|** *info*), the counter 32 bits from one, after the secret where SP 800-56C puts it before. It is here for the protocols that name it; prefer **kdf one-step** for a new design. The *info* is X9.63's SharedInfo, in parts concatenated in order. The secret may not be given as **str:**. Hex without a flag.
 
 ## key generate
 
@@ -245,7 +284,7 @@ An ECDSA signature as the fixed-width *r* followed by *s*, rather than the DER S
 
 **scytale kex agree** *algorithm* **-k** *private* **-p** *peer* \[**--hex**\|**--raw**\] \[*-o file*\]
 
-The shared secret between the private key in *private* and the peer's public key in *peer*, under **x25519**, **ecdh-p256**, **ecdh-p384** or **ecdh-p521**; both keys must be for it. Hex without a flag. A shared secret is keying material, not a key; derive keys from it with **kdf hkdf**.
+The shared secret between the private key in *private* and the peer's public key in *peer*, under **x25519**, **ecdh-p256**, **ecdh-p384** or **ecdh-p521**; both keys must be for it. Hex without a flag. A shared secret is keying material, not a key; derive keys from it with **kdf hkdf** or **kdf one-step**.
 
 ## kem encapsulate
 
