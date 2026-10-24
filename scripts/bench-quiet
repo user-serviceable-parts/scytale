@@ -1,0 +1,141 @@
+#!/bin/sh
+# Settles one core for scripts/bench, as root, so that the rates
+# repeat between runs as well as the cycle counts do. Everything it
+# changes is written to a state file and put back by --restore.
+#
+# Usage: sudo scripts/bench-quiet [--cpu N]   # settle CPU N
+#        sudo scripts/bench-quiet --restore   # put everything back
+#
+# With no --cpu, the CPU is the one scripts/bench would pin to: the
+# fastest, and the lowest numbered among equals. What is done, each
+# step only where the kernel offers the file:
+#
+#   - turbo off, through intel_pstate/no_turbo or cpufreq/boost, so
+#     the clock is the base clock and not whatever thermal headroom
+#     the last minute left;
+#   - the CPU's minimum clock raised to its maximum, so the governor
+#     has no range left to move in;
+#   - the other thread of the core taken offline, so nothing shares
+#     the core's units with the run;
+#   - every interrupt that may land on the CPU moved to the others;
+#   - kernel.perf_event_paranoid lowered to 2, so the cycle counter
+#     opens for an unprivileged run.
+#
+# A settled machine is not the machine as it is normally used; it is
+# the same machine every time, which is the point. Restore it before
+# measuring what a user would see, and before unplugging a laptop.
+
+set -eu
+cd "$(dirname "$0")/.."
+
+state=target/bench-quiet.state
+
+die() {
+    echo "bench-quiet: $*" >&2
+    exit 2
+}
+
+[ "$(id -u)" = 0 ] || die "needs root; run it with sudo"
+
+cpu=
+restore=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --cpu)
+            [ $# -ge 2 ] || die "--cpu wants a CPU number"
+            cpu=$2
+            shift 2
+            ;;
+        --restore)
+            restore=yes
+            shift
+            ;;
+        *) die "unknown argument: $1" ;;
+    esac
+done
+
+# Each line of the state file is a path and the value it held, so
+# restoring is writing the lines back, last change first.
+if [ -n "$restore" ]; then
+    [ -f "$state" ] || die "nothing to restore: no $state"
+    sed '1!G;h;$!d' "$state" | while read -r path value; do
+        if ! echo "$value" > "$path" 2> /dev/null; then
+            echo "bench-quiet: could not restore $path to $value" >&2
+        fi
+    done
+    rm -f "$state"
+    echo "bench-quiet: restored" >&2
+    exit
+fi
+
+[ -f "$state" ] && die "already settled; --restore first"
+
+# Changes a file, remembering what it held so it can be put back. A
+# file the kernel does not offer is skipped, and one it refuses to
+# change is left out of the state, since there is nothing to undo;
+# interrupts the kernel manages itself refuse, and that is fine.
+set_value() {
+    [ -f "$1" ] || return 0
+    was=$(cat "$1")
+    if echo "$2" > "$1" 2> /dev/null; then
+        printf '%s %s\n' "$1" "$was" >> "$state"
+    fi
+}
+
+# As scripts/bench chooses, so the two agree without being told.
+fastest_cpu() {
+    best=
+    best_freq=-1
+    for dir in /sys/devices/system/cpu/cpu[0-9]*; do
+        n=${dir##*cpu}
+        [ "$(cat "$dir/online" 2> /dev/null || echo 1)" = 1 ] || continue
+        freq=$(cat "$dir/cpufreq/cpuinfo_max_freq" 2> /dev/null || echo 0)
+        if [ "$freq" -gt "$best_freq" ] ||
+            { [ "$freq" -eq "$best_freq" ] && [ "$n" -lt "$best" ]; }; then
+            best=$n
+            best_freq=$freq
+        fi
+    done
+    echo "${best:-0}"
+}
+
+[ -n "$cpu" ] || cpu=$(fastest_cpu)
+cpu_sys=/sys/devices/system/cpu/cpu$cpu
+[ -d "$cpu_sys" ] || die "no CPU $cpu"
+mkdir -p "$(dirname "$state")"
+: > "$state"
+
+set_value /sys/devices/system/cpu/intel_pstate/no_turbo 1
+set_value /sys/devices/system/cpu/cpufreq/boost 0
+
+# After turbo is off, the maximum the governor may ask for is the base
+# clock; pinning the minimum to it leaves one speed.
+if [ -f "$cpu_sys/cpufreq/scaling_max_freq" ]; then
+    set_value "$cpu_sys/cpufreq/scaling_min_freq" \
+        "$(cat "$cpu_sys/cpufreq/scaling_max_freq")"
+fi
+
+siblings=$(cat "$cpu_sys/topology/thread_siblings_list" 2> /dev/null |
+    tr ',-' '\n\n' | grep -vx "$cpu" || true)
+for other in $siblings; do
+    set_value "/sys/devices/system/cpu/cpu$other/online" 0
+done
+
+# The CPUs that may take the interrupts: every online one but ours.
+others=
+for dir in /sys/devices/system/cpu/cpu[0-9]*; do
+    n=${dir##*cpu}
+    [ "$n" != "$cpu" ] || continue
+    [ "$(cat "$dir/online" 2> /dev/null || echo 1)" = 1 ] || continue
+    others="$others${others:+,}$n"
+done
+if [ -n "$others" ]; then
+    for irq in /proc/irq/[0-9]*; do
+        set_value "$irq/smp_affinity_list" "$others"
+    done
+fi
+
+set_value /proc/sys/kernel/perf_event_paranoid 2
+
+echo "bench-quiet: CPU $cpu settled; scripts/bench --cpu $cpu measures" \
+    "it, and scripts/bench-quiet --restore puts the machine back" >&2

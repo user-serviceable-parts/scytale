@@ -34,9 +34,19 @@
 //! so that a clock drifting over the minutes lands on every row of
 //! the section alike instead of on whichever rows came last.
 //!
+//! `scripts/bench` pins the run to one CPU, the fastest, so that two
+//! runs measure the same core and not wherever the scheduler put each
+//! row, and `--save NAME` keeps a pass under a header recording what
+//! else the machine was doing: governor, turbo, the other thread of
+//! the core, power, load and throttling. `scripts/bench-quiet`, as
+//! root, settles those so that the rates repeat as the cycles do.
+//!
 //! `--json PATH` writes every figure with its spread, the clock, the
-//! sample count and what the machine said about itself, so that two
-//! runs can be compared by their numbers rather than by eye.
+//! sample count and what the machine said about itself, and
+//! `--compare OLD NEW` sets two such documents side by side: a figure
+//! counts as changed only when it moved by more than both spreads
+//! together, and the run fails when any figure is worse by that much,
+//! so a check before a push has a yes or no.
 //!
 //! Every implementation gets one section, named for the instructions
 //! it runs on, and nothing is measured twice. A mode written out for
@@ -56,6 +66,7 @@
 //! scripts/bench sig                # signatures, both kinds
 //! scripts/bench --seconds 0.25     # a quicker sweep
 //! scripts/bench --json out.json    # keep every figure
+//! scripts/bench --compare a.json b.json   # what changed, beyond noise
 //! scripts/bench --self-test        # check the harness
 //! ```
 //!
@@ -84,6 +95,7 @@
 //! clock and not the code, and the recorded clock rate says so.
 //!
 use std::alloc::{Layout, alloc_zeroed, dealloc};
+use std::collections::BTreeMap;
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
@@ -188,6 +200,20 @@ fn speed() {
         assert!(self_test(), "self-test");
         return;
     }
+    // Comparing measures nothing, so the profile does not matter.
+    if let Some((old, new)) = &options.compare {
+        let comparison = match compare_files(old, new) {
+            Ok(comparison) => comparison,
+            Err(message) => panic!("speed: {message}"),
+        };
+        print!("{}", comparison.text);
+        assert!(
+            comparison.worse == 0,
+            "{} figures are worse beyond the noise",
+            comparison.worse
+        );
+        return;
+    }
     // A build with debug assertions left on is not the release
     // profile that `scripts/bench` uses, so any figure it produced
     // would describe the unoptimised code rather than the shipped
@@ -239,6 +265,7 @@ fn write_json(path: &str, document: &Value) -> Result<(), String> {
 }
 
 /// What the command line asked for.
+#[derive(Clone)]
 struct Options {
     /// CPU time to spend on each cell.
     budget: Duration,
@@ -248,6 +275,8 @@ struct Options {
     self_test: bool,
     /// Where to write the figures as JSON, if anywhere.
     json: Option<String>,
+    /// Two documents to compare instead of measuring.
+    compare: Option<(String, String)>,
 }
 
 impl Options {
@@ -261,6 +290,7 @@ impl Options {
             filters: Vec::new(),
             self_test: false,
             json: None,
+            compare: None,
         };
         let mut args = args.peekable();
         while let Some(arg) = args.next() {
@@ -285,6 +315,12 @@ impl Options {
                 "--json" => {
                     let path = args.next().ok_or("--json wants a path")?;
                     options.json = Some(path);
+                }
+                "--compare" => {
+                    let wants = "--compare wants two JSON paths";
+                    let old = args.next().ok_or(wants)?;
+                    let new = args.next().ok_or(wants)?;
+                    options.compare = Some((old, new));
                 }
                 // Cargo appends this when it runs a bench target,
                 // saying only that this is a benchmark run, which is
@@ -325,6 +361,9 @@ usage: scripts/bench [options] [filter...]
 
   --seconds N   CPU time to spend on each measurement (default 1)
   --json PATH   also write every figure, with its spread, as JSON
+  --compare OLD NEW
+                compare two such documents instead of measuring;
+                fails when a figure is worse beyond the noise
   --self-test   check the harness instead of benchmarking
   --help        this text
 
@@ -3223,6 +3262,157 @@ fn affinity() -> Vec<usize> {
         .collect()
 }
 
+/// What two documents said about the cells they share.
+struct Comparison {
+    text: String,
+    better: usize,
+    worse: usize,
+    within: usize,
+    unmatched: usize,
+}
+
+/// Reads two documents and compares them.
+fn compare_files(old: &str, new: &str) -> Result<Comparison, String> {
+    let read = |path: &str| -> Result<Value, String> {
+        let text =
+            fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))
+    };
+    Ok(compare(&read(old)?, &read(new)?))
+}
+
+/// One figure of a cell, as a document has it, in the unit compared.
+struct Figure {
+    unit: &'static str,
+    median: f64,
+    spread: f64,
+    lower_is_better: bool,
+}
+
+impl Figure {
+    /// The cycle figure where both documents counted cycles, since
+    /// that is the one that survives a change of clock rate between
+    /// the two runs; the rate otherwise.
+    fn of(cell: &Value, kind: &str, cycles: bool) -> Option<Figure> {
+        let (key, unit, scale, lower_is_better) = match (kind, cycles) {
+            ("throughput", true) => ("cycles_per_byte", "cpb", 1.0, true),
+            ("throughput", false) => ("bytes_per_second", "MB/s", 1e-6, false),
+            ("ops", true) => ("cycles_per_op", "cyc/op", 1.0, true),
+            ("ops", false) => ("ops_per_second", "ops/s", 1.0, false),
+            _ => return None,
+        };
+        let summary = cell.get(key)?;
+        Some(Figure {
+            unit,
+            median: summary["median"].as_f64()? * scale,
+            spread: summary["spread"].as_f64()?,
+            lower_is_better,
+        })
+    }
+}
+
+/// Compares every cell of `new` with the same cell of `old`: same
+/// section, row and size. A change counts only when it is larger than
+/// the two spreads together, so a figure that moved within its own
+/// noise is reported as such and not as a change.
+fn compare(old: &Value, new: &Value) -> Comparison {
+    let cycles = old["clock"] == "cycles" && new["clock"] == "cycles";
+    let empty = Vec::new();
+    let rows = |document: &Value| -> Vec<Value> {
+        document["rows"].as_array().unwrap_or(&empty).clone()
+    };
+    let mut before: BTreeMap<(String, String, Option<u64>), Figure> =
+        BTreeMap::new();
+    for row in rows(old) {
+        let kind = row["kind"].as_str().unwrap_or_default();
+        for cell in row["cells"].as_array().unwrap_or(&empty) {
+            if let Some(figure) = Figure::of(cell, kind, cycles) {
+                before.insert(place(&row, cell), figure);
+            }
+        }
+    }
+
+    let mut comparison = Comparison {
+        text: format!(
+            "Comparing {}: old, new, and the change; `+` is better and \
+             `-` worse\nby more than both spreads together.\n",
+            if cycles { "cycles" } else { "rates" }
+        ),
+        better: 0,
+        worse: 0,
+        within: 0,
+        unmatched: 0,
+    };
+    let mut section = String::new();
+    for row in rows(new) {
+        let kind = row["kind"].as_str().unwrap_or_default();
+        if row["section"] != section {
+            section = row["section"].as_str().unwrap_or_default().to_string();
+            let _ = writeln!(comparison.text, "\n{section}");
+        }
+        for cell in row["cells"].as_array().unwrap_or(&empty) {
+            let (_, name, size) = place(&row, cell);
+            let size = size.map_or(String::new(), |size| size.to_string());
+            let _ = write!(comparison.text, "  {name:22}{size:>6}");
+            let pair = Figure::of(cell, kind, cycles)
+                .and_then(|now| Some((before.get(&place(&row, cell))?, now)));
+            let Some((then, now)) = pair else {
+                comparison.unmatched += 1;
+                let _ = writeln!(comparison.text, "{:>7}{:>11}", "", "-");
+                continue;
+            };
+            let change = (now.median - then.median) / then.median;
+            let mark = if change.abs() <= then.spread + now.spread {
+                comparison.within += 1;
+                ' '
+            } else if (change < 0.0) == now.lower_is_better {
+                comparison.better += 1;
+                '+'
+            } else {
+                comparison.worse += 1;
+                '-'
+            };
+            let _ = writeln!(
+                comparison.text,
+                "{:>7}{:>11}{:>11}{:>+8.1}% {mark}",
+                now.unit,
+                short(then.median),
+                short(now.median),
+                change * 100.0
+            );
+        }
+    }
+    let _ = writeln!(
+        comparison.text,
+        "\n{} better, {} worse, {} within the noise, {} unmatched.",
+        comparison.better,
+        comparison.worse,
+        comparison.within,
+        comparison.unmatched
+    );
+    comparison
+}
+
+/// Where a cell sits: its section, row and size.
+fn place(row: &Value, cell: &Value) -> (String, String, Option<u64>) {
+    (
+        row["section"].as_str().unwrap_or_default().to_string(),
+        row["name"].as_str().unwrap_or_default().to_string(),
+        cell["size"].as_u64(),
+    )
+}
+
+/// A figure with the digits that matter at its size.
+fn short(value: f64) -> String {
+    if value >= 1000.0 {
+        format!("{value:.0}")
+    } else if value >= 10.0 {
+        format!("{value:.1}")
+    } else {
+        format!("{value:.3}")
+    }
+}
+
 /// Checks the parts of the harness that have an answer to be right
 /// about, and says whether it holds.
 fn self_test() -> bool {
@@ -3577,6 +3767,98 @@ fn self_test() -> bool {
     // The layout has to hold: the checks above are worthless if the
     // table is unreadable.
     check("the heading fits 80 columns", heading().len() <= 80);
+
+    // Comparing two documents: a change counts only past both
+    // spreads, and its direction depends on the unit.
+    let summary = |median: f64, spread: f64| Summary {
+        median,
+        min: median,
+        max: median,
+        spread,
+        samples: SAMPLES,
+    };
+    let cell = |median: f64, spread: f64| {
+        Some(Cell {
+            rate: summary(1e9 / median, spread),
+            cycles: Some(summary(median, spread)),
+            ghz: Some(1.0),
+        })
+    };
+    let rows = |cells: Vec<(Option<usize>, Option<Cell>)>| {
+        vec![Row {
+            section: "aesni".to_string(),
+            name: "aes-128-gcm-enc",
+            kind: Kind::Throughput,
+            cells,
+        }]
+    };
+    let mut old = Run::new(options.clone());
+    old.rows = rows(vec![
+        (Some(16), cell(10.0, 0.01)),
+        (Some(64), cell(10.0, 0.01)),
+        (Some(256), cell(10.0, 0.01)),
+    ]);
+    let mut new = Run::new(options);
+    new.rows = rows(vec![
+        (Some(16), cell(20.0, 0.01)),
+        (Some(64), cell(5.0, 0.01)),
+        (Some(256), cell(10.1, 0.01)),
+        (Some(1024), cell(10.0, 0.01)),
+    ]);
+    let (old, new) = (document(&old, 1, 2), document(&new, 3, 4));
+    let compared = compare(&old, &new);
+    check(
+        "compare counts each way",
+        (
+            compared.better,
+            compared.worse,
+            compared.within,
+            compared.unmatched,
+        ) == (1, 1, 1, 1),
+    );
+    check(
+        "compare marks the worse cell",
+        compared
+            .text
+            .lines()
+            .any(|l| l.contains("16") && l.ends_with('-')),
+    );
+    check(
+        "compare marks the better cell",
+        compared
+            .text
+            .lines()
+            .any(|l| l.contains("64") && l.ends_with('+')),
+    );
+    check(
+        "compare fits 80 columns",
+        compared.text.lines().all(|line| line.len() <= 80),
+    );
+    // Rates are compared where either run lacked the counter, and
+    // there more is better.
+    let mut plain = old.clone();
+    plain["clock"] = json!("thread-time");
+    let compared = compare(&plain, &new);
+    check(
+        "compare falls back to rates",
+        compared.text.contains("MB/s") && compared.better == 1,
+    );
+    check("short keeps the digits that matter", short(0.61) == "0.610");
+    check("short drops them at scale", short(12345.6) == "12346");
+    check(
+        "--compare wants two paths",
+        Options::parse(["--compare", "a"].into_iter().map(String::from))
+            .is_err(),
+    );
+    check(
+        "--compare takes two paths",
+        Options::parse(["--compare", "a", "b"].into_iter().map(String::from))
+            .ok()
+            .flatten()
+            .is_some_and(|o| {
+                o.compare == Some(("a".to_string(), "b".to_string()))
+            }),
+    );
 
     if failures.is_empty() {
         println!("speed: self-test passed");
