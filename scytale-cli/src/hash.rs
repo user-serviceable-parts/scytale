@@ -1,5 +1,6 @@
-//! `scytale hash`: a digest of each input, and the hash-by-name
-//! dispatch every other command that takes a hash shares.
+//! `scytale hash`: a digest of each input, or of a tuple of values,
+//! and the hash-by-name dispatch every other command that takes a
+//! hash shares.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -74,15 +75,18 @@ pub(crate) use with_hash;
 pub struct HashArgs {
     /// The hash: sha256, sha3-512, shake128, ... (scytale list hash)
     pub algorithm: String,
-    /// Bytes of output, for shake and cshake
+    /// Bytes of output, for shake, cshake and tuplehash
     #[arg(short, long)]
     length: Option<usize>,
     /// The function name, for cshake
     #[arg(long)]
     function_name: Option<String>,
-    /// The customization string, for cshake
+    /// The customization string, for cshake and tuplehash
     #[arg(long)]
     customization: Option<String>,
+    /// A string of the tuple, in order, for tuplehash; may repeat
+    #[arg(long)]
+    element: Vec<String>,
     /// Hex by default: "<digest>  <file>", one line each
     #[command(flatten)]
     format: Format,
@@ -99,18 +103,30 @@ pub fn run(args: HashArgs) -> Result<()> {
     }
     if !xof && args.length.is_some() {
         return Err(usage!(
-            "{name} takes no --length; that is for shake and cshake"
+            "{name} takes no --length; that is for shake, cshake and \
+             tuplehash"
         ));
     }
-    if !name.starts_with("cshake")
-        && (args.function_name.is_some() || args.customization.is_some())
-    {
+    let cshake = name.starts_with("cshake");
+    let tuple = name.starts_with("tuplehash");
+    if !cshake && args.function_name.is_some() {
         return Err(usage!(
-            "{name} takes no --function-name or --customization; those \
-             are cshake's"
+            "{name} takes no --function-name; that is cshake's"
         ));
+    }
+    if !cshake && !tuple && args.customization.is_some() {
+        return Err(usage!(
+            "{name} takes no --customization; that is for cshake and \
+             tuplehash"
+        ));
+    }
+    if !tuple && !args.element.is_empty() {
+        return Err(usage!("{name} takes no --element; that is tuplehash's"));
     }
     let as_hex = args.format.as_hex(true);
+    if tuple {
+        return tuple_hash(&args, name, as_hex);
+    }
     if !as_hex && args.files.len() > 1 {
         return Err(usage!(
             "--raw with {} files would run their digests together; one \
@@ -137,6 +153,45 @@ pub fn run(args: HashArgs) -> Result<()> {
         }
     }
     Ok(out.flush()?)
+}
+
+/// TupleHash over the `--element` values: one digest, written alone,
+/// since there is no file to name beside it. The strings are the
+/// tuple, so a file would be one more string and not the input, and
+/// files are refused rather than guessed at.
+fn tuple_hash(args: &HashArgs, name: &str, as_hex: bool) -> Result<()> {
+    if !args.files.is_empty() {
+        return Err(usage!(
+            "{name} hashes a tuple of --element values, not files; \
+             file:PATH makes a file one element"
+        ));
+    }
+    if args.element.is_empty() {
+        return Err(usage!(
+            "{name} hashes a tuple of strings; give each as --element"
+        ));
+    }
+    let elements = args
+        .element
+        .iter()
+        .map(|e| value::parse(e, "--element", true))
+        .collect::<Result<Vec<_>>>()?;
+    let custom = value::text(args.customization.as_deref(), "--customization")?;
+    let mut digest = vec![0u8; args.length.unwrap_or(0)];
+    macro_rules! tuple {
+        ($T:ident) => {{
+            let mut hash = scytale::hash::sha3::$T::new(&custom);
+            elements.iter().for_each(|e| hash.push(e));
+            hash.finalize_to(&mut digest);
+        }};
+    }
+    if name == "tuplehash128" {
+        tuple!(TupleHash128)
+    } else {
+        tuple!(TupleHash256)
+    }
+    let mut out = io::output(None, false)?;
+    io::write(&mut *out, &digest, as_hex)
 }
 
 fn digest(

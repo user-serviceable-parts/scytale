@@ -424,6 +424,286 @@ fn mac_and_kdf() {
 }
 
 #[test]
+fn tuplehash_and_the_secret_kdfs() {
+    // NIST's TupleHash samples 2 and 4: with and without a
+    // customization string, at both widths.
+    let out = text(ok(
+        &[
+            "hash",
+            "tuplehash128",
+            "-l",
+            "32",
+            "--customization",
+            "str:My Tuple App",
+            "--element",
+            "hex:000102",
+            "--element",
+            "hex:101112131415",
+        ],
+        b"",
+    ));
+    assert_eq!(
+        out,
+        "75cdb20ff4db1154e841d758e24160c54bae86eb8c13e7f5f40eb35588e96dfb"
+    );
+    let out = text(ok(
+        &[
+            "hash",
+            "tuplehash256",
+            "-l",
+            "64",
+            "--element",
+            "hex:000102",
+            "--element",
+            "hex:101112131415",
+        ],
+        b"",
+    ));
+    assert_eq!(
+        out,
+        "cfb7058caca5e668f81a12a20a2195ce97a925f1dba3e7449a56f82201ec6073\
+         11ac2696b1ab5ea2352df1423bde7bd4bb78c9aed1a853c78672f9eb23bbe194"
+    );
+    // The boundaries count: one string is not two.
+    let one = ok(
+        &["hash", "tuplehash128", "-l", "8", "--element", "str:ab"],
+        b"",
+    );
+    let two = ok(
+        &[
+            "hash",
+            "tuplehash128",
+            "-l",
+            "8",
+            "--element",
+            "str:a",
+            "--element",
+            "str:b",
+        ],
+        b"",
+    );
+    assert_ne!(one, two);
+
+    // Each secret KDF against its definition, written out with the
+    // hash and mac commands: the one-step KDF is H(1 || Z || info),
+    // X9.63 is H(Z || 1 || info), and SP 800-108 counter mode is
+    // PRF(fixed input with the counter at the given bit).
+    let sha = |input: &[u8]| {
+        let line = text(ok(&["hash", "sha256"], input));
+        line[..64].to_owned()
+    };
+    let out = text(ok(
+        &[
+            "kdf",
+            "one-step",
+            "sha256",
+            "--secret",
+            "hex:5a5a",
+            "--info",
+            "str:alice",
+            "--info",
+            "str:bob",
+            "-l",
+            "32",
+        ],
+        b"",
+    ));
+    assert_eq!(out, sha(b"\0\0\0\x01ZZalicebob"));
+    let out = text(ok(
+        &[
+            "kdf",
+            "x963",
+            "sha256",
+            "--secret",
+            "hex:5a5a",
+            "--info",
+            "str:alicebob",
+            "-l",
+            "32",
+        ],
+        b"",
+    ));
+    assert_eq!(out, sha(b"ZZ\0\0\0\x01alicebob"));
+    let hmac = |input: &[u8]| {
+        text(ok(&["mac", "tag", "hmac-sha256", "-k", "hex:0b0b"], input))
+    };
+    let out = text(ok(
+        &[
+            "kdf",
+            "sp800-108",
+            "hmac-sha256",
+            "-k",
+            "hex:0b0b",
+            "--fixed",
+            "str:label",
+            "--fixed",
+            "hex:00",
+            "--fixed",
+            "str:ctx",
+            "-l",
+            "32",
+        ],
+        b"",
+    ));
+    assert_eq!(out, hmac(b"\0\0\0\x01label\0ctx"));
+    let out = text(ok(
+        &[
+            "kdf",
+            "sp800-108",
+            "hmac-sha256",
+            "-k",
+            "hex:0b0b",
+            "--fixed",
+            "str:label",
+            "--counter-bits",
+            "8",
+            "--counter-at",
+            "40",
+            "-l",
+            "32",
+        ],
+        b"",
+    ));
+    assert_eq!(out, hmac(b"label\x01"));
+    // KDF-KMAC is KMAC under the label over the context; the one-step
+    // KDF under HMAC with no salt is HMAC under the empty key.
+    let out = text(ok(
+        &[
+            "kdf",
+            "sp800-108",
+            "kmac256",
+            "-k",
+            "hex:0b0b",
+            "--label",
+            "str:lbl",
+            "--context",
+            "str:ctx",
+            "-l",
+            "16",
+        ],
+        b"",
+    ));
+    let kmac = text(ok(
+        &[
+            "mac",
+            "tag",
+            "kmac256",
+            "-k",
+            "hex:0b0b",
+            "--customization",
+            "str:lbl",
+            "-l",
+            "16",
+        ],
+        b"ctx",
+    ));
+    assert_eq!(out, kmac);
+    let out = text(ok(
+        &[
+            "kdf",
+            "one-step",
+            "hmac-sha256",
+            "--secret",
+            "hex:5a5a",
+            "--info",
+            "str:x",
+            "-l",
+            "32",
+        ],
+        b"",
+    ));
+    let salted = text(ok(
+        &["mac", "tag", "hmac-sha256", "-k", "hex:"],
+        b"\0\0\0\x01ZZx",
+    ));
+    assert_eq!(out, salted);
+    // Every mode and PRF runs to the asked length; feedback without
+    // its IV differs from feedback with one.
+    for (prf, key) in [("hmac-sha3-256", "hex:00"), ("cmac-aes-128", KEY16)] {
+        for mode in ["counter", "feedback", "double-pipeline"] {
+            let args = [
+                "kdf",
+                "sp800-108",
+                prf,
+                "-k",
+                key,
+                "--mode",
+                mode,
+                "--fixed",
+                "str:f",
+                "-l",
+                "41",
+            ];
+            assert_eq!(text(ok(&args, b"")).len(), 82, "{prf} {mode}");
+        }
+    }
+    let plain = ok(
+        &[
+            "kdf",
+            "sp800-108",
+            "cmac-aes-128",
+            "-k",
+            KEY16,
+            "--mode",
+            "feedback",
+            "--counter-at",
+            "none",
+            "--fixed",
+            "str:f",
+            "-l",
+            "20",
+        ],
+        b"",
+    );
+    let with_iv = ok(
+        &[
+            "kdf",
+            "sp800-108",
+            "cmac-aes-128",
+            "-k",
+            KEY16,
+            "--mode",
+            "feedback",
+            "--counter-at",
+            "none",
+            "--iv",
+            "hex:01",
+            "--fixed",
+            "str:f",
+            "-l",
+            "20",
+        ],
+        b"",
+    );
+    assert_ne!(plain, with_iv);
+    // The one-step KDF under KMAC defaults the salt as the standard
+    // does, to zeros of the rate less four bytes.
+    let defaulted = ok(
+        &[
+            "kdf", "one-step", "kmac128", "--secret", "hex:5a", "-l", "16",
+        ],
+        b"",
+    );
+    let zeros = format!("hex:{}", "00".repeat(164));
+    let spelt = ok(
+        &[
+            "kdf", "one-step", "kmac128", "--secret", "hex:5a", "--salt",
+            &zeros, "-l", "16",
+        ],
+        b"",
+    );
+    assert_eq!(defaulted, spelt);
+    let empty = ok(
+        &[
+            "kdf", "one-step", "kmac128", "--secret", "hex:5a", "--salt",
+            "hex:", "-l", "16",
+        ],
+        b"",
+    );
+    assert_ne!(defaulted, empty);
+}
+
+#[test]
 fn random_is_random() {
     let a = text(ok(&["random", "32"], b""));
     let b = text(ok(&["random", "32"], b""));

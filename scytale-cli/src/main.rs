@@ -78,7 +78,7 @@ enum Command {
         #[command(subcommand)]
         op: mac::MacOp,
     },
-    /// Key derivation: HKDF, PBKDF2
+    /// Key derivation: HKDF, PBKDF2, SP 800-108, SP 800-56C, X9.63, TLS 1.2
     Kdf {
         #[command(subcommand)]
         op: kdf::KdfOp,

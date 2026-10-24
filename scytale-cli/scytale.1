@@ -1,4 +1,4 @@
-.TH SCYTALE 1 "2026-10-16" "scytale 0.10" "User Commands"
+.TH SCYTALE 1 "2026-10-24" "scytale 0.10" "User Commands"
 .SH NAME
 scytale \- cryptographic command line tool
 .SH SYNOPSIS
@@ -183,6 +183,7 @@ bytes from the system-seeded CTR_DRBG. Hex without a flag.
 .RI [ "\-l length" ]
 .RI [ "\-\-function\-name value" ]
 .RI [ "\-\-customization value" ]
+.RI [ "\-\-element value" ...]
 .RB [ \-\-hex | \-\-raw ]
 .RI [ file... ]
 .PP
@@ -193,7 +194,9 @@ standard input is named
 .BR \- .
 With
 .B \-\-raw
-the digest alone, for one file at most.
+the digest alone, for one file at most. TupleHash digests the
+.B \-\-element
+values instead, as one tuple, and writes the digest alone.
 .TP
 .I algorithm
 One of
@@ -208,21 +211,45 @@ One of
 .BR sha3\-256 ,
 .BR sha3\-384 ,
 .BR sha3\-512 ,
-or an extendable-output function,
+an extendable-output function,
 .BR shake128 ,
 .BR shake256 ,
 .B cshake128
 or
-.BR cshake256 .
+.BR cshake256 ,
+or a hash of a tuple of strings (SP 800-185),
+.B tuplehash128
+or
+.BR tuplehash256 .
 .TP
 .BI \-l,\ \-\-length\  bytes
-The output length, required for an extendable-output function and
-refused otherwise.
+The output length, required for an extendable-output function and for
+TupleHash, and refused otherwise. TupleHash absorbs the length, so a
+shorter output is not a prefix of a longer one.
 .TP
-.BI \-\-function\-name\  value ,\ \-\-customization\  value
-The cSHAKE function name and customization string, as
+.BI \-\-function\-name\  value
+The cSHAKE function name, as
 .BR VALUES ;
-empty without them, refused for the other hashes.
+empty without it, refused for the other hashes.
+.TP
+.BI \-\-customization\  value
+The cSHAKE or TupleHash customization string, as
+.BR VALUES ;
+empty without it, refused for the other hashes.
+.TP
+.BI \-\-element\  value
+One string of the tuple, for TupleHash, which hashes the strings in
+the order given with each one's length ahead of it, so that
+.B str:ab
+and
+.B str:c
+differ from
+.B str:a
+and
+.BR str:bc .
+At least one is required, and a file is given as
+.BR file: ;
+the files that the other hashes take are refused.
 .SS mac tag, mac verify
 .B scytale mac tag
 .I algorithm
@@ -488,6 +515,149 @@ and the seed it names, such as the two randoms in order.
 may repeat; the values are concatenated in order. The secret may not
 be given as
 .BR str: .
+.SS kdf sp800-108
+.B scytale kdf sp800\-108
+.I mac
+.BI \-k\  key
+.RI [ "\-\-mode mode" ]
+.RI [ "\-\-fixed value" ...]
+.RI [ "\-\-counter\-bits bits" ]
+.RI [ "\-\-counter\-at place" ]
+.RI [ "\-\-iv value" ]
+.BI \-l\  bytes
+.RB [ \-\-hex | \-\-raw ]
+.RI [ "\-o file" ]
+.br
+.B scytale kdf sp800\-108
+.BR kmac128 | kmac256
+.BI \-k\  key
+.RI [ "\-\-label value" ]
+.RI [ "\-\-context value" ]
+.BI \-l\  bytes
+.RB [ \-\-hex | \-\-raw ]
+.RI [ "\-o file" ]
+.PP
+The key-based KDFs of SP 800-108r1: keys from a key-derivation key,
+which is already a key, under the pseudorandom function
+.IR mac ,
+any
+.BI hmac\- hash
+or
+.BI cmac\-aes\- width
+of
+.BR "scytale list mac" .
+The
+.I fixed
+input names the key being derived; the standard leaves its layout to
+the protocol, commonly a label, a zero byte, a context and the output
+length in bits, so it is given in parts, which are concatenated in
+order. Hex without a flag.
+.TP
+.BI \-\-mode\  mode
+.BR counter ,
+the default, where each block is the PRF over the fixed input with
+the counter in it;
+.BR feedback ,
+where each block is the PRF over the previous block, the counter and
+the fixed input, the first block chaining from
+.BR \-\-iv ;
+or
+.BR double\-pipeline ,
+where a second chain of PRF outputs stands in for the previous block.
+.TP
+.BI \-\-counter\-bits\  bits
+The width of the counter, 8, 16, 24 or 32; 32 without it. The output
+may not need more blocks than the counter can number.
+.TP
+.BI \-\-counter\-at\  place
+Where the counter goes: a count of bits into the fixed input, 0 (ahead
+of it) without the option, and the fixed input's whole length for after
+it. In the feedback and double-pipeline modes also
+.BR before ,
+ahead of the chaining value, or
+.BR none ,
+for no counter at all.
+.TP
+.BI \-\-iv\  value
+The first chaining value of the feedback mode, which may be empty and
+is without the option; refused for the other modes.
+.PP
+.B kmac128
+and
+.B kmac256
+are KDF-KMAC (section 4.4 of the standard), which has no mode and no
+counter to place: the output is KMAC under the key with the
+.B \-\-label
+as its customization string over the
+.BR \-\-context ,
+both as
+.B VALUES
+and empty without them.
+.SS kdf one-step
+.B scytale kdf one\-step
+.I algorithm
+.BI \-\-secret\  value
+.RI [ "\-\-salt value" ]
+.RI [ "\-\-info value" ...]
+.RB [ \-\-no\-counter ]
+.BI \-l\  bytes
+.RB [ \-\-hex | \-\-raw ]
+.RI [ "\-o file" ]
+.PP
+The one-step key derivation of SP 800-56C r2 (section 4): keys from
+the shared secret
+.B Z
+of a key agreement, such as
+.B kex agree
+gives. Each block is
+.IR algorithm (counter
+.B || Z ||
+.IR info ),
+the counter 32 bits from one, under one of the plain hashes of
+.BR "scytale list kdf" ,
+or under
+.BI hmac\- hash
+or
+.BR kmac128 | kmac256
+of
+.B scytale list mac
+keyed with the
+.BR \-\-salt ,
+which the standard defaults to all zeros when there is none, and
+which a plain hash refuses. The fixed
+.I info
+names the key being derived, typically the parties and the length;
+the parts are concatenated in order. With
+.B \-\-no\-counter
+the counter is left out and one block, a digest or a tag, is the most
+that can be asked for, except under KMAC, which gives any length. The
+secret may not be given as
+.BR str: .
+Hex without a flag.
+.SS kdf x963
+.B scytale kdf x963
+.I hash
+.BI \-\-secret\  value
+.RI [ "\-\-info value" ...]
+.BI \-l\  bytes
+.RB [ \-\-hex | \-\-raw ]
+.RI [ "\-o file" ]
+.PP
+The ANSI X9.63 KDF, the one SEC 1 gives ECIES, over
+.IR hash :
+each block is
+.IR hash ( "Z ||"
+.I counter
+.B ||
+.IR info ),
+the counter 32 bits from one, after the secret where SP 800-56C puts
+it before. It is here for the protocols that name it; prefer
+.B kdf one\-step
+for a new design. The
+.I info
+is X9.63's SharedInfo, in parts concatenated in order. The secret may
+not be given as
+.BR str: .
 Hex without a flag.
 .SS key generate
 .B scytale key generate
@@ -653,7 +823,9 @@ or
 .BR ecdh\-p521 ;
 both keys must be for it. Hex without a flag. A shared secret is
 keying material, not a key; derive keys from it with
-.BR "kdf hkdf" .
+.B kdf hkdf
+or
+.BR "kdf one\-step" .
 .SS kem encapsulate
 .B scytale kem encapsulate
 .I algorithm

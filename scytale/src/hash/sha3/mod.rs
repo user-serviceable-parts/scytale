@@ -1,6 +1,7 @@
 //! SHA-3 (FIPS 202): SHA3-224, SHA3-256, SHA3-384 and SHA3-512, the
-//! extendable-output functions SHAKE128 and SHAKE256, and their
-//! customizable forms cSHAKE128 and cSHAKE256 (SP 800-185).
+//! extendable-output functions SHAKE128 and SHAKE256, their
+//! customizable forms cSHAKE128 and cSHAKE256 (SP 800-185), and
+//! TupleHash128 and TupleHash256, which hash a sequence of strings.
 //!
 //! One function underneath, really: the Keccak-f\[1600\] permutation
 //! used as a sponge. The six differ in how much of the 1600-bit
@@ -42,6 +43,19 @@
 //! purposes; KMAC, in [`mac::kmac`](crate::mac::kmac), is built on it.
 //! SHA3-256 and SHAKE128 are the usual picks; the larger digests cost
 //! more per byte because less of each permutation is message.
+//! TupleHash, [`TupleHash128`], is for hashing several strings where
+//! the boundaries between them must count.
+//!
+//! # ParallelHash
+//!
+//! SP 800-185's ParallelHash is deliberately absent. The standard
+//! counts its blocks as `ceil((len(X)/8) / B)` over the reals, so a
+//! message's last few bits after a full block make a block of their
+//! own; NIST's validation vectors divide in integers and drop those
+//! bits unhashed. The two disagree on 73 of the 400 one-shot vectors,
+//! and the question is open with NIST as ACVP-Server issue 440. Until
+//! it is settled, an implementation of either reading would fail the
+//! other, so there is none.
 //!
 //! # Bit strings
 //!
@@ -69,6 +83,7 @@ pub(crate) mod engine;
 pub(crate) mod portable;
 #[cfg(target_arch = "riscv64")]
 mod riscv64;
+mod tuple_hash;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
@@ -393,6 +408,9 @@ impl<V: XofVariant> BitXof for Auto<V> {
 }
 
 pub use cshake::{CShake128, CShake128Reader, CShake256, CShake256Reader};
+pub use tuple_hash::{
+    TupleHash128, TupleHash128Reader, TupleHash256, TupleHash256Reader,
+};
 
 #[cfg(test)]
 pub(crate) mod tests {

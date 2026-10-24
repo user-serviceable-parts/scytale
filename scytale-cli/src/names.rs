@@ -154,7 +154,7 @@ const fn any(_: usize) -> Len {
 
 static PLAIN_HASHES: [Entry; 11] = over_hashes!("", No, exact, "");
 
-static XOFS: [Entry; 4] = [
+static XOFS: [Entry; 6] = [
     e("shake128", No, No, No, Any, "--length required"),
     e("shake256", No, No, No, Any, "--length required"),
     e(
@@ -172,6 +172,22 @@ static XOFS: [Entry; 4] = [
         No,
         Any,
         "--length; --function-name, --customization",
+    ),
+    e(
+        "tuplehash128",
+        No,
+        No,
+        No,
+        Any,
+        "--length; --element values; --customization",
+    ),
+    e(
+        "tuplehash256",
+        No,
+        No,
+        No,
+        Any,
+        "--length; --element values; --customization",
     ),
 ];
 
@@ -393,8 +409,12 @@ pub static CIPHER: Family = Family {
     ],
 };
 
-static KDF_HASHES: [Entry; 11] =
-    over_hashes!("", Any, any, "hkdf, pbkdf2 or tls12 over this hash");
+static KDF_HASHES: [Entry; 11] = over_hashes!(
+    "",
+    Any,
+    any,
+    "hkdf, pbkdf2, tls12, one-step or x963 over this hash"
+);
 
 pub static KDF: Family = Family {
     name: "kdf",
