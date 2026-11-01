@@ -74,7 +74,7 @@ use crate::features::aarch64::Feature as A;
 use crate::features::riscv64::Feature as R;
 #[cfg(target_arch = "x86_64")]
 use crate::features::x86_64::Feature as X;
-use crate::features::{self, Features};
+use crate::features::{self, Dispatcher, Features};
 use crate::hash::{BitHash, Hash};
 use crate::{BlockType, Error};
 
@@ -222,19 +222,21 @@ pub(crate) mod variant {
 
 /// Which compression function a SHA-2 hash is running on.
 ///
-/// Every variant exists on every target, so that a program for more
-/// than one architecture can name them all; which can be chosen here
-/// is what [`Sha256::ranking`] and [`Sha512::ranking`] list.
+/// Which can be chosen is what [`Sha256::profiles`] and
+/// [`Sha512::profiles`] publish, by needs rather than by name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum Engine {
+pub(crate) enum Kernel {
     /// The SHA extensions on x86-64.
+    #[cfg(target_arch = "x86_64")]
     ShaNi,
     /// The ARMv8 cryptography extension.
+    #[cfg(target_arch = "aarch64")]
     Armv8,
     /// RISC-V vector SHA-2: Zvknha, or Zvknhb for SHA-512.
+    #[cfg(target_arch = "riscv64")]
     Zvknh,
     /// RISC-V scalar SHA-2, Zknh.
+    #[cfg(target_arch = "riscv64")]
     Zknh,
     /// Plain Rust, on any processor.
     Portable,
@@ -267,42 +269,48 @@ pub(crate) const ZVKNH_512: Features =
 #[cfg(target_arch = "riscv64")]
 pub(crate) const ZKNH: Features = features::riscv(&[R::Zknh]);
 
-/// The engines for SHA-224 and SHA-256, best first, each with what it
+/// The kernels for SHA-224 and SHA-256, best first, each with what it
 /// needs; the first whose needs are in force is the one a new hash
 /// gets. The portable code needs nothing, so the search always ends.
-pub(crate) const RANKING32: &[(Engine, Features)] = &[
+pub(crate) const KERNELS32: &[(Kernel, Features)] = &[
     #[cfg(target_arch = "x86_64")]
-    (Engine::ShaNi, SHA_NI),
+    (Kernel::ShaNi, SHA_NI),
     #[cfg(target_arch = "aarch64")]
-    (Engine::Armv8, ARMV8_256),
+    (Kernel::Armv8, ARMV8_256),
     #[cfg(target_arch = "riscv64")]
-    (Engine::Zvknh, ZVKNH_256),
+    (Kernel::Zvknh, ZVKNH_256),
     #[cfg(target_arch = "riscv64")]
-    (Engine::Zknh, ZKNH),
-    (Engine::Portable, Features::new()),
+    (Kernel::Zknh, ZKNH),
+    (Kernel::Portable, Features::new()),
 ];
 
-/// The engines for SHA-384, SHA-512 and the truncated SHA-512s. A
+/// The kernels for SHA-384, SHA-512 and the truncated SHA-512s. A
 /// processor may have the SHA-256 instructions and not these, which
-/// is why the two families are ranked apart.
-pub(crate) const RANKING64: &[(Engine, Features)] = &[
+/// is why the two families are listed apart.
+pub(crate) const KERNELS64: &[(Kernel, Features)] = &[
     #[cfg(target_arch = "aarch64")]
-    (Engine::Armv8, ARMV8_512),
+    (Kernel::Armv8, ARMV8_512),
     #[cfg(target_arch = "riscv64")]
-    (Engine::Zvknh, ZVKNH_512),
+    (Kernel::Zvknh, ZVKNH_512),
     #[cfg(target_arch = "riscv64")]
-    (Engine::Zknh, ZKNH),
-    (Engine::Portable, Features::new()),
+    (Kernel::Zknh, ZKNH),
+    (Kernel::Portable, Features::new()),
 ];
 
-/// Defines a family's dispatching type: an enum of the engines the
+/// What the two lists publish: their needs, without the names.
+const PROFILES32: [Features; KERNELS32.len()] =
+    features::profiles_of(KERNELS32);
+const PROFILES64: [Features; KERNELS64.len()] =
+    features::profiles_of(KERNELS64);
+
+/// Defines a family's dispatching type: an enum of the kernels the
 /// architecture has, chosen at construction, and each method fanned
 /// over them with one predictable branch.
 macro_rules! automatic {
     (
         $(#[$doc:meta])*
         $name:ident, $inner:ident, $engine:ident, $compress:path,
-        $variant:ident, $ranking:ident, $block:literal,
+        $variant:ident, $kernels:ident, $profiles:ident, $block:literal,
         [$( ($arch:literal, $choice:ident, $path:path) ),*]
     ) => {
         $(#[$doc])*
@@ -322,13 +330,13 @@ macro_rules! automatic {
             /// Starts a hash with the best implementation the
             /// features in force allow.
             pub fn new() -> Self {
-                let inner = match features::select($ranking) {
+                let inner = match features::select($kernels) {
                     $(
                         #[cfg(target_arch = $arch)]
-                        Some(Engine::$choice) => {
+                        Some(Kernel::$choice) => {
                             match <$path as $compress>::probe() {
                                 Some(c) => $inner::$choice($engine::with(c)),
-                                // The ranking chose it, so this is not
+                                // The list chose it, so this is not
                                 // taken unless the features changed
                                 // between the two reads; portable is
                                 // right if they did.
@@ -343,21 +351,22 @@ macro_rules! automatic {
                 $name(inner)
             }
 
-            /// Which implementation this hash is running on.
-            pub fn engine(&self) -> Engine {
+            /// Which kernel this hash is running on.
+            #[cfg(test)]
+            pub(crate) fn kernel(&self) -> Kernel {
                 match &self.0 {
                     $(
                         #[cfg(target_arch = $arch)]
-                        $inner::$choice(_) => Engine::$choice,
+                        $inner::$choice(_) => Kernel::$choice,
                     )*
-                    $inner::Portable(_) => Engine::Portable,
+                    $inner::Portable(_) => Kernel::Portable,
                 }
             }
 
-            /// The engines this architecture has, best first, each
-            /// with the features it needs.
-            pub fn ranking() -> &'static [(Engine, Features)] {
-                $ranking
+            /// The needs of each kernel this architecture has, best
+            /// first.
+            pub(crate) fn profiles() -> &'static [Features] {
+                &$profiles
             }
         }
 
@@ -447,8 +456,8 @@ macro_rules! automatic {
 automatic!(
     /// SHA-224 or SHA-256 using the best implementation the features
     /// in force allow; see [`Sha256`].
-    Auto32, Inner32, Engine32, engine::Compress32, Variant32, RANKING32,
-    64,
+    Auto32, Inner32, Engine32, engine::Compress32, Variant32, KERNELS32,
+    PROFILES32, 64,
     [
         ("x86_64", ShaNi, x86_64::ShaNi),
         ("aarch64", Armv8, aarch64::Armv8),
@@ -460,8 +469,8 @@ automatic!(
 automatic!(
     /// SHA-384 or SHA-512 using the best implementation the features
     /// in force allow; see [`Sha512`].
-    Auto64, Inner64, Engine64, engine::Compress64, Variant64, RANKING64,
-    128,
+    Auto64, Inner64, Engine64, engine::Compress64, Variant64, KERNELS64,
+    PROFILES64, 128,
     [
         ("aarch64", Armv8, aarch64::Armv8),
         ("riscv64", Zvknh, riscv64::Zvknh),
@@ -471,6 +480,8 @@ automatic!(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::vec::Vec;
+
     use super::*;
     use zeroize::ZeroizeOnDrop;
 
@@ -817,22 +828,31 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn picks_the_first_engine_whose_needs_are_met() {
-        for ranking in [RANKING32, RANKING64] {
-            assert!(features::rows_are_distinct(ranking));
+    fn picks_the_first_kernel_whose_needs_are_met() {
+        for (kernels, profiles) in [
+            (KERNELS32, Sha256::profiles()),
+            (KERNELS64, Sha512::profiles()),
+        ] {
+            assert!(features::rows_are_reachable(kernels));
             assert_eq!(
-                ranking.last(),
-                Some(&(Engine::Portable, Features::new()))
+                kernels.last(),
+                Some(&(Kernel::Portable, Features::new()))
             );
+            let needs: Vec<Features> = kernels.iter().map(|k| k.1).collect();
+            assert_eq!(profiles, needs);
             let in_force = features::get();
-            let expected = ranking
+            let expected = kernels
                 .iter()
                 .find(|(_, needs)| needs.is_subset(in_force))
                 .map(|(e, _)| *e);
-            assert_eq!(features::select(ranking), expected);
+            assert_eq!(features::select(kernels), expected);
         }
-        assert_eq!(Some(Sha256::new().engine()), features::select(RANKING32));
-        assert_eq!(Some(Sha512::new().engine()), features::select(RANKING64));
+        let sha256 = Auto32::<variant::Sha256>::new();
+        assert_eq!(Some(sha256.kernel()), features::select(KERNELS32));
+        let sha512 = Auto64::<variant::Sha512>::new();
+        assert_eq!(Some(sha512.kernel()), features::select(KERNELS64));
+        assert_eq!(Sha224::profiles(), Sha256::profiles());
+        assert_eq!(Sha384::profiles(), Sha512_256::profiles());
     }
 
     #[test]
@@ -873,16 +893,18 @@ macro_rules! digest {
                 $name($auto::new())
             }
 
-            /// Which implementation this hash is running on.
-            pub fn engine(&self) -> Engine {
-                self.0.engine()
+            /// The feature profiles this hash tells apart, best
+            /// first; see [`Dispatcher`].
+            pub fn profiles() -> &'static [Features] {
+                $auto::<variant::$variant>::profiles()
             }
+        }
 
-            /// The engines this architecture has, best first, each
-            /// with the features it needs. A new hash gets the first
-            /// whose needs are met by [`features::get`].
-            pub fn ranking() -> &'static [(Engine, Features)] {
-                $auto::<variant::$variant>::ranking()
+        impl features::sealed::Sealed for $name {}
+
+        impl Dispatcher for $name {
+            fn profiles() -> &'static [Features] {
+                $name::profiles()
             }
         }
 

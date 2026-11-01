@@ -1,14 +1,23 @@
-//! The set of features in force is global to the process, so these
-//! tests have a binary to themselves, and each holds the lock while
-//! it edits the set so that none sees another's edit.
+//! The public face of `features`: what a program outside the crate
+//! can see and do. The set in force is global to the process, so the
+//! tests that edit it hold a lock, and this file has a binary to
+//! itself so that no other test runs beside them.
+//!
+//! The kernels themselves are not visible from here, by design; the
+//! library's own tests check which one a set selects. What can be
+//! checked from outside is the shape of each type's profiles, that a
+//! narrowed set is honoured, and that every profile answers the same.
 
 use std::sync::{Mutex, MutexGuard};
 
-use scytale::cipher::aes::{self, Aes128};
-use scytale::cipher::chacha20::{self, ChaCha20};
-use scytale::features::{self, Feature, Features, aarch64, riscv64, x86_64};
-use scytale::hash::sha2::{self, Sha256, Sha512};
-use scytale::hash::sha3::{self, Sha3_256};
+use scytale::cipher::aes::Aes128;
+use scytale::cipher::chacha20::ChaCha20;
+use scytale::features::{
+    self, Dispatcher, Feature, Features, aarch64, riscv64, x86_64,
+};
+use scytale::hash::Hash;
+use scytale::hash::sha2::{Sha224, Sha256, Sha384, Sha512};
+use scytale::hash::sha3::{Sha3_256, Shake128};
 use scytale::{Error, Key};
 
 static LOCK: Mutex<()> = Mutex::new(());
@@ -89,135 +98,69 @@ fn a_feature_the_processor_lacks_is_refused() {
     }
 }
 
-/// Removing the feature the chosen engine needs selects the next
-/// engine down, for every family and every row of its ranking.
 #[test]
-fn removing_a_feature_selects_the_engine_below() {
-    let _edit = Edit::begin();
-    let key = Key::from([0u8; 16]);
-    let chacha_key = Key::from([0u8; 32]);
-    let detected = features::detected();
+fn the_empty_set_prints_as_none() {
+    assert_eq!(Features::new().to_string(), "none");
+    assert_eq!("none".parse::<Features>(), Ok(Features::new()));
+}
 
-    fn walk<E: Copy + PartialEq + std::fmt::Debug>(
-        ranking: &[(E, Features)],
-        detected: Features,
-        engine_now: &dyn Fn() -> E,
-    ) {
-        // Rows nobody can reach here: those needing a virtual feature
-        // or something the processor lacks.
-        let reachable: Vec<&(E, Features)> = ranking
-            .iter()
-            .filter(|(_, needs)| needs.is_subset(detected))
-            .collect();
-        let mut in_force = detected;
-        for (i, (engine, needs)) in reachable.iter().enumerate() {
-            features::set(in_force).unwrap();
-            assert_eq!(engine_now(), *engine, "with {in_force}");
-            // Take away what this row needs, then give back what the
-            // rows below it need, so the next reachable row is chosen.
-            in_force = in_force - *needs;
-            for (_, lower) in &reachable[i + 1..] {
-                in_force = in_force | *lower;
+/// Every dispatching type's profiles end with one that needs nothing,
+/// so a value can always be built, and no profile includes one above
+/// it, so setting exactly a profile selects the choice it stands for.
+#[test]
+fn profiles_end_in_nothing_and_are_each_reachable() {
+    fn check<T: Dispatcher>() {
+        let profiles = T::profiles();
+        let last = profiles[profiles.len() - 1];
+        assert!(last.is_empty(), "{profiles:?}");
+        for (i, higher) in profiles.iter().enumerate() {
+            for lower in &profiles[i + 1..] {
+                assert!(!higher.is_subset(*lower), "{profiles:?}");
             }
         }
-        features::set(Features::new()).unwrap();
-        let (last, needs) = reachable[reachable.len() - 1];
-        assert!(needs.is_empty());
-        assert_eq!(engine_now(), *last);
     }
-
-    walk(Aes128::ranking(), detected, &|| Aes128::new(&key).engine());
-    walk(Sha256::ranking(), detected, &|| Sha256::new().engine());
-    walk(Sha512::ranking(), detected, &|| Sha512::new().engine());
-    walk(Sha3_256::ranking(), detected, &|| Sha3_256::new().engine());
-    walk(ChaCha20::ranking(), detected, &|| {
-        ChaCha20::new(&chacha_key).engine()
-    });
+    check::<Aes128>();
+    check::<Sha224>();
+    check::<Sha256>();
+    check::<Sha384>();
+    check::<Sha512>();
+    check::<Sha3_256>();
+    check::<Shake128>();
+    check::<ChaCha20>();
+    // The trait and the inherent method agree.
+    assert_eq!(<Sha256 as Dispatcher>::profiles(), Sha256::profiles());
 }
 
+/// Under every profile this processor can satisfy, the type gives
+/// the same answer. This is the agreement a vector run relies on.
 #[test]
-fn isolated_admits_the_tables_below_the_hardware() {
+fn every_profile_answers_the_same() {
     let _edit = Edit::begin();
-    let key = Key::from([0u8; 16]);
-
-    // Alone, it unlocks the table-driven code over the bitsliced.
-    features::set(Features::of(&[Feature::Isolated])).unwrap();
-    assert_eq!(Aes128::new(&key).engine(), aes::Engine::Tables);
-
-    // Beside the hardware, the hardware still wins.
-    let mut f = features::detected();
-    f.insert(Feature::Isolated);
-    features::set(f).unwrap();
-    let hardware = Aes128::ranking()
-        .iter()
-        .find(|(_, needs)| needs.is_subset(features::detected()))
-        .map(|(e, _)| *e)
-        .unwrap();
-    assert_eq!(Aes128::new(&key).engine(), hardware);
-
-    // And without it, the tables are never chosen.
-    features::set(Features::new()).unwrap();
-    assert_eq!(Aes128::new(&key).engine(), aes::Engine::Bitsliced);
-}
-
-#[test]
-fn the_portable_engines_answer_the_same() {
-    let _edit = Edit::begin();
-    use scytale::hash::Hash;
-
+    let hardware = features::detected();
     let key = Key::from([0x42u8; 16]);
-    let message = b"the quick brown fox";
-    let before = Aes128::new(&key);
-    let hash_before = Sha256::digest(message);
+    let message = b"the quick brown fox jumps over the lazy dog";
 
-    features::set(Features::new()).unwrap();
-    let portable = Aes128::new(&key);
-    assert_eq!(portable.engine(), aes::Engine::Bitsliced);
-    assert_eq!(Sha256::new().engine(), sha2::Engine::Portable);
-    assert_eq!(Sha3_256::new().engine(), sha3::Engine::Portable);
-    // On AArch64 the ranking ends with NEON, which every processor
-    // has, rather than with the portable code.
-    let chacha = ChaCha20::new(&Key::from([0u8; 32]));
-    let (last, _) = ChaCha20::ranking()[ChaCha20::ranking().len() - 1];
-    assert_eq!(chacha.engine(), last);
-    assert!(matches!(
-        last,
-        chacha20::Engine::Portable | chacha20::Engine::Neon
-    ));
-    assert_eq!(Sha256::digest(message), hash_before);
+    let reference_hash = Sha256::digest(message);
+    let mut reference_block = [[0x5au8; 16]];
+    Aes128::new(&key).encrypt(&mut reference_block);
 
-    let mut a = [[0x5au8; 16]];
-    let mut b = a;
-    before.encrypt(&mut a);
-    portable.encrypt(&mut b);
-    assert_eq!(a, b);
-}
-
-#[test]
-fn a_value_keeps_the_engine_it_was_built_with() {
-    let _edit = Edit::begin();
-    let key = Key::from([0u8; 16]);
-    let built = Aes128::new(&key);
-    let engine = built.engine();
-    features::set(Features::new()).unwrap();
-    assert_eq!(built.engine(), engine);
-    assert_eq!(Aes128::new(&key).engine(), aes::Engine::Bitsliced);
-}
-
-#[test]
-fn the_rankings_end_in_portable_and_tell_their_rows_apart() {
-    fn check<E: Copy + PartialEq + std::fmt::Debug>(ranking: &[(E, Features)]) {
-        let (_, last) = ranking[ranking.len() - 1];
-        assert!(last.is_empty(), "{ranking:?}");
-        for (i, (_, a)) in ranking.iter().enumerate() {
-            for (_, b) in &ranking[i + 1..] {
-                assert_ne!(a, b, "{ranking:?}");
-            }
-        }
+    // Virtual features are granted rather than detected, so a profile
+    // naming one is satisfiable whenever its hardware part is.
+    let grantable = hardware | Features::of(&[Feature::Isolated]);
+    let satisfiable = |p: &Features| p.is_subset(grantable);
+    let mut tried = 0;
+    for &profile in Sha256::profiles().iter().filter(|p| satisfiable(p)) {
+        features::set(profile).unwrap();
+        assert_eq!(Sha256::digest(message), reference_hash, "{profile}");
+        tried += 1;
     }
-    check(Aes128::ranking());
-    check(Sha256::ranking());
-    check(Sha512::ranking());
-    check(Sha3_256::ranking());
-    check(ChaCha20::ranking());
+    for &profile in Aes128::profiles().iter().filter(|p| satisfiable(p)) {
+        features::set(profile).unwrap();
+        let mut block = [[0x5au8; 16]];
+        Aes128::new(&key).encrypt(&mut block);
+        assert_eq!(block, reference_block, "{profile}");
+        tried += 1;
+    }
+    // The empty profile is always satisfiable, so both loops ran.
+    assert!(tried >= 2);
 }

@@ -8,9 +8,9 @@
 //! state the message goes into at a time, the rate, and in the bits
 //! that end the message. The digests give a fixed output; the SHAKE
 //! functions give as much as is asked for, through [`Xof`]. The types
-//! here pick the best implementation the features in force allow
-//! (see [`crate::features`]); the implementations are not names a
-//! caller can reach, only engines a hash can report.
+//! here pick the best kernel the features in force allow (see
+//! [`crate::features`]); the kernels are not names a caller can
+//! reach, only the feature profiles that tell them apart.
 //!
 //! ```
 //! use scytale::hash::sha3::{Sha3_256, Shake128};
@@ -93,7 +93,7 @@ use engine::{DigestVariant, Reader, Sponge, XofVariant};
 
 #[cfg(target_arch = "aarch64")]
 use crate::features::aarch64::Feature as A;
-use crate::features::{self, Features};
+use crate::features::{self, Dispatcher, Features};
 use crate::hash::{BitHash, BitXof, Hash, Xof, XofReader};
 use crate::{BlockType, Error};
 
@@ -166,13 +166,12 @@ pub(crate) mod variant {
 
 /// Which permutation a SHA-3 function is running on.
 ///
-/// Every variant exists on every target, so that a program for more
-/// than one architecture can name them all; which can be chosen here
-/// is what [`Sha3_256::ranking`] and its siblings list.
+/// Which can be chosen is what [`Sha3_256::profiles`] and its
+/// siblings publish, by needs rather than by name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum Engine {
+pub(crate) enum Kernel {
     /// The ARMv8.2 SHA-3 instructions.
+    #[cfg(target_arch = "aarch64")]
     Armv8,
     /// Plain Rust, on any processor.
     Portable,
@@ -182,13 +181,16 @@ pub enum Engine {
 #[cfg(target_arch = "aarch64")]
 pub(crate) const ARMV8: Features = features::arm(&[A::Sha3]);
 
-/// The engines, best first, each with what it needs; the first whose
+/// The kernels, best first, each with what it needs; the first whose
 /// needs are in force is the one a new function gets.
-pub(crate) const RANKING: &[(Engine, Features)] = &[
+pub(crate) const KERNELS: &[(Kernel, Features)] = &[
     #[cfg(target_arch = "aarch64")]
-    (Engine::Armv8, ARMV8),
-    (Engine::Portable, Features::new()),
+    (Kernel::Armv8, ARMV8),
+    (Kernel::Portable, Features::new()),
 ];
+
+/// What the list publishes: the needs, without the names.
+const PROFILES: [Features; KERNELS.len()] = features::profiles_of(KERNELS);
 
 /// Applies a method to whichever implementation is in use.
 macro_rules! dispatch {
@@ -217,11 +219,11 @@ impl<V: engine::Variant> Auto<V> {
     /// Starts a function with the best implementation the features
     /// in force allow.
     pub fn new() -> Self {
-        let inner = match features::select(RANKING) {
+        let inner = match features::select(KERNELS) {
             #[cfg(target_arch = "aarch64")]
-            Some(Engine::Armv8) => match engine::Permutation::probe() {
+            Some(Kernel::Armv8) => match engine::Permutation::probe() {
                 Some(p) => Inner::Armv8(Sponge::with(p)),
-                // The ranking chose it, so this is not taken unless
+                // The list chose it, so this is not taken unless
                 // the features changed between the two reads;
                 // portable is right if they did.
                 None => Inner::Portable(Sponge::with(portable::Keccak)),
@@ -231,12 +233,13 @@ impl<V: engine::Variant> Auto<V> {
         Auto(inner)
     }
 
-    /// Which implementation this function is running on.
-    pub fn engine(&self) -> Engine {
+    /// Which kernel this function is running on.
+    #[cfg(test)]
+    pub(crate) fn kernel(&self) -> Kernel {
         match &self.0 {
             #[cfg(target_arch = "aarch64")]
-            Inner::Armv8(_) => Engine::Armv8,
-            Inner::Portable(_) => Engine::Portable,
+            Inner::Armv8(_) => Kernel::Armv8,
+            Inner::Portable(_) => Kernel::Portable,
         }
     }
 }
@@ -415,6 +418,8 @@ pub use tuple_hash::{
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::vec::Vec;
+
     use super::*;
     use zeroize::ZeroizeOnDrop;
 
@@ -682,17 +687,20 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn picks_the_first_engine_whose_needs_are_met() {
-        assert!(features::rows_are_distinct(RANKING));
-        assert_eq!(RANKING.last(), Some(&(Engine::Portable, Features::new())));
+    fn picks_the_first_kernel_whose_needs_are_met() {
+        assert!(features::rows_are_reachable(KERNELS));
+        assert_eq!(KERNELS.last(), Some(&(Kernel::Portable, Features::new())));
+        let needs: Vec<Features> = KERNELS.iter().map(|k| k.1).collect();
+        assert_eq!(Sha3_256::profiles(), needs);
+        assert_eq!(Shake128::profiles(), needs);
         let in_force = features::get();
-        let expected = RANKING
+        let expected = KERNELS
             .iter()
             .find(|(_, needs)| needs.is_subset(in_force))
             .map(|(e, _)| *e);
-        assert_eq!(features::select(RANKING), expected);
-        assert_eq!(Some(Sha3_256::new().engine()), expected);
-        assert_eq!(Some(Shake128::new().engine()), expected);
+        assert_eq!(features::select(KERNELS), expected);
+        assert_eq!(Some(Auto::<variant::Sha3_256>::new().kernel()), expected);
+        assert_eq!(Some(Auto::<variant::Shake128>::new().kernel()), expected);
     }
 
     #[test]
@@ -731,16 +739,18 @@ macro_rules! digest {
                 $name(Auto::new())
             }
 
-            /// Which implementation this hash is running on.
-            pub fn engine(&self) -> Engine {
-                self.0.engine()
+            /// The feature profiles this hash tells apart, best
+            /// first; see [`Dispatcher`].
+            pub fn profiles() -> &'static [Features] {
+                &PROFILES
             }
+        }
 
-            /// The engines this architecture has, best first, each
-            /// with the features it needs. A new hash gets the first
-            /// whose needs are met by [`features::get`].
-            pub fn ranking() -> &'static [(Engine, Features)] {
-                RANKING
+        impl features::sealed::Sealed for $name {}
+
+        impl Dispatcher for $name {
+            fn profiles() -> &'static [Features] {
+                $name::profiles()
             }
         }
 
@@ -806,16 +816,18 @@ macro_rules! shake {
                 $name(Auto::new())
             }
 
-            /// Which implementation this function is running on.
-            pub fn engine(&self) -> Engine {
-                self.0.engine()
+            /// The feature profiles this function tells apart, best
+            /// first; see [`Dispatcher`].
+            pub fn profiles() -> &'static [Features] {
+                &PROFILES
             }
+        }
 
-            /// The engines this architecture has, best first, each
-            /// with the features it needs. A new function gets the
-            /// first whose needs are met by [`features::get`].
-            pub fn ranking() -> &'static [(Engine, Features)] {
-                RANKING
+        impl features::sealed::Sealed for $name {}
+
+        impl Dispatcher for $name {
+            fn profiles() -> &'static [Features] {
+                $name::profiles()
             }
         }
 

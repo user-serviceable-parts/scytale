@@ -39,7 +39,7 @@ use crate::cipher::BlockCipher;
 use crate::features::aarch64::Feature as A;
 #[cfg(target_arch = "riscv64")]
 use crate::features::riscv64::Feature as R;
-use crate::features::{self, Feature, Features};
+use crate::features::{self, Dispatcher, Feature, Features};
 use crate::{BlockType, Key, KeyType};
 
 /// AES block size in bytes.
@@ -113,23 +113,26 @@ pub(crate) fn expand_words(
     w
 }
 
-/// Which implementation an AES key is expanded for.
+/// Which kernel an AES key is expanded for.
 ///
-/// Every variant exists on every target, so that a program for more
-/// than one architecture can name them all; which can be chosen here
-/// is what [`Aes128::ranking`] and its siblings list.
+/// Which can be chosen is what [`Aes128::profiles`] and its siblings
+/// publish, by needs rather than by name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum Engine {
+pub(crate) enum Kernel {
     /// VAES on x86-64, two blocks to a register.
+    #[cfg(target_arch = "x86_64")]
     Vaes,
     /// AES-NI on x86-64.
+    #[cfg(target_arch = "x86_64")]
     AesNi,
     /// The ARMv8 cryptography extension.
+    #[cfg(target_arch = "aarch64")]
     Armv8,
     /// RISC-V vector AES, Zvkned.
+    #[cfg(target_arch = "riscv64")]
     Zvkned,
     /// RISC-V scalar AES, Zkne and Zknd.
+    #[cfg(target_arch = "riscv64")]
     Zkn,
     /// Plain Rust over lookup tables, which leak through cache
     /// timing: chosen only where [`Feature::Isolated`] is in force.
@@ -155,26 +158,28 @@ pub(crate) const ARMV8: Features = features::arm(&[A::Aes]);
 /// untrusted shares its caches.
 pub(crate) const ISOLATED: Features = Features::of(&[Feature::Isolated]);
 
-/// The engines, best first, each with what it needs; the first whose
+/// The kernels, best first, each with what it needs; the first whose
 /// needs are in force is the one a new key gets. The hardware comes
 /// first, fastest first; then the table-driven code, which only
-/// [`Feature::Isolated`] admits;
-/// then the constant-time portable code, which needs nothing, so the
-/// search always ends.
-pub(crate) const RANKING: &[(Engine, Features)] = &[
+/// [`Feature::Isolated`] admits; then the constant-time portable
+/// code, which needs nothing, so the search always ends.
+pub(crate) const KERNELS: &[(Kernel, Features)] = &[
     #[cfg(target_arch = "x86_64")]
-    (Engine::Vaes, x86_64::VAES256),
+    (Kernel::Vaes, x86_64::VAES256),
     #[cfg(target_arch = "x86_64")]
-    (Engine::AesNi, x86_64::AESNI),
+    (Kernel::AesNi, x86_64::AESNI),
     #[cfg(target_arch = "aarch64")]
-    (Engine::Armv8, ARMV8),
+    (Kernel::Armv8, ARMV8),
     #[cfg(target_arch = "riscv64")]
-    (Engine::Zvkned, ZVKNED),
+    (Kernel::Zvkned, ZVKNED),
     #[cfg(target_arch = "riscv64")]
-    (Engine::Zkn, ZKN),
-    (Engine::Tables, ISOLATED),
-    (Engine::Bitsliced, Features::new()),
+    (Kernel::Zkn, ZKN),
+    (Kernel::Tables, ISOLATED),
+    (Kernel::Bitsliced, Features::new()),
 ];
+
+/// What the list publishes: the needs, without the names.
+const PROFILES: [Features; KERNELS.len()] = features::profiles_of(KERNELS);
 
 /// AES over the best implementation the features in force allow, at
 /// a key width of `K` bytes.
@@ -252,24 +257,24 @@ impl<const K: usize> Aes<K> {
             )
         };
         let inner = {
-            match features::select(RANKING) {
+            match features::select(KERNELS) {
                 #[cfg(target_arch = "x86_64")]
-                Some(Engine::Vaes) => Inner::Vaes(x86_64::vaes::Aes::new(key)),
+                Some(Kernel::Vaes) => Inner::Vaes(x86_64::vaes::Aes::new(key)),
                 #[cfg(target_arch = "x86_64")]
-                Some(Engine::AesNi) => {
+                Some(Kernel::AesNi) => {
                     Inner::AesNi(x86_64::aesni::Aes::new(key))
                 }
                 #[cfg(target_arch = "aarch64")]
-                Some(Engine::Armv8) => {
+                Some(Kernel::Armv8) => {
                     Inner::Armv8(aarch64::armv8::Aes::new(key))
                 }
                 #[cfg(target_arch = "riscv64")]
-                Some(Engine::Zvkned) => {
+                Some(Kernel::Zvkned) => {
                     Inner::Zvkned(riscv64::zvkned::Aes::new(key))
                 }
                 #[cfg(target_arch = "riscv64")]
-                Some(Engine::Zkn) => Inner::Zkn(riscv64::zkn::Aes::new(key)),
-                Some(Engine::Tables) => {
+                Some(Kernel::Zkn) => Inner::Zkn(riscv64::zkn::Aes::new(key)),
+                Some(Kernel::Tables) => {
                     Inner::Tables(portable::ttable::Aes::new(key))
                 }
                 _ => Inner::Bitsliced(portable::bitsliced::Aes::new(key)),
@@ -278,21 +283,22 @@ impl<const K: usize> Aes<K> {
         Aes(inner)
     }
 
-    /// Which implementation this key was expanded for.
-    pub(crate) fn engine(&self) -> Engine {
+    /// Which kernel this key was expanded for.
+    #[cfg(test)]
+    pub(crate) fn kernel(&self) -> Kernel {
         match &self.0 {
             #[cfg(target_arch = "x86_64")]
-            Inner::Vaes(_) => Engine::Vaes,
+            Inner::Vaes(_) => Kernel::Vaes,
             #[cfg(target_arch = "x86_64")]
-            Inner::AesNi(_) => Engine::AesNi,
+            Inner::AesNi(_) => Kernel::AesNi,
             #[cfg(target_arch = "aarch64")]
-            Inner::Armv8(_) => Engine::Armv8,
+            Inner::Armv8(_) => Kernel::Armv8,
             #[cfg(target_arch = "riscv64")]
-            Inner::Zvkned(_) => Engine::Zvkned,
+            Inner::Zvkned(_) => Kernel::Zvkned,
             #[cfg(target_arch = "riscv64")]
-            Inner::Zkn(_) => Engine::Zkn,
-            Inner::Tables(_) => Engine::Tables,
-            Inner::Bitsliced(_) => Engine::Bitsliced,
+            Inner::Zkn(_) => Kernel::Zkn,
+            Inner::Tables(_) => Kernel::Tables,
+            Inner::Bitsliced(_) => Kernel::Bitsliced,
         }
     }
 
@@ -406,16 +412,10 @@ macro_rules! width {
                 $name(Aes::new(key.array()))
             }
 
-            /// Which implementation this key was expanded for.
-            pub fn engine(&self) -> Engine {
-                self.0.engine()
-            }
-
-            /// The engines this architecture has, best first, each
-            /// with the features it needs. A new key gets the first
-            /// whose needs are met by [`features::get`].
-            pub fn ranking() -> &'static [(Engine, Features)] {
-                RANKING
+            /// The feature profiles this cipher tells apart, best
+            /// first; see [`Dispatcher`].
+            pub fn profiles() -> &'static [Features] {
+                &PROFILES
             }
 
             /// Number of rounds the key width fixes.
@@ -440,6 +440,14 @@ macro_rules! width {
                 f.debug_struct(stringify!($name))
                     .field("rounds", &self.rounds())
                     .finish()
+            }
+        }
+
+        impl features::sealed::Sealed for $name {}
+
+        impl Dispatcher for $name {
+            fn profiles() -> &'static [Features] {
+                $name::profiles()
             }
         }
 
@@ -525,6 +533,8 @@ width!(
 
 #[cfg(test)]
 mod tests {
+    use std::vec::Vec;
+
     use super::*;
     use crate::cipher::OneBlock;
     use zeroize::ZeroizeOnDrop;
@@ -576,18 +586,21 @@ mod tests {
     }
 
     #[test]
-    fn picks_the_first_engine_whose_needs_are_met() {
-        assert!(features::rows_are_distinct(RANKING));
-        assert_eq!(RANKING.last(), Some(&(Engine::Bitsliced, Features::new())));
+    fn picks_the_first_kernel_whose_needs_are_met() {
+        assert!(features::rows_are_reachable(KERNELS));
+        assert_eq!(KERNELS.last(), Some(&(Kernel::Bitsliced, Features::new())));
+        let needs: Vec<Features> = KERNELS.iter().map(|k| k.1).collect();
+        assert_eq!(Aes128::profiles(), needs);
+        assert_eq!(Aes256::profiles(), needs);
         let in_force = features::get();
-        let expected = RANKING
+        let expected = KERNELS
             .iter()
             .find(|(_, needs)| needs.is_subset(in_force))
             .map(|(e, _)| *e);
-        assert_eq!(features::select(RANKING), expected);
-        assert_eq!(Some(Aes::<16>::new(&[0; 16]).engine()), expected);
+        assert_eq!(features::select(KERNELS), expected);
+        assert_eq!(Some(Aes::<16>::new(&[0; 16]).kernel()), expected);
         // Tables are never detected, so never chosen unasked.
-        assert_ne!(expected, Some(Engine::Tables));
+        assert_ne!(expected, Some(Kernel::Tables));
     }
 
     #[test]

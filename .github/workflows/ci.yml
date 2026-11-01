@@ -64,6 +64,11 @@ jobs:
         # Carlo suites, which are quick enough on real hardware.
         run: cargo test-extended
 
+      - name: Test with the features in force edited
+        # These change a process-wide setting, so they run alone and
+        # single-threaded; the alias in .cargo/config.toml.
+        run: cargo test-alone
+
       - name: Implementations tested
         # The binary is built by now, so this costs a second and
         # says which implementations this processor could run. The
@@ -202,6 +207,8 @@ jobs:
           cargo test --lib --target "$TARGET" -- --nocapture \
               acvp::inventory
           cargo test --lib --target "$TARGET"
+          cargo test --lib --target "$TARGET" features::tests::alone -- \
+              --ignored --test-threads=1
         env:
           SCYTALE_CPU_FEATURES: ${{ matrix.features }}
 
@@ -285,7 +292,10 @@ jobs:
         # As `cargo test-extended`, which cannot take a target.
         run: |
           cargo test --workspace --target ${{ matrix.target }} \
-              -- --include-ignored --skip bench::speed
+              -- --include-ignored --skip bench::speed \
+              --skip features::tests::alone
+          cargo test -p scytale --lib --target ${{ matrix.target }} \
+              features::tests::alone -- --ignored --test-threads=1
         env:
           # Per target, because a plain RUSTFLAGS would replace these
           # rather than add to them and the linker flag would be lost.

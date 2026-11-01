@@ -98,7 +98,7 @@ has none. The corpus is 132 files holding 103,716 cases, and every case
 this build can run is run; the Monte Carlo groups chain a thousand
 cipher calls per case, with the key re-derived at each step. Every
 implementation is put through the whole vector set for its primitive,
-at every key size, the modes and the AEADs included: each engine
+at every key size, the modes and the AEADs included: each kernel
 written for a particular instruction set is tested as itself rather
 than only the one this processor would pick. Every implementation is
 also compared byte for byte against the portable one across a range of

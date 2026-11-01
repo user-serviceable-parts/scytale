@@ -65,7 +65,9 @@ run_target() {
     echo "==> $target"
     if [ "$target" = "$host" ]; then
         cargo test --workspace -- --include-ignored \
-            --skip bench::speed
+            --skip bench::speed --skip features::tests::alone
+        cargo test -p scytale --lib features::tests::alone -- \
+            --ignored --test-threads=1
         return
     fi
     if ! command -v cross >/dev/null 2>&1; then
@@ -90,7 +92,10 @@ run_target() {
         export SCYTALE_CPU_FEATURES="$RISCV_FEATURES"
     fi
     cross test --workspace --target "$target" -- \
-        --include-ignored --skip bench::speed --skip sha_ldt
+        --include-ignored --skip bench::speed --skip sha_ldt \
+        --skip features::tests::alone
+    cross test -p scytale --lib --target "$target" \
+        features::tests::alone -- --ignored --test-threads=1
     if [ "$target" = riscv64gc-unknown-linux-gnu ] \
         && [ -z "$QEMU_SWEEP" ]; then
         for cpu in $RISCV_CONFIGS; do

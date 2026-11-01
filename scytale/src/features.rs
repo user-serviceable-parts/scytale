@@ -1,25 +1,33 @@
 //! What the processor has, and what the program lets the library use.
 //!
-//! Every primitive with more than one implementation chooses between
-//! them at construction, from a fixed ranking: the first engine whose
+//! A primitive with more than one kernel, one routine for each
+//! instruction set it has been written for, chooses between them at
+//! construction from a fixed list, best first: the first kernel whose
 //! requirements are met wins. What meets them is a set of
 //! [`Features`], and this module owns that set.
 //!
 //! [`detected`] is what the processor reports, asked once. It is the
 //! default, and the reference set: the set in force, [`get`], may
 //! hold any of its members and nothing else from this architecture,
-//! so no edit can select an engine the processor cannot run. [`set`]
+//! so no edit can select a kernel the processor cannot run. [`set`]
 //! replaces the set in force; [`reset`] goes back to the hardware.
 //!
-//! Removing a feature selects the engine below the one it unlocked,
+//! Removing a feature selects the kernel below the one it unlocked,
 //! which is how a program chooses an implementation: not by naming
 //! one, but by saying what it may not use. A *virtual feature* is one
 //! no processor reports and only the program grants.
 //! [`Feature::Isolated`] is the first: no adversary shares this
 //! processor's caches, so the table-driven AES, which leaks through
-//! them, may be chosen above the bitsliced one. Two engines with the
+//! them, may be chosen above the bitsliced one. Two kernels with the
 //! same hardware requirements are told apart by a virtual feature,
 //! never by position alone.
+//!
+//! The kernels themselves are not named. What a type tells the
+//! program is its [`profiles`](Dispatcher::profiles): the feature
+//! sets it tells apart, each the least a processor must offer for
+//! one choice. A program that wants every choice exercised sets each
+//! profile in turn; one that wants to know what a machine will run
+//! finds the first profile the set in force meets.
 //!
 //! The per-architecture enums exist on every target, so a program
 //! for three architectures names all of their features in one place
@@ -48,9 +56,8 @@
 //!
 //! The set in force is global to the process and may be changed at
 //! any time; the latest `set` wins. A value constructed earlier keeps
-//! the engine it was built with, and says which through its
-//! `engine()` method. Code sharing the address space is trusted, so
-//! there is no fuse.
+//! the kernel it was built with. Code sharing the address space is
+//! trusted, so there is no fuse.
 //!
 //! # Asking once
 //!
@@ -362,7 +369,7 @@ architecture!(
 ///
 /// A plain value: `Copy`, with the set operations, and a string form
 /// that names each architecture's group with its prefix, the virtual
-/// features bare, and the empty set `portable`:
+/// features bare, and the empty set `none`:
 ///
 /// ```
 /// use scytale::features::{Feature, Features, x86_64::Feature as X};
@@ -372,7 +379,7 @@ architecture!(
 ///     .collect();
 /// assert_eq!(f.to_string(), "x86_64/aes+sha isolated");
 /// assert_eq!(f.to_string().parse::<Features>(), Ok(f));
-/// assert_eq!(Features::new().to_string(), "portable");
+/// assert_eq!(Features::new().to_string(), "none");
 /// ```
 ///
 /// Reading one back accepts that form, and also bare names, which
@@ -500,7 +507,7 @@ impl Extend<Feature> for Features {
 impl fmt::Display for Features {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.is_empty() {
-            return f.write_str("portable");
+            return f.write_str("none");
         }
         let mut first = true;
         let mut space = |f: &mut fmt::Formatter<'_>| {
@@ -540,15 +547,15 @@ impl fmt::Display for Features {
 }
 
 /// Reads the [`Display`](fmt::Display) form back, and bare names as
-/// [`Feature`] reads them. Tokens are separated by whitespace;
-/// `portable` names no feature.
+/// [`Feature`] reads them. Tokens are separated by whitespace; `none`
+/// names no feature.
 impl FromStr for Features {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Error> {
         let mut set = Features::new();
         for token in s.split_whitespace() {
-            if token == "portable" {
+            if token == "none" {
                 continue;
             }
             match token.split_once('/') {
@@ -666,7 +673,7 @@ pub fn get() -> Features {
 /// can build one set for all of them.
 ///
 /// Takes effect for every value constructed afterwards; values built
-/// earlier keep their engines.
+/// earlier keep their kernels.
 pub fn set(features: Features) -> Result<(), Error> {
     let hardware = detected();
     if let Some(missing) =
@@ -726,24 +733,62 @@ pub(crate) const fn riscv(features: &[riscv64::Feature]) -> Features {
     set
 }
 
-/// The first engine in `ranking` whose requirements are in force.
-/// Every ranking ends with an engine that requires nothing, so there
-/// is always one; `None` only for an empty list.
-pub(crate) fn select<E: Copy>(ranking: &[(E, Features)]) -> Option<E> {
-    ranking
+/// The first kernel in `kernels` whose requirements are in force.
+/// Every family's list ends with a kernel that requires nothing, so
+/// there is always one; `None` only for an empty list.
+pub(crate) fn select<K: Copy>(kernels: &[(K, Features)]) -> Option<K> {
+    kernels
         .iter()
         .find(|(_, required)| has(*required))
-        .map(|(engine, _)| *engine)
+        .map(|(kernel, _)| *kernel)
 }
 
-/// Whether `ranking` tells its rows apart: no two require the same
-/// set, so that each is reachable by editing the set in force. Every
-/// family's test asks this of its own ranking.
+/// The requirements alone, in order: what a family publishes as its
+/// profiles. `N` is the length of `kernels`, checked when the constant
+/// is evaluated.
+pub(crate) const fn profiles_of<K, const N: usize>(
+    kernels: &[(K, Features)],
+) -> [Features; N] {
+    assert!(kernels.len() == N, "profiles_of: wrong length");
+    let mut profiles = [Features::new(); N];
+    let mut i = 0;
+    while i < N {
+        profiles[i] = kernels[i].1;
+        i += 1;
+    }
+    profiles
+}
+
+/// Whether every row of `kernels` can be chosen: no row's requirements
+/// include a higher row's, since the higher one would then be taken
+/// whenever the lower one could be. Setting exactly a row's
+/// requirements selects that row, which is what a program running
+/// every kernel relies on. Every family's test asks this of its own
+/// list.
 #[cfg(test)]
-pub(crate) fn rows_are_distinct<E>(ranking: &[(E, Features)]) -> bool {
-    ranking.iter().enumerate().all(|(i, (_, required))| {
-        ranking[i + 1..].iter().all(|(_, other)| other != required)
+pub(crate) fn rows_are_reachable<K>(kernels: &[(K, Features)]) -> bool {
+    kernels.iter().enumerate().all(|(i, (_, higher))| {
+        kernels[i + 1..]
+            .iter()
+            .all(|(_, lower)| !higher.is_subset(*lower))
     })
+}
+
+/// A type that chooses a kernel by the features in force.
+///
+/// Sealed: only the crate's own dispatching types have kernels to
+/// choose among. The kernels are not named; what a type publishes is
+/// the feature set each one needs.
+pub trait Dispatcher: sealed::Sealed {
+    /// The feature profiles this type tells apart, best first. Each
+    /// is the least a processor must offer for one choice; a new
+    /// value takes the first whose profile the set in force meets,
+    /// and the last needs nothing, so there is always one.
+    fn profiles() -> &'static [Features];
+}
+
+pub(crate) mod sealed {
+    pub trait Sealed {}
 }
 
 #[cfg(test)]
@@ -813,9 +858,9 @@ mod tests {
     }
 
     #[test]
-    fn the_empty_set_is_portable() {
-        assert_eq!(Features::new().to_string(), "portable");
-        assert_eq!("portable".parse::<Features>(), Ok(Features::new()));
+    fn the_empty_set_is_none() {
+        assert_eq!(Features::new().to_string(), "none");
+        assert_eq!("none".parse::<Features>(), Ok(Features::new()));
         assert_eq!("".parse::<Features>(), Ok(Features::new()));
     }
 
@@ -844,18 +889,138 @@ mod tests {
     }
 
     #[test]
-    fn select_walks_the_ranking() {
-        let ranking = [
-            ("isolated", Features::of(&[Feature::Isolated])),
-            ("portable", Features::new()),
-        ];
-        assert!(rows_are_distinct(&ranking));
+    fn select_walks_the_list() {
+        let isolated = Features::of(&[Feature::Isolated]);
+        let kernels = [("isolated", isolated), ("none", Features::new())];
+        assert!(rows_are_reachable(&kernels));
         assert_eq!(select::<&str>(&[]), None);
         // Isolated is never detected, so the walk passes it.
-        assert_eq!(select(&ranking), Some("portable"));
-        assert!(!rows_are_distinct(&[
-            ("a", Features::new()),
-            ("b", Features::new()),
-        ]));
+        assert_eq!(select(&kernels), Some("none"));
+        let profiles: [Features; 2] = profiles_of(&kernels);
+        assert_eq!(profiles, [isolated, Features::new()]);
+    }
+
+    #[test]
+    fn a_row_below_one_it_includes_is_unreachable() {
+        let a = Features::of(&[Feature::X86_64(x86_64::Feature::Aes)]);
+        let b = a | Features::of(&[Feature::X86_64(x86_64::Feature::Sha)]);
+        // Two rows needing the same thing: the second never wins.
+        assert!(!rows_are_reachable(&[("a", a), ("b", a)]));
+        // A row needing more than the one above it: never wins either.
+        assert!(!rows_are_reachable(&[("a", a), ("b", b)]));
+        // More demanding rows first is the shape that works.
+        let none = Features::new();
+        assert!(rows_are_reachable(&[("b", b), ("a", a), ("", none)]));
+    }
+
+    /// Tests that edit the set in force. The set is global to the
+    /// process and the test binary is threaded, so these are ignored
+    /// by default and run on their own, single-threaded, by a step of
+    /// their own in CI:
+    ///
+    /// ```text
+    /// cargo test --lib features::tests::alone -- --ignored --test-threads=1
+    /// ```
+    ///
+    /// Each puts the hardware back in force when it is done.
+    mod alone {
+        use super::*;
+        use crate::cipher::aes::{self, Aes};
+        use crate::cipher::chacha20::ChaCha20;
+        use crate::hash::{sha2, sha3};
+
+        /// Puts the hardware back in force when dropped, so a failed
+        /// assertion does not leave the next test a narrowed set.
+        struct Restore;
+
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                reset();
+            }
+        }
+
+        /// Removing what the chosen kernel needs selects the kernel
+        /// below, for every row of a family's list the processor can
+        /// reach; and setting exactly a row's needs selects that row.
+        fn walk<K: Copy + PartialEq + core::fmt::Debug>(
+            kernels: &[(K, Features)],
+            now: &dyn Fn() -> K,
+        ) {
+            let hardware = detected();
+            let reachable: Vec<&(K, Features)> = kernels
+                .iter()
+                .filter(|(_, needs)| needs.is_subset(hardware))
+                .collect();
+            let mut in_force = hardware;
+            for (i, (kernel, needs)) in reachable.iter().enumerate() {
+                set(in_force).unwrap();
+                assert_eq!(now(), *kernel, "with {in_force}");
+                in_force = in_force - *needs;
+                for (_, lower) in &reachable[i + 1..] {
+                    in_force = in_force | *lower;
+                }
+            }
+            // Virtual features are granted, not detected, so every
+            // row is reachable by its own profile.
+            for (kernel, needs) in kernels {
+                if needs.native().is_subset(hardware) {
+                    set(*needs).unwrap();
+                    assert_eq!(now(), *kernel, "exactly {needs}");
+                }
+            }
+        }
+
+        #[test]
+        #[ignore]
+        fn removing_a_feature_selects_the_kernel_below() {
+            let _restore = Restore;
+            let key = [0u8; 16];
+            let chacha_key = crate::Key::from([0u8; 32]);
+            walk(aes::KERNELS, &|| Aes::<16>::new(&key).kernel());
+            walk(sha2::KERNELS32, &|| {
+                sha2::Auto32::<sha2::variant::Sha256>::new().kernel()
+            });
+            walk(sha2::KERNELS64, &|| {
+                sha2::Auto64::<sha2::variant::Sha512>::new().kernel()
+            });
+            walk(sha3::KERNELS, &|| {
+                sha3::Auto::<sha3::variant::Sha3_256>::new().kernel()
+            });
+            walk(crate::cipher::chacha20::KERNELS, &|| {
+                ChaCha20::new(&chacha_key).kernel()
+            });
+        }
+
+        #[test]
+        #[ignore]
+        fn isolated_admits_the_tables_below_the_hardware() {
+            let _restore = Restore;
+            let key = [0u8; 16];
+            // Alone, it unlocks the table-driven code over the
+            // bitsliced.
+            set(Features::of(&[Feature::Isolated])).unwrap();
+            assert_eq!(Aes::<16>::new(&key).kernel(), aes::Kernel::Tables);
+            // Beside the hardware, the hardware still wins.
+            let mut f = detected();
+            f.insert(Feature::Isolated);
+            set(f).unwrap();
+            let hardware = select(aes::KERNELS).unwrap();
+            assert_eq!(Aes::<16>::new(&key).kernel(), hardware);
+            // And without it, the tables are never chosen.
+            set(Features::new()).unwrap();
+            assert_eq!(Aes::<16>::new(&key).kernel(), aes::Kernel::Bitsliced);
+        }
+
+        #[test]
+        #[ignore]
+        fn a_value_keeps_the_kernel_it_was_built_with() {
+            let _restore = Restore;
+            let key = [0u8; 16];
+            let built = Aes::<16>::new(&key);
+            let kernel = built.kernel();
+            set(Features::new()).unwrap();
+            assert_eq!(built.kernel(), kernel);
+            assert_eq!(Aes::<16>::new(&key).kernel(), aes::Kernel::Bitsliced);
+        }
     }
 }
