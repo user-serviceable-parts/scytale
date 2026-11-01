@@ -383,6 +383,17 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
             subkey: Subkey::of(h, kernel)?,
         })
     }
+
+    /// Which kernel this engine runs: the wider one built the wider
+    /// table.
+    #[cfg(test)]
+    pub(crate) fn kernel(&self) -> Kernel {
+        if self.subkey.wide.is_some() {
+            Kernel::Vaes
+        } else {
+            Kernel::Aesni
+        }
+    }
 }
 
 /// By hand rather than derived: nothing here is a cipher, only a

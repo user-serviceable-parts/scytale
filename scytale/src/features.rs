@@ -659,9 +659,51 @@ pub fn get() -> Features {
     if kept & WRITTEN != 0 {
         Features(kept & !WRITTEN)
     } else {
-        detected()
+        baseline()
     }
 }
+
+/// What is in force until [`set`] is called, and again after
+/// [`reset`]: the hardware.
+#[cfg(not(test))]
+fn baseline() -> Features {
+    detected()
+}
+
+/// In the library's own test build, `SCYTALE_FEATURES` names the
+/// baseline instead when it is set. One more run of the suite under
+/// `none` then takes the portable kernels and every fallback through
+/// the public types on a machine that has the hardware, which no
+/// test of the kernels one by one does. Read once; a set the
+/// processor cannot honour fails the run as [`set`] would refuse it.
+#[cfg(test)]
+fn baseline() -> Features {
+    let kept = BASELINE.load(Ordering::Relaxed);
+    if kept & WRITTEN != 0 {
+        return Features(kept & !WRITTEN);
+    }
+    let found = match std::env::var("SCYTALE_FEATURES") {
+        Ok(text) => match text.parse::<Features>() {
+            Ok(wanted) => {
+                let hardware = detected();
+                if let Some(f) =
+                    wanted.native().iter().find(|&f| !hardware.contains(f))
+                {
+                    panic!("SCYTALE_FEATURES: {f} is not on this processor");
+                }
+                wanted
+            }
+            Err(e) => panic!("SCYTALE_FEATURES: {text:?}: {e:?}"),
+        },
+        Err(_) => detected(),
+    };
+    BASELINE.store(found.0 | WRITTEN, Ordering::Relaxed);
+    found
+}
+
+/// The test build's baseline, with [`WRITTEN`] once it has been read.
+#[cfg(test)]
+static BASELINE: AtomicU64 = AtomicU64::new(0);
 
 /// Makes `features` the set in force.
 ///
@@ -743,17 +785,20 @@ pub(crate) fn select<K: Copy>(kernels: &[(K, Features)]) -> Option<K> {
         .map(|(kernel, _)| *kernel)
 }
 
-/// Whether `kernel` is a row of `kernels` that this processor can run,
-/// the virtual features granted. The test constructors ask this
-/// rather than the set in force, so a test may build any kernel the
-/// machine has without editing the set, which is global to the
-/// process.
+/// Whether `kernel` is a row of `kernels` whose needs the set in force
+/// meets, the virtual features granted. What the test constructors
+/// ask: the virtual features so that the table-driven cipher is to be
+/// had without editing the set, which is global to the process; the
+/// set in force rather than the processor because a mode's test
+/// constructor builds the cipher beneath it under that set, and a
+/// loop cannot read a schedule laid out for another kernel. Under a
+/// narrowed baseline the hardware kernels are skipped, loudly.
 #[cfg(test)]
 pub(crate) fn available<K: PartialEq>(
     kernels: &[(K, Features)],
     kernel: K,
 ) -> bool {
-    let granted = detected() | Features::of(&[Feature::Isolated]);
+    let granted = get() | Features::of(&[Feature::Isolated]);
     kernels
         .iter()
         .any(|(k, needs)| *k == kernel && needs.is_subset(granted))
@@ -788,6 +833,32 @@ pub(crate) fn rows_are_reachable<K>(kernels: &[(K, Features)]) -> bool {
             .iter()
             .all(|(_, lower)| !higher.is_subset(*lower))
     })
+}
+
+/// What every dispatching type's test asserts of its list: each row
+/// can be chosen and the last needs nothing, so the search always
+/// ends; the published profiles are the rows' needs in order; and the
+/// kernel a new value took, `built`, is the first row the set in force
+/// meets, which is what [`select`] says too.
+#[cfg(test)]
+pub(crate) fn dispatches<K: Copy + PartialEq + core::fmt::Debug>(
+    kernels: &[(K, Features)],
+    profiles: &[Features],
+    built: K,
+) {
+    assert!(rows_are_reachable(kernels), "{kernels:?}");
+    let last = kernels.last().map(|(_, needs)| *needs);
+    assert_eq!(last, Some(Features::new()), "the search must always end");
+    let needs: std::vec::Vec<Features> =
+        kernels.iter().map(|(_, needs)| *needs).collect();
+    assert_eq!(profiles, needs);
+    let in_force = get();
+    let expected = kernels
+        .iter()
+        .find(|(_, needs)| needs.is_subset(in_force))
+        .map(|(kernel, _)| *kernel);
+    assert_eq!(select(kernels), expected);
+    assert_eq!(Some(built), expected, "with {in_force}");
 }
 
 /// A type that chooses a kernel by the features in force.
@@ -941,8 +1012,11 @@ mod tests {
     /// Each puts the hardware back in force when it is done.
     mod alone {
         use super::*;
-        use crate::cipher::aes::{self, Aes};
+        use crate::Key;
+        use crate::aead::{Ccm, Gcm, GcmSiv, ccm, gcm, gcm_siv};
+        use crate::cipher::aes::{self, Aes, Aes128};
         use crate::cipher::chacha20::ChaCha20;
+        use crate::cipher::mode::{Cbc, Ctr, Xts, cbc, ctr, xts};
         use crate::hash::{sha2, sha3};
 
         /// Puts the hardware back in force when dropped, so a failed
@@ -1005,6 +1079,20 @@ mod tests {
             walk(crate::cipher::chacha20::KERNELS, &|| {
                 ChaCha20::new(&chacha_key).kernel()
             });
+            // The modes, over a cipher whose schedule their
+            // instructions can read, so every row is in play.
+            let aes = Key::from([0u8; 16]);
+            let tweak = Key::from([1u8; 16]);
+            walk(cbc::KERNELS, &|| Cbc::<Aes128>::new(&aes).kernel());
+            walk(ctr::KERNELS, &|| Ctr::<Aes128>::new(&aes).kernel());
+            walk(xts::KERNELS, &|| {
+                Xts::<Aes128>::try_new(&aes, &tweak)
+                    .expect("distinct keys")
+                    .kernel()
+            });
+            walk(gcm::KERNELS, &|| Gcm::<Aes128>::new(&aes).kernel());
+            walk(gcm_siv::KERNELS, &|| GcmSiv::<Aes128>::new(&aes).kernel());
+            walk(ccm::KERNELS, &|| Ccm::<Aes128>::new(&aes).kernel());
         }
 
         #[test]

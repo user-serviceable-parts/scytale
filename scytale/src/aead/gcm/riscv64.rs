@@ -182,6 +182,12 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
             subkey: Subkey::new(h)?,
         })
     }
+
+    /// Which kernel this engine runs: the one there is.
+    #[cfg(test)]
+    pub(crate) fn kernel(&self) -> Kernel {
+        Kernel::Zvkned
+    }
 }
 
 // The running hash is a function of the subkey and the message, and

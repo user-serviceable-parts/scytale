@@ -521,13 +521,13 @@ mod tests {
         }
     }
 
-    /// The questions are put in terms of the detected features, and
-    /// each wider one asks for everything the narrower one does.
+    /// The questions are put in terms of the set in force, and each
+    /// wider one asks for everything the narrower one does.
     #[test]
     fn the_questions_nest() {
-        let detected = features::detected();
-        assert_eq!(has_aesni(), AESNI.is_subset(detected));
-        assert_eq!(has_vaes256(), VAES256.is_subset(detected));
+        let in_force = features::get();
+        assert_eq!(has_aesni(), AESNI.is_subset(in_force));
+        assert_eq!(has_vaes256(), VAES256.is_subset(in_force));
         assert!(AESNI.is_subset(AESNI_AVX));
         assert!(AESNI_AVX.is_subset(VAES256));
     }

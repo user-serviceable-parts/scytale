@@ -70,6 +70,12 @@ impl<C: BlockCipher> Engine<C> {
         })
     }
 
+    /// Which kernel this engine runs: the one there is.
+    #[cfg(test)]
+    pub(crate) fn kernel(&self) -> Kernel {
+        Kernel::Armv8
+    }
+
     /// Encrypts `data`, a whole number of blocks, chaining from
     /// `chain` and leaving the last block of ciphertext there.
     pub(crate) fn encrypt(

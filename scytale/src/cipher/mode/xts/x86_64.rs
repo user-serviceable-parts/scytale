@@ -91,6 +91,16 @@ impl<C> Clone for Engine<C> {
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
+    /// Which kernel this engine runs.
+    #[cfg(test)]
+    pub(crate) fn kernel(&self) -> Kernel {
+        if self.wide {
+            Kernel::Vaes
+        } else {
+            Kernel::Aesni
+        }
+    }
+
     /// The engine `kernel` names, or `None` where it is not one of
     /// this file's or `C` is not a cipher it is written for. That the
     /// processor has the instructions is settled by whoever chose the

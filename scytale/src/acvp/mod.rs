@@ -1160,12 +1160,13 @@ mod inventory {
             audit
         }
 
-        /// What the processor has, by the job's word where it gave
-        /// one and the library's own detection otherwise, and the
-        /// virtual features with it: a test may build any kernel the
-        /// machine can run, whatever the program has said.
+        /// What a kernel may need, by the job's word where it gave
+        /// one and the set in force otherwise, and the virtual
+        /// features with it: what [`features::available`] grants the
+        /// test constructors, so the rows here say what the suites
+        /// ran.
         fn has(&self) -> Features {
-            self.declared.unwrap_or_else(features::detected)
+            self.declared.unwrap_or_else(features::get)
                 | Features::of(&[Feature::Isolated])
         }
 

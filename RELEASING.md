@@ -110,6 +110,7 @@ The last needs Go, a C compiler and `cpp` for BoGo.
 and the CI jobs that `test-extended` does not cover on the host:
 
 ```sh
+SCYTALE_FEATURES=none cargo test -p scytale --lib
 for t in wasm32-unknown-unknown x86_64-unknown-none \
          aarch64-unknown-none riscv64gc-unknown-none-elf; do
     RUSTFLAGS="-D warnings" cargo build -p scytale --target $t

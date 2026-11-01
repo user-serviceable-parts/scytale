@@ -370,10 +370,10 @@ macro_rules! automatic {
                 $kernels
             }
 
-            /// Starts a hash on `kernel` alone, or `None` where this
-            /// processor cannot run it. The vector suites and the
-            /// cross-checks reach each kernel this way, through the
-            /// same type that dispatches to it.
+            /// Starts a hash on `kernel` alone, or `None` where the
+            /// set in force does not allow it. The vector suites and
+            /// the cross-checks reach each kernel this way, through
+            /// the same type that dispatches to it.
             #[cfg(test)]
             pub(crate) fn with_kernel(kernel: Kernel) -> Option<Self> {
                 if !features::available($kernels, kernel) {
@@ -509,7 +509,6 @@ automatic!(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::vec::Vec;
 
     use super::*;
     use zeroize::ZeroizeOnDrop;
@@ -868,28 +867,10 @@ pub(crate) mod tests {
 
     #[test]
     fn picks_the_first_kernel_whose_needs_are_met() {
-        for (kernels, profiles) in [
-            (KERNELS32, Sha256::profiles()),
-            (KERNELS64, Sha512::profiles()),
-        ] {
-            assert!(features::rows_are_reachable(kernels));
-            assert_eq!(
-                kernels.last(),
-                Some(&(Kernel::Portable, Features::new()))
-            );
-            let needs: Vec<Features> = kernels.iter().map(|k| k.1).collect();
-            assert_eq!(profiles, needs);
-            let in_force = features::get();
-            let expected = kernels
-                .iter()
-                .find(|(_, needs)| needs.is_subset(in_force))
-                .map(|(e, _)| *e);
-            assert_eq!(features::select(kernels), expected);
-        }
         let sha256 = Auto32::<variant::Sha256>::new();
-        assert_eq!(Some(sha256.kernel()), features::select(KERNELS32));
+        features::dispatches(KERNELS32, Sha256::profiles(), sha256.kernel());
         let sha512 = Auto64::<variant::Sha512>::new();
-        assert_eq!(Some(sha512.kernel()), features::select(KERNELS64));
+        features::dispatches(KERNELS64, Sha512::profiles(), sha512.kernel());
         assert_eq!(Sha224::profiles(), Sha256::profiles());
         assert_eq!(Sha384::profiles(), Sha512_256::profiles());
     }
@@ -944,8 +925,8 @@ macro_rules! digest {
                 $auto::<variant::$variant>::kernels()
             }
 
-            /// Starts a hash on `kernel` alone, or `None` where this
-            /// processor cannot run it.
+            /// Starts a hash on `kernel` alone, or `None` where the
+            /// set in force does not allow it.
             #[cfg(test)]
             pub(crate) fn with_kernel(kernel: Kernel) -> Option<Self> {
                 $auto::with_kernel(kernel).map($name)

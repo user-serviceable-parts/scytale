@@ -249,8 +249,8 @@ impl<V: engine::Variant> Auto<V> {
         KERNELS
     }
 
-    /// Starts a function on `kernel` alone, or `None` where this
-    /// processor cannot run it. The vector suites and the cross-checks
+    /// Starts a function on `kernel` alone, or `None` where the set
+    /// in force does not allow it. The vector suites and the cross-checks
     /// reach each kernel this way, through the same type that
     /// dispatches to it.
     #[cfg(test)]
@@ -444,7 +444,6 @@ pub use tuple_hash::{
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::vec::Vec;
 
     use super::*;
     use zeroize::ZeroizeOnDrop;
@@ -742,19 +741,10 @@ pub(crate) mod tests {
 
     #[test]
     fn picks_the_first_kernel_whose_needs_are_met() {
-        assert!(features::rows_are_reachable(KERNELS));
-        assert_eq!(KERNELS.last(), Some(&(Kernel::Portable, Features::new())));
-        let needs: Vec<Features> = KERNELS.iter().map(|k| k.1).collect();
-        assert_eq!(Sha3_256::profiles(), needs);
-        assert_eq!(Shake128::profiles(), needs);
-        let in_force = features::get();
-        let expected = KERNELS
-            .iter()
-            .find(|(_, needs)| needs.is_subset(in_force))
-            .map(|(e, _)| *e);
-        assert_eq!(features::select(KERNELS), expected);
-        assert_eq!(Some(Auto::<variant::Sha3_256>::new().kernel()), expected);
-        assert_eq!(Some(Auto::<variant::Shake128>::new().kernel()), expected);
+        let hash = Auto::<variant::Sha3_256>::new();
+        features::dispatches(KERNELS, Sha3_256::profiles(), hash.kernel());
+        let xof = Auto::<variant::Shake128>::new();
+        features::dispatches(KERNELS, Shake128::profiles(), xof.kernel());
     }
 
     #[test]
@@ -805,8 +795,8 @@ macro_rules! digest {
                 KERNELS
             }
 
-            /// Starts a hash on `kernel` alone, or `None` where this
-            /// processor cannot run it.
+            /// Starts a hash on `kernel` alone, or `None` where the
+            /// set in force does not allow it.
             #[cfg(test)]
             pub(crate) fn with_kernel(kernel: Kernel) -> Option<Self> {
                 Auto::with_kernel(kernel).map($name)
@@ -897,7 +887,7 @@ macro_rules! shake {
             }
 
             /// Starts a function on `kernel` alone, or `None` where
-            /// this processor cannot run it.
+            /// the set in force does not allow it.
             #[cfg(test)]
             pub(crate) fn with_kernel(kernel: Kernel) -> Option<Self> {
                 Auto::with_kernel(kernel).map($name)

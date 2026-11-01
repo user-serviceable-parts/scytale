@@ -64,6 +64,16 @@ jobs:
         # Carlo suites, which are quick enough on real hardware.
         run: cargo test-extended
 
+      - name: Test with nothing in force
+        # The library's own suite once more with the hardware
+        # withheld, so the portable kernels and every fallback run
+        # through the public types on a machine that has the
+        # hardware. The test build takes SCYTALE_FEATURES as the set
+        # in force; see features::baseline.
+        run: cargo test -p scytale --lib
+        env:
+          SCYTALE_FEATURES: none
+
       - name: Test with the features in force edited
         # These change a process-wide setting, so they run alone and
         # single-threaded; the alias in .cargo/config.toml.

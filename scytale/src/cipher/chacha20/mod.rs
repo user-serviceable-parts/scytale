@@ -502,8 +502,8 @@ impl ChaCha20 {
         KERNELS
     }
 
-    /// Takes the key under `kernel` alone, or `None` where this
-    /// processor cannot run it. The vector suites and the cross-checks
+    /// Takes the key under `kernel` alone, or `None` where the set in
+    /// force does not allow it. The vector suites and the cross-checks
     /// reach each kernel this way, through the same type that
     /// dispatches to it.
     #[cfg(test)]
@@ -643,7 +643,6 @@ impl fmt::Debug for AutoStream<'_> {
 #[cfg(test)]
 pub(crate) mod tests {
     use std::format;
-    use std::vec::Vec;
 
     use super::*;
 
@@ -824,19 +823,8 @@ pub(crate) mod tests {
 
     #[test]
     fn picks_the_first_kernel_whose_needs_are_met() {
-        assert!(features::rows_are_reachable(KERNELS));
-        let (_, last) = KERNELS[KERNELS.len() - 1];
-        assert!(last.is_empty(), "the search must always end");
-        let needs: Vec<Features> = KERNELS.iter().map(|k| k.1).collect();
-        assert_eq!(ChaCha20::profiles(), needs);
-        let in_force = features::get();
-        let expected = KERNELS
-            .iter()
-            .find(|(_, needs)| needs.is_subset(in_force))
-            .map(|(e, _)| *e);
-        assert_eq!(features::select(KERNELS), expected);
         let cipher = ChaCha20::new(&Key::from([0u8; 32]));
-        assert_eq!(Some(cipher.kernel()), expected);
+        features::dispatches(KERNELS, ChaCha20::profiles(), cipher.kernel());
     }
 
     #[test]

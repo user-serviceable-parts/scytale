@@ -203,6 +203,16 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
             _ => None,
         }
     }
+
+    /// Which kernel this engine runs.
+    #[cfg(test)]
+    fn kernel(&self) -> Kernel {
+        match self {
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            Engine::Native(engine) => engine.kernel(),
+            Engine::Generic(_) => Kernel::Portable,
+        }
+    }
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> features::sealed::Sealed for Xts<C> {}
@@ -244,13 +254,15 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
         profiles::<C>()
     }
 
-    /// The mode over the kernel named, or `None` where this processor
-    /// cannot run it or it is not written for this cipher.
+    /// The mode over the kernel named, or `None` where the set in
+    /// force does not meet its needs or it is not written for this
+    /// cipher.
     ///
     /// For the tests and the vector suites, which run every kernel
     /// rather than only the one [`try_new`](Self::try_new) would
-    /// take. It asks the processor, not the set in force, so a test
-    /// may build any kernel the machine has without editing the set.
+    /// take. The virtual features are granted, so the table-driven
+    /// cipher is to be had without editing the set; see
+    /// [`features::available`].
     #[cfg(test)]
     pub(crate) fn with_kernel(
         data: &C::Key,
@@ -263,6 +275,12 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
             tweak: C::new(tweak),
             engine: Engine::with(kernel)?,
         })
+    }
+
+    /// Which kernel this mode was built with.
+    #[cfg(test)]
+    pub(crate) fn kernel(&self) -> Kernel {
+        self.engine.kernel()
     }
 
     /// Encrypts one data unit in place under `tweak`.
