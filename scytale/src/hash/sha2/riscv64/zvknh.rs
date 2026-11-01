@@ -79,13 +79,13 @@ impl super::super::engine::Sealed for Zvknh {}
 /// Whether the SHA-256 instructions are available. Zvknha has them
 /// and Zvknhb has them as well as SHA-512's.
 pub(crate) fn has_sha256() -> bool {
-    features::has(super::super::ZVKNH_256)
+    features::allows(super::super::KERNELS32, super::super::Kernel::Zvknh)
 }
 
 /// Whether the SHA-512 instructions are available; only Zvknhb has
 /// them.
 pub(crate) fn has_sha512() -> bool {
-    features::has(super::super::ZVKNH_512)
+    features::allows(super::super::KERNELS64, super::super::Kernel::Zvknh)
 }
 
 /// Splits the state into the two element groups the instructions

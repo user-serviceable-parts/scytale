@@ -26,7 +26,7 @@ pub type ChaCha20 = Cipher<Zvkb>;
 /// the subset of Zvbb that the vector cryptography sets pull in, so
 /// either extension will do.
 pub(crate) fn has_zvkb() -> bool {
-    features::has(super::super::ZVKB)
+    features::allows(super::super::KERNELS, super::super::Kernel::Zvkb)
 }
 
 /// The keystream generator with the vector extension and Zvkb.

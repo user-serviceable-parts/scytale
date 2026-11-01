@@ -20,7 +20,8 @@
 #![allow(unsafe_code)]
 
 use super::P256_PRIME;
-use crate::features::{self, Features, x86_64::Feature as F};
+use crate::features;
+use crate::math::limbs::x86_64::{KERNELS, Kernel};
 use crate::math::uint::Uint;
 
 /// The product, where the processor has the instructions. A value
@@ -30,13 +31,11 @@ use crate::math::uint::Uint;
 pub(crate) struct Adx(());
 
 /// The product, where the processor reports ADX (CPUID leaf 7, EBX
-/// bit 19) and BMI2 for `mulx` (bit 8). Asked once.
+/// bit 19) and BMI2 for `mulx` (bit 8): the same row as the limb
+/// arithmetic's, since the two are one instruction set. Asked once.
 pub(crate) fn probe() -> Option<Adx> {
-    features::has(ADX).then_some(Adx(()))
+    features::allows(KERNELS, Kernel::Adx).then_some(Adx(()))
 }
-
-/// What [`probe`] asks for.
-pub(crate) const ADX: Features = features::x86(&[F::Adx, F::Bmi2]);
 
 impl Adx {
     /// `a b / 2^256 mod p` for the P-256 prime, with `b` below `p`

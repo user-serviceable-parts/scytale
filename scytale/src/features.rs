@@ -732,10 +732,55 @@ pub fn reset() {
     IN_FORCE.store(0, Ordering::Relaxed);
 }
 
-/// Whether everything in `required` is in force. What every
-/// implementation asks before it is chosen.
-pub(crate) fn has(required: Features) -> bool {
+/// Whether everything in `required` is in force. Private: a kernel
+/// asks for its instructions by naming its row, through [`allows`],
+/// so that every hardware branch in the crate is a row some list
+/// publishes and the inventory can account for.
+fn has(required: Features) -> bool {
     required.is_subset(get())
+}
+
+/// Whether the set in force meets the needs of some row of `kernels`
+/// named `kernel`. A kernel named twice, under two sets that each
+/// suffice, is allowed when either is met.
+///
+/// This is the one way to ask for hardware outside [`select`]: a
+/// kernel's own probe, and a loop that stands apart from any list and
+/// borrows a row's needs, both name the row.
+// An architecture with no kernels written for it asks for none.
+#[cfg_attr(
+    not(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn allows<K: PartialEq>(
+    kernels: &[(K, Features)],
+    kernel: K,
+) -> bool {
+    row_within(kernels, kernel, get())
+}
+
+/// Whether some row of `kernels` named `kernel` needs no more than
+/// `granted`.
+#[cfg_attr(
+    not(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    )),
+    allow(dead_code)
+)]
+fn row_within<K: PartialEq>(
+    kernels: &[(K, Features)],
+    kernel: K,
+    granted: Features,
+) -> bool {
+    kernels
+        .iter()
+        .any(|(k, needs)| *k == kernel && needs.is_subset(granted))
 }
 
 /// The set of these x86-64 features, for writing a requirement down.
@@ -798,10 +843,7 @@ pub(crate) fn available<K: PartialEq>(
     kernels: &[(K, Features)],
     kernel: K,
 ) -> bool {
-    let granted = get() | Features::of(&[Feature::Isolated]);
-    kernels
-        .iter()
-        .any(|(k, needs)| *k == kernel && needs.is_subset(granted))
+    row_within(kernels, kernel, get() | Features::of(&[Feature::Isolated]))
 }
 
 /// The requirements alone, in order: what a family publishes as its

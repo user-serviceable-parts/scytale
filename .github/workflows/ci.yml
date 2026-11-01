@@ -161,9 +161,12 @@ jobs:
           - arch: aarch64
             cpu: neoverse-v1
             features: aes pmull sha1 sha2 sha512 sha3
+          # Everything the architecture has, so every row must run:
+          # one that cannot would otherwise skip forever.
           - arch: aarch64
             cpu: max
             features: aes pmull sha1 sha2 sha512 sha3
+            expect_all: 1
           # The base profile, which QEMU gives Zbb and Zbc: the
           # portable code, the rotates and the scalar GHASH.
           - arch: riscv64
@@ -176,6 +179,7 @@ jobs:
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
+            expect_all: 1
     steps:
       - uses: actions/checkout@v7
 
@@ -221,6 +225,9 @@ jobs:
               --ignored --test-threads=1
         env:
           SCYTALE_CPU_FEATURES: ${{ matrix.features }}
+          # Empty for the rows that do not set it, which the
+          # inventory reads as unset.
+          SCYTALE_EXPECT_ALL: ${{ matrix.expect_all }}
 
   # Targets the jobs above do not build. wasm32 is an architecture
   # with no loops written out for it, which is a different shape of

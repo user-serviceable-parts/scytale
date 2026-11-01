@@ -95,9 +95,9 @@ pub(crate) const ZVKNED: Features = crate::cipher::aes::ZVKNED
     .union(crate::cipher::aes::VREV8)
     .union(ghash::riscv64::ZVKG);
 
-/// Whether the loops here can run.
+/// Whether the loops here can run: their row in GCM's list.
 fn supported() -> bool {
-    features::has(ZVKNED)
+    features::allows(super::KERNELS, Kernel::Zvkned)
 }
 
 /// Everything the hash works out from the subkey and never changes.

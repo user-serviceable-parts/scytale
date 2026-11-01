@@ -79,9 +79,9 @@ static BSWAP: At16<[u8; BLOCK]> =
 pub(crate) const ARMV8: Features =
     crate::cipher::aes::ARMV8.union(ghash::aarch64::PMULL);
 
-/// Whether the loops here can run.
+/// Whether the loops here can run: their row in GCM's list.
 fn supported() -> bool {
-    features::has(ARMV8)
+    features::allows(super::KERNELS, Kernel::Armv8)
 }
 
 /// Everything the hash works out from the subkey and never changes.

@@ -44,8 +44,42 @@ use core::fmt;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::features::{self, Features};
 use crate::hash::{BitHash, Hash};
 use crate::{BlockType, Error};
+
+/// Which compression function a hash runs on.
+///
+/// SHA-1 keeps no kernel in the value: each call to [`compress`]
+/// takes the first row the set in force meets, which costs one load,
+/// and the inventory accounts for the instructions through the same
+/// list as everywhere else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kernel {
+    /// The SHA extensions, which carry SHA-1 beside SHA-256.
+    #[cfg(target_arch = "x86_64")]
+    ShaNi,
+    /// The ARMv8 SHA-1 instructions.
+    #[cfg(target_arch = "aarch64")]
+    Armv8,
+    /// Plain Rust, on any processor.
+    Portable,
+}
+
+/// The ARMv8 SHA-1 instructions, which a processor reports apart from
+/// its SHA-256 ones.
+#[cfg(target_arch = "aarch64")]
+const ARMV8: Features =
+    features::arm(&[crate::features::aarch64::Feature::Sha1]);
+
+/// The kernels, best first, each with what it needs.
+pub(crate) const KERNELS: &[(Kernel, Features)] = &[
+    #[cfg(target_arch = "x86_64")]
+    (Kernel::ShaNi, crate::hash::sha2::SHA_NI),
+    #[cfg(target_arch = "aarch64")]
+    (Kernel::Armv8, ARMV8),
+    (Kernel::Portable, Features::new()),
+];
 
 /// A SHA-1 computation in progress.
 pub struct Sha1 {
@@ -66,18 +100,16 @@ pub struct Sha1 {
 const IV: [u32; 5] =
     [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0];
 
-/// The compression function over whole blocks, on the processor's
-/// instructions where it has them.
+/// The compression function over whole blocks, on the first kernel
+/// the set in force allows.
 fn compress(state: &mut [u32; 5], blocks: &[[u8; 64]]) {
-    #[cfg(target_arch = "aarch64")]
-    if aarch64::compress(state, blocks) {
-        return;
+    match features::select(KERNELS) {
+        #[cfg(target_arch = "aarch64")]
+        Some(Kernel::Armv8) => aarch64::compress(state, blocks),
+        #[cfg(target_arch = "x86_64")]
+        Some(Kernel::ShaNi) => x86_64::compress(state, blocks),
+        _ => portable(state, blocks),
     }
-    #[cfg(target_arch = "x86_64")]
-    if x86_64::compress(state, blocks) {
-        return;
-    }
-    portable(state, blocks);
 }
 
 /// The compression function, FIPS 180-4 section 6.1.2, over whole
@@ -352,6 +384,13 @@ mod tests {
         #[cfg(target_arch = "x86_64")]
         use x86_64::compress as written_out;
 
+        // The one hardware row is the first; the portable row is
+        // the one that needs nothing.
+        let hardware = KERNELS[0].0;
+        if !features::allows(KERNELS, hardware) {
+            std::eprintln!("{hardware:?} not available; skipping");
+            return;
+        }
         let mut blocks = [[0u8; 64]; 9];
         for (i, block) in blocks.iter_mut().enumerate() {
             for (j, byte) in block.iter_mut().enumerate() {
@@ -362,12 +401,10 @@ mod tests {
         let mut actual = IV;
         for n in 1..=blocks.len() {
             portable(&mut expected, &blocks[..n]);
-            if !written_out(&mut actual, &blocks[..n]) {
-                return;
-            }
+            written_out(&mut actual, &blocks[..n]);
             assert_eq!(actual, expected, "{n} blocks");
         }
-        assert!(written_out(&mut actual, &[]));
+        written_out(&mut actual, &[]);
         assert_eq!(actual, expected, "no blocks");
     }
 

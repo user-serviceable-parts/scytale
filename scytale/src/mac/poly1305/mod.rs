@@ -38,7 +38,7 @@ pub const KEY_SIZE: usize = 32;
 const BLOCK: usize = 16;
 
 #[cfg(target_arch = "x86_64")]
-mod x86_64;
+pub(crate) mod x86_64;
 
 /// A 44-bit limb's worth of ones.
 const MASK44: u64 = (1 << 44) - 1;

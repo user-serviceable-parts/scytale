@@ -72,26 +72,14 @@ impl<'a> Schedule<'a> {
 
 /// Whether the scalar AES instructions (Zkne and Zknd) are available.
 pub(crate) fn has_zkn() -> bool {
-    features::has(super::ZKN)
+    features::allows(super::KERNELS, super::Kernel::Zkn)
 }
 
 /// Whether the vector AES instructions are available: the vector
 /// extension, Zvkned, and registers of at least 128 bits, which the
 /// 128-bit element groups need.
 pub(crate) fn has_zvkned() -> bool {
-    features::has(super::ZVKNED)
-}
-
-/// Whether the vector byte reverse `vrev8.v` is here. It belongs to
-/// Zvbb, and also to Zvkb, the subset of Zvbb that the vector
-/// cryptography sets pull in: a processor with Zvkn has Zvkb and need
-/// not have the whole of Zvbb, so either answer will do.
-///
-/// The counter loop uses it and the cipher does not, so it is asked
-/// for separately. RVA23 requires Zvbb, so a machine that conforms to
-/// the profile has it; one that does not takes the shared loop.
-pub(crate) fn has_vrev8() -> bool {
-    features::has(super::VREV8)
+    features::allows(super::KERNELS, super::Kernel::Zvkned)
 }
 
 /// How to reach the round keys of the cipher a mode was built over.

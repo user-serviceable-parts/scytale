@@ -31,7 +31,7 @@ pub type ChaCha20 = Cipher<Zbb>;
 /// and either will do. RVA23 requires Zbb, so anything that conforms
 /// to the profile has it.
 pub(crate) fn has_zbb() -> bool {
-    features::has(super::super::ZBB) || features::has(super::super::ZBKB)
+    features::allows(super::super::KERNELS, super::super::Kernel::Zbb)
 }
 
 /// The keystream generator on the general registers.
