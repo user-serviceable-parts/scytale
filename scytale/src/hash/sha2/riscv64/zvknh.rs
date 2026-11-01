@@ -68,12 +68,6 @@ pub type Sha384 = Engine64<Zvknh, variant::Sha384>;
 /// SHA-512 with Zvknh.
 #[cfg(test)]
 pub type Sha512 = Engine64<Zvknh, variant::Sha512>;
-/// SHA-512/224 with Zvknh.
-#[cfg(test)]
-pub type Sha512_224 = Engine64<Zvknh, variant::Sha512_224>;
-/// SHA-512/256 with Zvknh.
-#[cfg(test)]
-pub type Sha512_256 = Engine64<Zvknh, variant::Sha512_256>;
 
 /// The vector SHA-2 instructions.
 // No public constructor: a value exists only by way of `probe`.
@@ -360,10 +354,7 @@ impl Compress64 for Zvknh {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hash::sha2::portable;
-    use crate::hash::sha2::tests::{
-        check_known_answers, check_matches_portable,
-    };
+    use crate::hash::sha2::tests::check_known_answers;
 
     #[test]
     fn known_answers() {
@@ -373,38 +364,6 @@ mod tests {
                 || Sha256::try_new().expect("supported"),
                 || Sha384::try_new().expect("supported"),
                 || Sha512::try_new().expect("supported"),
-            );
-        }
-    }
-
-    #[test]
-    fn matches_portable() {
-        if has_sha256() {
-            check_matches_portable(
-                || Sha224::try_new().expect("supported"),
-                || portable::Sha224::try_new().expect("portable"),
-            );
-            check_matches_portable(
-                || Sha256::try_new().expect("supported"),
-                || portable::Sha256::try_new().expect("portable"),
-            );
-        }
-        if has_sha512() {
-            check_matches_portable(
-                || Sha384::try_new().expect("supported"),
-                || portable::Sha384::try_new().expect("portable"),
-            );
-            check_matches_portable(
-                || Sha512::try_new().expect("supported"),
-                || portable::Sha512::try_new().expect("portable"),
-            );
-            check_matches_portable(
-                || Sha512_224::try_new().expect("supported"),
-                || portable::Sha512_224::try_new().expect("portable"),
-            );
-            check_matches_portable(
-                || Sha512_256::try_new().expect("supported"),
-                || portable::Sha512_256::try_new().expect("portable"),
             );
         }
     }

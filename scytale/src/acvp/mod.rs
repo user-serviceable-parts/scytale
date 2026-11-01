@@ -3,23 +3,28 @@
 //!
 //! Inside the crate rather than in `tests/`, because an integration
 //! test is a separate crate and would see only the public types,
-//! while an implementation is validated in its own right. Test names
-//! read `acvp::primitive::implementation::suite`. Implementations
-//! that do not exist on this architecture are left out rather than
-//! named and skipped; [`inventory`] prints the ones that do and says
-//! which of them this processor can run.
+//! while each kernel is validated in its own right. Test names read
+//! `acvp::primitive::suite`; within one, the suite runs once per
+//! kernel in the primitive's list, through the same type that
+//! dispatches to it, and says which kernels this processor cannot
+//! run. Kernels that do not exist on this architecture are not in the
+//! list; [`inventory`] prints the ones that are and says which of
+//! them this processor can run.
 //!
-//! An implementation is validated by the suite for the primitive it
+//! A kernel is validated by the suite for the primitive it
 //! implements, at every key size: AES by `aes_ecb`, each hash by its
-//! own suites. What is built on top of a primitive is tested once,
-//! on the implementation the processor picks, since a mode, a MAC or
-//! a KDF does not vary with the code underneath it.
+//! own suites, and a mode or AEAD written out for the processor by
+//! its own. What is built over a primitive's calls is tested once, on
+//! the kernel the processor picks, since it does not vary with the
+//! code underneath it.
 
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
 mod support;
 
+use crate::hash::{sha2, sha3};
+use support::acvp::sha::Family;
 use support::acvp::{
     aes_cbc as cbc, aes_ccm as ccm, aes_cfb1 as cfb1, aes_cfb8 as cfb8,
     aes_cfb128 as cfb128, aes_ctr as ctr, aes_ecb as ecb, aes_ff1 as ff1,
@@ -64,101 +69,6 @@ macro_rules! suites {
     };
 }
 
-/// As `hardware_suites!`, for a block cipher, which says whether the
-/// processor can run it rather than failing to be built.
-#[cfg_attr(
-    not(any(
-        target_arch = "aarch64",
-        target_arch = "riscv64",
-        target_arch = "x86_64"
-    )),
-    allow(unused_macros)
-)]
-macro_rules! cipher_hardware_suites {
-    ($name:ident, $ty:ty, $suite:ident, $what:literal, $kind:ident) => {
-        mod $name {
-            use super::*;
-
-            /// Whether to run, reporting a skip when the processor
-            /// cannot. A silent skip would look like a pass.
-            fn supported() -> bool {
-                if <$ty>::supported() {
-                    return true;
-                }
-                eprintln!(concat!($what, " not available; skipping"));
-                false
-            }
-
-            hardware_tests!($ty, $suite, $kind);
-        }
-    };
-}
-
-/// Defines the suites for a hardware implementation, which skip when
-/// the processor lacks the instructions. Only the hashes use it: an
-/// architecture with no hardware hash never expands it.
-#[allow(unused_macros)]
-macro_rules! hardware_suites {
-    ($name:ident, $ty:ty, $suite:ident, $what:literal, $kind:ident) => {
-        mod $name {
-            use super::*;
-            use crate::Error;
-
-            /// Whether to run, reporting a skip when the processor
-            /// cannot. A silent skip would look like a pass.
-            fn supported() -> bool {
-                match <$ty>::try_new(&<$ty as crate::KeyType>::zero_key()) {
-                    Ok(_) => true,
-                    Err(Error::NotSupported) => {
-                        eprintln!(concat!($what, " not available; skipping"));
-                        false
-                    }
-                    Err(e) => panic!("{e}"),
-                }
-            }
-
-            hardware_tests!($ty, $suite, $kind);
-        }
-    };
-}
-
-/// The test bodies inside a hardware implementation's module.
-#[cfg_attr(
-    not(any(
-        target_arch = "aarch64",
-        target_arch = "riscv64",
-        target_arch = "x86_64"
-    )),
-    allow(unused_macros)
-)]
-macro_rules! hardware_tests {
-    ($ty:ty, $suite:ident, both) => {
-        #[test]
-        fn acvp_aft() {
-            if supported() {
-                $suite::run_aft::<$ty>();
-            }
-        }
-
-        /// Slow; run with `cargo test-extended`.
-        #[test]
-        #[ignore]
-        fn acvp_mct() {
-            if supported() {
-                $suite::run_mct::<$ty>();
-            }
-        }
-    };
-    ($ty:ty, $suite:ident, aft_only) => {
-        #[test]
-        fn acvp_aft() {
-            if supported() {
-                $suite::run_aft::<$ty>();
-            }
-        }
-    };
-}
-
 /// Defines the suites for one implementation at each of the three
 /// key widths, which are three types.
 macro_rules! widths {
@@ -170,38 +80,21 @@ macro_rules! widths {
     };
 }
 
-/// As `widths!`, for a hardware implementation.
-#[cfg_attr(
-    not(any(
-        target_arch = "aarch64",
-        target_arch = "riscv64",
-        target_arch = "x86_64"
-    )),
-    allow(unused_macros)
-)]
-macro_rules! hardware_widths {
-    ($n128:ident, $n192:ident, $n256:ident, $($p:ident)::+,
-     $suite:ident, $what:literal, $kind:ident) => {
-        cipher_hardware_suites!($n128, $($p)::+<16>, $suite, $what, $kind);
-        cipher_hardware_suites!($n192, $($p)::+<24>, $suite, $what, $kind);
-        cipher_hardware_suites!($n256, $($p)::+<32>, $suite, $what, $kind);
-    };
-}
-
 /// Runs one mode's suite against the dispatching AES, at every key
 /// width. A mode built out of the cipher's own operations does not
-/// vary with the implementation beneath it, and `aes_ecb` validates
-/// each implementation in turn against the vectors for it; running
-/// the mode on the dispatched cipher covers the selector as well, and
-/// takes the fastest code the processor has. Suites with a Monte
-/// Carlo test take no second argument.
+/// vary with the kernel beneath it, and `aes_ecb` validates each
+/// kernel in turn against the vectors for it; running the mode on the
+/// dispatched cipher covers the selector as well, and takes the
+/// fastest code the processor has. Suites with a Monte Carlo test
+/// take no second argument.
 ///
 /// A mode that is written out for the processor rather than built out
-/// of the cipher is a different matter: there the mode is the
-/// implementation, and which one runs depends on the machine. Those
-/// suites run every implementation the processor has, one after
-/// another, so that none goes unvalidated for want of the right
-/// hardware under the test. See `aes_ctr` and `aes_gcm`.
+/// of the cipher is a different matter: there the mode has kernels of
+/// its own, and which one runs depends on the machine. Those suites
+/// walk the mode's kernel list, one after another, so that none goes
+/// unvalidated for want of the right hardware under the test. See
+/// `aes_cbc`, `aes_ctr`, `aes_xts`, `aes_gcm`, `aes_gcm_siv` and
+/// `aes_ccm`.
 macro_rules! modes {
     ($suite:ident) => {
         modes!($suite, both);
@@ -221,104 +114,77 @@ macro_rules! modes {
     };
 }
 
-/// Runs one suite against every AES implementation this architecture
-/// has, at every key width. Used by `aes_ecb`, which is where an
-/// implementation is validated: its one-shot cases drive whole
-/// buffers through `encrypt_blocks` and `decrypt_blocks`, and its
-/// Monte Carlo cases chain 600,000 single-block calls.
-macro_rules! every_aes {
-    ($suite:ident) => {
-        every_aes!($suite, both);
-    };
-    ($suite:ident, $kind:ident) => {
-        use super::*;
-        use crate::cipher::aes;
-
-        // The dispatching type is not here. On any one processor it
-        // is one of the implementations below, so its cases are theirs
-        // run twice -- and a Monte Carlo run is 600,000 chained calls
-        // a width. What it alone covers is the dispatch, and
-        // `aes::tests::matches_ttable` covers that against the
-        // table-driven code at every width, both directions, a block
-        // at a time and in bulk.
-        widths!(
-            bitsliced_128,
-            bitsliced_192,
-            bitsliced_256,
-            aes::portable::bitsliced::Aes,
-            $suite,
-            $kind
-        );
-        widths!(
-            ttable_128,
-            ttable_192,
-            ttable_256,
-            aes::portable::ttable::Aes,
-            $suite,
-            $kind
-        );
-
-        #[cfg(target_arch = "x86_64")]
-        hardware_widths!(
-            aesni_128,
-            aesni_192,
-            aesni_256,
-            aes::x86_64::aesni::Aes,
-            $suite,
-            "AES-NI",
-            $kind
-        );
-
-        #[cfg(target_arch = "x86_64")]
-        hardware_widths!(
-            vaes_128,
-            vaes_192,
-            vaes_256,
-            aes::x86_64::vaes::Aes,
-            $suite,
-            "VAES",
-            $kind
-        );
-
-        #[cfg(target_arch = "aarch64")]
-        hardware_widths!(
-            armv8_128,
-            armv8_192,
-            armv8_256,
-            aes::aarch64::armv8::Aes,
-            $suite,
-            "ARMv8 AES",
-            $kind
-        );
-
-        #[cfg(target_arch = "riscv64")]
-        hardware_widths!(
-            zkn_128,
-            zkn_192,
-            zkn_256,
-            aes::riscv64::zkn::Aes,
-            $suite,
-            "RISC-V scalar AES",
-            $kind
-        );
-
-        #[cfg(target_arch = "riscv64")]
-        hardware_widths!(
-            zvkned_128,
-            zvkned_192,
-            zvkned_256,
-            aes::riscv64::zvkned::Aes,
-            $suite,
-            "RISC-V vector AES",
-            $kind
-        );
-    };
+/// Runs `suite` once per kernel in `kernels` that this processor can
+/// build, and reports the ones it cannot: a silent skip would look
+/// like a pass. A kernel named twice, under two sets that each
+/// suffice, runs once.
+fn every_kernel<K>(
+    kernels: &[(K, crate::features::Features)],
+    available: impl Fn(K) -> bool,
+    suite: impl Fn(K),
+) where
+    K: Copy + PartialEq + core::fmt::Debug,
+{
+    for (i, &(kernel, _)) in kernels.iter().enumerate() {
+        if kernels[..i].iter().any(|(k, _)| *k == kernel) {
+            continue;
+        }
+        if available(kernel) {
+            suite(kernel);
+        } else {
+            eprintln!("{kernel:?} not available; skipping");
+        }
+    }
 }
 
-/// AES (FIPS 197) with each block encrypted independently, and so
-/// the suite that validates each implementation of the cipher.
+/// AES (FIPS 197) with each block encrypted independently, and so the
+/// suite that validates each kernel of the cipher: its one-shot cases
+/// drive whole buffers through `encrypt_blocks` and `decrypt_blocks`,
+/// and its Monte Carlo cases chain 600,000 single-block calls. Every
+/// kernel, at every key width, through the dispatching type.
 mod aes_ecb {
-    every_aes!(ecb);
+    use super::*;
+    use crate::Key;
+    use crate::cipher::aes::{self, Aes};
+
+    /// Runs `suite` under each kernel at width `K`, given a
+    /// constructor that expands a key for that kernel alone.
+    fn every<const K: usize>(suite: impl Fn(&dyn Fn(&Key<[u8; K]>) -> Aes<K>)) {
+        every_kernel(
+            aes::KERNELS,
+            |kernel| Aes::<K>::with_kernel(&[0; K], kernel).is_some(),
+            |kernel| {
+                suite(&|key| {
+                    Aes::<K>::with_kernel(key.array(), kernel)
+                        .expect("available")
+                })
+            },
+        );
+    }
+
+    macro_rules! width {
+        ($name:ident, $k:literal) => {
+            mod $name {
+                use super::*;
+
+                #[test]
+                fn acvp_aft() {
+                    every::<$k>(|make| ecb::run_aft::<Aes<$k>>(make));
+                }
+
+                /// Slow; run with `cargo test-extended`.
+                #[test]
+                #[ignore]
+                fn acvp_mct() {
+                    every::<$k>(|make| ecb::run_mct::<Aes<$k>>(make));
+                }
+            }
+        };
+    }
+
+    width!(aes_128, 16);
+    width!(aes_192, 24);
+    width!(aes_256, 32);
 }
 
 /// AES in cipher block chaining mode (SP 800-38A).
@@ -467,354 +333,184 @@ mod hash_drbgs {
     }
 }
 
-/// Defines the SHA-2 suites for one implementation of one variant.
-/// The hardware ones skip, saying so, when the processor cannot.
-macro_rules! sha2_suites {
-    ($name:ident, $ty:ty, $file:literal, $algorithm:literal,
-     $family:expr) => {
-        sha2_suites!($name, $ty, $file, $algorithm, $family, "portable code");
-    };
-    ($name:ident, $ty:ty, $file:literal, $algorithm:literal,
-     $family:expr, $what:literal) => {
+/// Defines the suites for a hash or XOF, running each against every
+/// kernel of its dispatching type `$ty` that this processor can
+/// build, through [`every_kernel`]. `$run` is the driver; SHA-2 and
+/// SHA-3 share one, which takes the family.
+macro_rules! hash_suites {
+    ($(#[$doc:meta])* $name:ident, $ty:ty, $run:ident, $file:literal,
+     $algorithm:literal $(, $family:expr)?) => {
+        $(#[$doc])*
         mod $name {
             use super::*;
-            use crate::Error;
 
-            /// Whether to run, reporting a skip when the processor
-            /// cannot. A silent skip would look like a pass.
-            fn supported() -> bool {
-                match <$ty>::try_new() {
-                    Ok(_) => true,
-                    Err(Error::NotSupported) => {
-                        eprintln!(concat!($what, " not available; skipping"));
-                        false
-                    }
-                    Err(e) => panic!("{e}"),
-                }
+            fn every(suite: impl Fn(&dyn Fn() -> $ty)) {
+                every_kernel(
+                    <$ty>::kernels(),
+                    |kernel| <$ty>::with_kernel(kernel).is_some(),
+                    |kernel| {
+                        let start =
+                            || <$ty>::with_kernel(kernel).expect("available");
+                        suite(&start)
+                    },
+                );
             }
 
             #[test]
             fn acvp_aft() {
-                if supported() {
-                    sha_vectors::run_aft($file, $algorithm, $family, || {
-                        <$ty>::try_new().expect("supported")
-                    });
-                }
+                every(|start| {
+                    $run::run_aft($file, $algorithm, $($family,)? start)
+                });
             }
 
             /// Slow; run with `cargo test-extended`.
             #[test]
             #[ignore]
             fn acvp_mct() {
-                if supported() {
-                    sha_vectors::run_mct($file, $algorithm, $family, || {
-                        <$ty>::try_new().expect("supported")
-                    });
-                }
+                every(|start| {
+                    $run::run_mct($file, $algorithm, $($family,)? start)
+                });
             }
         }
     };
 }
 
-/// Runs one SHA-2 variant's suites against each implementation this
-/// architecture has. The dispatching type is not among them: it is
-/// one of these at run time, and the HMAC suites below run on it.
-macro_rules! every_sha2 {
-    ($variant:ident, $file:literal, $algorithm:literal) => {
-        use super::*;
-        use crate::hash::sha2;
-        use support::acvp::sha::Family;
+hash_suites!(
+    /// SHA-224 (FIPS 180-4).
+    sha2_224,
+    sha2::Sha224,
+    sha_vectors,
+    "ACVP-SHA2-224-1.0/internalProjection.json",
+    "SHA2-224",
+    Family::Sha2
+);
 
-        sha2_suites!(
-            portable,
-            sha2::portable::$variant,
-            $file,
-            $algorithm,
-            Family::Sha2
-        );
+hash_suites!(
+    /// SHA-256 (FIPS 180-4).
+    sha2_256,
+    sha2::Sha256,
+    sha_vectors,
+    "ACVP-SHA2-256-1.0/internalProjection.json",
+    "SHA2-256",
+    Family::Sha2
+);
 
-        #[cfg(target_arch = "aarch64")]
-        sha2_suites!(
-            armv8,
-            sha2::aarch64::$variant,
-            $file,
-            $algorithm,
-            Family::Sha2,
-            "ARMv8 SHA2"
-        );
+hash_suites!(
+    /// SHA-384 (FIPS 180-4).
+    sha2_384,
+    sha2::Sha384,
+    sha_vectors,
+    "ACVP-SHA2-384-1.0/internalProjection.json",
+    "SHA2-384",
+    Family::Sha2
+);
 
-        #[cfg(target_arch = "riscv64")]
-        sha2_suites!(
-            zknh,
-            sha2::riscv64::zknh::$variant,
-            $file,
-            $algorithm,
-            Family::Sha2,
-            "RISC-V Zknh"
-        );
+hash_suites!(
+    /// SHA-512 (FIPS 180-4).
+    sha2_512,
+    sha2::Sha512,
+    sha_vectors,
+    "ACVP-SHA2-512-1.0/internalProjection.json",
+    "SHA2-512",
+    Family::Sha2
+);
 
-        #[cfg(target_arch = "riscv64")]
-        sha2_suites!(
-            zvknh,
-            sha2::riscv64::zvknh::$variant,
-            $file,
-            $algorithm,
-            Family::Sha2,
-            "RISC-V Zvknh"
-        );
-    };
-}
+hash_suites!(
+    /// SHA-512/224 (FIPS 180-4 section 5.3.6).
+    sha2_512_224,
+    sha2::Sha512_224,
+    sha_vectors,
+    "ACVP-SHA2-512-224-1.0/internalProjection.json",
+    "SHA2-512/224",
+    Family::Sha2
+);
 
-/// Runs one SHA-3 digest's suites against each implementation this
-/// architecture has, as `every_sha2!` does.
-macro_rules! every_sha3 {
-    ($variant:ident, $file:literal, $algorithm:literal) => {
-        use super::*;
-        use crate::hash::sha3;
-        use support::acvp::sha::Family;
+hash_suites!(
+    /// SHA-512/256 (FIPS 180-4 section 5.3.6).
+    sha2_512_256,
+    sha2::Sha512_256,
+    sha_vectors,
+    "ACVP-SHA2-512-256-1.0/internalProjection.json",
+    "SHA2-512/256",
+    Family::Sha2
+);
 
-        sha2_suites!(
-            portable,
-            sha3::portable::$variant,
-            $file,
-            $algorithm,
-            Family::Sha3
-        );
+hash_suites!(
+    /// SHA3-224 (FIPS 202).
+    sha3_224,
+    sha3::Sha3_224,
+    sha_vectors,
+    "ACVP-SHA3-224-2.0/internalProjection.json",
+    "SHA3-224",
+    Family::Sha3
+);
 
-        #[cfg(target_arch = "aarch64")]
-        sha2_suites!(
-            armv8,
-            sha3::aarch64::$variant,
-            $file,
-            $algorithm,
-            Family::Sha3,
-            "ARMv8 SHA3"
-        );
-    };
-}
+hash_suites!(
+    /// SHA3-256 (FIPS 202).
+    sha3_256,
+    sha3::Sha3_256,
+    sha_vectors,
+    "ACVP-SHA3-256-2.0/internalProjection.json",
+    "SHA3-256",
+    Family::Sha3
+);
 
-/// SHA-224 (FIPS 180-4).
-mod sha2_224 {
-    every_sha2!(
-        Sha224,
-        "ACVP-SHA2-224-1.0/internalProjection.json",
-        "SHA2-224"
-    );
+hash_suites!(
+    /// SHA3-384 (FIPS 202).
+    sha3_384,
+    sha3::Sha3_384,
+    sha_vectors,
+    "ACVP-SHA3-384-2.0/internalProjection.json",
+    "SHA3-384",
+    Family::Sha3
+);
 
-    #[cfg(target_arch = "x86_64")]
-    sha2_suites!(
-        shani,
-        sha2::x86_64::Sha224,
-        "ACVP-SHA2-224-1.0/internalProjection.json",
-        "SHA2-224",
-        Family::Sha2,
-        "SHA-NI"
-    );
-}
+hash_suites!(
+    /// SHA3-512 (FIPS 202).
+    sha3_512,
+    sha3::Sha3_512,
+    sha_vectors,
+    "ACVP-SHA3-512-2.0/internalProjection.json",
+    "SHA3-512",
+    Family::Sha3
+);
 
-/// SHA-256 (FIPS 180-4).
-mod sha2_256 {
-    every_sha2!(
-        Sha256,
-        "ACVP-SHA2-256-1.0/internalProjection.json",
-        "SHA2-256"
-    );
+hash_suites!(
+    /// SHAKE128 (FIPS 202).
+    shake_128,
+    sha3::Shake128,
+    shake_vectors,
+    "ACVP-SHAKE-128-1.0/internalProjection.json",
+    "SHAKE-128"
+);
 
-    #[cfg(target_arch = "x86_64")]
-    sha2_suites!(
-        shani,
-        sha2::x86_64::Sha256,
-        "ACVP-SHA2-256-1.0/internalProjection.json",
-        "SHA2-256",
-        Family::Sha2,
-        "SHA-NI"
-    );
-}
+hash_suites!(
+    /// SHAKE256 (FIPS 202).
+    shake_256,
+    sha3::Shake256,
+    shake_vectors,
+    "ACVP-SHAKE-256-1.0/internalProjection.json",
+    "SHAKE-256"
+);
 
-/// SHA-384 (FIPS 180-4).
-mod sha2_384 {
-    every_sha2!(
-        Sha384,
-        "ACVP-SHA2-384-1.0/internalProjection.json",
-        "SHA2-384"
-    );
-}
+hash_suites!(
+    /// cSHAKE128 (SP 800-185), over the bare sponge: the driver supplies
+    /// the function name and customization case by case.
+    cshake_128,
+    sha3::Auto<sha3::variant::CShake128>,
+    cshake_vectors,
+    "cSHAKE-128-1.0/internalProjection.json",
+    "cSHAKE-128"
+);
 
-/// SHA-512 (FIPS 180-4).
-mod sha2_512 {
-    every_sha2!(
-        Sha512,
-        "ACVP-SHA2-512-1.0/internalProjection.json",
-        "SHA2-512"
-    );
-}
-
-/// SHA-512/224 (FIPS 180-4 section 5.3.6).
-mod sha2_512_224 {
-    every_sha2!(
-        Sha512_224,
-        "ACVP-SHA2-512-224-1.0/internalProjection.json",
-        "SHA2-512/224"
-    );
-}
-
-/// SHA-512/256 (FIPS 180-4 section 5.3.6).
-mod sha2_512_256 {
-    every_sha2!(
-        Sha512_256,
-        "ACVP-SHA2-512-256-1.0/internalProjection.json",
-        "SHA2-512/256"
-    );
-}
-
-/// SHA3-224 (FIPS 202).
-mod sha3_224 {
-    every_sha3!(
-        Sha3_224,
-        "ACVP-SHA3-224-2.0/internalProjection.json",
-        "SHA3-224"
-    );
-}
-
-/// SHA3-256 (FIPS 202).
-mod sha3_256 {
-    every_sha3!(
-        Sha3_256,
-        "ACVP-SHA3-256-2.0/internalProjection.json",
-        "SHA3-256"
-    );
-}
-
-/// SHA3-384 (FIPS 202).
-mod sha3_384 {
-    every_sha3!(
-        Sha3_384,
-        "ACVP-SHA3-384-2.0/internalProjection.json",
-        "SHA3-384"
-    );
-}
-
-/// SHA3-512 (FIPS 202).
-mod sha3_512 {
-    every_sha3!(
-        Sha3_512,
-        "ACVP-SHA3-512-2.0/internalProjection.json",
-        "SHA3-512"
-    );
-}
-
-/// Defines the SHAKE suites for one implementation.
-macro_rules! shake_suites {
-    ($name:ident, $ty:ty, $run:ident, $file:literal, $algorithm:literal) => {
-        shake_suites!($name, $ty, $run, $file, $algorithm, "portable code");
-    };
-    ($name:ident, $ty:ty, $run:ident, $file:literal, $algorithm:literal,
-     $what:literal) => {
-        mod $name {
-            use super::*;
-            use crate::Error;
-
-            fn supported() -> bool {
-                match <$ty>::try_new() {
-                    Ok(_) => true,
-                    Err(Error::NotSupported) => {
-                        eprintln!(concat!($what, " not available; skipping"));
-                        false
-                    }
-                    Err(e) => panic!("{e}"),
-                }
-            }
-
-            #[test]
-            fn acvp_aft() {
-                if supported() {
-                    $run::run_aft($file, $algorithm, || {
-                        <$ty>::try_new().expect("supported")
-                    });
-                }
-            }
-
-            /// Slow; run with `cargo test-extended`.
-            #[test]
-            #[ignore]
-            fn acvp_mct() {
-                if supported() {
-                    $run::run_mct($file, $algorithm, || {
-                        <$ty>::try_new().expect("supported")
-                    });
-                }
-            }
-        }
-    };
-}
-
-/// Runs one SHAKE or cSHAKE function's suites against each
-/// implementation this architecture has, as `every_sha2!` does.
-/// `$run` is the driver: cSHAKE's runs over the bare sponge.
-macro_rules! every_shake {
-    ($variant:ident, $run:ident, $file:literal, $algorithm:literal) => {
-        use super::*;
-        use crate::hash::sha3;
-
-        shake_suites!(
-            portable,
-            sha3::portable::$variant,
-            $run,
-            $file,
-            $algorithm
-        );
-
-        #[cfg(target_arch = "aarch64")]
-        shake_suites!(
-            armv8,
-            sha3::aarch64::$variant,
-            $run,
-            $file,
-            $algorithm,
-            "ARMv8 SHA3"
-        );
-    };
-}
-
-/// SHAKE128 (FIPS 202).
-mod shake_128 {
-    every_shake!(
-        Shake128,
-        shake_vectors,
-        "ACVP-SHAKE-128-1.0/internalProjection.json",
-        "SHAKE-128"
-    );
-}
-
-/// SHAKE256 (FIPS 202).
-mod shake_256 {
-    every_shake!(
-        Shake256,
-        shake_vectors,
-        "ACVP-SHAKE-256-1.0/internalProjection.json",
-        "SHAKE-256"
-    );
-}
-
-/// cSHAKE128 (SP 800-185).
-mod cshake_128 {
-    every_shake!(
-        CShake128,
-        cshake_vectors,
-        "cSHAKE-128-1.0/internalProjection.json",
-        "cSHAKE-128"
-    );
-}
-
-/// cSHAKE256 (SP 800-185).
-mod cshake_256 {
-    every_shake!(
-        CShake256,
-        cshake_vectors,
-        "cSHAKE-256-1.0/internalProjection.json",
-        "cSHAKE-256"
-    );
-}
+hash_suites!(
+    /// cSHAKE256 (SP 800-185).
+    cshake_256,
+    sha3::Auto<sha3::variant::CShake256>,
+    cshake_vectors,
+    "cSHAKE-256-1.0/internalProjection.json",
+    "cSHAKE-256"
+);
 
 /// KMAC128 (SP 800-185), over whichever permutation the probe picks.
 mod kmac_128 {
@@ -1080,49 +776,34 @@ mod pbkdf2 {
     }
 }
 
-/// One ChaCha20 backend against the keystream Wycheproof's cases
-/// imply, which is what a backend can get wrong.
-macro_rules! chacha20_backend {
-    ($name:ident, $backend:ty, $what:literal) => {
-        mod $name {
-            use super::*;
-
-            #[test]
-            fn wycheproof_keystream() {
-                support::wycheproof::chacha20_poly1305::run_cipher::<$backend>(
-                    $what,
-                );
-            }
-        }
-    };
-}
-
 /// ChaCha20-Poly1305 (RFC 8439), through Project Wycheproof's cases:
 /// there is no ACVP suite for it. The whole AEAD runs under the
-/// backend the processor picks, and each backend runs the keystream
+/// kernel the processor picks, and each kernel runs the keystream
 /// those same cases imply.
 mod chacha20_poly1305 {
     use super::*;
-    use crate::cipher::chacha20;
+    use crate::Key;
+    use crate::cipher::chacha20::ChaCha20;
 
     #[test]
     fn wycheproof() {
         support::wycheproof::chacha20_poly1305::run();
     }
 
-    chacha20_backend!(portable, chacha20::portable::Portable, "portable");
-
-    #[cfg(target_arch = "x86_64")]
-    chacha20_backend!(avx2, chacha20::x86_64::Avx2, "AVX2");
-
-    #[cfg(target_arch = "aarch64")]
-    chacha20_backend!(neon, chacha20::aarch64::Neon, "NEON");
-
-    #[cfg(target_arch = "riscv64")]
-    chacha20_backend!(zvkb, chacha20::riscv64::Zvkb, "RISC-V vectors");
-
-    #[cfg(target_arch = "riscv64")]
-    chacha20_backend!(zbb, chacha20::riscv64::Zbb, "RISC-V rotates");
+    #[test]
+    fn wycheproof_keystream() {
+        every_kernel(
+            ChaCha20::kernels(),
+            |kernel| {
+                ChaCha20::with_kernel(&Key::from([0u8; 32]), kernel).is_some()
+            },
+            |kernel| {
+                support::wycheproof::chacha20_poly1305::run_cipher(&|key| {
+                    ChaCha20::with_kernel(key, kernel).expect("available")
+                })
+            },
+        );
+    }
 }
 
 /// Key agreement: X25519, through ACVP's shared-secret and key
@@ -1435,10 +1116,8 @@ mod inventory {
     #[allow(unused_imports)]
     use std::{format, println, vec};
 
-    use crate::Error;
-    use crate::cipher::chacha20::Backend;
     use crate::cipher::{aes, chacha20};
-    use crate::features::{self, Features};
+    use crate::features::{self, Feature, Features};
     use crate::hash::{sha2, sha3};
 
     /// Where an emulating job declares the processor's features.
@@ -1482,25 +1161,24 @@ mod inventory {
         }
 
         /// What the processor has, by the job's word where it gave
-        /// one and the library's own detection otherwise.
+        /// one and the library's own detection otherwise, and the
+        /// virtual features with it: a test may build any kernel the
+        /// machine can run, whatever the program has said.
         fn has(&self) -> Features {
             self.declared.unwrap_or_else(features::detected)
+                | Features::of(&[Feature::Isolated])
         }
 
-        /// Whether an implementation should be available: one that
-        /// needs nothing always is, and one with `requires` listed
-        /// is where any one of those sets is present.
+        /// Whether a kernel should be available: one that needs
+        /// nothing always is, and one with `requires` listed is
+        /// where any one of those sets is present.
         fn expects(&self, requires: &[Features]) -> bool {
             let has = self.has();
             requires.is_empty() || requires.iter().any(|r| r.is_subset(has))
         }
 
-        fn report(&self, name: &str, available: bool, requires: &[Features]) {
-            self.row("", name, available, requires);
-        }
-
-        /// One row, under the heading `suite` where it has one: the
-        /// modes all call their kernels by the same names.
+        /// One row, under the heading `suite`: the modes all call
+        /// their kernels by the same names.
         fn row(
             &self,
             suite: &str,
@@ -1533,6 +1211,30 @@ mod inventory {
         }
     }
 
+    /// Every kernel of one list, named, with what it needs from each
+    /// row that names it, and whether `has` can build it.
+    fn kernels<K>(
+        audit: &Audit,
+        suite: &str,
+        all: &[(K, Features)],
+        has: &dyn Fn(K) -> bool,
+    ) where
+        K: Copy + PartialEq + core::fmt::Debug,
+    {
+        println!("{suite}");
+        for (i, &(k, _)) in all.iter().enumerate() {
+            if all[..i].iter().any(|(other, _)| *other == k) {
+                continue;
+            }
+            let needs: Vec<Features> = all
+                .iter()
+                .filter(|(other, _)| *other == k)
+                .map(|(_, needs)| *needs)
+                .collect();
+            audit.row(suite, &format!("{k:?}"), has(k), &needs);
+        }
+    }
+
     /// Every kernel of every mode that has more than one, under the
     /// cipher `C`. What each needs comes from its row in the mode's
     /// list, the same row that chooses it.
@@ -1545,215 +1247,61 @@ mod inventory {
     {
         use crate::aead::{ccm, gcm, gcm_siv};
         use crate::cipher::mode::{cbc, ctr, xts};
-        use crate::kernel::Kernel;
 
         let key = crate::Key::from([0x42u8; 16]);
         let tweak = crate::Key::from([0x99u8; 16]);
-        let one = |suite: &str,
-                   all: &[(Kernel, Features)],
-                   has: &dyn Fn(Kernel) -> bool| {
-            println!("{suite}");
-            for &(k, needs) in all {
-                audit.row(suite, k.name(), has(k), &[needs]);
-            }
-        };
-        one("AES-CBC", cbc::KERNELS, &|k| {
+        kernels(audit, "AES-CBC", cbc::KERNELS, &|k| {
             cbc::Cbc::<C>::with_kernel(&key, k).is_some()
         });
-        one("AES-CTR", ctr::KERNELS, &|k| {
+        kernels(audit, "AES-CTR", ctr::KERNELS, &|k| {
             ctr::Ctr::<C>::with_kernel(&key, k).is_some()
         });
-        one("AES-XTS", xts::KERNELS, &|k| {
+        kernels(audit, "AES-XTS", xts::KERNELS, &|k| {
             xts::Xts::<C>::with_kernel(&key, &tweak, k).is_some()
         });
-        one("AES-CCM", ccm::KERNELS, &|k| {
+        kernels(audit, "AES-CCM", ccm::KERNELS, &|k| {
             ccm::Ccm::<C>::with_kernel(&key, k).is_some()
         });
-        one("AES-GCM", gcm::KERNELS, &|k| {
+        kernels(audit, "AES-GCM", gcm::KERNELS, &|k| {
             gcm::Gcm::<C>::with_kernel(&key, k).is_some()
         });
-        one("AES-GCM-SIV", gcm_siv::KERNELS, &|k| {
+        kernels(audit, "AES-GCM-SIV", gcm_siv::KERNELS, &|k| {
             gcm_siv::GcmSiv::<C>::with_kernel(&key, k).is_some()
         });
     }
 
-    /// Whether a hash can be built on this processor. The named
-    /// backends ask the probe, which is what can answer no; the
-    /// dispatching types pass their own infallible constructor.
-    fn hash<H>(start: fn() -> Result<H, Error>) -> bool {
-        available(start().map(|_| ()))
-    }
-
-    /// `NotSupported` is the absence of instructions; anything else
-    /// is a fault worth failing for.
-    fn available(result: Result<(), Error>) -> bool {
-        match result {
-            Ok(()) => true,
-            Err(Error::NotSupported) => false,
-            Err(e) => panic!("{e}"),
-        }
-    }
-
+    /// Every kernel the crate has, from the lists that choose them,
+    /// and whether this processor can build each. The dispatching
+    /// types themselves need nothing and are not rows.
     #[test]
     fn implementations() {
         let audit = Audit::new();
-        println!("\nAES");
-        audit.report("aes::Aes", true, &[]);
-        audit.report(
-            "aes::portable::bitsliced::Aes",
-            aes::portable::bitsliced::Aes::<16>::supported(),
-            &[],
-        );
-        audit.report(
-            "aes::portable::ttable::Aes",
-            aes::portable::ttable::Aes::<16>::supported(),
-            &[],
-        );
-        #[cfg(target_arch = "x86_64")]
-        {
-            // The cipher alone is in the legacy encodings; it is the
-            // loops over it, below, that are not.
-            audit.report(
-                "aes::x86_64::aesni::Aes",
-                aes::x86_64::aesni::Aes::<16>::supported(),
-                &[aes::x86_64::AESNI],
-            );
-            audit.report(
-                "aes::x86_64::vaes::Aes",
-                aes::x86_64::vaes::Aes::<16>::supported(),
-                &[aes::x86_64::VAES256],
-            );
-        }
-        #[cfg(target_arch = "aarch64")]
-        audit.report(
-            "aes::aarch64::armv8::Aes",
-            aes::aarch64::armv8::Aes::<16>::supported(),
-            &[aes::ARMV8],
-        );
-        #[cfg(target_arch = "riscv64")]
-        {
-            audit.report(
-                "aes::riscv64::zkn::Aes",
-                aes::riscv64::zkn::Aes::<16>::supported(),
-                &[aes::ZKN],
-            );
-            audit.report(
-                "aes::riscv64::zvkned::Aes",
-                aes::riscv64::zvkned::Aes::<16>::supported(),
-                &[aes::ZVKNED],
-            );
-        }
+        println!();
+        kernels(&audit, "AES", aes::KERNELS, &|k| {
+            aes::Aes::<16>::with_kernel(&[0; 16], k).is_some()
+        });
 
         // The modes and AEADs written out for particular
-        // instructions, which are implementations in their own right
-        // and validated by name like the ciphers above.
+        // instructions, which are kernels in their own right and
+        // validated by name like the cipher's above.
         modes::<aes::Aes128>(&audit);
 
         // SHA-256 and SHA-512 are listed apart: they are different
         // instructions, and a processor can have one without the
         // other.
-        println!("SHA-2");
-        audit.report("sha2::Sha256", hash(|| Ok(sha2::Sha256::new())), &[]);
-        audit.report("sha2::Sha512", hash(|| Ok(sha2::Sha512::new())), &[]);
-        audit.report(
-            "sha2::portable::Sha256",
-            hash(sha2::portable::Sha256::try_new),
-            &[],
-        );
-        audit.report(
-            "sha2::portable::Sha512",
-            hash(sha2::portable::Sha512::try_new),
-            &[],
-        );
-        // The rounds are the SHA instructions, and around them the
-        // loop shuffles bytes and inserts and blends words.
-        #[cfg(target_arch = "x86_64")]
-        audit.report(
-            "sha2::x86_64::Sha256",
-            hash(sha2::x86_64::Sha256::try_new),
-            &[sha2::SHA_NI],
-        );
-        #[cfg(target_arch = "aarch64")]
-        {
-            audit.report(
-                "sha2::aarch64::Sha256",
-                hash(sha2::aarch64::Sha256::try_new),
-                &[sha2::ARMV8_256],
-            );
-            audit.report(
-                "sha2::aarch64::Sha512",
-                hash(sha2::aarch64::Sha512::try_new),
-                &[sha2::ARMV8_512],
-            );
-        }
-        #[cfg(target_arch = "riscv64")]
-        {
-            audit.report(
-                "sha2::riscv64::zknh::Sha256",
-                hash(sha2::riscv64::zknh::Sha256::try_new),
-                &[sha2::ZKNH],
-            );
-            audit.report(
-                "sha2::riscv64::zknh::Sha512",
-                hash(sha2::riscv64::zknh::Sha512::try_new),
-                &[sha2::ZKNH],
-            );
-            audit.report(
-                "sha2::riscv64::zvknh::Sha256",
-                hash(sha2::riscv64::zvknh::Sha256::try_new),
-                &[sha2::ZVKNH_256],
-            );
-            audit.report(
-                "sha2::riscv64::zvknh::Sha512",
-                hash(sha2::riscv64::zvknh::Sha512::try_new),
-                &[sha2::ZVKNH_512],
-            );
-        }
-
-        println!("SHA-3");
-        audit.report("sha3::Sha3_256", hash(|| Ok(sha3::Sha3_256::new())), &[]);
-        audit.report(
-            "sha3::portable::Sha3_256",
-            hash(sha3::portable::Sha3_256::try_new),
-            &[],
-        );
-        #[cfg(target_arch = "aarch64")]
-        audit.report(
-            "sha3::aarch64::Sha3_256",
-            hash(sha3::aarch64::Sha3_256::try_new),
-            &[sha3::ARMV8],
-        );
-
-        println!("ChaCha20");
-        audit.report(
-            "chacha20::portable::Portable",
-            chacha20::portable::Portable::supported(),
-            &[],
-        );
-        #[cfg(target_arch = "x86_64")]
-        audit.report(
-            "chacha20::x86_64::Avx2",
-            chacha20::x86_64::Avx2::supported(),
-            &[chacha20::AVX2],
-        );
-        #[cfg(target_arch = "aarch64")]
-        audit.report(
-            "chacha20::aarch64::Neon",
-            chacha20::aarch64::Neon::supported(),
-            &[],
-        );
-        #[cfg(target_arch = "riscv64")]
-        audit.report(
-            "chacha20::riscv64::Zvkb",
-            chacha20::riscv64::Zvkb::supported(),
-            &[chacha20::ZVKB],
-        );
-        #[cfg(target_arch = "riscv64")]
-        audit.report(
-            "chacha20::riscv64::Zbb",
-            chacha20::riscv64::Zbb::supported(),
-            &[chacha20::ZBB, chacha20::ZBKB],
-        );
+        kernels(&audit, "SHA-256", sha2::Sha256::kernels(), &|k| {
+            sha2::Sha256::with_kernel(k).is_some()
+        });
+        kernels(&audit, "SHA-512", sha2::Sha512::kernels(), &|k| {
+            sha2::Sha512::with_kernel(k).is_some()
+        });
+        kernels(&audit, "SHA-3", sha3::Sha3_256::kernels(), &|k| {
+            sha3::Sha3_256::with_kernel(k).is_some()
+        });
+        let key = crate::Key::from([0u8; 32]);
+        kernels(&audit, "ChaCha20", chacha20::ChaCha20::kernels(), &|k| {
+            chacha20::ChaCha20::with_kernel(&key, k).is_some()
+        });
 
         // The arithmetic behind the curves, RSA and the MACs, and the
         // POLYVAL loop GCM-SIV hashes with: neither is a row in any
@@ -1762,12 +1310,14 @@ mod inventory {
         #[cfg(target_arch = "x86_64")]
         {
             println!("Arithmetic");
-            audit.report(
+            audit.row(
+                "Arithmetic",
                 "montgomery::x86_64::Adx",
                 crate::math::montgomery::x86_64::probe().is_some(),
                 &[crate::math::montgomery::x86_64::ADX],
             );
-            audit.report(
+            audit.row(
+                "Arithmetic",
                 "gcm::x86_64::Polyval",
                 crate::aead::gcm::x86_64::Polyval::new(&[0; 16]).is_some(),
                 &[crate::aead::gcm::x86_64::NARROW],

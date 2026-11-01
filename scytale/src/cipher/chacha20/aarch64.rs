@@ -204,18 +204,11 @@ unsafe fn group4(states: &[[u32; 16]; GROUP], data: *mut u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cipher::chacha20::tests::{
-        check_known_answers, check_matches_portable,
-    };
+    use crate::cipher::chacha20::tests::check_known_answers;
 
     #[test]
     fn known_answers() {
         check_known_answers::<Neon>();
-    }
-
-    #[test]
-    fn matches_portable() {
-        check_matches_portable::<Neon>();
     }
 
     #[test]

@@ -198,21 +198,12 @@ unsafe fn group(state: &[u32; 16], data: *mut u8, blocks: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cipher::chacha20::tests::{
-        check_known_answers, check_matches_portable,
-    };
+    use crate::cipher::chacha20::tests::check_known_answers;
 
     #[test]
     fn known_answers() {
         if has_zvkb() {
             check_known_answers::<Zvkb>();
-        }
-    }
-
-    #[test]
-    fn matches_portable() {
-        if has_zvkb() {
-            check_matches_portable::<Zvkb>();
         }
     }
 

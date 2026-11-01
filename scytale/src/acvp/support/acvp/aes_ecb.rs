@@ -3,7 +3,7 @@
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
-use super::{cipher_of, groups as suite_groups, hex, key_of};
+use super::{groups as suite_groups, hex, key_of};
 use crate::KeyType;
 use crate::cipher::BlockCipher;
 use serde_json::Value;
@@ -13,29 +13,30 @@ const FILE: &str = "ACVP-AES-ECB-1.0/internalProjection.json";
 /// Iterations of each Monte Carlo step (ACVP AES MCT).
 const MCT_ITERATIONS: usize = 1000;
 
-/// Runs the one-shot (AFT) groups against `C`; a no-op without the
-/// vendored vectors.
-pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
+/// Runs the one-shot (AFT) groups against the ciphers `make` builds,
+/// one per key; a no-op without the vendored vectors.
+pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>(make: &dyn Fn(&C::Key) -> C) {
     let Some(groups) = groups::<C>("AFT") else {
         return;
     };
     let count: usize = groups
         .iter()
-        .map(|(group, encrypt)| aft::<C>(group, *encrypt))
+        .map(|(group, encrypt)| aft::<C>(group, *encrypt, make))
         .sum();
     // Guard against a truncated or wrong file passing vacuously.
     assert!(count >= 333, "only {count} AFT cases");
 }
 
-/// Runs the Monte Carlo (MCT) groups against `C`; a no-op without the
-/// vendored vectors. Slow: 600,000 cipher calls.
-pub fn run_mct<C: BlockCipher<Block = [u8; 16]>>() {
+/// Runs the Monte Carlo (MCT) groups against the ciphers `make`
+/// builds; a no-op without the vendored vectors. Slow: 600,000 cipher
+/// calls.
+pub fn run_mct<C: BlockCipher<Block = [u8; 16]>>(make: &dyn Fn(&C::Key) -> C) {
     let Some(groups) = groups::<C>("MCT") else {
         return;
     };
     let count: usize = groups
         .iter()
-        .map(|(group, encrypt)| mct::<C>(group, *encrypt))
+        .map(|(group, encrypt)| mct::<C>(group, *encrypt, make))
         .sum();
     assert!(count >= 200, "only {count} MCT steps");
 }
@@ -63,12 +64,14 @@ fn apply<C: BlockCipher<Block = [u8; 16]>>(
 fn aft<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
+    make: &dyn Fn(&C::Key) -> C,
 ) -> usize {
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {
-        let Some(cipher) = cipher_of::<C>(&hex(&t["key"])) else {
+        let Some(key) = key_of::<C>(&hex(&t["key"])) else {
             continue;
         };
+        let cipher = make(&key);
         let (input, expected) = if encrypt {
             (hex(&t["pt"]), hex(&t["ct"]))
         } else {
@@ -89,6 +92,7 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
 fn mct<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
+    make: &dyn Fn(&C::Key) -> C,
 ) -> usize {
     let (input_name, output_name) =
         if encrypt { ("pt", "ct") } else { ("ct", "pt") };
@@ -106,7 +110,7 @@ fn mct<C: BlockCipher<Block = [u8; 16]>>(
             assert_eq!(key, hex(&step["key"]), "{tag} key");
             assert_eq!(data, hex(&step[input_name]), "{tag} input");
 
-            let cipher = cipher_of::<C>(&key).expect("width");
+            let cipher = make(&key_of::<C>(&key).expect("width"));
             let mut previous = data.clone();
             for _ in 0..MCT_ITERATIONS {
                 previous.copy_from_slice(&data);

@@ -473,7 +473,6 @@ body!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cipher::aes::portable;
 
     /// Returns the cipher, or `None` (skipping the test) without AES-NI.
     fn aes<const K: usize>(key: &[u8; K]) -> Option<Aes<K>> {
@@ -529,44 +528,6 @@ mod tests {
             "00112233445566778899aabbccddeeff",
             "8ea2b7ca516745bfeafc49904b496089",
         );
-    }
-
-    #[test]
-    fn matches_ttable() {
-        matches_ttable_for::<16>();
-        matches_ttable_for::<24>();
-        matches_ttable_for::<32>();
-    }
-
-    fn matches_ttable_for<const K: usize>() {
-        let klen = K;
-        {
-            let mut key = [0u8; K];
-            for (i, k) in key.iter_mut().enumerate() {
-                *k = (i * 37 + klen) as u8;
-            }
-            let Some(hw) = aes(&key) else { return };
-            let sw = portable::ttable::Aes::new(&key);
-            // Every tail width, with and without full groups before it.
-            for nblocks in 0..26 {
-                let mut data = [[0u8; BLOCK_SIZE]; 25];
-                for (i, b) in data.as_flattened_mut().iter_mut().enumerate() {
-                    *b = (i * 13 + klen) as u8;
-                }
-                let data = &mut data[..nblocks];
-                let mut expected = [[0u8; BLOCK_SIZE]; 25];
-                let expected = &mut expected[..data.len()];
-                expected.copy_from_slice(data);
-                let mut orig = [[0u8; BLOCK_SIZE]; 25];
-                orig[..data.len()].copy_from_slice(data);
-
-                sw.encrypt_blocks(expected);
-                hw.encrypt_blocks(data);
-                assert_eq!(data, expected, "encrypt {klen} {nblocks}");
-                hw.decrypt_blocks(data);
-                assert_eq!(data, &orig[..data.len()], "decrypt {klen}");
-            }
-        }
     }
 
     #[test]

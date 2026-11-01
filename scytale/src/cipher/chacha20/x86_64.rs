@@ -493,21 +493,12 @@ unsafe fn group4(state: &[u32; 16], data: *mut u8) {
 mod tests {
     use super::*;
     use crate::Error;
-    use crate::cipher::chacha20::tests::{
-        check_known_answers, check_matches_portable,
-    };
+    use crate::cipher::chacha20::tests::check_known_answers;
 
     #[test]
     fn known_answers() {
         if has_avx2() {
             check_known_answers::<Avx2>();
-        }
-    }
-
-    #[test]
-    fn matches_portable() {
-        if has_avx2() {
-            check_matches_portable::<Avx2>();
         }
     }
 
