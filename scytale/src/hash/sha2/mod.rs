@@ -363,6 +363,35 @@ macro_rules! automatic {
                 }
             }
 
+            /// The kernels this family chooses among, with their
+            /// needs.
+            #[cfg(test)]
+            pub(crate) fn kernels() -> &'static [(Kernel, Features)] {
+                $kernels
+            }
+
+            /// Starts a hash on `kernel` alone, or `None` where this
+            /// processor cannot run it. The vector suites and the
+            /// cross-checks reach each kernel this way, through the
+            /// same type that dispatches to it.
+            #[cfg(test)]
+            pub(crate) fn with_kernel(kernel: Kernel) -> Option<Self> {
+                if !features::available($kernels, kernel) {
+                    return None;
+                }
+                let inner = match kernel {
+                    $(
+                        #[cfg(target_arch = $arch)]
+                        Kernel::$choice => {
+                            let c = <$path as $compress>::probe()?;
+                            $inner::$choice($engine::with(c))
+                        }
+                    )*
+                    _ => $inner::Portable($engine::with(portable::Compress)),
+                };
+                Some($name(inner))
+            }
+
             /// The needs of each kernel this architecture has, best
             /// first.
             pub(crate) fn profiles() -> &'static [Features] {
@@ -601,11 +630,11 @@ pub(crate) mod tests {
         }
     }
 
-    /// Checks one implementation against the portable one over every
-    /// length up to a few blocks, fed in every way.
-    pub(crate) fn check_matches_portable<H, P>(
-        start: fn() -> H,
-        portable: fn() -> P,
+    /// Checks one kernel against the portable one over every length
+    /// up to a few blocks, fed in every way.
+    fn check_matches_portable<H, P>(
+        start: impl Fn() -> H,
+        portable: impl Fn() -> P,
     ) where
         H: Hash,
         P: Hash<Output = H::Output>,
@@ -633,6 +662,38 @@ pub(crate) mod tests {
     #[test]
     fn known_answers() {
         check_known_answers(Sha224::new, Sha256::new, Sha384::new, Sha512::new);
+    }
+
+    /// Every kernel this processor can build agrees with the portable
+    /// code, for each of the six digests. The kernels this processor
+    /// cannot build are reported rather than passed over in silence;
+    /// the inventory audits those skips.
+    #[test]
+    fn every_kernel_agrees_with_the_portable_code() {
+        fn check<H>(
+            kernels: &[(Kernel, Features)],
+            with_kernel: fn(Kernel) -> Option<H>,
+        ) where
+            H: Hash,
+            H::Output: PartialEq + core::fmt::Debug,
+        {
+            for &(kernel, _) in kernels {
+                if with_kernel(kernel).is_none() {
+                    std::eprintln!("{kernel:?} not available; skipping");
+                    continue;
+                }
+                check_matches_portable(
+                    || with_kernel(kernel).expect("available"),
+                    || with_kernel(Kernel::Portable).expect("portable"),
+                );
+            }
+        }
+        check(Sha224::kernels(), Sha224::with_kernel);
+        check(Sha256::kernels(), Sha256::with_kernel);
+        check(Sha384::kernels(), Sha384::with_kernel);
+        check(Sha512::kernels(), Sha512::with_kernel);
+        check(Sha512_224::kernels(), Sha512_224::with_kernel);
+        check(Sha512_256::kernels(), Sha512_256::with_kernel);
     }
 
     /// The SHA-512/t starting values are SHA-512 of "SHA-512/t" from
@@ -678,28 +739,6 @@ pub(crate) mod tests {
                  967a"
             )[..32]
         );
-    }
-
-    #[test]
-    fn matches_portable() {
-        check_matches_portable(Sha512_224::new, || {
-            portable::Sha512_224::try_new().expect("portable")
-        });
-        check_matches_portable(Sha512_256::new, || {
-            portable::Sha512_256::try_new().expect("portable")
-        });
-        check_matches_portable(Sha224::new, || {
-            portable::Sha224::try_new().expect("portable")
-        });
-        check_matches_portable(Sha256::new, || {
-            portable::Sha256::try_new().expect("portable")
-        });
-        check_matches_portable(Sha384::new, || {
-            portable::Sha384::try_new().expect("portable")
-        });
-        check_matches_portable(Sha512::new, || {
-            portable::Sha512::try_new().expect("portable")
-        });
     }
 
     #[test]
@@ -897,6 +936,19 @@ macro_rules! digest {
             /// first; see [`Dispatcher`].
             pub fn profiles() -> &'static [Features] {
                 $auto::<variant::$variant>::profiles()
+            }
+
+            /// The kernels this hash chooses among, with their needs.
+            #[cfg(test)]
+            pub(crate) fn kernels() -> &'static [(Kernel, Features)] {
+                $auto::<variant::$variant>::kernels()
+            }
+
+            /// Starts a hash on `kernel` alone, or `None` where this
+            /// processor cannot run it.
+            #[cfg(test)]
+            pub(crate) fn with_kernel(kernel: Kernel) -> Option<Self> {
+                $auto::with_kernel(kernel).map($name)
             }
         }
 

@@ -33,14 +33,14 @@ pub fn run_aft<H: BitHash>(
     file: &str,
     algorithm: &str,
     family: Family,
-    start: fn() -> H,
+    start: impl Fn() -> H,
 ) where
     H::Output: AsRef<[u8]>,
 {
     let Some(groups) = groups(file, algorithm, family, "AFT") else {
         return;
     };
-    let count: usize = groups.iter().map(|g| aft(g, family, start)).sum();
+    let count: usize = groups.iter().map(|g| aft(g, family, &start)).sum();
     // Guard against a truncated or wrong file passing vacuously.
     assert!(count >= 500, "only {count} AFT cases");
 }
@@ -51,14 +51,14 @@ pub fn run_mct<H: BitHash>(
     file: &str,
     algorithm: &str,
     family: Family,
-    start: fn() -> H,
+    start: impl Fn() -> H,
 ) where
     H::Output: AsRef<[u8]>,
 {
     let Some(groups) = groups(file, algorithm, family, "MCT") else {
         return;
     };
-    let count: usize = groups.iter().map(|g| mct(g, family, start)).sum();
+    let count: usize = groups.iter().map(|g| mct(g, family, &start)).sum();
     assert!(count >= 100, "only {count} MCT steps");
 }
 
@@ -68,14 +68,14 @@ pub fn run_ldt<H: Hash>(
     file: &str,
     algorithm: &str,
     family: Family,
-    start: fn() -> H,
+    start: impl Fn() -> H,
 ) where
     H::Output: AsRef<[u8]>,
 {
     let Some(groups) = groups(file, algorithm, family, "LDT") else {
         return;
     };
-    let count: usize = groups.iter().map(|g| ldt(g, start)).sum();
+    let count: usize = groups.iter().map(|g| ldt(g, &start)).sum();
     assert!(count >= 1, "only {count} LDT cases");
 }
 
@@ -145,7 +145,11 @@ impl Message {
 }
 
 /// Algorithm Functional Test: one message, one digest.
-fn aft<H: BitHash>(group: &Value, family: Family, start: fn() -> H) -> usize
+fn aft<H: BitHash>(
+    group: &Value,
+    family: Family,
+    start: &dyn Fn() -> H,
+) -> usize
 where
     H::Output: AsRef<[u8]>,
 {
@@ -168,7 +172,11 @@ where
 /// the previous three digests each time, in the standard version as
 /// they are and in the alternate one cut or padded with zeros to the
 /// length of the seed; SHA-3 hashes just the previous digest.
-fn mct<H: BitHash>(group: &Value, family: Family, start: fn() -> H) -> usize
+fn mct<H: BitHash>(
+    group: &Value,
+    family: Family,
+    start: &dyn Fn() -> H,
+) -> usize
 where
     H::Output: AsRef<[u8]>,
 {
@@ -252,7 +260,7 @@ where
 
 /// Large Data Test: a short piece repeated to gigabytes, hashed as
 /// it is generated.
-fn ldt<H: Hash>(group: &Value, start: fn() -> H) -> usize
+fn ldt<H: Hash>(group: &Value, start: &dyn Fn() -> H) -> usize
 where
     H::Output: AsRef<[u8]>,
 {

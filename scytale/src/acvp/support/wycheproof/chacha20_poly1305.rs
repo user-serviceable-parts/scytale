@@ -3,11 +3,12 @@
 //! wrong lengths, and ciphertexts built to exercise Poly1305 carries)
 //! must be rejected with the buffer wiped.
 //!
-//! [`run`] drives the whole AEAD, which fixes the backend to the one
+//! [`run`] drives the whole AEAD, which fixes the kernel to the one
 //! the processor picks. [`run_cipher`] takes the same file the other
-//! way round and drives one named backend, so that every keystream
-//! this crate can produce meets external vectors rather than only
-//! the in-module comparison against the portable code.
+//! way round and drives the ciphers its caller builds, one kernel at
+//! a time, so that every keystream this crate can produce meets
+//! external vectors rather than only the in-module comparison against
+//! the portable code.
 
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
@@ -15,7 +16,7 @@ use std::{eprintln, format, println, string::String, vec, vec::Vec};
 use super::super::acvp::hex;
 use super::load;
 use crate::aead::{Aead, ChaCha20Poly1305};
-use crate::cipher::chacha20::{Backend, Cipher};
+use crate::cipher::chacha20::ChaCha20;
 use crate::{Error, Key};
 
 const FILE: &str = "wycheproof/chacha20_poly1305_test.json";
@@ -82,35 +83,23 @@ pub fn run() {
     assert!(invalid >= 50, "only {invalid} invalid cases");
 }
 
-/// Runs the keystream of every valid case under backend `B`, which
-/// `what` names for the skip message; a no-op without the vendored
-/// vectors.
+/// Runs the keystream of every valid case through the ciphers `make`
+/// builds, one per key; a no-op without the vendored vectors.
 ///
 /// The AEAD takes its Poly1305 key from block zero and encrypts from
 /// block one, so a valid case's ciphertext is its message xored with
-/// the keystream from block one. That is the whole of what a backend
-/// contributes to the AEAD: Poly1305 has no backends, and the
-/// framing around it is the same code whichever keystream runs
-/// underneath.
+/// the keystream from block one. That is the whole of what a kernel
+/// contributes to the AEAD: Poly1305 has no kernels, and the framing
+/// around it is the same code whichever keystream runs underneath.
 ///
 /// Block zero is not reachable this way, since only the tag depends
-/// on it. It is covered for the processor's chosen backend by [`run`]
+/// on it. It is covered for the processor's chosen kernel by [`run`]
 /// checking the tag, and for the others by the in-module comparison
-/// against the portable keystream.
-pub fn run_cipher<B: Backend>(what: &str) {
+/// against the last kernel in the list.
+pub fn run_cipher(make: &dyn Fn(&Key<[u8; 32]>) -> ChaCha20) {
     let Some(doc) = load(FILE, "CHACHA20-POLY1305") else {
         return;
     };
-    // Asked once rather than per case, and reported: a silent skip
-    // would look like a pass.
-    match Cipher::<B>::try_new(&Key::from([0u8; 32])) {
-        Ok(_) => {}
-        Err(Error::NotSupported) => {
-            eprintln!("{what} not available; skipping");
-            return;
-        }
-        Err(e) => panic!("{e}"),
-    }
 
     let mut cases = 0;
     for group in doc["testGroups"].as_array().expect("testGroups") {
@@ -128,7 +117,7 @@ pub fn run_cipher<B: Backend>(what: &str) {
             let Ok(key) = Key::try_from(&hex(&t["key"])[..]) else {
                 continue;
             };
-            let cipher = Cipher::<B>::try_new(&key).expect("key");
+            let cipher = make(&key);
             let nonce: [u8; 12] = hex(&t["iv"]).try_into().expect("nonce");
             let msg = hex(&t["msg"]);
 
@@ -140,5 +129,5 @@ pub fn run_cipher<B: Backend>(what: &str) {
             cases += 1;
         }
     }
-    assert!(cases >= 200, "only {cases} cases under {what}");
+    assert!(cases >= 200, "only {cases} cases");
 }

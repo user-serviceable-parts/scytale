@@ -496,6 +496,48 @@ impl ChaCha20 {
         ChaCha20(inner)
     }
 
+    /// The kernels this cipher chooses among, with their needs.
+    #[cfg(test)]
+    pub(crate) fn kernels() -> &'static [(Kernel, Features)] {
+        KERNELS
+    }
+
+    /// Takes the key under `kernel` alone, or `None` where this
+    /// processor cannot run it. The vector suites and the cross-checks
+    /// reach each kernel this way, through the same type that
+    /// dispatches to it.
+    #[cfg(test)]
+    pub(crate) fn with_kernel(
+        key: &Key<[u8; KEY_SIZE]>,
+        kernel: Kernel,
+    ) -> Option<Self> {
+        if !features::available(KERNELS, kernel) {
+            return None;
+        }
+        let inner = match kernel {
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx2 => {
+                Inner::Avx2(Cipher::with(x86_64::Avx2::probe()?, key))
+            }
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => {
+                Inner::Neon(Cipher::with(aarch64::Neon::probe()?, key))
+            }
+            #[cfg(target_arch = "riscv64")]
+            Kernel::Zvkb => {
+                Inner::Zvkb(Cipher::with(riscv64::Zvkb::probe()?, key))
+            }
+            #[cfg(target_arch = "riscv64")]
+            Kernel::Zbb => {
+                Inner::Zbb(Cipher::with(riscv64::Zbb::probe()?, key))
+            }
+            Kernel::Portable => {
+                Inner::Portable(Cipher::with(portable::Portable, key))
+            }
+        };
+        Some(ChaCha20(inner))
+    }
+
     /// Which kernel this cipher is running on.
     #[cfg(test)]
     pub(crate) fn kernel(&self) -> Kernel {
@@ -600,6 +642,7 @@ impl fmt::Debug for AutoStream<'_> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::format;
     use std::vec::Vec;
 
     use super::*;
@@ -671,49 +714,6 @@ pub(crate) mod tests {
         )),
         allow(dead_code)
     )]
-    pub(crate) fn check_matches_portable<B: Backend>() {
-        let cipher = Cipher::<B>::try_new(&Key::from(KEY)).unwrap();
-        let reference =
-            Cipher::<portable::Portable>::try_new(&Key::from(KEY)).unwrap();
-        let data: [u8; 1100] = core::array::from_fn(|i| (i * 13 + 7) as u8);
-        for len in [
-            0usize, 1, 63, 64, 65, 127, 128, 255, 256, 257, 511, 512, 513,
-            1024, 1100,
-        ] {
-            for counter in [0u32, 1, 7, u32::MAX - 20] {
-                let mut want = data;
-                let mut got = data;
-                let want_result =
-                    reference.encrypt(&NONCE, counter, &mut want[..len]);
-                let got_result =
-                    cipher.encrypt(&NONCE, counter, &mut got[..len]);
-                assert_eq!(
-                    want_result, got_result,
-                    "len {len} counter {counter}"
-                );
-                assert_eq!(
-                    want[..len],
-                    got[..len],
-                    "len {len} counter {counter}"
-                );
-                // The same message in pieces.
-                let mut pieces = data;
-                let mut stream = cipher.stream(&NONCE, counter);
-                let mut ok = Ok(());
-                for chunk in pieces[..len].chunks_mut(37) {
-                    ok = ok.and(stream.update(chunk));
-                }
-                assert_eq!(
-                    ok, got_result,
-                    "len {len} counter {counter} pieces"
-                );
-                if ok.is_ok() {
-                    assert_eq!(pieces[..len], want[..len], "len {len} pieces");
-                }
-            }
-        }
-    }
-
     #[test]
     fn known_answers() {
         let cipher = ChaCha20::new(&Key::from(KEY));
@@ -722,16 +722,50 @@ pub(crate) mod tests {
         assert_eq!(data, hex::<114>(CIPHER));
     }
 
+    /// Every kernel this processor can build agrees with the portable
+    /// code across lengths, counters and chunkings. The portable code
+    /// is reached directly: on AArch64 it is not a row, since every
+    /// processor there has NEON. The kernels this processor cannot
+    /// build are reported rather than passed over in silence; the
+    /// inventory audits those skips.
     #[test]
-    fn matches_portable() {
-        let cipher = ChaCha20::new(&Key::from(KEY));
-        let reference =
-            Cipher::<portable::Portable>::try_new(&Key::from(KEY)).unwrap();
-        let mut a = [0x5au8; 1000];
-        let mut b = a;
-        cipher.encrypt(&NONCE, 3, &mut a).unwrap();
-        reference.encrypt(&NONCE, 3, &mut b).unwrap();
-        assert_eq!(a[..], b[..]);
+    fn every_kernel_agrees_with_the_portable_code() {
+        let key = Key::from(KEY);
+        let reference = Cipher::with(portable::Portable, &key);
+        let data: [u8; 1100] = core::array::from_fn(|i| (i * 13 + 7) as u8);
+        for &(kernel, _) in KERNELS {
+            let Some(cipher) = ChaCha20::with_kernel(&key, kernel) else {
+                std::eprintln!("{kernel:?} not available; skipping");
+                continue;
+            };
+            for len in [
+                0usize, 1, 63, 64, 65, 127, 128, 255, 256, 257, 511, 512, 513,
+                1024, 1100,
+            ] {
+                for counter in [0u32, 1, 7, u32::MAX - 20] {
+                    let tag = format!("{kernel:?} len {len} counter {counter}");
+                    let mut want = data;
+                    let mut got = data;
+                    let want_result =
+                        reference.encrypt(&NONCE, counter, &mut want[..len]);
+                    let got_result =
+                        cipher.encrypt(&NONCE, counter, &mut got[..len]);
+                    assert_eq!(want_result, got_result, "{tag}");
+                    assert_eq!(want[..len], got[..len], "{tag}");
+                    // The same message in pieces.
+                    let mut pieces = data;
+                    let mut stream = cipher.stream(&NONCE, counter);
+                    let mut ok = Ok(());
+                    for chunk in pieces[..len].chunks_mut(37) {
+                        ok = ok.and(stream.update(chunk));
+                    }
+                    assert_eq!(ok, got_result, "{tag} pieces");
+                    if ok.is_ok() {
+                        assert_eq!(pieces[..len], want[..len], "{tag} pieces");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -234,9 +234,7 @@ mod tests {
     use super::*;
     use crate::Error;
     use crate::hash::sha2::portable;
-    use crate::hash::sha2::tests::{
-        check_known_answers, check_matches_portable,
-    };
+    use crate::hash::sha2::tests::check_known_answers;
 
     #[test]
     fn known_answers() {
@@ -250,21 +248,6 @@ mod tests {
             || Sha256::try_new().expect("supported"),
             || Sha384::try_new().expect("supported"),
             || Sha512::try_new().expect("supported"),
-        );
-    }
-
-    #[test]
-    fn matches_portable() {
-        if !has_sha() {
-            return;
-        }
-        check_matches_portable(
-            || Sha224::try_new().expect("supported"),
-            || portable::Sha224::try_new().expect("portable"),
-        );
-        check_matches_portable(
-            || Sha256::try_new().expect("supported"),
-            || portable::Sha256::try_new().expect("portable"),
         );
     }
 

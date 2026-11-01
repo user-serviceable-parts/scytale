@@ -32,12 +32,6 @@ pub type Sha384 = Engine64<Armv8, variant::Sha384>;
 /// SHA-512 with the SHA512 instructions.
 #[cfg(test)]
 pub type Sha512 = Engine64<Armv8, variant::Sha512>;
-/// SHA-512/224 with the SHA512 instructions.
-#[cfg(test)]
-pub type Sha512_224 = Engine64<Armv8, variant::Sha512_224>;
-/// SHA-512/256 with the SHA512 instructions.
-#[cfg(test)]
-pub type Sha512_256 = Engine64<Armv8, variant::Sha512_256>;
 
 /// Whether the SHA-256 instructions are available.
 pub(crate) fn has_sha256() -> bool {
@@ -317,9 +311,7 @@ unsafe fn compress512(state: &mut [u64; 8], data: *const u8, count: usize) {
 mod tests {
     use super::*;
     use crate::hash::sha2::portable;
-    use crate::hash::sha2::tests::{
-        check_known_answers, check_matches_portable,
-    };
+    use crate::hash::sha2::tests::check_known_answers;
 
     #[test]
     fn known_answers() {
@@ -337,30 +329,6 @@ mod tests {
                 || portable::Sha256::try_new().expect("supported"),
                 || Sha384::try_new().expect("supported"),
                 || Sha512::try_new().expect("supported"),
-            );
-        }
-    }
-
-    #[test]
-    fn matches_portable() {
-        if has_sha256() {
-            check_matches_portable(
-                || Sha224::try_new().expect("supported"),
-                || portable::Sha224::try_new().expect("portable"),
-            );
-            check_matches_portable(
-                || Sha256::try_new().expect("supported"),
-                || portable::Sha256::try_new().expect("portable"),
-            );
-        }
-        if has_sha512() {
-            check_matches_portable(
-                || Sha384::try_new().expect("supported"),
-                || portable::Sha384::try_new().expect("portable"),
-            );
-            check_matches_portable(
-                || Sha512::try_new().expect("supported"),
-                || portable::Sha512::try_new().expect("portable"),
             );
         }
     }

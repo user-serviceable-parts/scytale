@@ -68,13 +68,6 @@ impl<const K: usize> fmt::Debug for Aes<K> {
 }
 
 impl<const K: usize> Aes<K> {
-    /// Whether this processor can run this implementation: it is
-    /// plain Rust, so always.
-    #[cfg(test)]
-    pub(crate) fn supported() -> bool {
-        true
-    }
-
     /// Expands `key`.
     pub(crate) fn new(key: &[u8; K]) -> Self {
         const {

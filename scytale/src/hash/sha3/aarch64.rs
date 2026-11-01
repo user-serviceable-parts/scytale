@@ -39,12 +39,6 @@ pub type Shake128 = Sponge<Armv8, variant::Shake128>;
 /// SHAKE256 with the SHA3 instructions.
 #[cfg(test)]
 pub type Shake256 = Sponge<Armv8, variant::Shake256>;
-/// The sponge under cSHAKE128, with the SHA3 instructions.
-#[cfg(test)]
-pub type CShake128 = Sponge<Armv8, variant::CShake128>;
-/// The sponge under cSHAKE256, with the SHA3 instructions.
-#[cfg(test)]
-pub type CShake256 = Sponge<Armv8, variant::CShake256>;
 
 /// Whether the SHA3 instructions are available.
 pub(crate) fn has_sha3() -> bool {
@@ -225,10 +219,8 @@ unsafe fn keccak_f1600(state: *mut u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hash::sha3::portable::{self, keccak_f1600 as reference};
-    use crate::hash::sha3::tests::{
-        check_known_answers, check_matches_portable,
-    };
+    use crate::hash::sha3::portable::keccak_f1600 as reference;
+    use crate::hash::sha3::tests::check_known_answers;
 
     #[test]
     fn known_answers() {
@@ -244,18 +236,6 @@ mod tests {
                     || Shake128::try_new().expect("supported"),
                     || Shake256::try_new().expect("supported"),
                 ),
-            );
-        }
-    }
-
-    #[test]
-    fn matches_portable() {
-        if has_sha3() {
-            check_matches_portable(
-                || Sha3_256::try_new().expect("supported"),
-                || portable::Sha3_256::try_new().expect("portable"),
-                || Shake128::try_new().expect("supported"),
-                || portable::Shake128::try_new().expect("portable"),
             );
         }
     }

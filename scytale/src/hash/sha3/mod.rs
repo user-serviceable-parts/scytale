@@ -242,6 +242,32 @@ impl<V: engine::Variant> Auto<V> {
             Inner::Portable(_) => Kernel::Portable,
         }
     }
+
+    /// The kernels this family chooses among, with their needs.
+    #[cfg(test)]
+    pub(crate) fn kernels() -> &'static [(Kernel, Features)] {
+        KERNELS
+    }
+
+    /// Starts a function on `kernel` alone, or `None` where this
+    /// processor cannot run it. The vector suites and the cross-checks
+    /// reach each kernel this way, through the same type that
+    /// dispatches to it.
+    #[cfg(test)]
+    pub(crate) fn with_kernel(kernel: Kernel) -> Option<Self> {
+        if !features::available(KERNELS, kernel) {
+            return None;
+        }
+        let inner = match kernel {
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Armv8 => {
+                let p = <aarch64::Armv8 as engine::Permutation>::probe()?;
+                Inner::Armv8(Sponge::with(p))
+            }
+            Kernel::Portable => Inner::Portable(Sponge::with(portable::Keccak)),
+        };
+        Some(Auto(inner))
+    }
 }
 
 impl<V: engine::Variant> Default for Auto<V> {
@@ -481,7 +507,11 @@ pub(crate) mod tests {
         },
     ];
 
-    fn squeeze<X: Xof>(message: &[u8], n: usize, start: fn() -> X) -> [u8; 64] {
+    fn squeeze<X: Xof>(
+        message: &[u8],
+        n: usize,
+        start: impl Fn() -> X,
+    ) -> [u8; 64] {
         let mut x = start();
         x.update(message);
         let mut out = [0u8; 64];
@@ -524,13 +554,13 @@ pub(crate) mod tests {
         }
     }
 
-    /// Checks one implementation against the portable one over every
-    /// length up to a few blocks, fed in every way, digest and XOF.
-    pub(crate) fn check_matches_portable<H, P, X, Y>(
-        start: fn() -> H,
-        portable: fn() -> P,
-        xof: fn() -> X,
-        portable_xof: fn() -> Y,
+    /// Checks one kernel against the portable one over every length
+    /// up to a few blocks, fed in every way, digest and XOF.
+    fn check_matches_portable<H, P, X, Y>(
+        start: impl Fn() -> H,
+        portable: impl Fn() -> P,
+        xof: impl Fn() -> X,
+        portable_xof: impl Fn() -> Y,
     ) where
         H: Hash,
         P: Hash<Output = H::Output>,
@@ -554,8 +584,8 @@ pub(crate) mod tests {
                 assert_eq!(hash.finalize(), expected, "len {len} at {split}");
             }
             assert_eq!(
-                squeeze(message, 64, xof),
-                squeeze(message, 64, portable_xof),
+                squeeze(message, 64, &xof),
+                squeeze(message, 64, &portable_xof),
                 "xof len {len}"
             );
         }
@@ -569,14 +599,38 @@ pub(crate) mod tests {
         );
     }
 
+    /// Every kernel this processor can build agrees with the portable
+    /// code, for each digest and each XOF. The kernels this processor
+    /// cannot build are reported rather than passed over in silence;
+    /// the inventory audits those skips.
     #[test]
-    fn matches_portable() {
-        check_matches_portable(
-            Sha3_256::new,
-            || portable::Sha3_256::try_new().expect("portable"),
-            Shake256::new,
-            || portable::Shake256::try_new().expect("portable"),
-        );
+    fn every_kernel_agrees_with_the_portable_code() {
+        fn check<H, X>(
+            kernel: Kernel,
+            digest: fn(Kernel) -> Option<H>,
+            xof: fn(Kernel) -> Option<X>,
+        ) where
+            H: Hash,
+            H::Output: PartialEq + core::fmt::Debug,
+            X: Xof,
+        {
+            check_matches_portable(
+                || digest(kernel).expect("available"),
+                || digest(Kernel::Portable).expect("portable"),
+                || xof(kernel).expect("available"),
+                || xof(Kernel::Portable).expect("portable"),
+            );
+        }
+        for &(kernel, _) in KERNELS {
+            if Sha3_256::with_kernel(kernel).is_none() {
+                std::eprintln!("{kernel:?} not available; skipping");
+                continue;
+            }
+            check(kernel, Sha3_224::with_kernel, Shake128::with_kernel);
+            check(kernel, Sha3_256::with_kernel, Shake256::with_kernel);
+            check(kernel, Sha3_384::with_kernel, Shake128::with_kernel);
+            check(kernel, Sha3_512::with_kernel, Shake256::with_kernel);
+        }
     }
 
     /// Two bit-string cases from the NIST ACVP SHA3-256 vectors: 22
@@ -744,6 +798,19 @@ macro_rules! digest {
             pub fn profiles() -> &'static [Features] {
                 &PROFILES
             }
+
+            /// The kernels this hash chooses among, with their needs.
+            #[cfg(test)]
+            pub(crate) fn kernels() -> &'static [(Kernel, Features)] {
+                KERNELS
+            }
+
+            /// Starts a hash on `kernel` alone, or `None` where this
+            /// processor cannot run it.
+            #[cfg(test)]
+            pub(crate) fn with_kernel(kernel: Kernel) -> Option<Self> {
+                Auto::with_kernel(kernel).map($name)
+            }
         }
 
         impl features::sealed::Sealed for $name {}
@@ -820,6 +887,20 @@ macro_rules! shake {
             /// first; see [`Dispatcher`].
             pub fn profiles() -> &'static [Features] {
                 &PROFILES
+            }
+
+            /// The kernels this function chooses among, with their
+            /// needs.
+            #[cfg(test)]
+            pub(crate) fn kernels() -> &'static [(Kernel, Features)] {
+                KERNELS
+            }
+
+            /// Starts a function on `kernel` alone, or `None` where
+            /// this processor cannot run it.
+            #[cfg(test)]
+            pub(crate) fn with_kernel(kernel: Kernel) -> Option<Self> {
+                Auto::with_kernel(kernel).map($name)
             }
         }
 

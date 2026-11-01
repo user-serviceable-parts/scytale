@@ -48,24 +48,6 @@ pub(crate) enum Kernel {
     Portable,
 }
 
-impl Kernel {
-    /// What it is called, in a benchmark row or a suite's log.
-    #[cfg(test)]
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            #[cfg(target_arch = "x86_64")]
-            Kernel::Aesni => "aesni",
-            #[cfg(target_arch = "x86_64")]
-            Kernel::Vaes => "vaes",
-            #[cfg(target_arch = "aarch64")]
-            Kernel::Armv8 => "armv8",
-            #[cfg(target_arch = "riscv64")]
-            Kernel::Zvkned => "zvkned",
-            Kernel::Portable => "portable",
-        }
-    }
-}
-
 /// The rows of a mode's list that a cipher can run with: all of them
 /// where the instructions can read its key schedule, and the last
 /// alone, the portable construction over the cipher's own calls,

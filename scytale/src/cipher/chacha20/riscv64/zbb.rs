@@ -184,21 +184,12 @@ unsafe fn keystream_block(state: &[u32; 16], out: &mut [u32; 16]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cipher::chacha20::tests::{
-        check_known_answers, check_matches_portable,
-    };
+    use crate::cipher::chacha20::tests::check_known_answers;
 
     #[test]
     fn known_answers() {
         if has_zbb() {
             check_known_answers::<Zbb>();
-        }
-    }
-
-    #[test]
-    fn matches_portable() {
-        if has_zbb() {
-            check_matches_portable::<Zbb>();
         }
     }
 

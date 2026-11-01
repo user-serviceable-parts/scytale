@@ -283,6 +283,34 @@ impl<const K: usize> Aes<K> {
         Aes(inner)
     }
 
+    /// Expands `key` for `kernel` alone, or `None` where this
+    /// processor cannot run it. The vector suites and the cross-checks
+    /// reach each kernel this way, through the same type that
+    /// dispatches to it.
+    #[cfg(test)]
+    pub(crate) fn with_kernel(key: &[u8; K], kernel: Kernel) -> Option<Self> {
+        if !features::available(KERNELS, kernel) {
+            return None;
+        }
+        let inner = match kernel {
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Vaes => Inner::Vaes(x86_64::vaes::Aes::new(key)),
+            #[cfg(target_arch = "x86_64")]
+            Kernel::AesNi => Inner::AesNi(x86_64::aesni::Aes::new(key)),
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Armv8 => Inner::Armv8(aarch64::armv8::Aes::new(key)),
+            #[cfg(target_arch = "riscv64")]
+            Kernel::Zvkned => Inner::Zvkned(riscv64::zvkned::Aes::new(key)),
+            #[cfg(target_arch = "riscv64")]
+            Kernel::Zkn => Inner::Zkn(riscv64::zkn::Aes::new(key)),
+            Kernel::Tables => Inner::Tables(portable::ttable::Aes::new(key)),
+            Kernel::Bitsliced => {
+                Inner::Bitsliced(portable::bitsliced::Aes::new(key))
+            }
+        };
+        Some(Aes(inner))
+    }
+
     /// Which kernel this key was expanded for.
     #[cfg(test)]
     pub(crate) fn kernel(&self) -> Kernel {
@@ -603,44 +631,60 @@ mod tests {
         assert_ne!(expected, Some(Kernel::Tables));
     }
 
+    /// Every kernel this processor can build agrees with the
+    /// constant-time portable code, at every key width, both
+    /// directions, a block at a time and in bulk: every tail width
+    /// the widest loop has, with and without full groups before it.
+    /// The kernels this processor cannot build are reported rather
+    /// than passed over in silence; the inventory audits those skips.
     #[test]
-    fn matches_ttable() {
-        matches_ttable_for::<16>();
-        matches_ttable_for::<24>();
-        matches_ttable_for::<32>();
+    fn every_kernel_agrees_with_the_portable_code() {
+        agrees_with_the_portable_code::<16>();
+        agrees_with_the_portable_code::<24>();
+        agrees_with_the_portable_code::<32>();
     }
 
-    fn matches_ttable_for<const K: usize>() {
-        let key = [0x5au8; K];
-        let aes = Aes::<K>::new(&key);
-        let sw = portable::ttable::Aes::<K>::new(&key);
-        assert_eq!(aes.rounds(), sw.rounds());
-
-        let mut data = [[0u8; BLOCK_SIZE]; 17];
-        for (i, x) in data.as_flattened_mut().iter_mut().enumerate() {
-            *x = i as u8;
+    fn agrees_with_the_portable_code<const K: usize>() {
+        // Past the widest loop's group, so its tails are all here.
+        const MAX: usize = 41;
+        let key: [u8; K] = core::array::from_fn(|i| (i * 37 + K) as u8);
+        let reference = Aes::<K>::with_kernel(&key, Kernel::Bitsliced)
+            .expect("the portable code runs anywhere");
+        let mut data = [[0u8; BLOCK_SIZE]; MAX];
+        for (i, b) in data.as_flattened_mut().iter_mut().enumerate() {
+            *b = (i * 13 + K) as u8;
         }
-        let mut expected = data;
-        sw.encrypt_blocks(&mut expected);
-        aes.encrypt_blocks(&mut data);
-        assert_eq!(data, expected);
-        aes.decrypt_blocks(&mut data);
-
-        let mut block = [7u8; BLOCK_SIZE];
-        let mut block2 = block;
-        sw.encrypt_one(&mut block2);
-        aes.encrypt_one(&mut block);
-        assert_eq!(block, block2);
-        aes.decrypt_one(&mut block);
-        assert_eq!(block, [7u8; BLOCK_SIZE]);
+        for &(kernel, _) in KERNELS {
+            let Some(aes) = Aes::<K>::with_kernel(&key, kernel) else {
+                std::eprintln!("{kernel:?} not available; skipping");
+                continue;
+            };
+            assert_eq!(aes.rounds(), reference.rounds(), "{kernel:?}");
+            for nblocks in 0..=MAX {
+                let mut got = data;
+                let mut want = data;
+                reference.encrypt_blocks(&mut want[..nblocks]);
+                aes.encrypt_blocks(&mut got[..nblocks]);
+                assert_eq!(got, want, "{kernel:?} encrypt {K} {nblocks}");
+                aes.decrypt_blocks(&mut got[..nblocks]);
+                assert_eq!(got, data, "{kernel:?} decrypt {K} {nblocks}");
+            }
+            let mut block = [7u8; BLOCK_SIZE];
+            let mut want = block;
+            reference.encrypt_one(&mut want);
+            aes.encrypt_one(&mut block);
+            assert_eq!(block, want, "{kernel:?} one block");
+            aes.decrypt_one(&mut block);
+            assert_eq!(block, [7u8; BLOCK_SIZE], "{kernel:?} one block back");
+        }
     }
 
     /// The three public widths are the same cipher as the generic one
     /// they wrap, both ways round and over a run of blocks.
     ///
-    /// The vector suites validate each implementation and the generic
-    /// type's agreement with the table-driven one; these wrappers sit
-    /// above all of that and are covered here.
+    /// The vector suites validate each kernel through the generic
+    /// type; these wrappers sit above all of that and are covered
+    /// here.
     #[test]
     fn widths_match() {
         fn same<W, const K: usize>(wrapped: W, key: [u8; K])

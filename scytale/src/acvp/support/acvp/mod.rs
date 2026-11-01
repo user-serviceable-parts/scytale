@@ -46,7 +46,6 @@ pub mod tuple_hash;
 pub mod xecdh;
 
 use crate::KeyType;
-use crate::cipher::BlockCipher;
 use serde_json::Value;
 
 pub fn hex(v: &Value) -> Vec<u8> {
@@ -80,11 +79,6 @@ pub fn key_of<C: KeyType>(bytes: &[u8]) -> Option<C::Key> {
     }
     key.as_mut().copy_from_slice(bytes);
     Some(key)
-}
-
-/// `C` keyed from `bytes`, or `None` if the width is another type's.
-pub fn cipher_of<C: BlockCipher>(bytes: &[u8]) -> Option<C> {
-    key_of::<C>(bytes).map(|key| C::new(&key))
 }
 
 /// The groups of one test type in a suite for the key width of `C`,
