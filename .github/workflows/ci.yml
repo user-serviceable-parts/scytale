@@ -127,7 +127,7 @@ jobs:
           # AVX2 and BMI2 without ADX.
           - arch: x86_64
             cpu: Haswell
-            features: ssse3 sse4.1 aes pclmulqdq avx avx2 bmi2
+            features: ssse3 sse4.1 aes pclmulqdq avx avx2 bmi1 bmi2
           # An Atom: the SHA extensions without AVX.
           - arch: x86_64
             cpu: Denverton
@@ -137,30 +137,30 @@ jobs:
           - arch: x86_64
             cpu: max
             features: >-
-              ssse3 sse4.1 aes pclmulqdq avx avx2 bmi2 adx sha vaes
+              ssse3 sse4.1 aes pclmulqdq avx avx2 bmi1 bmi2 adx sha vaes
           # ARMv8.0 with the cryptography extension.
           - arch: aarch64
             cpu: cortex-a53
-            features: aes pmull sha2
+            features: aes pmull sha1 sha2
           # SHA-512 and SHA-3 as well.
           - arch: aarch64
             cpu: neoverse-v1
-            features: aes pmull sha2 sha3
+            features: aes pmull sha1 sha2 sha512 sha3
           - arch: aarch64
             cpu: max
-            features: aes pmull sha2 sha3
-          # The base profile, which QEMU gives Zbb: nothing but the
-          # portable code and the rotates.
+            features: aes pmull sha1 sha2 sha512 sha3
+          # The base profile, which QEMU gives Zbb and Zbc: the
+          # portable code, the rotates and the scalar GHASH.
           - arch: riscv64
             cpu: rv64
-            features: zbb
+            features: zbb zbc
           # The vector and scalar cryptography extensions, which no
           # runner has.
           - arch: riscv64
             cpu: max
             features: >-
-              v zbb zbkb zkne zknd zknh zvkned zvknha zvknhb zvbb
-              zvkb zvkg
+              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
+              zvbb zvbc zvkb zvkg
     steps:
       - uses: actions/checkout@v7
 

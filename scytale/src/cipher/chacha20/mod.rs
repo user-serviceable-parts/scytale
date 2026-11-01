@@ -64,7 +64,11 @@ use core::fmt;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::probe::Probe;
+#[cfg(target_arch = "riscv64")]
+use crate::features::riscv64::Feature as R;
+#[cfg(target_arch = "x86_64")]
+use crate::features::x86_64::Feature as X;
+use crate::features::{self, Features};
 use crate::{Error, Key, KeyType};
 
 /// The key length, in bytes.
@@ -338,52 +342,61 @@ impl<B: Backend> fmt::Debug for Stream<'_, B> {
     }
 }
 
-/// The implementation the processor gets, chosen once.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Choice {
+/// Which implementation a [`ChaCha20`] is running on.
+///
+/// Every variant exists on every target, so that a program for more
+/// than one architecture can name them all; which can be chosen here
+/// is what [`ChaCha20::ranking`] lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Engine {
+    /// AVX2 on x86-64, eight blocks at a time.
     Avx2,
+    /// NEON on AArch64, which every such processor has.
     Neon,
+    /// RISC-V vector rotates, Zvkb or Zvbb.
     Zvkb,
+    /// RISC-V scalar rotates, Zbb or Zbkb.
     Zbb,
+    /// Plain Rust, on any processor.
     Portable,
 }
 
-/// Candidates in order of preference; the portable code is last so
-/// the search always ends.
-const CHOICES: [Choice; 5] = [
-    Choice::Avx2,
-    Choice::Neon,
-    Choice::Zvkb,
-    Choice::Zbb,
-    Choice::Portable,
+/// AVX2 with the operating system saving the upper register halves.
+#[cfg(target_arch = "x86_64")]
+pub(crate) const AVX2: Features = features::x86(&[X::Avx, X::Avx2]);
+/// The vector rotate `vror.vi`, from Zvkb (which Zvbb includes), on
+/// registers of a block or more.
+#[cfg(target_arch = "riscv64")]
+pub(crate) const ZVKB: Features = features::riscv(&[R::V, R::Zvkb]);
+/// The scalar rotate, which Zbb has.
+#[cfg(target_arch = "riscv64")]
+pub(crate) const ZBB: Features = features::riscv(&[R::Zbb]);
+/// The same rotate, which Zbkb has as well; a processor with the
+/// scalar cryptography and not Zbb takes this row.
+#[cfg(target_arch = "riscv64")]
+pub(crate) const ZBKB: Features = features::riscv(&[R::Zbkb]);
+
+/// The engines, best first, each with what it needs; the first whose
+/// needs are in force is the one a new cipher gets. One engine may
+/// appear twice, under two sets that each suffice. Every AArch64
+/// processor has NEON, so there the ranking ends with it and the
+/// portable code is never reached: two rows needing nothing would
+/// leave the second unreachable by any edit to the features.
+pub(crate) const RANKING: &[(Engine, Features)] = &[
+    #[cfg(target_arch = "x86_64")]
+    (Engine::Avx2, AVX2),
+    #[cfg(target_arch = "aarch64")]
+    (Engine::Neon, Features::new()),
+    #[cfg(target_arch = "riscv64")]
+    (Engine::Zvkb, ZVKB),
+    #[cfg(target_arch = "riscv64")]
+    (Engine::Zbb, ZBB),
+    #[cfg(target_arch = "riscv64")]
+    (Engine::Zbb, ZBKB),
+    #[cfg(not(target_arch = "aarch64"))]
+    (Engine::Portable, Features::new()),
 ];
-
-/// Asked once; see [`crate::probe`].
-static PROBED: Probe = Probe::new();
-
-/// Asks the processor once; afterwards a single atomic load.
-fn probe() -> Choice {
-    PROBED
-        .first(&CHOICES, supported)
-        .unwrap_or(Choice::Portable)
-}
-
-/// Whether the processor can run `choice`.
-fn supported(choice: Choice) -> bool {
-    match choice {
-        #[cfg(target_arch = "x86_64")]
-        Choice::Avx2 => <x86_64::Avx2 as Backend>::supported(),
-        #[cfg(target_arch = "aarch64")]
-        Choice::Neon => <aarch64::Neon as Backend>::supported(),
-        #[cfg(target_arch = "riscv64")]
-        Choice::Zvkb => <riscv64::Zvkb as Backend>::supported(),
-        #[cfg(target_arch = "riscv64")]
-        Choice::Zbb => <riscv64::Zbb as Backend>::supported(),
-        Choice::Portable => <portable::Portable as Backend>::supported(),
-        #[allow(unreachable_patterns)]
-        _ => false,
-    }
-}
 
 /// Applies a method to whichever implementation is in use.
 macro_rules! dispatch {
@@ -402,11 +415,11 @@ macro_rules! dispatch {
     };
 }
 
-/// ChaCha20 using the best implementation the processor supports.
+/// ChaCha20 using the best implementation the features in force
+/// allow; see [`crate::features`].
 ///
-/// The processor is probed once, the first time a key is taken;
-/// every later [`ChaCha20::new`] reads the cached answer, and
-/// each call then dispatches with a single predictable branch.
+/// The choice is made when the key is taken, and each call then
+/// dispatches with a single predictable branch.
 #[derive(Clone)]
 pub struct ChaCha20(Inner);
 
@@ -439,39 +452,62 @@ enum InnerStream<'a> {
 }
 
 impl ChaCha20 {
-    /// Takes the key, with the best implementation the processor
-    /// supports. The portable one is always there, so this cannot
-    /// fail.
+    /// Takes the key, with the best implementation the features in
+    /// force allow. The last engine in the ranking needs nothing, so
+    /// this cannot fail.
     pub fn new(key: &Key<[u8; KEY_SIZE]>) -> Self {
-        // The probe chose the arm, so the backend's own probe answers
-        // yes; the portable fallback in each arm is right if it did
-        // not.
+        // The ranking chose the arm, so the backend's own probe
+        // answers yes unless the features changed between the two
+        // reads; the portable fallback in each arm is right if they
+        // did.
         let portable =
             || Inner::Portable(Cipher::with(portable::Portable, key));
-        let inner = match probe() {
+        let inner = match features::select(RANKING) {
             #[cfg(target_arch = "x86_64")]
-            Choice::Avx2 => match x86_64::Avx2::probe() {
+            Some(Engine::Avx2) => match x86_64::Avx2::probe() {
                 Some(b) => Inner::Avx2(Cipher::with(b, key)),
                 None => portable(),
             },
             #[cfg(target_arch = "aarch64")]
-            Choice::Neon => match aarch64::Neon::probe() {
+            Some(Engine::Neon) => match aarch64::Neon::probe() {
                 Some(b) => Inner::Neon(Cipher::with(b, key)),
                 None => portable(),
             },
             #[cfg(target_arch = "riscv64")]
-            Choice::Zvkb => match riscv64::Zvkb::probe() {
+            Some(Engine::Zvkb) => match riscv64::Zvkb::probe() {
                 Some(b) => Inner::Zvkb(Cipher::with(b, key)),
                 None => portable(),
             },
             #[cfg(target_arch = "riscv64")]
-            Choice::Zbb => match riscv64::Zbb::probe() {
+            Some(Engine::Zbb) => match riscv64::Zbb::probe() {
                 Some(b) => Inner::Zbb(Cipher::with(b, key)),
                 None => portable(),
             },
             _ => portable(),
         };
         ChaCha20(inner)
+    }
+
+    /// Which implementation this cipher is running on.
+    pub fn engine(&self) -> Engine {
+        match &self.0 {
+            #[cfg(target_arch = "x86_64")]
+            Inner::Avx2(_) => Engine::Avx2,
+            #[cfg(target_arch = "aarch64")]
+            Inner::Neon(_) => Engine::Neon,
+            #[cfg(target_arch = "riscv64")]
+            Inner::Zvkb(_) => Engine::Zvkb,
+            #[cfg(target_arch = "riscv64")]
+            Inner::Zbb(_) => Engine::Zbb,
+            Inner::Portable(_) => Engine::Portable,
+        }
+    }
+
+    /// The engines this architecture has, best first, each with the
+    /// features it needs. A new cipher gets the first whose needs are
+    /// met by [`features::get`].
+    pub fn ranking() -> &'static [(Engine, Features)] {
+        RANKING
     }
 
     /// Encrypts `data` in place, its first byte at the start of
@@ -735,15 +771,18 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn picks_best_supported() {
-        let choice = probe();
-        for c in CHOICES {
-            if supported(c) {
-                assert_eq!(choice, c);
-                break;
-            }
-        }
-        assert_eq!(probe(), choice);
+    fn picks_the_first_engine_whose_needs_are_met() {
+        assert!(features::rows_are_distinct(RANKING));
+        let (_, last) = RANKING[RANKING.len() - 1];
+        assert!(last.is_empty(), "the search must always end");
+        let in_force = features::get();
+        let expected = RANKING
+            .iter()
+            .find(|(_, needs)| needs.is_subset(in_force))
+            .map(|(e, _)| *e);
+        assert_eq!(features::select(RANKING), expected);
+        let cipher = ChaCha20::new(&Key::from([0u8; 32]));
+        assert_eq!(Some(cipher.engine()), expected);
     }
 
     #[test]

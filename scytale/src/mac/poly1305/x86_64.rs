@@ -42,9 +42,7 @@
 
 #![allow(unsafe_code)]
 
-use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
-
-use crate::probe::Probe;
+use crate::features::{self, Features, x86_64::Feature as F};
 use zeroize::Zeroize;
 
 /// Bytes in a block.
@@ -96,25 +94,11 @@ impl Drop for Powers {
 
 /// Whether the processor and operating system support AVX2.
 pub(super) fn supported() -> bool {
-    PROBED.yes(ask)
+    features::has(AVX2)
 }
 
-/// Asked once; see [`crate::probe`].
-static PROBED: Probe = Probe::new();
-
-fn ask() -> bool {
-    let leaf1 = __cpuid(1);
-    let wanted = (1 << 27) | (1 << 28);
-    if leaf1.ecx & wanted != wanted {
-        return false;
-    }
-    if __cpuid_count(7, 0).ebx & (1 << 5) == 0 {
-        return false;
-    }
-    // SAFETY: OSXSAVE was just confirmed, so XGETBV is available.
-    let xcr0 = unsafe { _xgetbv(0) };
-    xcr0 & 0b110 == 0b110
-}
+/// What [`supported`] asks for.
+const AVX2: Features = features::x86(&[F::Avx, F::Avx2]);
 
 /// Multiplies two values in the field, with the limbs carried far
 /// enough that another multiplication cannot overflow.

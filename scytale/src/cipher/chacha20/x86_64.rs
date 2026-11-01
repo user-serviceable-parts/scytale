@@ -25,13 +25,11 @@
 
 #![allow(unsafe_code)]
 
-use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
-
 use zeroize::Zeroize;
 
 use super::{BLOCK_SIZE, Backend, Cipher, Sealed};
 use crate::align::At32;
-use crate::probe::Probe;
+use crate::features;
 
 /// ChaCha20 with AVX2.
 pub type ChaCha20 = Cipher<Avx2>;
@@ -40,23 +38,7 @@ pub type ChaCha20 = Cipher<Avx2>;
 /// instructions (leaf 7, EBX bit 5) and the OS saving the upper
 /// register halves (XCR0 bits 1 and 2), as for VAES.
 pub(crate) fn has_avx2() -> bool {
-    AVX2.yes(ask_avx2)
-}
-
-/// Kept: ChaCha20-Poly1305 takes a cipher for every message.
-static AVX2: Probe = Probe::new();
-
-fn ask_avx2() -> bool {
-    let leaf1 = __cpuid(1);
-    let osxsave = leaf1.ecx & (1 << 27) != 0;
-    let avx = leaf1.ecx & (1 << 28) != 0;
-    if !(osxsave && avx) {
-        return false;
-    }
-    let avx2 = __cpuid_count(7, 0).ebx & (1 << 5) != 0;
-    // SAFETY: OSXSAVE was just confirmed, so XGETBV is available.
-    let xcr0 = unsafe { _xgetbv(0) };
-    avx2 && xcr0 & 0b110 == 0b110
+    features::has(super::AVX2)
 }
 
 /// The keystream generator with AVX2.

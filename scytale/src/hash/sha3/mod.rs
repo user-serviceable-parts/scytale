@@ -8,9 +8,9 @@
 //! state the message goes into at a time, the rate, and in the bits
 //! that end the message. The digests give a fixed output; the SHAKE
 //! functions give as much as is asked for, through [`Xof`]. The types
-//! here pick the best implementation the processor has; which one
-//! that is is not a choice a caller makes, and the implementations
-//! are not names a caller can reach.
+//! here pick the best implementation the features in force allow
+//! (see [`crate::features`]); the implementations are not names a
+//! caller can reach, only engines a hash can report.
 //!
 //! ```
 //! use scytale::hash::sha3::{Sha3_256, Shake128};
@@ -91,8 +91,10 @@ use core::fmt;
 
 use engine::{DigestVariant, Reader, Sponge, XofVariant};
 
+#[cfg(target_arch = "aarch64")]
+use crate::features::aarch64::Feature as A;
+use crate::features::{self, Features};
 use crate::hash::{BitHash, BitXof, Hash, Xof, XofReader};
-use crate::probe::Probe;
 use crate::{BlockType, Error};
 
 /// The six functions, as markers the sponge is generic over.
@@ -162,39 +164,31 @@ pub(crate) mod variant {
     impl XofVariant for CShake256 {}
 }
 
-/// The implementation the processor gets, chosen once.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Choice {
+/// Which permutation a SHA-3 function is running on.
+///
+/// Every variant exists on every target, so that a program for more
+/// than one architecture can name them all; which can be chosen here
+/// is what [`Sha3_256::ranking`] and its siblings list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Engine {
+    /// The ARMv8.2 SHA-3 instructions.
     Armv8,
+    /// Plain Rust, on any processor.
     Portable,
 }
 
-/// Candidates in order of preference; the portable code is last so
-/// the search always ends.
-const CHOICES: [Choice; 2] = [Choice::Armv8, Choice::Portable];
+/// The ARMv8.2 SHA-3 instructions.
+#[cfg(target_arch = "aarch64")]
+pub(crate) const ARMV8: Features = features::arm(&[A::Sha3]);
 
-/// Asked once; see [`crate::probe`].
-static PROBED: Probe = Probe::new();
-
-/// Asks the processor once; afterwards a single atomic load.
-fn probe() -> Choice {
-    PROBED
-        .first(&CHOICES, supported)
-        .unwrap_or(Choice::Portable)
-}
-
-/// Whether the processor can run `choice`.
-fn supported(choice: Choice) -> bool {
-    match choice {
-        #[cfg(target_arch = "aarch64")]
-        Choice::Armv8 => <aarch64::Armv8 as engine::Permutation>::supported(),
-        Choice::Portable => {
-            <portable::Keccak as engine::Permutation>::supported()
-        }
-        #[allow(unreachable_patterns)]
-        _ => false,
-    }
-}
+/// The engines, best first, each with what it needs; the first whose
+/// needs are in force is the one a new function gets.
+pub(crate) const RANKING: &[(Engine, Features)] = &[
+    #[cfg(target_arch = "aarch64")]
+    (Engine::Armv8, ARMV8),
+    (Engine::Portable, Features::new()),
+];
 
 /// Applies a method to whichever implementation is in use.
 macro_rules! dispatch {
@@ -207,11 +201,8 @@ macro_rules! dispatch {
     };
 }
 
-/// A SHA-3 function using the best implementation the processor
-/// supports; see [`Sha3_256`] and [`Shake128`].
-///
-/// The processor is probed the first time; every later call reads
-/// the cached answer.
+/// A SHA-3 function using the best implementation the features in
+/// force allow; see [`Sha3_256`] and [`Shake128`].
 #[derive(Clone)]
 pub(crate) struct Auto<V: engine::Variant>(Inner<V>);
 
@@ -223,20 +214,30 @@ enum Inner<V: engine::Variant> {
 }
 
 impl<V: engine::Variant> Auto<V> {
-    /// Starts a function with the best implementation the processor
-    /// supports.
+    /// Starts a function with the best implementation the features
+    /// in force allow.
     pub fn new() -> Self {
-        let inner = match probe() {
+        let inner = match features::select(RANKING) {
             #[cfg(target_arch = "aarch64")]
-            Choice::Armv8 => match engine::Permutation::probe() {
+            Some(Engine::Armv8) => match engine::Permutation::probe() {
                 Some(p) => Inner::Armv8(Sponge::with(p)),
-                // The probe chose it, so this is not taken; portable
-                // is right if it were.
+                // The ranking chose it, so this is not taken unless
+                // the features changed between the two reads;
+                // portable is right if they did.
                 None => Inner::Portable(Sponge::with(portable::Keccak)),
             },
             _ => Inner::Portable(Sponge::with(portable::Keccak)),
         };
         Auto(inner)
+    }
+
+    /// Which implementation this function is running on.
+    pub fn engine(&self) -> Engine {
+        match &self.0 {
+            #[cfg(target_arch = "aarch64")]
+            Inner::Armv8(_) => Engine::Armv8,
+            Inner::Portable(_) => Engine::Portable,
+        }
     }
 }
 
@@ -681,15 +682,17 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn picks_best_supported() {
-        let choice = probe();
-        for c in CHOICES {
-            if supported(c) {
-                assert_eq!(choice, c);
-                break;
-            }
-        }
-        assert_eq!(probe(), choice);
+    fn picks_the_first_engine_whose_needs_are_met() {
+        assert!(features::rows_are_distinct(RANKING));
+        assert_eq!(RANKING.last(), Some(&(Engine::Portable, Features::new())));
+        let in_force = features::get();
+        let expected = RANKING
+            .iter()
+            .find(|(_, needs)| needs.is_subset(in_force))
+            .map(|(e, _)| *e);
+        assert_eq!(features::select(RANKING), expected);
+        assert_eq!(Some(Sha3_256::new().engine()), expected);
+        assert_eq!(Some(Shake128::new().engine()), expected);
     }
 
     #[test]
@@ -723,12 +726,21 @@ macro_rules! digest {
 
         impl $name {
             /// Starts a hash with the best implementation the
-            /// processor supports.
-            ///
-            /// The processor is probed the first time; every later
-            /// call reads the cached answer.
+            /// features in force allow; see [`crate::features`].
             pub fn new() -> Self {
                 $name(Auto::new())
+            }
+
+            /// Which implementation this hash is running on.
+            pub fn engine(&self) -> Engine {
+                self.0.engine()
+            }
+
+            /// The engines this architecture has, best first, each
+            /// with the features it needs. A new hash gets the first
+            /// whose needs are met by [`features::get`].
+            pub fn ranking() -> &'static [(Engine, Features)] {
+                RANKING
             }
         }
 
@@ -789,12 +801,21 @@ macro_rules! shake {
 
         impl $name {
             /// Starts a function with the best implementation the
-            /// processor supports.
-            ///
-            /// The processor is probed the first time; every later
-            /// call reads the cached answer.
+            /// features in force allow; see [`crate::features`].
             pub fn new() -> Self {
                 $name(Auto::new())
+            }
+
+            /// Which implementation this function is running on.
+            pub fn engine(&self) -> Engine {
+                self.0.engine()
+            }
+
+            /// The engines this architecture has, best first, each
+            /// with the features it needs. A new function gets the
+            /// first whose needs are met by [`features::get`].
+            pub fn ranking() -> &'static [(Engine, Features)] {
+                RANKING
             }
         }
 

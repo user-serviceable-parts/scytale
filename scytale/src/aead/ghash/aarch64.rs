@@ -13,7 +13,7 @@
 //! coming in.
 
 #![allow(unsafe_code)]
-use crate::probe::Probe;
+use crate::features::{self, Features, aarch64::Feature};
 
 /// The field polynomial `x^128 + x^7 + x^2 + x + 1` without its
 /// leading term, written in the reversed bit order.
@@ -195,41 +195,11 @@ impl Multiply {
 
 /// Whether the polynomial multiply is available.
 pub(crate) fn has_carryless_multiply() -> bool {
-    PMULL.yes(ask_carryless_multiply)
+    features::has(PMULL)
 }
 
-/// Kept: the hash subkey is prepared for every GCM-SIV message.
-static PMULL: Probe = Probe::new();
-
-fn ask_carryless_multiply() -> bool {
-    cfg!(target_feature = "aes") || id_register_reports_pmull()
-}
-
-/// Linux traps and emulates reads of the ID registers from user space
-/// (since 4.11). Bits 7:4 of ID_AA64ISAR0_EL1 hold 2 or more when the
-/// 64-bit polynomial multiply is implemented, and 1 when only the AES
-/// instructions are.
-#[cfg(target_os = "linux")]
-fn id_register_reports_pmull() -> bool {
-    let isar0: u64;
-    // SAFETY: reads a register the kernel exposes to user space; no
-    // memory is touched.
-    unsafe {
-        core::arch::asm!(
-            "mrs {}, ID_AA64ISAR0_EL1",
-            out(reg) isar0,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    (isar0 >> 4) & 0xf >= 2
-}
-
-/// Without an operating system that exposes the ID registers there is
-/// no safe way to ask, so only the compile-time feature counts.
-#[cfg(not(target_os = "linux"))]
-fn id_register_reports_pmull() -> bool {
-    false
-}
+/// What [`has_carryless_multiply`] asks for.
+pub(crate) const PMULL: Features = features::arm(&[Feature::Pmull]);
 
 /// Prepares the subkey for [`multiply`].
 pub(crate) fn prepare(h: &[u64; 2]) -> [u64; 2] {

@@ -20,11 +20,9 @@
 
 #![allow(unsafe_code)]
 
-use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
-
+use crate::features::{self, Features, x86_64::Feature as F};
 use crate::math::montgomery::x86_64::Adx;
 use crate::math::uint::Uint;
-use crate::probe::Probe;
 
 use super::{Affine, Jacobian};
 
@@ -39,25 +37,11 @@ pub(crate) struct Avx2(());
 /// AVX2 (CPUID leaf 7, EBX bit 5) with the operating system saving
 /// the upper halves of the registers (XCR0 bits 1 and 2). Asked once.
 pub(crate) fn probe() -> Option<Avx2> {
-    AVX2.yes(ask).then_some(Avx2(()))
+    features::has(AVX2).then_some(Avx2(()))
 }
 
-/// Kept: every curve operation asks.
-static AVX2: Probe = Probe::new();
-
-fn ask() -> bool {
-    let leaf1 = __cpuid(1);
-    let wanted = (1 << 27) | (1 << 28);
-    if leaf1.ecx & wanted != wanted {
-        return false;
-    }
-    if __cpuid_count(7, 0).ebx & (1 << 5) == 0 {
-        return false;
-    }
-    // SAFETY: OSXSAVE was just confirmed, so XGETBV is available.
-    let xcr0 = unsafe { _xgetbv(0) };
-    xcr0 & 0b110 == 0b110
-}
+/// What [`probe`] asks for.
+const AVX2: Features = features::x86(&[F::Avx, F::Avx2]);
 
 impl Avx2 {
     /// The entry of `table` whose position, counted from one, is

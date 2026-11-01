@@ -52,9 +52,7 @@ use super::super::engine::{Engine32, Engine64};
 use super::super::portable::{K256, K512};
 #[cfg(test)]
 use super::super::variant;
-use crate::arch::riscv64::{
-    EXT_ZVBB, EXT_ZVKB, EXT_ZVKNHA, EXT_ZVKNHB, IMA_V, extensions, vector_bytes,
-};
+use crate::features;
 
 // Named for the vector suites and the benchmark, which drive each
 // engine in turn; the dispatching types reach it directly.
@@ -84,27 +82,16 @@ pub struct Zvknh(());
 
 impl super::super::engine::Sealed for Zvknh {}
 
-/// Whether `ext` reports a vector unit, a byte reverse and any of
-/// `wanted`, on a processor whose vector registers are `bytes` wide.
-fn present(ext: u64, bytes: usize, wanted: u64) -> bool {
-    ext & IMA_V != 0
-        && ext & wanted != 0
-        && ext & (EXT_ZVBB | EXT_ZVKB) != 0
-        && bytes >= 16
-}
-
 /// Whether the SHA-256 instructions are available. Zvknha has them
 /// and Zvknhb has them as well as SHA-512's.
 pub(crate) fn has_sha256() -> bool {
-    let ext = extensions();
-    present(ext, vector_bytes(ext), EXT_ZVKNHA | EXT_ZVKNHB)
+    features::has(super::super::ZVKNH_256)
 }
 
 /// Whether the SHA-512 instructions are available; only Zvknhb has
 /// them.
 pub(crate) fn has_sha512() -> bool {
-    let ext = extensions();
-    present(ext, vector_bytes(ext), EXT_ZVKNHB)
+    features::has(super::super::ZVKNH_512)
 }
 
 /// Splits the state into the two element groups the instructions
@@ -433,20 +420,25 @@ mod tests {
     /// other. Zvkn includes Zvknhb, so real vector hardware has both.
     #[test]
     fn the_narrow_extension_offers_only_sha256() {
-        use crate::arch::riscv64::profile;
+        use crate::arch::riscv64::{
+            EXT_ZVKB, EXT_ZVKNHA, EXT_ZVKNHB, IMA_V, detected_from, profile,
+        };
+        use crate::hash::sha2::{ZVKNH_256, ZVKNH_512};
 
-        let narrow = IMA_V | EXT_ZVKB | EXT_ZVKNHA;
-        assert!(present(narrow, 16, EXT_ZVKNHA | EXT_ZVKNHB));
-        assert!(!present(narrow, 16, EXT_ZVKNHB));
+        let narrow = detected_from(IMA_V | EXT_ZVKB | EXT_ZVKNHA, 16);
+        assert!(ZVKNH_256.is_subset(narrow));
+        assert!(!ZVKNH_512.is_subset(narrow));
 
-        for wanted in [EXT_ZVKNHA | EXT_ZVKNHB, EXT_ZVKNHB] {
-            assert!(present(profile::ZVKN, 16, wanted));
+        for needs in [ZVKNH_256, ZVKNH_512] {
+            assert!(needs.is_subset(detected_from(profile::ZVKN, 16)));
             // No byte reverse to put the message words the right way
             // round, no vector unit, or registers too narrow.
-            assert!(!present(IMA_V | EXT_ZVKNHB, 16, wanted));
-            assert!(!present(profile::ZVKN & !IMA_V, 16, wanted));
-            assert!(!present(profile::ZVKN, 8, wanted));
-            assert!(!present(profile::ZKN, 0, wanted));
+            assert!(!needs.is_subset(detected_from(IMA_V | EXT_ZVKNHB, 16)));
+            assert!(
+                !needs.is_subset(detected_from(profile::ZVKN & !IMA_V, 16))
+            );
+            assert!(!needs.is_subset(detected_from(profile::ZVKN, 8)));
+            assert!(!needs.is_subset(detected_from(profile::ZKN, 0)));
         }
     }
 

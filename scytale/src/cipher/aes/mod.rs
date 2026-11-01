@@ -35,7 +35,11 @@ pub(crate) mod x86_64;
 use core::fmt;
 
 use crate::cipher::BlockCipher;
-use crate::probe::Probe;
+#[cfg(target_arch = "aarch64")]
+use crate::features::aarch64::Feature as A;
+#[cfg(target_arch = "riscv64")]
+use crate::features::riscv64::Feature as R;
+use crate::features::{self, Feature, Features};
 use crate::{BlockType, Key, KeyType};
 
 /// AES block size in bytes.
@@ -109,68 +113,78 @@ pub(crate) fn expand_words(
     w
 }
 
-/// The implementation the processor gets, chosen once.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Choice {
+/// Which implementation an AES key is expanded for.
+///
+/// Every variant exists on every target, so that a program for more
+/// than one architecture can name them all; which can be chosen here
+/// is what [`Aes128::ranking`] and its siblings list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Engine {
+    /// VAES on x86-64, two blocks to a register.
     Vaes,
+    /// AES-NI on x86-64.
     AesNi,
+    /// The ARMv8 cryptography extension.
     Armv8,
+    /// RISC-V vector AES, Zvkned.
     Zvkned,
+    /// RISC-V scalar AES, Zkne and Zknd.
     Zkn,
+    /// Plain Rust over lookup tables, which leak through cache
+    /// timing: chosen only where [`Feature::Isolated`] is in force.
+    Tables,
+    /// Plain Rust, bitsliced, constant time, on any processor.
     Bitsliced,
 }
 
-/// Candidates in order of preference: hardware, fastest first, then
-/// the constant-time portable code. The table-driven portable code is
-/// never chosen automatically because it leaks through cache timing.
-const CHOICES: [Choice; 6] = [
-    Choice::Vaes,
-    Choice::AesNi,
-    Choice::Armv8,
-    Choice::Zvkned,
-    Choice::Zkn,
-    Choice::Bitsliced,
+/// The scalar AES instructions, both directions.
+#[cfg(target_arch = "riscv64")]
+pub(crate) const ZKN: Features = features::riscv(&[R::Zkne, R::Zknd]);
+/// The vector AES instructions on registers of a block or more.
+#[cfg(target_arch = "riscv64")]
+pub(crate) const ZVKNED: Features = features::riscv(&[R::V, R::Zvkned]);
+/// The vector byte reverse `vrev8.v`, from Zvkb (which Zvbb
+/// includes); the counter loop uses it and the cipher does not.
+#[cfg(target_arch = "riscv64")]
+pub(crate) const VREV8: Features = features::riscv(&[R::V, R::Zvkb]);
+/// The ARMv8 AES instructions.
+#[cfg(target_arch = "aarch64")]
+pub(crate) const ARMV8: Features = features::arm(&[A::Aes]);
+/// Nothing the processor reports; the program's word that nothing
+/// untrusted shares its caches.
+pub(crate) const ISOLATED: Features = Features::of(&[Feature::Isolated]);
+
+/// The engines, best first, each with what it needs; the first whose
+/// needs are in force is the one a new key gets. The hardware comes
+/// first, fastest first; then the table-driven code, which only
+/// [`Feature::Isolated`] admits;
+/// then the constant-time portable code, which needs nothing, so the
+/// search always ends.
+pub(crate) const RANKING: &[(Engine, Features)] = &[
+    #[cfg(target_arch = "x86_64")]
+    (Engine::Vaes, x86_64::VAES256),
+    #[cfg(target_arch = "x86_64")]
+    (Engine::AesNi, x86_64::AESNI),
+    #[cfg(target_arch = "aarch64")]
+    (Engine::Armv8, ARMV8),
+    #[cfg(target_arch = "riscv64")]
+    (Engine::Zvkned, ZVKNED),
+    #[cfg(target_arch = "riscv64")]
+    (Engine::Zkn, ZKN),
+    (Engine::Tables, ISOLATED),
+    (Engine::Bitsliced, Features::new()),
 ];
 
-/// Asked once; see [`crate::probe`].
-static PROBED: Probe = Probe::new();
-
-/// Asks the processor once; afterwards a single atomic load.
-fn probe() -> Choice {
-    PROBED
-        .first(&CHOICES, supported)
-        .unwrap_or(Choice::Bitsliced)
-}
-
-/// Asks the processor directly whether it supports `choice`.
-fn supported(choice: Choice) -> bool {
-    match choice {
-        #[cfg(target_arch = "x86_64")]
-        Choice::Vaes => x86_64::has_vaes256(),
-        #[cfg(target_arch = "x86_64")]
-        Choice::AesNi => x86_64::has_aesni(),
-        #[cfg(target_arch = "aarch64")]
-        Choice::Armv8 => aarch64::armv8::has_aes(),
-        #[cfg(target_arch = "riscv64")]
-        Choice::Zvkned => riscv64::has_zvkned(),
-        #[cfg(target_arch = "riscv64")]
-        Choice::Zkn => riscv64::has_zkn(),
-        Choice::Bitsliced => true,
-        #[allow(unreachable_patterns)]
-        _ => false,
-    }
-}
-
-/// AES over the best implementation the processor supports, at a key
-/// width of `K` bytes.
+/// AES over the best implementation the features in force allow, at
+/// a key width of `K` bytes.
 ///
 /// The public types are the three widths: [`Aes128`], [`Aes192`] and
 /// [`Aes256`]. This one is generic so that the crate's own code, and
 /// the tests, can be written once for all three.
 ///
-/// The processor is probed once, the first time a key is expanded;
-/// every later [`Aes::new`] reads the cached answer, and each call
-/// then dispatches with a single predictable branch.
+/// The choice is made when the key is expanded, and each call then
+/// dispatches with a single predictable branch.
 #[derive(Clone)]
 pub(crate) struct Aes<const K: usize>(Inner<K>);
 
@@ -189,6 +203,7 @@ enum Inner<const K: usize> {
     Zvkned(riscv64::zvkned::Aes<K>),
     #[cfg(target_arch = "riscv64")]
     Zkn(riscv64::zkn::Aes<K>),
+    Tables(portable::ttable::Aes<K>),
     Bitsliced(portable::bitsliced::Aes<K>),
 }
 
@@ -206,6 +221,7 @@ macro_rules! dispatch {
             Inner::Zvkned($aes) => $body,
             #[cfg(target_arch = "riscv64")]
             Inner::Zkn($aes) => $body,
+            Inner::Tables($aes) => $body,
             Inner::Bitsliced($aes) => $body,
         }
     };
@@ -221,13 +237,13 @@ impl<const K: usize> fmt::Debug for Aes<K> {
 }
 
 impl<const K: usize> Aes<K> {
-    /// Expands `key` with the best implementation the processor
-    /// supports.
+    /// Expands `key` with the best implementation the features in
+    /// force allow.
     ///
     /// A width other than 16, 24 or 32 is refused when the type is
     /// instantiated, at compile time.
-    // Each hardware constructor checks the kept answer itself, which
-    // is one atomic load; there is nothing here to be unsafe about.
+    // Each hardware constructor checks the features itself, which is
+    // one atomic load; there is nothing here to be unsafe about.
     pub(crate) fn new(key: &[u8; K]) -> Self {
         const {
             assert!(
@@ -236,21 +252,48 @@ impl<const K: usize> Aes<K> {
             )
         };
         let inner = {
-            match probe() {
+            match features::select(RANKING) {
                 #[cfg(target_arch = "x86_64")]
-                Choice::Vaes => Inner::Vaes(x86_64::vaes::Aes::new(key)),
+                Some(Engine::Vaes) => Inner::Vaes(x86_64::vaes::Aes::new(key)),
                 #[cfg(target_arch = "x86_64")]
-                Choice::AesNi => Inner::AesNi(x86_64::aesni::Aes::new(key)),
+                Some(Engine::AesNi) => {
+                    Inner::AesNi(x86_64::aesni::Aes::new(key))
+                }
                 #[cfg(target_arch = "aarch64")]
-                Choice::Armv8 => Inner::Armv8(aarch64::armv8::Aes::new(key)),
+                Some(Engine::Armv8) => {
+                    Inner::Armv8(aarch64::armv8::Aes::new(key))
+                }
                 #[cfg(target_arch = "riscv64")]
-                Choice::Zvkned => Inner::Zvkned(riscv64::zvkned::Aes::new(key)),
+                Some(Engine::Zvkned) => {
+                    Inner::Zvkned(riscv64::zvkned::Aes::new(key))
+                }
                 #[cfg(target_arch = "riscv64")]
-                Choice::Zkn => Inner::Zkn(riscv64::zkn::Aes::new(key)),
+                Some(Engine::Zkn) => Inner::Zkn(riscv64::zkn::Aes::new(key)),
+                Some(Engine::Tables) => {
+                    Inner::Tables(portable::ttable::Aes::new(key))
+                }
                 _ => Inner::Bitsliced(portable::bitsliced::Aes::new(key)),
             }
         };
         Aes(inner)
+    }
+
+    /// Which implementation this key was expanded for.
+    pub(crate) fn engine(&self) -> Engine {
+        match &self.0 {
+            #[cfg(target_arch = "x86_64")]
+            Inner::Vaes(_) => Engine::Vaes,
+            #[cfg(target_arch = "x86_64")]
+            Inner::AesNi(_) => Engine::AesNi,
+            #[cfg(target_arch = "aarch64")]
+            Inner::Armv8(_) => Engine::Armv8,
+            #[cfg(target_arch = "riscv64")]
+            Inner::Zvkned(_) => Engine::Zvkned,
+            #[cfg(target_arch = "riscv64")]
+            Inner::Zkn(_) => Engine::Zkn,
+            Inner::Tables(_) => Engine::Tables,
+            Inner::Bitsliced(_) => Engine::Bitsliced,
+        }
     }
 
     /// Number of rounds: 10, 12 or 14 depending on key size.
@@ -357,9 +400,22 @@ macro_rules! width {
         pub struct $name(Aes<$k>);
 
         impl $name {
-            /// Expands `key`.
+            /// Expands `key` with the best implementation the
+            /// features in force allow; see [`crate::features`].
             pub fn new(key: &Key<[u8; $k]>) -> Self {
                 $name(Aes::new(key.array()))
+            }
+
+            /// Which implementation this key was expanded for.
+            pub fn engine(&self) -> Engine {
+                self.0.engine()
+            }
+
+            /// The engines this architecture has, best first, each
+            /// with the features it needs. A new key gets the first
+            /// whose needs are met by [`features::get`].
+            pub fn ranking() -> &'static [(Engine, Features)] {
+                RANKING
             }
 
             /// Number of rounds the key width fixes.
@@ -520,29 +576,18 @@ mod tests {
     }
 
     #[test]
-    fn picks_best_supported() {
-        let aes = Aes::<16>::new(&[0; 16]);
-        let chosen = probe();
-        assert!(PROBED.asked());
-        assert_eq!(probe(), chosen);
-        assert!(supported(chosen));
-        let faster = CHOICES.iter().take_while(|&&c| c != chosen);
-        assert!(faster.clone().all(|&c| !supported(c)), "{chosen:?}");
-        let matches = match (&aes.0, chosen) {
-            #[cfg(target_arch = "x86_64")]
-            (Inner::Vaes(_), Choice::Vaes) => true,
-            #[cfg(target_arch = "x86_64")]
-            (Inner::AesNi(_), Choice::AesNi) => true,
-            #[cfg(target_arch = "aarch64")]
-            (Inner::Armv8(_), Choice::Armv8) => true,
-            #[cfg(target_arch = "riscv64")]
-            (Inner::Zvkned(_), Choice::Zvkned) => true,
-            #[cfg(target_arch = "riscv64")]
-            (Inner::Zkn(_), Choice::Zkn) => true,
-            (Inner::Bitsliced(_), Choice::Bitsliced) => true,
-            _ => false,
-        };
-        assert!(matches, "{aes:?} vs {chosen:?}");
+    fn picks_the_first_engine_whose_needs_are_met() {
+        assert!(features::rows_are_distinct(RANKING));
+        assert_eq!(RANKING.last(), Some(&(Engine::Bitsliced, Features::new())));
+        let in_force = features::get();
+        let expected = RANKING
+            .iter()
+            .find(|(_, needs)| needs.is_subset(in_force))
+            .map(|(e, _)| *e);
+        assert_eq!(features::select(RANKING), expected);
+        assert_eq!(Some(Aes::<16>::new(&[0; 16]).engine()), expected);
+        // Tables are never detected, so never chosen unasked.
+        assert_ne!(expected, Some(Engine::Tables));
     }
 
     #[test]

@@ -46,11 +46,12 @@ use super::{BLOCK, Direction};
 // architecture is.
 use crate::align::{At16, At32};
 use crate::cipher::BlockCipher;
+use crate::cipher::aes::x86_64::AESNI;
+use crate::cipher::aes::x86_64::Schedule;
 pub(crate) use crate::cipher::aes::x86_64::{Keys, keys};
-use crate::cipher::aes::x86_64::{Schedule, has_aesni};
 use crate::cipher::mode::{ByteOrder, add_counter};
+use crate::features::{self, Features, x86_64::Feature as F};
 use crate::implementation::Implementation;
-use crate::probe::Probe;
 use zeroize::Zeroize;
 
 /// Blocks the loop takes at once, which is also how many powers of
@@ -268,13 +269,8 @@ unsafe fn wide_powers_of(h: &[u64; 2]) -> At32<[[u64; 2]; 2 * WIDE_AGGREGATE]> {
     wide
 }
 
-/// Whether this processor has everything the loop below uses, asked
-/// once; see [`crate::probe`].
-static PROBED: Probe = Probe::new();
-
-/// Whether the processor has `pclmulqdq` (CPUID leaf 1, ECX bit 1),
-/// AVX (bit 28), and an operating system that has turned the wider
-/// register state on (bit 27, then XCR0 bits 1 and 2).
+/// What the loops here need: AES-NI and SSSE3, as the cipher asks,
+/// and `pclmulqdq` with AVX.
 ///
 /// AVX is asked for not to work on wider registers but for the way
 /// the instructions are written down. The VEX encoding of the same
@@ -284,17 +280,8 @@ static PROBED: Probe = Probe::new();
 /// its operand first, and those copies contend for the very ports the
 /// cipher is trying to use. It is a separate question from VAES, and
 /// answered yes by every processor built since about 2011.
-fn has_vex_and_carryless_multiply() -> bool {
-    use core::arch::x86_64::{__cpuid, _xgetbv};
-    let leaf1 = __cpuid(1);
-    let wanted = (1 << 1) | (1 << 27) | (1 << 28);
-    if leaf1.ecx & wanted != wanted {
-        return false;
-    }
-    // SAFETY: OSXSAVE was just confirmed, so XGETBV is available.
-    let xcr0 = unsafe { _xgetbv(0) };
-    xcr0 & 0b110 == 0b110
-}
+pub(crate) const NARROW: Features =
+    AESNI.union(features::x86(&[F::Pclmulqdq, F::Avx]));
 
 /// Whether the wider loop can run here as well: VAES and
 /// VPCLMULQDQ, which have shipped together on every processor that
@@ -305,31 +292,19 @@ fn has_vex_and_carryless_multiply() -> bool {
 /// that allows: a processor with these runs the wider loop over as
 /// much of a message as it covers and the narrower one over the rest.
 fn wide_supported() -> bool {
-    WIDE_PROBED.yes(ask_wide)
+    features::has(WIDE)
 }
 
-/// Whether this processor has the wider loop's instructions, asked
-/// once.
-///
-/// Kept because `cpuid` serialises the processor, and a mode that
-/// derives a key for every message would otherwise ask once a
-/// message.
-static WIDE_PROBED: Probe = Probe::new();
-
-fn ask_wide() -> bool {
-    use core::arch::x86_64::__cpuid_count;
-    if !supported() {
-        return false;
-    }
-    let leaf7 = __cpuid_count(7, 0);
-    let wanted = (1 << 9) | (1 << 10);
-    leaf7.ecx & wanted == wanted && leaf7.ebx & (1 << 5) != 0
-}
+/// What the wider loop needs: [`NARROW`], and VAES with VPCLMULQDQ,
+/// which have shipped together on every processor that has either,
+/// on 256-bit registers.
+pub(crate) const WIDE: Features =
+    NARROW.union(features::x86(&[F::Avx2, F::Vaes, F::Vpclmulqdq]));
 
 /// Whether the loops here can run: AES-NI and SSSE3, which
 /// [`has_aesni`] asks for together, and `pclmulqdq` with AVX.
 pub(crate) fn supported() -> bool {
-    PROBED.yes(|| has_aesni() && has_vex_and_carryless_multiply())
+    features::has(NARROW)
 }
 
 /// What AES-GCM's bulk work needs and what it does not change: the

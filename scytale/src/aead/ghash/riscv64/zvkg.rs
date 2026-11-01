@@ -20,8 +20,6 @@
 
 #![allow(unsafe_code)]
 
-use crate::arch::riscv64::{EXT_ZVKG, IMA_V};
-
 /// How many blocks the group multiply takes at once. `vgmul` does a
 /// whole field multiplication in one instruction, so there is no
 /// reduction for a group to amortise and no group multiply here.
@@ -45,14 +43,6 @@ pub(super) unsafe fn multiply_group(
         // SAFETY: the caller's.
         unsafe { multiply(value, &powers[0]) };
     }
-}
-
-/// Whether `ext` reports the vector GHASH instruction, on a processor
-/// whose vector registers are `bytes` wide: the vector extension,
-/// Zvkg, and at least 128 bits, which the element groups need.
-pub(super) fn present(ext: u64, bytes: usize) -> bool {
-    let want = IMA_V | EXT_ZVKG;
-    ext & want == want && bytes >= 16
 }
 
 /// Puts the subkey in the byte order [`multiply`] wants.

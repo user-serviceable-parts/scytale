@@ -6,7 +6,8 @@
 //! written to run anywhere Rust
 //! does: `no_std`, no allocator, no cargo features to get wrong. Where
 //! the processor has instructions for a primitive they are used,
-//! chosen at run time, and there is always portable code behind them.
+//! chosen at run time from what [`features`] says is in force, and
+//! there is always portable code behind them.
 //!
 //! | Module | What is in it |
 //! | --- | --- |
@@ -19,6 +20,7 @@
 //! | [`kex`] | X25519 and ECDH key agreement |
 //! | [`pke`] | HPKE and RSA-OAEP public-key encryption |
 //! | [`random`] | the SP 800-90A generators and the entropy that seeds them |
+//! | [`features`] | what the processor has, and what the program allows |
 //! | [`constant_time`] | comparing secrets without timing them |
 //! | [`codec`] | hex, base64 and PEM, in constant time |
 //! | [`sig`] | Ed25519, ECDSA, ML-DSA, SLH-DSA and RSA signatures |
@@ -83,8 +85,10 @@
 //! - Tags are compared in time that depends on their length and on
 //!   nothing else.
 //! - The implementation chosen at run time is never one that leaks
-//!   through the cache; table-driven code exists as a peer of the
-//!   constant-time code, and must be asked for by name.
+//!   through the cache unless the program has said, through
+//!   [`features`], that nothing untrusted shares the processor;
+//!   table-driven code exists as a peer of the constant-time code
+//!   and is chosen on that word alone.
 //! - `Debug` output never contains key material, so a state can be
 //!   logged.
 //! - A trait describing a value you hold, a hash, a MAC or a cipher,
@@ -141,6 +145,7 @@ pub mod codec;
 pub mod constant_time;
 mod der;
 mod error;
+pub mod features;
 pub mod hash;
 mod implementation;
 pub mod kdf;
@@ -150,7 +155,6 @@ mod key_info;
 pub mod mac;
 mod math;
 pub mod pke;
-mod probe;
 pub mod random;
 pub mod sig;
 

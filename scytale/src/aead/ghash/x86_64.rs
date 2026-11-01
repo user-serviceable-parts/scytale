@@ -57,9 +57,7 @@
 
 #![allow(unsafe_code)]
 
-use core::arch::x86_64::__cpuid;
-
-use crate::probe::Probe;
+use crate::features::{self, Features, x86_64::Feature as F};
 
 /// The field polynomial `x^128 + x^7 + x^2 + x + 1` without its
 /// leading term, written in the reversed bit order.
@@ -130,16 +128,11 @@ impl Multiply {
 /// (bit 9). Every processor with the first has the second, but the
 /// group multiply below uses both, so both are checked.
 pub(super) fn has_carryless_multiply() -> bool {
-    PCLMUL.yes(ask_carryless_multiply)
+    features::has(PCLMUL)
 }
 
-/// Kept: the hash subkey is prepared for every GCM-SIV message.
-static PCLMUL: Probe = Probe::new();
-
-fn ask_carryless_multiply() -> bool {
-    let features = __cpuid(1).ecx;
-    features & (1 << 1) != 0 && features & (1 << 9) != 0
-}
+/// What [`has_carryless_multiply`] asks for.
+pub(crate) const PCLMUL: Features = features::x86(&[F::Pclmulqdq, F::Ssse3]);
 
 /// Multiplies `value` by the prepared subkey `h`, in place.
 ///

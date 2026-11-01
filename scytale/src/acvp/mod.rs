@@ -1430,121 +1430,50 @@ mod tls12 {
 mod inventory {
     use std::cell::RefCell;
     use std::string::String;
+    use std::string::ToString;
     use std::vec::Vec;
     #[allow(unused_imports)]
-    use std::{format, println};
+    use std::{format, println, vec};
 
     use crate::Error;
     use crate::cipher::chacha20::Backend;
     use crate::cipher::{aes, chacha20};
+    use crate::features::{self, Features};
     use crate::hash::{sha2, sha3};
 
     /// Where an emulating job declares the processor's features.
     const DECLARED: &str = "SCYTALE_CPU_FEATURES";
 
-    /// Every feature a row below is written in terms of.
-    #[cfg(target_arch = "x86_64")]
-    const FEATURES: &[&str] = &[
-        "aes",
-        "ssse3",
-        "sse4.1",
-        "avx",
-        "avx2",
-        "vaes",
-        "pclmulqdq",
-        "vpclmulqdq",
-        "sha",
-        "adx",
-        "bmi2",
-    ];
-    #[cfg(target_arch = "aarch64")]
-    const FEATURES: &[&str] = &["aes", "pmull", "sha2", "sha3"];
-    #[cfg(target_arch = "riscv64")]
-    const FEATURES: &[&str] = &[
-        "v", "zbb", "zbkb", "zkne", "zknd", "zknh", "zvkned", "zvknha",
-        "zvknhb", "zvbb", "zvkb", "zvkg",
-    ];
-    #[cfg(not(any(
-        target_arch = "aarch64",
-        target_arch = "riscv64",
-        target_arch = "x86_64"
-    )))]
-    const FEATURES: &[&str] = &[];
-
-    /// What the standard library makes of `feature`, which is an
-    /// answer reached without any of this crate's probes; `None`
-    /// where it has no stable way to be asked.
-    #[allow(unused_variables)]
-    fn detected(feature: &str) -> Option<bool> {
-        #[cfg(target_arch = "x86_64")]
-        {
-            use std::arch::is_x86_feature_detected as has;
-            return Some(match feature {
-                "aes" => has!("aes"),
-                "ssse3" => has!("ssse3"),
-                "sse4.1" => has!("sse4.1"),
-                "avx" => has!("avx"),
-                "avx2" => has!("avx2"),
-                "vaes" => has!("vaes"),
-                "pclmulqdq" => has!("pclmulqdq"),
-                "vpclmulqdq" => has!("vpclmulqdq"),
-                "sha" => has!("sha"),
-                "adx" => has!("adx"),
-                "bmi2" => has!("bmi2"),
-                _ => return None,
-            });
-        }
-        #[cfg(target_arch = "aarch64")]
-        {
-            use std::arch::is_aarch64_feature_detected as has;
-            return Some(match feature {
-                "aes" => has!("aes"),
-                "pmull" => has!("pmull"),
-                "sha2" => has!("sha2"),
-                "sha3" => has!("sha3"),
-                _ => return None,
-            });
-        }
-        #[allow(unreachable_code)]
-        None
-    }
-
     /// The table as it is printed, and what was wrong with it.
     struct Audit {
         /// What the job said the processor has, if it said.
-        declared: Option<Vec<String>>,
+        declared: Option<Features>,
         wrong: RefCell<Vec<String>>,
     }
 
     impl Audit {
         fn new() -> Self {
             let declared = std::env::var(DECLARED).ok().map(|list| {
-                list.split_whitespace()
-                    .map(String::from)
-                    .collect::<Vec<_>>()
+                list.parse::<Features>().unwrap_or_else(|_| {
+                    panic!("{DECLARED} names a feature no row knows: {list}")
+                })
             });
             let audit = Audit {
                 declared,
                 wrong: RefCell::new(Vec::new()),
             };
-            let Some(declared) = &audit.declared else {
+            let Some(declared) = audit.declared else {
                 return audit;
             };
-            for feature in declared {
-                assert!(
-                    FEATURES.contains(&feature.as_str()),
-                    "{DECLARED} names {feature}, which no row knows"
-                );
-            }
             // The emulator has to be offering what the job thinks it
             // is, or the job is not testing what it says.
-            for &feature in FEATURES {
-                let said = declared.iter().any(|d| d == feature);
-                if let Some(found) = detected(feature)
-                    && found != said
-                {
+            let found = features::detected();
+            for feature in features::native_all().iter() {
+                let (said, is) =
+                    (declared.contains(feature), found.contains(feature));
+                if said != is {
                     audit.wrong.borrow_mut().push(format!(
-                        "{feature}: the processor reports {found}, \
+                        "{feature}: the processor reports {is}, \
                          {DECLARED} says {said}"
                     ));
                 }
@@ -1552,31 +1481,21 @@ mod inventory {
             audit
         }
 
-        /// Whether the processor has `feature`, by the job's word
-        /// where it gave one and the standard library's otherwise.
-        fn has(&self, feature: &str) -> Option<bool> {
-            match &self.declared {
-                Some(declared) => Some(declared.iter().any(|d| d == feature)),
-                None => detected(feature),
-            }
+        /// What the processor has, by the job's word where it gave
+        /// one and the library's own detection otherwise.
+        fn has(&self) -> Features {
+            self.declared.unwrap_or_else(features::detected)
         }
 
-        /// Whether an implementation needing `requires` should be
-        /// available. Every entry is needed; an entry `a|b` is met
-        /// by either. `None` where there is nothing to ask.
-        fn expects(&self, requires: &[&str]) -> Option<bool> {
-            let mut all = true;
-            for entry in requires {
-                let mut any = false;
-                for feature in entry.split('|') {
-                    any |= self.has(feature)?;
-                }
-                all &= any;
-            }
-            Some(all)
+        /// Whether an implementation should be available: one that
+        /// needs nothing always is, and one with `requires` listed
+        /// is where any one of those sets is present.
+        fn expects(&self, requires: &[Features]) -> bool {
+            let has = self.has();
+            requires.is_empty() || requires.iter().any(|r| r.is_subset(has))
         }
 
-        fn report(&self, name: &str, available: bool, requires: &[&str]) {
+        fn report(&self, name: &str, available: bool, requires: &[Features]) {
             self.row("", name, available, requires);
         }
 
@@ -1587,28 +1506,26 @@ mod inventory {
             suite: &str,
             name: &str,
             available: bool,
-            requires: &[&str],
+            requires: &[Features],
         ) {
             let state = if available { "run" } else { "not available" };
             println!("  {name:<32} {state}");
-            if let Some(expected) = self.expects(requires)
-                && expected != available
-            {
+            let expected = self.expects(requires);
+            if expected != available {
+                let needs: Vec<String> =
+                    requires.iter().map(|r| r.to_string()).collect();
                 self.wrong.borrow_mut().push(format!(
-                    "{suite} {name}: {state}, but it needs {requires:?} \
-                     and the processor {} them",
-                    if expected { "has" } else { "lacks one of" }
+                    "{suite} {name}: {state}, but it needs one of {needs:?} \
+                     and the processor {}",
+                    if expected { "has it" } else { "lacks them all" }
                 ));
             }
         }
 
         fn finish(self) {
-            let source = match (&self.declared, FEATURES.first()) {
-                (Some(_), _) => DECLARED,
-                (None, Some(&first)) if detected(first).is_some() => {
-                    "the standard library's detection"
-                }
-                _ => "nothing: there is no way to ask here",
+            let source = match self.declared {
+                Some(_) => DECLARED,
+                None => "the library's own detection",
             };
             println!("checked against {source}\n");
             let wrong = self.wrong.into_inner();
@@ -1620,40 +1537,37 @@ mod inventory {
     /// tweak loops need what the cipher's own instructions need, in
     /// the encoding they are written in; the two with a hash in the
     /// loop need its multiply as well.
-    fn mode_requires(suite: &str, name: &str) -> Vec<&'static str> {
+    #[allow(unused_variables)]
+    fn mode_requires(suite: &str, name: &str) -> Vec<Features> {
         let hashes = matches!(suite, "AES-GCM" | "AES-GCM-SIV");
-        let mut needs: Vec<&'static str> = Vec::new();
         match name {
             // Written in the VEX encodings, so AES-NI is not enough.
-            "aesni" => {
-                needs.extend(["aes", "ssse3", "avx"]);
-                if hashes {
-                    needs.push("pclmulqdq");
-                }
+            #[cfg(target_arch = "x86_64")]
+            "aesni" if hashes => vec![crate::aead::gcm::x86_64::NARROW],
+            #[cfg(target_arch = "x86_64")]
+            "aesni" => vec![aes::x86_64::AESNI_AVX],
+            #[cfg(target_arch = "x86_64")]
+            "vaes" if hashes => vec![crate::aead::gcm::x86_64::WIDE],
+            #[cfg(target_arch = "x86_64")]
+            "vaes" => vec![aes::x86_64::VAES256],
+            #[cfg(target_arch = "aarch64")]
+            "armv8" if hashes => {
+                vec![aes::ARMV8.union(crate::aead::ghash::aarch64::PMULL)]
             }
-            "vaes" => {
-                needs.extend(["aes", "ssse3", "avx", "avx2", "vaes"]);
-                if hashes {
-                    needs.extend(["pclmulqdq", "vpclmulqdq"]);
-                }
-            }
-            "armv8" => {
-                needs.push("aes");
-                if hashes {
-                    needs.push("pmull");
-                }
-            }
+            #[cfg(target_arch = "aarch64")]
+            "armv8" => vec![aes::ARMV8],
             // The counters are reversed with `vrev8`, which either
             // of two extensions brings.
-            "zvkned" => {
-                needs.extend(["v", "zvkned", "zvbb|zvkb"]);
-                if hashes {
-                    needs.push("zvkg");
-                }
-            }
-            _ => {}
+            #[cfg(target_arch = "riscv64")]
+            "zvkned" if hashes => vec![
+                aes::ZVKNED
+                    .union(aes::VREV8)
+                    .union(crate::aead::ghash::riscv64::ZVKG),
+            ],
+            #[cfg(target_arch = "riscv64")]
+            "zvkned" => vec![aes::ZVKNED.union(aes::VREV8)],
+            _ => Vec::new(),
         }
-        needs
     }
 
     /// Every implementation of every mode that has more than one,
@@ -1739,31 +1653,31 @@ mod inventory {
             audit.report(
                 "aes::x86_64::aesni::Aes",
                 aes::x86_64::aesni::Aes::<16>::supported(),
-                &["aes", "ssse3"],
+                &[aes::x86_64::AESNI],
             );
             audit.report(
                 "aes::x86_64::vaes::Aes",
                 aes::x86_64::vaes::Aes::<16>::supported(),
-                &["aes", "ssse3", "avx", "avx2", "vaes"],
+                &[aes::x86_64::VAES256],
             );
         }
         #[cfg(target_arch = "aarch64")]
         audit.report(
             "aes::aarch64::armv8::Aes",
             aes::aarch64::armv8::Aes::<16>::supported(),
-            &["aes"],
+            &[aes::ARMV8],
         );
         #[cfg(target_arch = "riscv64")]
         {
             audit.report(
                 "aes::riscv64::zkn::Aes",
                 aes::riscv64::zkn::Aes::<16>::supported(),
-                &["zkne", "zknd"],
+                &[aes::ZKN],
             );
             audit.report(
                 "aes::riscv64::zvkned::Aes",
                 aes::riscv64::zvkned::Aes::<16>::supported(),
-                &["v", "zvkned"],
+                &[aes::ZVKNED],
             );
         }
 
@@ -1794,21 +1708,19 @@ mod inventory {
         audit.report(
             "sha2::x86_64::Sha256",
             hash(sha2::x86_64::Sha256::try_new),
-            &["sha", "ssse3", "sse4.1"],
+            &[sha2::SHA_NI],
         );
         #[cfg(target_arch = "aarch64")]
         {
             audit.report(
                 "sha2::aarch64::Sha256",
                 hash(sha2::aarch64::Sha256::try_new),
-                &["sha2"],
+                &[sha2::ARMV8_256],
             );
-            // The standard library reports SHA-512 and SHA-3
-            // together, as one feature, which is how they arrive.
             audit.report(
                 "sha2::aarch64::Sha512",
                 hash(sha2::aarch64::Sha512::try_new),
-                &["sha3"],
+                &[sha2::ARMV8_512],
             );
         }
         #[cfg(target_arch = "riscv64")]
@@ -1816,22 +1728,22 @@ mod inventory {
             audit.report(
                 "sha2::riscv64::zknh::Sha256",
                 hash(sha2::riscv64::zknh::Sha256::try_new),
-                &["zknh"],
+                &[sha2::ZKNH],
             );
             audit.report(
                 "sha2::riscv64::zknh::Sha512",
                 hash(sha2::riscv64::zknh::Sha512::try_new),
-                &["zknh"],
+                &[sha2::ZKNH],
             );
             audit.report(
                 "sha2::riscv64::zvknh::Sha256",
                 hash(sha2::riscv64::zvknh::Sha256::try_new),
-                &["v", "zvknha|zvknhb", "zvbb|zvkb"],
+                &[sha2::ZVKNH_256],
             );
             audit.report(
                 "sha2::riscv64::zvknh::Sha512",
                 hash(sha2::riscv64::zvknh::Sha512::try_new),
-                &["v", "zvknhb", "zvbb|zvkb"],
+                &[sha2::ZVKNH_512],
             );
         }
 
@@ -1846,7 +1758,7 @@ mod inventory {
         audit.report(
             "sha3::aarch64::Sha3_256",
             hash(sha3::aarch64::Sha3_256::try_new),
-            &["sha3"],
+            &[sha3::ARMV8],
         );
 
         println!("ChaCha20");
@@ -1859,7 +1771,7 @@ mod inventory {
         audit.report(
             "chacha20::x86_64::Avx2",
             chacha20::x86_64::Avx2::supported(),
-            &["avx2"],
+            &[chacha20::AVX2],
         );
         #[cfg(target_arch = "aarch64")]
         audit.report(
@@ -1871,13 +1783,13 @@ mod inventory {
         audit.report(
             "chacha20::riscv64::Zvkb",
             chacha20::riscv64::Zvkb::supported(),
-            &["v", "zvbb|zvkb"],
+            &[chacha20::ZVKB],
         );
         #[cfg(target_arch = "riscv64")]
         audit.report(
             "chacha20::riscv64::Zbb",
             chacha20::riscv64::Zbb::supported(),
-            &["zbb|zbkb"],
+            &[chacha20::ZBB, chacha20::ZBKB],
         );
 
         // The arithmetic behind the curves, RSA and the MACs, which
@@ -1889,7 +1801,7 @@ mod inventory {
             audit.report(
                 "montgomery::x86_64::Adx",
                 crate::math::montgomery::x86_64::probe().is_some(),
-                &["adx", "bmi2"],
+                &[crate::math::montgomery::x86_64::ADX],
             );
         }
         audit.finish();

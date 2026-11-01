@@ -16,9 +16,7 @@
 #![allow(unsafe_code)]
 
 use super::super::{BLOCK_SIZE, Backend, Cipher, Sealed};
-use crate::arch::riscv64::{
-    EXT_ZVBB, EXT_ZVKB, IMA_V, extensions, vector_bytes,
-};
+use crate::features;
 
 /// ChaCha20 with the vector extension and Zvkb.
 pub type ChaCha20 = Cipher<Zvkb>;
@@ -28,14 +26,7 @@ pub type ChaCha20 = Cipher<Zvkb>;
 /// the subset of Zvbb that the vector cryptography sets pull in, so
 /// either extension will do.
 pub(crate) fn has_zvkb() -> bool {
-    let ext = extensions();
-    present(ext, vector_bytes(ext))
-}
-
-/// Whether `ext` reports a vector rotate, on a processor whose vector
-/// registers are `bytes` wide.
-fn present(ext: u64, bytes: usize) -> bool {
-    ext & IMA_V != 0 && ext & (EXT_ZVBB | EXT_ZVKB) != 0 && bytes >= 16
+    features::has(super::super::ZVKB)
 }
 
 /// The keystream generator with the vector extension and Zvkb.
@@ -237,15 +228,17 @@ mod tests {
     /// vector cryptography set has the second without the first.
     #[test]
     fn the_rotate_comes_from_either_extension() {
-        use crate::arch::riscv64::profile;
+        use crate::arch::riscv64::{EXT_ZVBB, IMA_V, detected_from, profile};
+        use crate::cipher::chacha20::ZVKB;
 
-        assert!(present(profile::ZVKN, 16));
-        assert!(present(profile::RVA23, 16));
+        let has = |ext, bytes| ZVKB.is_subset(detected_from(ext, bytes));
+        assert!(has(profile::ZVKN, 16));
+        assert!(has(profile::RVA23, 16));
         // A vector unit with neither is not enough, and nor is the
         // extension without one.
-        assert!(!present(IMA_V, 16));
-        assert!(!present(EXT_ZVBB, 16));
+        assert!(!has(IMA_V, 16));
+        assert!(!has(EXT_ZVBB, 16));
         // Registers too narrow for four lanes of the state.
-        assert!(!present(profile::ZVKN, 8));
+        assert!(!has(profile::ZVKN, 8));
     }
 }

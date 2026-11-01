@@ -16,7 +16,7 @@
 
 use super::engine::LANES;
 use super::portable::keccak_f1600;
-use crate::arch::riscv64::{EXT_ZBB, extensions};
+use crate::features::{self, riscv64::Feature};
 
 /// Applies the permutation where the processor has Zbb, returning
 /// whether it did.
@@ -43,7 +43,7 @@ unsafe fn permute_zbb(state: &mut [u64; LANES]) {
 /// `extensions` keeps its answer, so asking for every permutation
 /// costs a load.
 fn has_zbb() -> bool {
-    extensions() & EXT_ZBB != 0
+    features::has(features::riscv(&[Feature::Zbb]))
 }
 
 #[cfg(test)]
