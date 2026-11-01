@@ -561,9 +561,13 @@ pub(crate) struct Polyval {
 }
 
 impl Polyval {
-    /// The hash under converted key `key`, or `None` where this
-    /// processor has not the instructions for it.
+    /// The hash under converted key `key`, or `None` where the
+    /// features in force have not the instructions for it.
+    ///
+    /// Not chosen from a row: the hash stands alone, with no list to
+    /// have settled the instructions, so it asks for them here.
     pub(crate) fn new(key: &[u8; BLOCK]) -> Option<Self> {
+        features::has(NARROW).then_some(())?;
         Some(Polyval {
             subkey: Subkey::of(key, Kernel::Aesni)?,
             digest: Digest::new(false),

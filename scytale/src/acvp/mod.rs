@@ -1755,9 +1755,10 @@ mod inventory {
             &[chacha20::ZBB, chacha20::ZBKB],
         );
 
-        // The arithmetic behind the curves, RSA and the MACs, which
-        // has no suite of its own to skip and so no other place to
-        // say whether its written-out path was the one that ran.
+        // The arithmetic behind the curves, RSA and the MACs, and the
+        // POLYVAL loop GCM-SIV hashes with: neither is a row in any
+        // list, so this is the one place that holds its probe to the
+        // processor.
         #[cfg(target_arch = "x86_64")]
         {
             println!("Arithmetic");
@@ -1765,6 +1766,11 @@ mod inventory {
                 "montgomery::x86_64::Adx",
                 crate::math::montgomery::x86_64::probe().is_some(),
                 &[crate::math::montgomery::x86_64::ADX],
+            );
+            audit.report(
+                "gcm::x86_64::Polyval",
+                crate::aead::gcm::x86_64::Polyval::new(&[0; 16]).is_some(),
+                &[crate::aead::gcm::x86_64::NARROW],
             );
         }
         audit.finish();
