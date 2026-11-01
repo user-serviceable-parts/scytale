@@ -75,6 +75,10 @@ pub enum Error {
     /// A call came in an order the mode does not allow, such as
     /// additional data after the message has begun.
     OutOfOrder,
+    /// [`features::set`](crate::features::set) was handed a feature
+    /// of this architecture that the processor does not have. The set
+    /// in force is unchanged.
+    UnsupportedFeature(crate::features::Feature),
     /// The authentication tag is not a length the mode allows.
     InvalidTagLength(usize),
     /// The message did not authenticate: it is not what was
@@ -235,6 +239,9 @@ impl fmt::Display for Error {
             }
             Error::UnsupportedVersion => {
                 write!(f, "unsupported structure version")
+            }
+            Error::UnsupportedFeature(feature) => {
+                write!(f, "the processor does not have {feature}")
             }
             Error::NotSupported => {
                 write!(f, "not supported by this processor")

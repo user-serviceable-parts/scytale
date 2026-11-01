@@ -28,8 +28,7 @@
 
 #![allow(unsafe_code)]
 
-use crate::arch::riscv64::{extensions, vector_bytes};
-use crate::probe::Probe;
+use crate::features::{self, Features, riscv64::Feature as R};
 
 mod zbc;
 mod zvbc;
@@ -51,42 +50,41 @@ enum Choice {
     Zbc,
 }
 
-/// The chosen multiply, asked for once; see [`crate::probe`].
-static CHOSEN: Probe = Probe::new();
+/// The whole field multiplication in one instruction, on registers of
+/// a block or more.
+pub(crate) const ZVKG: Features = features::riscv(&[R::V, R::Zvkg]);
+/// The vector carry-less multiply, with the byte reverse from Zvkb
+/// (which Zvbb includes), on registers of a block or more.
+const ZVBC: Features = features::riscv(&[R::V, R::Zvbc, R::Zvkb]);
+/// The scalar carry-less multiply, from Zbc.
+const ZBC: Features = features::riscv(&[R::Zbc]);
+/// The same instruction, from Zbkc; the scalar cryptography profile
+/// brings this one and not Zbc.
+const ZBKC: Features = features::riscv(&[R::Zbkc]);
 
-/// Every backend, best first.
-const CHOICES: [Choice; 3] = [Choice::Zvkg, Choice::Zvbc, Choice::Zbc];
+/// Every backend, best first, each with what it needs. One backend
+/// may appear twice, under two sets that each suffice.
+const RANKING: &[(Choice, Features)] = &[
+    (Choice::Zvkg, ZVKG),
+    (Choice::Zvbc, ZVBC),
+    (Choice::Zbc, ZBC),
+    (Choice::Zbc, ZBKC),
+];
 
-/// Whether `ext` reports `choice`, on a processor whose vector
-/// registers are `bytes` wide.
-fn present(choice: Choice, ext: u64, bytes: usize) -> bool {
-    match choice {
-        Choice::Zvkg => zvkg::present(ext, bytes),
-        Choice::Zvbc => zvbc::present(ext, bytes),
-        Choice::Zbc => zbc::present(ext, bytes),
-    }
+/// The best multiply the features in force allow, or none.
+fn choice() -> Option<Choice> {
+    features::select(RANKING)
 }
 
-/// The best multiply the extensions in `ext` offer.
+/// The best multiply the extensions in `ext` offer, on a processor
+/// whose vector registers are `bytes` wide.
 #[cfg(test)]
 fn best_of(ext: u64, bytes: usize) -> Option<Choice> {
-    CHOICES.into_iter().find(|&c| present(c, ext, bytes))
-}
-
-/// The chosen multiply, asked of the processor only once. The answer
-/// cannot change while the program runs, and the probe is a system
-/// call.
-///
-/// The extensions are read inside the closure rather than before it,
-/// so that the system call happens only on the first call rather than
-/// on every one. That first call may make it more than once, as it
-/// works down the list, which is a cost paid once in the life of the
-/// program.
-fn choice() -> Option<Choice> {
-    CHOSEN.first(&CHOICES, |choice| {
-        let ext = extensions();
-        present(choice, ext, vector_bytes(ext))
-    })
+    let found = crate::arch::riscv64::detected_from(ext, bytes);
+    RANKING
+        .iter()
+        .find(|(_, needs)| needs.is_subset(found))
+        .map(|(c, _)| *c)
 }
 
 /// The processor's carry-less multiply, whichever of the three it
@@ -270,8 +268,9 @@ mod tests {
     /// Whether this processor has `choice`, which is what decides
     /// whether a test can run that backend's instructions at all.
     fn here(choice: Choice) -> bool {
-        let ext = extensions();
-        present(choice, ext, vector_bytes(ext))
+        RANKING
+            .iter()
+            .any(|&(c, needs)| c == choice && features::has(needs))
     }
 
     /// The portable multiply is the reference; every backend has to
@@ -388,8 +387,8 @@ mod tests {
             Some(chosen) => {
                 assert!(here(chosen));
                 let fast = probe().expect("a multiply");
-                let at = CHOICES.iter().position(|&c| c == chosen).unwrap();
-                assert_eq!(fast.group(), BACKENDS[at].group);
+                let at = BACKENDS.iter().position(|b| b.choice == chosen);
+                assert_eq!(fast.group(), BACKENDS[at.unwrap()].group);
                 // Asking twice must give the same answer, now that
                 // the first call has cached it.
                 assert_eq!(choice(), Some(chosen));

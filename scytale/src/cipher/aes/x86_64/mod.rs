@@ -9,14 +9,13 @@
 pub mod aesni;
 pub mod vaes;
 
-use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
 use zeroize::ZeroizeOnDrop;
 
 use core::any::Any;
 
 use super::{Aes, Aes128, Aes192, Aes256, KeySize, MAX_WORDS};
 use crate::cipher::{BlockCipher, is};
-use crate::probe::Probe;
+use crate::features::{self, Features, x86_64::Feature as F};
 
 /// Whether the processor reports AES-NI (CPUID leaf 1, ECX bit 25)
 /// and `pshufb`, which comes with SSSE3 (bit 9).
@@ -27,17 +26,11 @@ use crate::probe::Probe;
 /// takes the portable path, rather than every call carrying a branch
 /// for hardware that does not exist.
 pub(crate) fn has_aesni() -> bool {
-    AESNI.yes(ask_aesni)
+    features::has(AESNI)
 }
 
-/// Kept, because a key expansion asks: GCM-SIV derives a key for
-/// every message it encrypts, and `cpuid` serialises the pipeline.
-static AESNI: Probe = Probe::new();
-
-fn ask_aesni() -> bool {
-    let features = __cpuid(1).ecx;
-    features & (1 << 25) != 0 && features & (1 << 9) != 0
-}
+/// What [`has_aesni`] asks for.
+pub(crate) const AESNI: Features = features::x86(&[F::Aes, F::Ssse3]);
 
 /// Whether the processor has AES-NI *and* AVX, with the operating
 /// system saving its state: AES-NI and SSSE3 as above, then OSXSAVE
@@ -50,48 +43,26 @@ fn ask_aesni() -> bool {
 /// the encoding. Any suite whose assembly is VEX-encoded asks this
 /// rather than [`has_aesni`].
 pub(crate) fn has_aesni_avx() -> bool {
-    AESNI_AVX.yes(ask_aesni_avx)
+    features::has(AESNI_AVX)
 }
 
-/// Kept, as [`AESNI`] is: a mode asks when it is built, and that is
-/// once per key.
-static AESNI_AVX: Probe = Probe::new();
-
-fn ask_aesni_avx() -> bool {
-    let wanted = (1 << 27) | (1 << 28);
-    if !has_aesni() || __cpuid(1).ecx & wanted != wanted {
-        return false;
-    }
-    // SAFETY: OSXSAVE was just confirmed, so XGETBV is available.
-    let xcr0 = unsafe { _xgetbv(0) };
-    xcr0 & 0b110 == 0b110
-}
+/// What [`has_aesni_avx`] asks for.
+pub(crate) const AESNI_AVX: Features =
+    features::x86(&[F::Aes, F::Ssse3, F::Avx]);
 
 /// Whether the processor and operating system support VAES on 256-bit
 /// registers: VAES (leaf 7, ECX bit 9), AVX2 (leaf 7, EBX bit 5), and
 /// the OS saving the upper register halves (XCR0 bits 1 and 2).
-pub(super) fn has_vaes256() -> bool {
-    VAES256.yes(ask_vaes256)
+pub(crate) fn has_vaes256() -> bool {
+    features::has(VAES256)
 }
 
-/// Kept, as [`AESNI`] is, and asked more dearly: three questions of
-/// the processor rather than one.
-static VAES256: Probe = Probe::new();
-
-fn ask_vaes256() -> bool {
-    let leaf1 = __cpuid(1);
-    let osxsave = leaf1.ecx & (1 << 27) != 0;
-    let avx = leaf1.ecx & (1 << 28) != 0;
-    if !(osxsave && avx && has_aesni()) {
-        return false;
-    }
-    let leaf7 = __cpuid_count(7, 0);
-    let avx2 = leaf7.ebx & (1 << 5) != 0;
-    let vaes = leaf7.ecx & (1 << 9) != 0;
-    // SAFETY: OSXSAVE was just confirmed, so XGETBV is available.
-    let xcr0 = unsafe { _xgetbv(0) };
-    avx2 && vaes && xcr0 & 0b110 == 0b110
-}
+/// What [`has_vaes256`] asks for. The wider loops finish with the
+/// narrower ones, and the cipher keeps a schedule these can read only
+/// where it took the AES instructions itself, so VAES alone, which a
+/// hypervisor's mask can produce, is not enough.
+pub(crate) const VAES256: Features =
+    features::x86(&[F::Aes, F::Ssse3, F::Avx, F::Avx2, F::Vaes]);
 
 /// A cipher whose expanded key the AES instructions can read.
 ///
@@ -555,14 +526,14 @@ mod tests {
         }
     }
 
-    /// The kept answers are the processor's own, and they are kept:
-    /// a key expansion asks on every call, and GCM-SIV expands a key
-    /// for every message.
+    /// The questions are put in terms of the detected features, and
+    /// each wider one asks for everything the narrower one does.
     #[test]
-    fn the_probes_keep_what_the_processor_said() {
-        assert_eq!(has_aesni(), ask_aesni());
-        assert_eq!(has_vaes256(), ask_vaes256());
-        assert!(AESNI.asked());
-        assert!(VAES256.asked());
+    fn the_questions_nest() {
+        let detected = features::detected();
+        assert_eq!(has_aesni(), AESNI.is_subset(detected));
+        assert_eq!(has_vaes256(), VAES256.is_subset(detected));
+        assert!(AESNI.is_subset(AESNI_AVX));
+        assert!(AESNI_AVX.is_subset(VAES256));
     }
 }

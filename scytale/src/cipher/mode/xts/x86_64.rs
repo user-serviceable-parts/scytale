@@ -33,10 +33,9 @@
 
 use crate::cipher::BlockCipher;
 use crate::cipher::aes::x86_64::{
-    KeysEitherWay as Keys, has_aesni_avx, keys_either_way,
+    KeysEitherWay as Keys, has_aesni_avx, has_vaes256, keys_either_way,
 };
 use crate::implementation::Implementation;
-use crate::probe::Probe;
 
 /// The block these loops work in.
 const BLOCK: usize = 16;
@@ -197,35 +196,9 @@ struct Bodies {
 }
 
 /// Whether the processor and operating system support VAES on 256-bit
-/// registers.
+/// registers, as the cipher asks.
 fn has_vaes() -> bool {
-    PROBED.yes(ask_vaes)
-}
-
-/// Asked once; see [`crate::probe`].
-static PROBED: Probe = Probe::new();
-
-fn ask_vaes() -> bool {
-    use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
-    // The wider loop finishes with the narrower one, and the cipher
-    // keeps a schedule these can read only where it took the AES
-    // instructions itself. A machine reporting VAES without AES-NI,
-    // which a hypervisor's mask can produce, has neither.
-    if !has_aesni_avx() {
-        return false;
-    }
-    let leaf1 = __cpuid(1);
-    let wanted = (1 << 27) | (1 << 28);
-    if leaf1.ecx & wanted != wanted {
-        return false;
-    }
-    let leaf7 = __cpuid_count(7, 0);
-    if leaf7.ecx & (1 << 9) == 0 || leaf7.ebx & (1 << 5) == 0 {
-        return false;
-    }
-    // SAFETY: OSXSAVE was just confirmed, so XGETBV is available.
-    let xcr0 = unsafe { _xgetbv(0) };
-    xcr0 & 0b110 == 0b110
+    has_vaes256()
 }
 
 /// Defines one body: the listed registers, loaded from the listed

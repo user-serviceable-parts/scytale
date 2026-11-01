@@ -43,13 +43,10 @@ pub(crate) use sealed::Sealed;
 /// call, and the one `unsafe` block in a hardware module is where
 /// the value is minted.
 pub trait Compress32: Sealed + Copy {
-    /// The function, where this processor can run it. Asked once.
+    /// The function, where the features in force allow it.
+    // An architecture with no SHA-256 instructions has no caller.
+    #[allow(dead_code)]
     fn probe() -> Option<Self>;
-
-    /// Whether this processor can run it.
-    fn supported() -> bool {
-        Self::probe().is_some()
-    }
 
     /// Folds every block into `state`.
     fn compress(self, state: &mut [u32; 8], blocks: &[[u8; 64]]);
@@ -58,13 +55,10 @@ pub trait Compress32: Sealed + Copy {
 /// A SHA-512 family compression function. Sealed; see
 /// [`Compress32`] for what a value of the type means.
 pub trait Compress64: Sealed + Copy {
-    /// The function, where this processor can run it. Asked once.
+    /// The function, where the features in force allow it.
+    // An architecture with no SHA-512 instructions has no caller.
+    #[allow(dead_code)]
     fn probe() -> Option<Self>;
-
-    /// Whether this processor can run it.
-    fn supported() -> bool {
-        Self::probe().is_some()
-    }
 
     /// Folds every block into `state`.
     fn compress(self, state: &mut [u64; 8], blocks: &[[u8; 128]]);

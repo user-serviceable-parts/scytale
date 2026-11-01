@@ -32,7 +32,7 @@ use core::fmt;
 
 use crate::cipher::BlockCipher;
 use crate::cipher::aes::{BLOCK_SIZE, KeySize, MAX_WORDS};
-use crate::probe::Probe;
+use crate::features;
 use crate::{BlockType, Key, KeyType};
 use zeroize::ZeroizeOnDrop;
 
@@ -61,40 +61,7 @@ impl<const K: usize> fmt::Debug for Aes<K> {
 
 /// Whether the AES instructions are available.
 pub(crate) fn has_aes() -> bool {
-    AES.yes(ask_aes)
-}
-
-/// Kept: reading the ID register traps into the kernel, and a key
-/// is expanded for every GCM-SIV message.
-static AES: Probe = Probe::new();
-
-fn ask_aes() -> bool {
-    cfg!(target_feature = "aes") || id_register_reports_aes()
-}
-
-/// Linux traps and emulates reads of the ID registers from user space
-/// (since 4.11). Bits 7:4 of ID_AA64ISAR0_EL1 are nonzero when
-/// AESE/AESD are implemented.
-#[cfg(target_os = "linux")]
-fn id_register_reports_aes() -> bool {
-    let isar0: u64;
-    // SAFETY: reads a register the kernel exposes to user space; no
-    // memory is touched.
-    unsafe {
-        core::arch::asm!(
-            "mrs {}, ID_AA64ISAR0_EL1",
-            out(reg) isar0,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    (isar0 >> 4) & 0xf != 0
-}
-
-/// Without an operating system that exposes the ID registers there is
-/// no safe way to ask, so only the compile-time feature counts.
-#[cfg(not(target_os = "linux"))]
-fn id_register_reports_aes() -> bool {
-    false
+    features::has(super::super::ARMV8)
 }
 
 impl<const K: usize> Aes<K> {

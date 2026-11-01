@@ -18,10 +18,11 @@
 //! It is roughly 1.5x to 2x faster than
 //! [`bitsliced`](super::bitsliced), its peer under
 //! [`portable`](super), and far slower than any hardware
-//! implementation. The automatic choice in
-//! [`cipher::aes::Aes`](crate::cipher::aes::Aes) never selects it.
+//! implementation. The dispatching cipher selects it only where the
+//! program has put [`Isolated`](crate::features::Feature::Isolated)
+//! in force, and then only below any hardware the processor has.
 //!
-//! Use it only when all of the following hold:
+//! Grant that only when all of the following hold:
 //! - no hardware AES is available, and
 //! - no untrusted code can run on the same machine while keys are in
 //!   use (a dedicated single-tenant device, an isolated embedded
@@ -69,6 +70,7 @@ impl<const K: usize> fmt::Debug for Aes<K> {
 impl<const K: usize> Aes<K> {
     /// Whether this processor can run this implementation: it is
     /// plain Rust, so always.
+    #[cfg(test)]
     pub(crate) fn supported() -> bool {
         true
     }

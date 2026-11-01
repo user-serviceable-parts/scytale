@@ -12,8 +12,7 @@
 
 #![allow(unsafe_code)]
 
-use crate::probe::Probe;
-use core::arch::x86_64::__cpuid_count;
+use crate::features;
 
 use super::engine::Compress32;
 #[cfg(test)]
@@ -36,27 +35,7 @@ pub type Sha256 = Engine32<ShaNi, variant::Sha256>;
 /// Every such processor also has the SSSE3 and SSE4.1 shuffles the
 /// code uses.
 pub(crate) fn has_sha() -> bool {
-    SHA.yes(ask_sha)
-}
-
-/// Kept: `cpuid` serialises the pipeline, and a hash is started
-/// for every message, every HMAC block and every PBKDF2 iteration.
-static SHA: Probe = Probe::new();
-
-fn ask_sha() -> bool {
-    // A processor whose highest leaf is below seven answers this one
-    // with the data of its highest, not with zeros, so the bits
-    // would be whatever that leaf happens to hold.
-    if core::arch::x86_64::__cpuid(0).eax < 7 {
-        return false;
-    }
-    // The loops also shuffle bytes (SSSE3, leaf 1 ECX bit 9) and
-    // insert and blend words (SSE4.1, bit 19). Every processor with
-    // the SHA instructions has both, but a hypervisor can hide one
-    // and not the other, and asking costs nothing.
-    let sse = (1 << 9) | (1 << 19);
-    core::arch::x86_64::__cpuid(1).ecx & sse == sse
-        && __cpuid_count(7, 0).ebx & (1 << 29) != 0
+    features::has(super::SHA_NI)
 }
 
 /// The compression function via SHA-NI.

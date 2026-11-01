@@ -1,5 +1,16 @@
 [alias]
-# Runs every test, including the long ones marked #[ignore]. The
-# benchmark is ignored too and is left out: it measures rather than
-# checks. Use scripts/bench for that.
-test-extended = "test --workspace -- --include-ignored --skip bench::speed"
+# Runs every test, including the long ones marked #[ignore]. Two
+# ignored groups are left out: the benchmark, which measures rather
+# than checks (use scripts/bench), and the tests that edit the
+# features in force, which must run alone (see test-alone).
+test-extended = [
+    "test", "--workspace", "--",
+    "--include-ignored", "--skip", "bench::speed",
+    "--skip", "features::tests::alone",
+]
+# The tests that edit the process-wide set of features in force, run
+# single-threaded so that no other test sees a narrowed set.
+test-alone = [
+    "test", "-p", "scytale", "--lib", "features::tests::alone", "--",
+    "--ignored", "--test-threads=1",
+]

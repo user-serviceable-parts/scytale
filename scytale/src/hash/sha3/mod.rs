@@ -8,9 +8,9 @@
 //! state the message goes into at a time, the rate, and in the bits
 //! that end the message. The digests give a fixed output; the SHAKE
 //! functions give as much as is asked for, through [`Xof`]. The types
-//! here pick the best implementation the processor has; which one
-//! that is is not a choice a caller makes, and the implementations
-//! are not names a caller can reach.
+//! here pick the best kernel the features in force allow (see
+//! [`crate::features`]); the kernels are not names a caller can
+//! reach, only the feature profiles that tell them apart.
 //!
 //! ```
 //! use scytale::hash::sha3::{Sha3_256, Shake128};
@@ -91,8 +91,10 @@ use core::fmt;
 
 use engine::{DigestVariant, Reader, Sponge, XofVariant};
 
+#[cfg(target_arch = "aarch64")]
+use crate::features::aarch64::Feature as A;
+use crate::features::{self, Dispatcher, Features};
 use crate::hash::{BitHash, BitXof, Hash, Xof, XofReader};
-use crate::probe::Probe;
 use crate::{BlockType, Error};
 
 /// The six functions, as markers the sponge is generic over.
@@ -162,39 +164,33 @@ pub(crate) mod variant {
     impl XofVariant for CShake256 {}
 }
 
-/// The implementation the processor gets, chosen once.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Choice {
+/// Which permutation a SHA-3 function is running on.
+///
+/// Which can be chosen is what [`Sha3_256::profiles`] and its
+/// siblings publish, by needs rather than by name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Kernel {
+    /// The ARMv8.2 SHA-3 instructions.
+    #[cfg(target_arch = "aarch64")]
     Armv8,
+    /// Plain Rust, on any processor.
     Portable,
 }
 
-/// Candidates in order of preference; the portable code is last so
-/// the search always ends.
-const CHOICES: [Choice; 2] = [Choice::Armv8, Choice::Portable];
+/// The ARMv8.2 SHA-3 instructions.
+#[cfg(target_arch = "aarch64")]
+pub(crate) const ARMV8: Features = features::arm(&[A::Sha3]);
 
-/// Asked once; see [`crate::probe`].
-static PROBED: Probe = Probe::new();
+/// The kernels, best first, each with what it needs; the first whose
+/// needs are in force is the one a new function gets.
+pub(crate) const KERNELS: &[(Kernel, Features)] = &[
+    #[cfg(target_arch = "aarch64")]
+    (Kernel::Armv8, ARMV8),
+    (Kernel::Portable, Features::new()),
+];
 
-/// Asks the processor once; afterwards a single atomic load.
-fn probe() -> Choice {
-    PROBED
-        .first(&CHOICES, supported)
-        .unwrap_or(Choice::Portable)
-}
-
-/// Whether the processor can run `choice`.
-fn supported(choice: Choice) -> bool {
-    match choice {
-        #[cfg(target_arch = "aarch64")]
-        Choice::Armv8 => <aarch64::Armv8 as engine::Permutation>::supported(),
-        Choice::Portable => {
-            <portable::Keccak as engine::Permutation>::supported()
-        }
-        #[allow(unreachable_patterns)]
-        _ => false,
-    }
-}
+/// What the list publishes: the needs, without the names.
+const PROFILES: [Features; KERNELS.len()] = features::profiles_of(KERNELS);
 
 /// Applies a method to whichever implementation is in use.
 macro_rules! dispatch {
@@ -207,11 +203,8 @@ macro_rules! dispatch {
     };
 }
 
-/// A SHA-3 function using the best implementation the processor
-/// supports; see [`Sha3_256`] and [`Shake128`].
-///
-/// The processor is probed the first time; every later call reads
-/// the cached answer.
+/// A SHA-3 function using the best implementation the features in
+/// force allow; see [`Sha3_256`] and [`Shake128`].
 #[derive(Clone)]
 pub(crate) struct Auto<V: engine::Variant>(Inner<V>);
 
@@ -223,20 +216,31 @@ enum Inner<V: engine::Variant> {
 }
 
 impl<V: engine::Variant> Auto<V> {
-    /// Starts a function with the best implementation the processor
-    /// supports.
+    /// Starts a function with the best implementation the features
+    /// in force allow.
     pub fn new() -> Self {
-        let inner = match probe() {
+        let inner = match features::select(KERNELS) {
             #[cfg(target_arch = "aarch64")]
-            Choice::Armv8 => match engine::Permutation::probe() {
+            Some(Kernel::Armv8) => match engine::Permutation::probe() {
                 Some(p) => Inner::Armv8(Sponge::with(p)),
-                // The probe chose it, so this is not taken; portable
-                // is right if it were.
+                // The list chose it, so this is not taken unless
+                // the features changed between the two reads;
+                // portable is right if they did.
                 None => Inner::Portable(Sponge::with(portable::Keccak)),
             },
             _ => Inner::Portable(Sponge::with(portable::Keccak)),
         };
         Auto(inner)
+    }
+
+    /// Which kernel this function is running on.
+    #[cfg(test)]
+    pub(crate) fn kernel(&self) -> Kernel {
+        match &self.0 {
+            #[cfg(target_arch = "aarch64")]
+            Inner::Armv8(_) => Kernel::Armv8,
+            Inner::Portable(_) => Kernel::Portable,
+        }
     }
 }
 
@@ -414,6 +418,8 @@ pub use tuple_hash::{
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::vec::Vec;
+
     use super::*;
     use zeroize::ZeroizeOnDrop;
 
@@ -681,15 +687,20 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn picks_best_supported() {
-        let choice = probe();
-        for c in CHOICES {
-            if supported(c) {
-                assert_eq!(choice, c);
-                break;
-            }
-        }
-        assert_eq!(probe(), choice);
+    fn picks_the_first_kernel_whose_needs_are_met() {
+        assert!(features::rows_are_reachable(KERNELS));
+        assert_eq!(KERNELS.last(), Some(&(Kernel::Portable, Features::new())));
+        let needs: Vec<Features> = KERNELS.iter().map(|k| k.1).collect();
+        assert_eq!(Sha3_256::profiles(), needs);
+        assert_eq!(Shake128::profiles(), needs);
+        let in_force = features::get();
+        let expected = KERNELS
+            .iter()
+            .find(|(_, needs)| needs.is_subset(in_force))
+            .map(|(e, _)| *e);
+        assert_eq!(features::select(KERNELS), expected);
+        assert_eq!(Some(Auto::<variant::Sha3_256>::new().kernel()), expected);
+        assert_eq!(Some(Auto::<variant::Shake128>::new().kernel()), expected);
     }
 
     #[test]
@@ -723,12 +734,23 @@ macro_rules! digest {
 
         impl $name {
             /// Starts a hash with the best implementation the
-            /// processor supports.
-            ///
-            /// The processor is probed the first time; every later
-            /// call reads the cached answer.
+            /// features in force allow; see [`crate::features`].
             pub fn new() -> Self {
                 $name(Auto::new())
+            }
+
+            /// The feature profiles this hash tells apart, best
+            /// first; see [`Dispatcher`].
+            pub fn profiles() -> &'static [Features] {
+                &PROFILES
+            }
+        }
+
+        impl features::sealed::Sealed for $name {}
+
+        impl Dispatcher for $name {
+            fn profiles() -> &'static [Features] {
+                $name::profiles()
             }
         }
 
@@ -789,12 +811,23 @@ macro_rules! shake {
 
         impl $name {
             /// Starts a function with the best implementation the
-            /// processor supports.
-            ///
-            /// The processor is probed the first time; every later
-            /// call reads the cached answer.
+            /// features in force allow; see [`crate::features`].
             pub fn new() -> Self {
                 $name(Auto::new())
+            }
+
+            /// The feature profiles this function tells apart, best
+            /// first; see [`Dispatcher`].
+            pub fn profiles() -> &'static [Features] {
+                &PROFILES
+            }
+        }
+
+        impl features::sealed::Sealed for $name {}
+
+        impl Dispatcher for $name {
+            fn profiles() -> &'static [Features] {
+                $name::profiles()
             }
         }
 

@@ -34,12 +34,16 @@ gcm.decrypt(&nonce, header, &mut message, &tag)?;
 assert_eq!(&message, b"attack at dawn");
 ```
 
-That is the whole setup: no builder, no context object, no global
-state to initialise, and no choice to make about which implementation
-to run. `Aes256` asks the processor what it can do the first time a
-key is expanded, and every call after that is one predictable branch.
+That is the whole setup: no builder, no context object, nothing to
+initialise, and no choice to make about which implementation to run.
+`Aes256` takes the best implementation the processor has when a key
+is expanded, and every call after that is one predictable branch.
 The same binary does that on a laptop with VAES and on a board with
-no cryptographic instructions at all.
+no cryptographic instructions at all. A program that wants a say
+edits one set, `scytale::features`: remove a feature and the
+implementation below it is chosen; grant `Isolated`, the word that
+nothing untrusted shares the processor, and the table-driven AES is
+admitted where there are no AES instructions.
 
 The API documentation is on [docs.rs](https://docs.rs/scytale), and
 `cargo doc --open` builds it locally.
@@ -94,7 +98,7 @@ has none. The corpus is 132 files holding 103,716 cases, and every case
 this build can run is run; the Monte Carlo groups chain a thousand
 cipher calls per case, with the key re-derived at each step. Every
 implementation is put through the whole vector set for its primitive,
-at every key size, the modes and the AEADs included: each engine
+at every key size, the modes and the AEADs included: each kernel
 written for a particular instruction set is tested as itself rather
 than only the one this processor would pick. Every implementation is
 also compared byte for byte against the portable one across a range of
@@ -119,15 +123,16 @@ right width rather than one block at a time.
 **Portable.** Every primitive has a pure Rust implementation that
 works anywhere, with no lookup tables and no data-dependent branches,
 so it is constant time. The accelerated versions are additions to
-that, never a requirement.
+that, never a requirement. The one table-driven implementation, AES,
+is never chosen unless the program says the processor is isolated.
 
 **No setup.** The library is `no_std`, has two dependencies
 (`zeroize`, and `getrandom` where there is an operating system to
 ask), and builds with nothing but a stable Rust toolchain: no
 C compiler, no build script, no feature flags, no target-specific
 compiler options. Which implementation to run is decided at run time,
-by asking the processor what it supports, so one binary works across
-a whole architecture.
+from what the processor supports and what the program allows, so one
+binary works across a whole architecture.
 
 ## Supported algorithms
 

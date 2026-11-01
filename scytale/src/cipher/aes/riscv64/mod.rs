@@ -13,11 +13,8 @@ pub mod zvkned;
 use core::any::Any;
 
 use super::{Aes, Aes128, Aes192, Aes256, MAX_WORDS};
-use crate::arch::riscv64::{
-    EXT_ZKND, EXT_ZKNE, EXT_ZVBB, EXT_ZVKB, EXT_ZVKNED, IMA_V, extensions,
-    vector_bytes,
-};
 use crate::cipher::{BlockCipher, is};
+use crate::features;
 
 /// A cipher whose expanded key the vector AES instructions can read.
 ///
@@ -75,28 +72,14 @@ impl<'a> Schedule<'a> {
 
 /// Whether the scalar AES instructions (Zkne and Zknd) are available.
 pub(crate) fn has_zkn() -> bool {
-    zkn_present(extensions())
-}
-
-/// Whether `ext` reports the scalar AES instructions.
-fn zkn_present(ext: u64) -> bool {
-    let want = EXT_ZKNE | EXT_ZKND;
-    ext & want == want
+    features::has(super::ZKN)
 }
 
 /// Whether the vector AES instructions are available: the vector
 /// extension, Zvkned, and registers of at least 128 bits, which the
 /// 128-bit element groups need.
 pub(crate) fn has_zvkned() -> bool {
-    let ext = extensions();
-    zvkned_present(ext, vector_bytes(ext))
-}
-
-/// Whether `ext` reports the vector AES instructions, on a processor
-/// whose vector registers are `bytes` wide.
-fn zvkned_present(ext: u64, bytes: usize) -> bool {
-    let want = IMA_V | EXT_ZVKNED;
-    ext & want == want && bytes >= 16
+    features::has(super::ZVKNED)
 }
 
 /// Whether the vector byte reverse `vrev8.v` is here. It belongs to
@@ -108,12 +91,7 @@ fn zvkned_present(ext: u64, bytes: usize) -> bool {
 /// for separately. RVA23 requires Zvbb, so a machine that conforms to
 /// the profile has it; one that does not takes the shared loop.
 pub(crate) fn has_vrev8() -> bool {
-    vrev8_present(extensions())
-}
-
-/// Whether `ext` reports the vector byte reverse.
-fn vrev8_present(ext: u64) -> bool {
-    ext & IMA_V != 0 && ext & (EXT_ZVBB | EXT_ZVKB) != 0
+    features::has(super::VREV8)
 }
 
 /// How to reach the round keys of the cipher a mode was built over.
@@ -173,7 +151,10 @@ pub(crate) fn keys<C: BlockCipher>() -> Option<Keys<C>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arch::riscv64::profile;
+    use crate::arch::riscv64::{
+        EXT_ZKND, EXT_ZKNE, EXT_ZVBB, EXT_ZVKB, IMA_V, detected_from, profile,
+    };
+    use crate::cipher::aes::{VREV8, ZKN, ZVKNED};
 
     #[test]
     fn probes_agree_with_constructors() {
@@ -186,25 +167,27 @@ mod tests {
     /// than a sample of them.
     #[test]
     fn the_scalar_cipher_needs_both_halves_of_zkn() {
-        assert!(zkn_present(profile::ZKN));
+        let has = |ext| ZKN.is_subset(detected_from(ext, 0));
+        assert!(has(profile::ZKN));
         // A profile with the vector set and no scalar one, which is
         // every vector profile: Zvkn does not imply Zkn.
-        assert!(!zkn_present(profile::ZVKNG));
+        assert!(!has(profile::ZVKNG));
         // Encryption without decryption is not enough, and the crate
         // uses the pair for one cipher object.
-        assert!(!zkn_present(EXT_ZKNE));
-        assert!(!zkn_present(EXT_ZKND));
+        assert!(!has(EXT_ZKNE));
+        assert!(!has(EXT_ZKND));
     }
 
     #[test]
     fn the_vector_cipher_needs_registers_wide_enough() {
-        assert!(zvkned_present(profile::ZVKN, 16));
-        assert!(zvkned_present(profile::ZVKN, 64));
+        let has = |ext, bytes| ZVKNED.is_subset(detected_from(ext, bytes));
+        assert!(has(profile::ZVKN, 16));
+        assert!(has(profile::ZVKN, 64));
         // A 64-bit vector register cannot hold a block.
-        assert!(!zvkned_present(profile::ZVKN, 8));
+        assert!(!has(profile::ZVKN, 8));
         // Zkn's vector unit is not a vector AES.
-        assert!(!zvkned_present(profile::RVA23, 16));
-        assert!(!zvkned_present(profile::ZKN, 0));
+        assert!(!has(profile::RVA23, 16));
+        assert!(!has(profile::ZKN, 0));
     }
 
     /// The counter loop's byte reverse is in Zvbb and in Zvkb, and a
@@ -212,12 +195,13 @@ mod tests {
     /// without necessarily having the first.
     #[test]
     fn the_byte_reverse_comes_from_either_extension() {
-        assert!(vrev8_present(profile::ZVKN));
-        assert!(vrev8_present(profile::RVA23));
-        assert!(vrev8_present(IMA_V | EXT_ZVBB));
-        assert!(vrev8_present(IMA_V | EXT_ZVKB));
+        let has = |ext| VREV8.is_subset(detected_from(ext, 16));
+        assert!(has(profile::ZVKN));
+        assert!(has(profile::RVA23));
+        assert!(has(IMA_V | EXT_ZVBB));
+        assert!(has(IMA_V | EXT_ZVKB));
         // Neither half on its own.
-        assert!(!vrev8_present(IMA_V));
-        assert!(!vrev8_present(EXT_ZVKB));
+        assert!(!has(IMA_V));
+        assert!(!has(EXT_ZVKB));
     }
 }

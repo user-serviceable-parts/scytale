@@ -8,6 +8,46 @@
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use crate::features::{Features, riscv64::Feature};
+
+/// Everything this processor has, of the extensions the crate names.
+pub(crate) fn detected() -> Features {
+    let ext = extensions();
+    detected_from(ext, vector_bytes(ext))
+}
+
+/// What `ext` reports, on a processor whose vector registers are
+/// `bytes` wide. The vector extension counts only at 128 bits or
+/// more, which every vector loop here needs, so no loop has to ask
+/// the width again.
+pub(crate) fn detected_from(ext: u64, bytes: usize) -> Features {
+    let mut found = Features::new();
+    let mut add = |has: bool, feature: Feature| {
+        if has {
+            found.insert(feature.into());
+        }
+    };
+    add(ext & IMA_V != 0 && bytes >= 16, Feature::V);
+    add(ext & EXT_ZBB != 0, Feature::Zbb);
+    add(ext & EXT_ZBC != 0, Feature::Zbc);
+    add(ext & EXT_ZBKB != 0, Feature::Zbkb);
+    add(ext & EXT_ZBKC != 0, Feature::Zbkc);
+    add(ext & EXT_ZKNE != 0, Feature::Zkne);
+    add(ext & EXT_ZKND != 0, Feature::Zknd);
+    add(ext & EXT_ZKNH != 0, Feature::Zknh);
+    add(ext & EXT_ZVBB != 0, Feature::Zvbb);
+    add(ext & EXT_ZVBC != 0, Feature::Zvbc);
+    // Zvkb is a subset of Zvbb and Zvknha of Zvknhb, so a processor
+    // reporting the larger has the smaller's instructions whether or
+    // not it says so.
+    add(ext & (EXT_ZVKB | EXT_ZVBB) != 0, Feature::Zvkb);
+    add(ext & EXT_ZVKG != 0, Feature::Zvkg);
+    add(ext & EXT_ZVKNED != 0, Feature::Zvkned);
+    add(ext & (EXT_ZVKNHA | EXT_ZVKNHB) != 0, Feature::Zvknha);
+    add(ext & EXT_ZVKNHB != 0, Feature::Zvknhb);
+    found
+}
+
 /// Linux `riscv_hwprobe` (since 6.4): fills `value` for key
 /// `RISCV_HWPROBE_KEY_IMA_EXT_0`, a bit set of extensions present on
 /// every hart. Returns `None` if the kernel lacks the call or the key.
@@ -87,7 +127,7 @@ pub(crate) fn extensions() -> u64 {
 
 /// What [`extensions`] found, with [`ASKED`] set once it has looked.
 /// A race is harmless: the question has one answer, so two threads
-/// store the same word. See [`crate::probe`].
+/// store the same word. See [`crate::features`].
 static EXTENSIONS: AtomicU64 = AtomicU64::new(0);
 
 /// Marks the kept word as filled in, since no extension owns the top
@@ -198,6 +238,38 @@ pub(crate) mod profile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The profiles read back as the extensions they are made of, and
+    /// a vector unit narrower than a block does not count.
+    #[test]
+    fn profiles_read_as_their_extensions() {
+        let f = detected_from(profile::ZKN, 0);
+        for want in [
+            Feature::Zbkb,
+            Feature::Zbkc,
+            Feature::Zkne,
+            Feature::Zknd,
+            Feature::Zknh,
+        ] {
+            assert!(f.contains(want.into()), "{want}");
+        }
+        assert!(!f.contains(Feature::Zbb.into()));
+        assert!(!f.contains(Feature::V.into()));
+
+        let f = detected_from(profile::ZVKNG, 16);
+        assert!(f.contains(Feature::V.into()));
+        assert!(f.contains(Feature::Zvkg.into()));
+        assert!(f.contains(Feature::Zvkned.into()));
+        assert!(!f.contains(Feature::Zvbc.into()));
+        assert!(!detected_from(profile::ZVKNG, 8).contains(Feature::V.into()));
+
+        let f = detected_from(profile::RVA23, 32);
+        assert!(f.contains(Feature::Zbb.into()));
+        assert!(f.contains(Feature::Zvbb.into()));
+        assert!(f.contains(Feature::Zvkb.into()), "Zvbb includes Zvkb");
+        let f = detected_from(IMA_V | EXT_ZVKNHB, 16);
+        assert!(f.contains(Feature::Zvknha.into()), "Zvknhb includes Zvknha");
+    }
 
     /// The kept answer is what the kernel said, and it is kept: every
     /// decision on this architecture reads it, a key expansion and

@@ -20,7 +20,7 @@ use super::super::portable::{
 };
 #[cfg(test)]
 use super::super::variant;
-use crate::arch::riscv64::{EXT_ZKNH, extensions};
+use crate::features;
 
 // Named for the vector suites and the benchmark, which drive each
 // engine in turn; the dispatching types reach it directly.
@@ -45,12 +45,7 @@ pub type Sha512_256 = Engine64<Zknh, variant::Sha512_256>;
 
 /// Whether the Zknh instructions are available.
 pub(crate) fn has_zknh() -> bool {
-    present(extensions())
-}
-
-/// Whether `ext` reports the scalar sigma instructions.
-fn present(ext: u64) -> bool {
-    ext & EXT_ZKNH != 0
+    features::has(super::super::ZKNH)
 }
 
 /// The sigma functions as Zknh instructions.
@@ -186,10 +181,11 @@ mod tests {
     /// set rather than with any vector one.
     #[test]
     fn the_scalar_sigmas_come_with_the_scalar_set() {
-        use crate::arch::riscv64::profile;
+        use crate::arch::riscv64::{detected_from, profile};
+        use crate::hash::sha2::ZKNH;
 
-        assert!(present(profile::ZKN));
-        assert!(!present(profile::ZVKNG));
-        assert!(!present(profile::RVA23));
+        assert!(ZKNH.is_subset(detected_from(profile::ZKN, 0)));
+        assert!(!ZKNH.is_subset(detected_from(profile::ZVKNG, 16)));
+        assert!(!ZKNH.is_subset(detected_from(profile::RVA23, 16)));
     }
 }

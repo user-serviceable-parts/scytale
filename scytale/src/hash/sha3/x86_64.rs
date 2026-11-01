@@ -10,11 +10,9 @@
 
 #![allow(unsafe_code)]
 
-use core::arch::x86_64::__cpuid_count;
-
 use super::engine::LANES;
 use super::portable::keccak_f1600;
-use crate::probe::Probe;
+use crate::features::{self, Features, x86_64::Feature as F};
 
 /// Applies the permutation where the processor has BMI1 and BMI2,
 /// returning whether it did.
@@ -40,22 +38,11 @@ unsafe fn permute_bmi(state: &mut [u64; LANES]) {
 /// Whether the processor reports BMI1 and BMI2 (CPUID leaf 7, EBX
 /// bits 3 and 8).
 fn has_bmi() -> bool {
-    BMI.yes(ask_bmi)
+    features::has(BMI)
 }
 
-/// Kept: a permutation runs for every block absorbed or squeezed.
-static BMI: Probe = Probe::new();
-
-fn ask_bmi() -> bool {
-    // A processor whose highest leaf is below seven answers this one
-    // with the data of its highest, not with zeros, so the bits
-    // would be whatever that leaf happens to hold.
-    if core::arch::x86_64::__cpuid(0).eax < 7 {
-        return false;
-    }
-    let wanted = (1 << 3) | (1 << 8);
-    __cpuid_count(7, 0).ebx & wanted == wanted
-}
+/// What [`has_bmi`] asks for.
+const BMI: Features = features::x86(&[F::Bmi1, F::Bmi2]);
 
 #[cfg(test)]
 mod tests {

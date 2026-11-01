@@ -22,7 +22,7 @@
 #![allow(unsafe_code)]
 
 use super::super::{BLOCK_SIZE, Backend, CONSTANTS, Cipher, Sealed};
-use crate::arch::riscv64::{EXT_ZBB, EXT_ZBKB, extensions};
+use crate::features;
 
 /// ChaCha20 on the general registers.
 pub type ChaCha20 = Cipher<Zbb>;
@@ -31,12 +31,7 @@ pub type ChaCha20 = Cipher<Zbb>;
 /// and either will do. RVA23 requires Zbb, so anything that conforms
 /// to the profile has it.
 pub(crate) fn has_zbb() -> bool {
-    present(extensions())
-}
-
-/// Whether `ext` reports a scalar rotate.
-fn present(ext: u64) -> bool {
-    ext & (EXT_ZBB | EXT_ZBKB) != 0
+    features::has(super::super::ZBB) || features::has(super::super::ZBKB)
 }
 
 /// The keystream generator on the general registers.
@@ -220,12 +215,17 @@ mod tests {
     /// no vector unit is wanted.
     #[test]
     fn the_rotate_comes_from_either_extension() {
-        use crate::arch::riscv64::profile;
+        use crate::arch::riscv64::{EXT_ZBB, EXT_ZBKB, detected_from, profile};
+        use crate::cipher::chacha20::{ZBB, ZBKB};
 
-        assert!(present(profile::RVA23));
-        assert!(present(profile::ZKN));
-        assert!(present(EXT_ZBB));
-        assert!(present(EXT_ZBKB));
-        assert!(!present(0));
+        let has = |ext| {
+            let found = detected_from(ext, 0);
+            ZBB.is_subset(found) || ZBKB.is_subset(found)
+        };
+        assert!(has(profile::RVA23));
+        assert!(has(profile::ZKN));
+        assert!(has(EXT_ZBB));
+        assert!(has(EXT_ZBKB));
+        assert!(!has(0));
     }
 }

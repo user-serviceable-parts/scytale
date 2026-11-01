@@ -17,7 +17,7 @@ use super::engine::{LANES, Permutation};
 use super::portable::ROUND_CONSTANTS;
 #[cfg(test)]
 use super::variant;
-use crate::probe::Probe;
+use crate::features;
 
 // Named for the vector suites and the benchmark, which drive each
 // engine in turn; the dispatching types reach it directly.
@@ -48,39 +48,7 @@ pub type CShake256 = Sponge<Armv8, variant::CShake256>;
 
 /// Whether the SHA3 instructions are available.
 pub(crate) fn has_sha3() -> bool {
-    SHA3.yes(ask_sha3)
-}
-
-/// Kept: a hash is started for every message.
-static SHA3: Probe = Probe::new();
-
-fn ask_sha3() -> bool {
-    cfg!(target_feature = "sha3") || id_register_reports_sha3()
-}
-
-/// The SHA3 field of ID_AA64ISAR0_EL1, bits 35:32, is nonzero when
-/// the instructions are implemented. Linux traps and emulates reads
-/// of the ID registers from user space (since 4.11).
-#[cfg(target_os = "linux")]
-fn id_register_reports_sha3() -> bool {
-    let isar0: u64;
-    // SAFETY: reads a register the kernel exposes to user space; no
-    // memory is touched.
-    unsafe {
-        core::arch::asm!(
-            "mrs {}, ID_AA64ISAR0_EL1",
-            out(reg) isar0,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    (isar0 >> 32) & 0xf != 0
-}
-
-/// Without an operating system that exposes the ID registers there is
-/// no safe way to ask, so only the compile-time feature counts.
-#[cfg(not(target_os = "linux"))]
-fn id_register_reports_sha3() -> bool {
-    false
+    features::has(super::ARMV8)
 }
 
 /// The permutation via the SHA3 instructions. No public constructor:

@@ -47,13 +47,10 @@ const MAX_RATE: usize = 168;
 /// one `unsafe` block in a hardware module is where the value is
 /// minted.
 pub trait Permutation: Sealed + Copy {
-    /// The permutation, where this processor can run it. Asked once.
+    /// The permutation, where the features in force allow it.
+    // An architecture with no SHA-3 instructions has no caller.
+    #[allow(dead_code)]
     fn probe() -> Option<Self>;
-
-    /// Whether this processor can run it.
-    fn supported() -> bool {
-        Self::probe().is_some()
-    }
 
     /// Applies the permutation to `state`.
     fn permute(self, state: &mut [u64; LANES]);

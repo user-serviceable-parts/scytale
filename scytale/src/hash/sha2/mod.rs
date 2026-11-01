@@ -66,12 +66,16 @@ pub(crate) mod x86_64;
 
 use core::fmt;
 
-use engine::{
-    Compress32, Compress64, Engine32, Engine64, Variant32, Variant64,
-};
+use engine::{Engine32, Engine64, Variant32, Variant64};
 
+#[cfg(target_arch = "aarch64")]
+use crate::features::aarch64::Feature as A;
+#[cfg(target_arch = "riscv64")]
+use crate::features::riscv64::Feature as R;
+#[cfg(target_arch = "x86_64")]
+use crate::features::x86_64::Feature as X;
+use crate::features::{self, Dispatcher, Features};
 use crate::hash::{BitHash, Hash};
-use crate::probe::Probe;
 use crate::{BlockType, Error};
 
 /// The members of the family, as markers the engines are generic
@@ -216,78 +220,97 @@ pub(crate) mod variant {
     }
 }
 
-/// The implementation the processor gets, chosen once per family.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Choice {
+/// Which compression function a SHA-2 hash is running on.
+///
+/// Which can be chosen is what [`Sha256::profiles`] and
+/// [`Sha512::profiles`] publish, by needs rather than by name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Kernel {
+    /// The SHA extensions on x86-64.
+    #[cfg(target_arch = "x86_64")]
     ShaNi,
+    /// The ARMv8 cryptography extension.
+    #[cfg(target_arch = "aarch64")]
     Armv8,
+    /// RISC-V vector SHA-2: Zvknha, or Zvknhb for SHA-512.
+    #[cfg(target_arch = "riscv64")]
     Zvknh,
+    /// RISC-V scalar SHA-2, Zknh.
+    #[cfg(target_arch = "riscv64")]
     Zknh,
+    /// Plain Rust, on any processor.
     Portable,
 }
 
-/// Candidates in order of preference: hardware first, then the
-/// portable code, which is always last so the search always ends.
-const CHOICES: [Choice; 5] = [
-    Choice::ShaNi,
-    Choice::Armv8,
-    Choice::Zvknh,
-    Choice::Zknh,
-    Choice::Portable,
+/// What the SHA extensions' loops need: the rounds are the SHA
+/// instructions, and around them the loop shuffles bytes (SSSE3) and
+/// inserts and blends words (SSE4.1). Every processor with the SHA
+/// instructions has both, but a hypervisor can hide one and not the
+/// other, and asking costs nothing.
+#[cfg(target_arch = "x86_64")]
+pub(crate) const SHA_NI: Features =
+    features::x86(&[X::Sha, X::Ssse3, X::Sse41]);
+/// The ARMv8 SHA-256 instructions.
+#[cfg(target_arch = "aarch64")]
+pub(crate) const ARMV8_256: Features = features::arm(&[A::Sha2]);
+/// The ARMv8 SHA-512 instructions.
+#[cfg(target_arch = "aarch64")]
+pub(crate) const ARMV8_512: Features = features::arm(&[A::Sha512]);
+/// Vector SHA-256: the vector unit, the SHA-256 instructions, and the
+/// byte reverse from Zvkb, which Zvbb also brings.
+#[cfg(target_arch = "riscv64")]
+pub(crate) const ZVKNH_256: Features =
+    features::riscv(&[R::V, R::Zvknha, R::Zvkb]);
+/// Vector SHA-512: only Zvknhb has it.
+#[cfg(target_arch = "riscv64")]
+pub(crate) const ZVKNH_512: Features =
+    features::riscv(&[R::V, R::Zvknhb, R::Zvkb]);
+/// The scalar sigma instructions.
+#[cfg(target_arch = "riscv64")]
+pub(crate) const ZKNH: Features = features::riscv(&[R::Zknh]);
+
+/// The kernels for SHA-224 and SHA-256, best first, each with what it
+/// needs; the first whose needs are in force is the one a new hash
+/// gets. The portable code needs nothing, so the search always ends.
+pub(crate) const KERNELS32: &[(Kernel, Features)] = &[
+    #[cfg(target_arch = "x86_64")]
+    (Kernel::ShaNi, SHA_NI),
+    #[cfg(target_arch = "aarch64")]
+    (Kernel::Armv8, ARMV8_256),
+    #[cfg(target_arch = "riscv64")]
+    (Kernel::Zvknh, ZVKNH_256),
+    #[cfg(target_arch = "riscv64")]
+    (Kernel::Zknh, ZKNH),
+    (Kernel::Portable, Features::new()),
 ];
 
-/// One probe per family, since the processor may have an
-/// instruction for one and not the other; see [`crate::probe`].
-static PROBED32: Probe = Probe::new();
-static PROBED64: Probe = Probe::new();
+/// The kernels for SHA-384, SHA-512 and the truncated SHA-512s. A
+/// processor may have the SHA-256 instructions and not these, which
+/// is why the two families are listed apart.
+pub(crate) const KERNELS64: &[(Kernel, Features)] = &[
+    #[cfg(target_arch = "aarch64")]
+    (Kernel::Armv8, ARMV8_512),
+    #[cfg(target_arch = "riscv64")]
+    (Kernel::Zvknh, ZVKNH_512),
+    #[cfg(target_arch = "riscv64")]
+    (Kernel::Zknh, ZKNH),
+    (Kernel::Portable, Features::new()),
+];
 
-/// Asks the processor once; afterwards a single atomic load.
-fn probe(probed: &Probe, supported: fn(Choice) -> bool) -> Choice {
-    probed
-        .first(&CHOICES, supported)
-        .unwrap_or(Choice::Portable)
-}
+/// What the two lists publish: their needs, without the names.
+const PROFILES32: [Features; KERNELS32.len()] =
+    features::profiles_of(KERNELS32);
+const PROFILES64: [Features; KERNELS64.len()] =
+    features::profiles_of(KERNELS64);
 
-/// Whether the processor can run `choice`'s SHA-256.
-fn supported32(choice: Choice) -> bool {
-    match choice {
-        #[cfg(target_arch = "x86_64")]
-        Choice::ShaNi => <x86_64::ShaNi as Compress32>::supported(),
-        #[cfg(target_arch = "aarch64")]
-        Choice::Armv8 => <aarch64::Armv8 as Compress32>::supported(),
-        #[cfg(target_arch = "riscv64")]
-        Choice::Zvknh => <riscv64::Zvknh as Compress32>::supported(),
-        #[cfg(target_arch = "riscv64")]
-        Choice::Zknh => <riscv64::Zknh as Compress32>::supported(),
-        Choice::Portable => <portable::Compress as Compress32>::supported(),
-        #[allow(unreachable_patterns)]
-        _ => false,
-    }
-}
-
-/// Whether the processor can run `choice`'s SHA-512.
-fn supported64(choice: Choice) -> bool {
-    match choice {
-        #[cfg(target_arch = "aarch64")]
-        Choice::Armv8 => <aarch64::Armv8 as Compress64>::supported(),
-        #[cfg(target_arch = "riscv64")]
-        Choice::Zvknh => <riscv64::Zvknh as Compress64>::supported(),
-        #[cfg(target_arch = "riscv64")]
-        Choice::Zknh => <riscv64::Zknh as Compress64>::supported(),
-        Choice::Portable => <portable::Compress as Compress64>::supported(),
-        #[allow(unreachable_patterns)]
-        _ => false,
-    }
-}
-
-/// Defines a family's dispatching type: an enum of the engines the
+/// Defines a family's dispatching type: an enum of the kernels the
 /// architecture has, chosen at construction, and each method fanned
 /// over them with one predictable branch.
 macro_rules! automatic {
     (
         $(#[$doc:meta])*
-        $name:ident, $inner:ident, $engine:ident, $compress:ident,
-        $variant:ident, $probed:ident, $supported:ident, $block:literal,
+        $name:ident, $inner:ident, $engine:ident, $compress:path,
+        $variant:ident, $kernels:ident, $profiles:ident, $block:literal,
         [$( ($arch:literal, $choice:ident, $path:path) ),*]
     ) => {
         $(#[$doc])*
@@ -305,19 +328,18 @@ macro_rules! automatic {
 
         impl<V: $variant> $name<V> {
             /// Starts a hash with the best implementation the
-            /// processor supports.
-            ///
-            /// The processor is probed the first time; every later
-            /// call reads the cached answer.
+            /// features in force allow.
             pub fn new() -> Self {
-                let inner = match probe(&$probed, $supported) {
+                let inner = match features::select($kernels) {
                     $(
                         #[cfg(target_arch = $arch)]
-                        Choice::$choice => {
+                        Some(Kernel::$choice) => {
                             match <$path as $compress>::probe() {
                                 Some(c) => $inner::$choice($engine::with(c)),
-                                // The probe chose it, so this is not
-                                // taken; portable is right if it were.
+                                // The list chose it, so this is not
+                                // taken unless the features changed
+                                // between the two reads; portable is
+                                // right if they did.
                                 None => $inner::Portable($engine::with(
                                     portable::Compress,
                                 )),
@@ -327,6 +349,24 @@ macro_rules! automatic {
                     _ => $inner::Portable($engine::with(portable::Compress)),
                 };
                 $name(inner)
+            }
+
+            /// Which kernel this hash is running on.
+            #[cfg(test)]
+            pub(crate) fn kernel(&self) -> Kernel {
+                match &self.0 {
+                    $(
+                        #[cfg(target_arch = $arch)]
+                        $inner::$choice(_) => Kernel::$choice,
+                    )*
+                    $inner::Portable(_) => Kernel::Portable,
+                }
+            }
+
+            /// The needs of each kernel this architecture has, best
+            /// first.
+            pub(crate) fn profiles() -> &'static [Features] {
+                &$profiles
             }
         }
 
@@ -414,10 +454,10 @@ macro_rules! automatic {
 }
 
 automatic!(
-    /// SHA-224 or SHA-256 using the best implementation the processor
-    /// supports; see [`Sha256`].
-    Auto32, Inner32, Engine32, Compress32, Variant32, PROBED32,
-    supported32, 64,
+    /// SHA-224 or SHA-256 using the best implementation the features
+    /// in force allow; see [`Sha256`].
+    Auto32, Inner32, Engine32, engine::Compress32, Variant32, KERNELS32,
+    PROFILES32, 64,
     [
         ("x86_64", ShaNi, x86_64::ShaNi),
         ("aarch64", Armv8, aarch64::Armv8),
@@ -427,10 +467,10 @@ automatic!(
 );
 
 automatic!(
-    /// SHA-384 or SHA-512 using the best implementation the processor
-    /// supports; see [`Sha512`].
-    Auto64, Inner64, Engine64, Compress64, Variant64, PROBED64,
-    supported64, 128,
+    /// SHA-384 or SHA-512 using the best implementation the features
+    /// in force allow; see [`Sha512`].
+    Auto64, Inner64, Engine64, engine::Compress64, Variant64, KERNELS64,
+    PROFILES64, 128,
     [
         ("aarch64", Armv8, aarch64::Armv8),
         ("riscv64", Zvknh, riscv64::Zvknh),
@@ -440,6 +480,8 @@ automatic!(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::vec::Vec;
+
     use super::*;
     use zeroize::ZeroizeOnDrop;
 
@@ -786,24 +828,31 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn picks_best_supported() {
-        let choice32 = probe(&PROBED32, supported32);
-        let choice64 = probe(&PROBED64, supported64);
-        for c in CHOICES {
-            if supported32(c) {
-                assert_eq!(choice32, c);
-                break;
-            }
+    fn picks_the_first_kernel_whose_needs_are_met() {
+        for (kernels, profiles) in [
+            (KERNELS32, Sha256::profiles()),
+            (KERNELS64, Sha512::profiles()),
+        ] {
+            assert!(features::rows_are_reachable(kernels));
+            assert_eq!(
+                kernels.last(),
+                Some(&(Kernel::Portable, Features::new()))
+            );
+            let needs: Vec<Features> = kernels.iter().map(|k| k.1).collect();
+            assert_eq!(profiles, needs);
+            let in_force = features::get();
+            let expected = kernels
+                .iter()
+                .find(|(_, needs)| needs.is_subset(in_force))
+                .map(|(e, _)| *e);
+            assert_eq!(features::select(kernels), expected);
         }
-        for c in CHOICES {
-            if supported64(c) {
-                assert_eq!(choice64, c);
-                break;
-            }
-        }
-        // Probing again gives the same answer from the cache.
-        assert_eq!(probe(&PROBED32, supported32), choice32);
-        assert_eq!(probe(&PROBED64, supported64), choice64);
+        let sha256 = Auto32::<variant::Sha256>::new();
+        assert_eq!(Some(sha256.kernel()), features::select(KERNELS32));
+        let sha512 = Auto64::<variant::Sha512>::new();
+        assert_eq!(Some(sha512.kernel()), features::select(KERNELS64));
+        assert_eq!(Sha224::profiles(), Sha256::profiles());
+        assert_eq!(Sha384::profiles(), Sha512_256::profiles());
     }
 
     #[test]
@@ -839,12 +888,23 @@ macro_rules! digest {
 
         impl $name {
             /// Starts a hash with the best implementation the
-            /// processor supports.
-            ///
-            /// The processor is probed the first time; every later
-            /// call reads the cached answer.
+            /// features in force allow; see [`crate::features`].
             pub fn new() -> Self {
                 $name($auto::new())
+            }
+
+            /// The feature profiles this hash tells apart, best
+            /// first; see [`Dispatcher`].
+            pub fn profiles() -> &'static [Features] {
+                $auto::<variant::$variant>::profiles()
+            }
+        }
+
+        impl features::sealed::Sealed for $name {}
+
+        impl Dispatcher for $name {
+            fn profiles() -> &'static [Features] {
+                $name::profiles()
             }
         }
 

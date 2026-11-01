@@ -38,9 +38,8 @@
 #![allow(unsafe_code)]
 
 use crate::cipher::BlockCipher;
-use crate::cipher::aes::x86_64::{Keys, has_aesni, keys};
+use crate::cipher::aes::x86_64::{Keys, has_aesni_avx, keys};
 use crate::implementation::Implementation;
-use crate::probe::Probe;
 
 /// The block the loop works in.
 const BLOCK: usize = 16;
@@ -136,21 +135,7 @@ impl<C: BlockCipher> Engine<C> {
 /// and AVX with the operating system saving its state (CPUID leaf 1,
 /// ECX bits 27 and 28, then XCR0 bits 1 and 2).
 fn supported() -> bool {
-    has_aesni() && PROBED.yes(ask_avx)
-}
-
-/// Asked once; see [`crate::probe`].
-static PROBED: Probe = Probe::new();
-
-fn ask_avx() -> bool {
-    use core::arch::x86_64::{__cpuid, _xgetbv};
-    let wanted = (1 << 27) | (1 << 28);
-    if __cpuid(1).ecx & wanted != wanted {
-        return false;
-    }
-    // SAFETY: OSXSAVE was just confirmed, so XGETBV is available.
-    let xcr0 = unsafe { _xgetbv(0) };
-    xcr0 & 0b110 == 0b110
+    has_aesni_avx()
 }
 
 /// The loop, written once for both directions. `$plain` names the

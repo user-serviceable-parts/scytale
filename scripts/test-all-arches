@@ -44,8 +44,8 @@ max,vlen=512
 # could only print what the probes found; with it the test holds them
 # to it. A QEMU_CPU given by hand is a different processor, so it
 # gets no list.
-RISCV_FEATURES="v zbb zbkb zkne zknd zknh zvkned zvknha zvknhb zvbb \
-zvkb zvkg"
+RISCV_FEATURES="v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb \
+zvbb zvbc zvkb zvkg"
 
 # This runs from a checkout, so the vectors are there, and a suite
 # that cannot find them is to fail rather than skip.
@@ -65,7 +65,9 @@ run_target() {
     echo "==> $target"
     if [ "$target" = "$host" ]; then
         cargo test --workspace -- --include-ignored \
-            --skip bench::speed
+            --skip bench::speed --skip features::tests::alone
+        cargo test -p scytale --lib features::tests::alone -- \
+            --ignored --test-threads=1
         return
     fi
     if ! command -v cross >/dev/null 2>&1; then
@@ -90,7 +92,10 @@ run_target() {
         export SCYTALE_CPU_FEATURES="$RISCV_FEATURES"
     fi
     cross test --workspace --target "$target" -- \
-        --include-ignored --skip bench::speed --skip sha_ldt
+        --include-ignored --skip bench::speed --skip sha_ldt \
+        --skip features::tests::alone
+    cross test -p scytale --lib --target "$target" \
+        features::tests::alone -- --ignored --test-threads=1
     if [ "$target" = riscv64gc-unknown-linux-gnu ] \
         && [ -z "$QEMU_SWEEP" ]; then
         for cpu in $RISCV_CONFIGS; do
