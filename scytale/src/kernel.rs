@@ -66,25 +66,72 @@ pub(crate) fn rows_for<T>(rows: &'static [T], readable: bool) -> &'static [T] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Key;
+    use crate::aead::{Ccm, Gcm, GcmSiv, ccm, gcm, gcm_siv};
+    use crate::cipher::aes::Aes128;
+    use crate::cipher::mode::{Cbc, Ctr, Xts, cbc, ctr, xts};
     use crate::features::{self, Features};
 
-    /// Every mode's list ends with the portable kernel, which needs
-    /// nothing, so there is always one to take; and no row's needs
-    /// include a row above it, so each can be selected on its own.
+    /// Every mode dispatches as the primitives do: the list ends in
+    /// the portable kernel, each row can be chosen, the profiles are
+    /// the rows' needs, and a new value takes the first row the set
+    /// in force meets. Over AES, whose schedule the instructions can
+    /// read, so every row is in play.
     #[test]
-    fn every_list_ends_in_the_portable_kernel_and_each_row_is_reachable() {
+    fn every_mode_picks_the_first_kernel_whose_needs_are_met() {
+        let key = Key::from([0u8; 16]);
+        let tweak = Key::from([1u8; 16]);
+        let cbc = Cbc::<Aes128>::new(&key);
+        features::dispatches(
+            cbc::KERNELS,
+            Cbc::<Aes128>::profiles(),
+            cbc.kernel(),
+        );
+        let ctr = Ctr::<Aes128>::new(&key);
+        features::dispatches(
+            ctr::KERNELS,
+            Ctr::<Aes128>::profiles(),
+            ctr.kernel(),
+        );
+        let xts = Xts::<Aes128>::try_new(&key, &tweak).expect("distinct");
+        features::dispatches(
+            xts::KERNELS,
+            Xts::<Aes128>::profiles(),
+            xts.kernel(),
+        );
+        let gcm = Gcm::<Aes128>::new(&key);
+        features::dispatches(
+            gcm::KERNELS,
+            Gcm::<Aes128>::profiles(),
+            gcm.kernel(),
+        );
+        let siv = GcmSiv::<Aes128>::new(&key);
+        features::dispatches(
+            gcm_siv::KERNELS,
+            GcmSiv::<Aes128>::profiles(),
+            siv.kernel(),
+        );
+        let ccm = Ccm::<Aes128>::new(&key);
+        features::dispatches(
+            ccm::KERNELS,
+            Ccm::<Aes128>::profiles(),
+            ccm.kernel(),
+        );
+    }
+
+    /// Each list names a kernel once: one that named it twice would
+    /// measure and validate it twice over.
+    #[test]
+    fn every_list_names_each_kernel_once() {
         for list in [
-            crate::cipher::mode::cbc::KERNELS,
-            crate::cipher::mode::ctr::KERNELS,
-            crate::cipher::mode::xts::KERNELS,
-            crate::aead::gcm::KERNELS,
-            crate::aead::gcm_siv::KERNELS,
-            crate::aead::ccm::KERNELS,
+            cbc::KERNELS,
+            ctr::KERNELS,
+            xts::KERNELS,
+            gcm::KERNELS,
+            gcm_siv::KERNELS,
+            ccm::KERNELS,
         ] {
             assert_eq!(list.last(), Some(&(Kernel::Portable, Features::new())));
-            assert!(features::rows_are_reachable(list), "{list:?}");
-            // Named once each: a list that named one twice would
-            // measure and validate it twice over.
             for (i, (one, _)) in list.iter().enumerate() {
                 assert!(
                     !list[i + 1..].iter().any(|(other, _)| other == one),

@@ -79,6 +79,12 @@ scripts/bench                  # measures rather than checks
 scripts/bench-quiet            # settles a core first, as root
 ```
 
+In the library's own test build, `SCYTALE_FEATURES` names the set of
+features in force, so `SCYTALE_FEATURES=none cargo test -p scytale
+--lib` runs the suite with the hardware withheld: the portable kernels
+and every fallback, through the public types. CI does this on every
+host it tests on.
+
 Each crate's README says what it is tested against. The ACVP,
 Wycheproof and HPKE vectors are in `scytale/tests/vectors` and ring's
 suite in `scytale-ring/ring-tests`; neither is in a published crate.

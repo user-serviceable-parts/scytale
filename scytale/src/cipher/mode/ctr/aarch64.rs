@@ -99,6 +99,12 @@ impl<C: BlockCipher> Engine<C> {
         Some(Engine { keys: keys::<C>()? })
     }
 
+    /// Which kernel this engine runs: the one there is.
+    #[cfg(test)]
+    pub(crate) fn kernel(&self) -> Kernel {
+        Kernel::Armv8
+    }
+
     /// Encrypts the counter blocks made from `counter` and XORs them
     /// over `data`, leaving `counter` on the block after the last.
     ///

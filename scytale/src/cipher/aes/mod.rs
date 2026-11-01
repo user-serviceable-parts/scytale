@@ -283,8 +283,8 @@ impl<const K: usize> Aes<K> {
         Aes(inner)
     }
 
-    /// Expands `key` for `kernel` alone, or `None` where this
-    /// processor cannot run it. The vector suites and the cross-checks
+    /// Expands `key` for `kernel` alone, or `None` where the set in
+    /// force does not allow it. The vector suites and the cross-checks
     /// reach each kernel this way, through the same type that
     /// dispatches to it.
     #[cfg(test)]
@@ -561,7 +561,6 @@ width!(
 
 #[cfg(test)]
 mod tests {
-    use std::vec::Vec;
 
     use super::*;
     use crate::cipher::OneBlock;
@@ -615,20 +614,12 @@ mod tests {
 
     #[test]
     fn picks_the_first_kernel_whose_needs_are_met() {
-        assert!(features::rows_are_reachable(KERNELS));
+        let built = Aes::<16>::new(&[0; 16]).kernel();
+        features::dispatches(KERNELS, Aes128::profiles(), built);
+        assert_eq!(Aes256::profiles(), Aes128::profiles());
         assert_eq!(KERNELS.last(), Some(&(Kernel::Bitsliced, Features::new())));
-        let needs: Vec<Features> = KERNELS.iter().map(|k| k.1).collect();
-        assert_eq!(Aes128::profiles(), needs);
-        assert_eq!(Aes256::profiles(), needs);
-        let in_force = features::get();
-        let expected = KERNELS
-            .iter()
-            .find(|(_, needs)| needs.is_subset(in_force))
-            .map(|(e, _)| *e);
-        assert_eq!(features::select(KERNELS), expected);
-        assert_eq!(Some(Aes::<16>::new(&[0; 16]).kernel()), expected);
         // Tables are never detected, so never chosen unasked.
-        assert_ne!(expected, Some(Kernel::Tables));
+        assert_ne!(built, Kernel::Tables);
     }
 
     /// Every kernel this processor can build agrees with the

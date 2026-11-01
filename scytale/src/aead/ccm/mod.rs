@@ -193,14 +193,15 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
         ctr::profiles::<C>()
     }
 
-    /// The mode over the kernel named, or `None` where this processor
-    /// cannot run it or it is not written for this cipher.
+    /// The mode over the kernel named, or `None` where the set in
+    /// force does not meet its needs or it is not written for this
+    /// cipher.
     ///
-    /// For the tests, the vector suites and the benchmark, which run
-    /// every kernel rather than only the one [`new`](Self::new) would
-    /// take. The kernel is counter mode's, which settles that the
-    /// processor has it; the MAC runs the chaining loop of that name,
-    /// or the portable one where CBC has none.
+    /// For the tests and the vector suites, which run every kernel
+    /// rather than only the one [`new`](Self::new) would take. The
+    /// kernel is counter mode's, whose constructor settles that the
+    /// set in force allows it; the MAC runs the chaining loop of that
+    /// name, or the portable one where CBC has none.
     #[cfg(test)]
     pub(crate) fn with_kernel(key: &C::Key, kernel: Kernel) -> Option<Self> {
         Some(Ccm {
@@ -212,6 +213,13 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
             #[cfg(target_arch = "x86_64")]
             native: x86_64::Engine::of(kernel),
         })
+    }
+
+    /// Which kernel this mode was built with: counter mode's, which
+    /// the MAC and the interleaved loop follow.
+    #[cfg(test)]
+    pub(crate) fn kernel(&self) -> Kernel {
+        self.ctr.kernel()
     }
 
     /// Encrypts `data` in place and writes its tag.

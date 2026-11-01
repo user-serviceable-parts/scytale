@@ -93,6 +93,12 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
         })
     }
 
+    /// Which kernel this engine runs: the one there is.
+    #[cfg(test)]
+    pub(crate) fn kernel(&self) -> Kernel {
+        Kernel::Armv8
+    }
+
     /// Runs `data`, a whole number of blocks, from tweak `t`, leaving
     /// `t` on the tweak after the last block.
     pub(crate) fn bulk(

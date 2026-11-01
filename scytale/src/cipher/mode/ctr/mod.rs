@@ -207,6 +207,20 @@ impl<C: BlockCipher> Engine<C> {
         }
     }
 
+    /// Which kernel this engine runs.
+    #[cfg(test)]
+    fn kernel(&self) -> Kernel {
+        match self {
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
+            Engine::Native(engine) => engine.kernel(),
+            Engine::Generic(_) => Kernel::Portable,
+        }
+    }
+
     /// Encrypts the counter blocks made from `counter` and XORs them
     /// over `data`, which is a whole number of blocks, leaving
     /// `counter` on the block after the last.
@@ -291,13 +305,14 @@ where
         profiles::<C>()
     }
 
-    /// The mode over the kernel named, or `None` where this processor
-    /// cannot run it or it is not written for this cipher.
+    /// The mode over the kernel named, or `None` where the set in
+    /// force does not meet its needs or it is not written for this
+    /// cipher.
     ///
     /// For the tests and the vector suites, which run every kernel
-    /// rather than only the one [`new`](Self::new) would take. It
-    /// asks the processor, not the set in force, so a test may build
-    /// any kernel the machine has without editing the set.
+    /// rather than only the one [`new`](Self::new) would take. The
+    /// virtual features are granted, so the table-driven cipher is to
+    /// be had without editing the set; see [`features::available`].
     #[cfg(test)]
     pub(crate) fn with_kernel(key: &C::Key, kernel: Kernel) -> Option<Self> {
         features::available(kernels::<C>(), kernel).then_some(())?;
@@ -305,6 +320,12 @@ where
             cipher: C::new(key),
             engine: Engine::with(kernel)?,
         })
+    }
+
+    /// Which kernel this mode was built with.
+    #[cfg(test)]
+    pub(crate) fn kernel(&self) -> Kernel {
+        self.engine.kernel()
     }
 
     /// Encrypts `data` in place, starting from `counter`. Any length
