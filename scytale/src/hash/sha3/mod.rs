@@ -173,6 +173,12 @@ pub(crate) enum Kernel {
     /// The ARMv8.2 SHA-3 instructions.
     #[cfg(target_arch = "aarch64")]
     Armv8,
+    /// The portable permutation compiled for BMI1 and BMI2.
+    #[cfg(target_arch = "x86_64")]
+    Bmi,
+    /// The portable permutation compiled for Zbb.
+    #[cfg(target_arch = "riscv64")]
+    Zbb,
     /// Plain Rust, on any processor.
     Portable,
 }
@@ -186,6 +192,10 @@ pub(crate) const ARMV8: Features = features::arm(&[A::Sha3]);
 pub(crate) const KERNELS: &[(Kernel, Features)] = &[
     #[cfg(target_arch = "aarch64")]
     (Kernel::Armv8, ARMV8),
+    #[cfg(target_arch = "x86_64")]
+    (Kernel::Bmi, x86_64::BMI),
+    #[cfg(target_arch = "riscv64")]
+    (Kernel::Zbb, riscv64::ZBB),
     (Kernel::Portable, Features::new()),
 ];
 
@@ -198,6 +208,10 @@ macro_rules! dispatch {
         match $value {
             #[cfg(target_arch = "aarch64")]
             $inner::Armv8($x) => $body,
+            #[cfg(target_arch = "x86_64")]
+            $inner::Bmi($x) => $body,
+            #[cfg(target_arch = "riscv64")]
+            $inner::Zbb($x) => $body,
             $inner::Portable($x) => $body,
         }
     };
@@ -212,6 +226,10 @@ pub(crate) struct Auto<V: engine::Variant>(Inner<V>);
 enum Inner<V: engine::Variant> {
     #[cfg(target_arch = "aarch64")]
     Armv8(Sponge<aarch64::Armv8, V>),
+    #[cfg(target_arch = "x86_64")]
+    Bmi(Sponge<x86_64::Bmi, V>),
+    #[cfg(target_arch = "riscv64")]
+    Zbb(Sponge<riscv64::Zbb, V>),
     Portable(Sponge<portable::Keccak, V>),
 }
 
@@ -219,18 +237,35 @@ impl<V: engine::Variant> Auto<V> {
     /// Starts a function with the best implementation the features
     /// in force allow.
     pub fn new() -> Self {
-        let inner = match features::select(KERNELS) {
-            #[cfg(target_arch = "aarch64")]
-            Some(Kernel::Armv8) => match engine::Permutation::probe() {
-                Some(p) => Inner::Armv8(Sponge::with(p)),
-                // The list chose it, so this is not taken unless
-                // the features changed between the two reads;
-                // portable is right if they did.
-                None => Inner::Portable(Sponge::with(portable::Keccak)),
-            },
-            _ => Inner::Portable(Sponge::with(portable::Keccak)),
-        };
+        // The list chose the kernel, so its probe answers unless the
+        // features changed between the two reads; portable is right
+        // if they did.
+        let inner = features::select(KERNELS)
+            .and_then(Self::with)
+            .unwrap_or(Inner::Portable(Sponge::with(portable::Keccak)));
         Auto(inner)
+    }
+
+    /// The sponge on `kernel`, or `None` where its probe says no.
+    fn with(kernel: Kernel) -> Option<Inner<V>> {
+        Some(match kernel {
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Armv8 => {
+                let p = <aarch64::Armv8 as engine::Permutation>::probe()?;
+                Inner::Armv8(Sponge::with(p))
+            }
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Bmi => {
+                let p = <x86_64::Bmi as engine::Permutation>::probe()?;
+                Inner::Bmi(Sponge::with(p))
+            }
+            #[cfg(target_arch = "riscv64")]
+            Kernel::Zbb => {
+                let p = <riscv64::Zbb as engine::Permutation>::probe()?;
+                Inner::Zbb(Sponge::with(p))
+            }
+            Kernel::Portable => Inner::Portable(Sponge::with(portable::Keccak)),
+        })
     }
 
     /// Which kernel this function is running on.
@@ -239,6 +274,10 @@ impl<V: engine::Variant> Auto<V> {
         match &self.0 {
             #[cfg(target_arch = "aarch64")]
             Inner::Armv8(_) => Kernel::Armv8,
+            #[cfg(target_arch = "x86_64")]
+            Inner::Bmi(_) => Kernel::Bmi,
+            #[cfg(target_arch = "riscv64")]
+            Inner::Zbb(_) => Kernel::Zbb,
             Inner::Portable(_) => Kernel::Portable,
         }
     }
@@ -258,15 +297,7 @@ impl<V: engine::Variant> Auto<V> {
         if !features::available(KERNELS, kernel) {
             return None;
         }
-        let inner = match kernel {
-            #[cfg(target_arch = "aarch64")]
-            Kernel::Armv8 => {
-                let p = <aarch64::Armv8 as engine::Permutation>::probe()?;
-                Inner::Armv8(Sponge::with(p))
-            }
-            Kernel::Portable => Inner::Portable(Sponge::with(portable::Keccak)),
-        };
-        Some(Auto(inner))
+        Self::with(kernel).map(Auto)
     }
 }
 
@@ -325,7 +356,27 @@ pub(crate) struct AutoReader<V: XofVariant>(InnerReader<V>);
 enum InnerReader<V: XofVariant> {
     #[cfg(target_arch = "aarch64")]
     Armv8(Reader<aarch64::Armv8, V>),
+    #[cfg(target_arch = "x86_64")]
+    Bmi(Reader<x86_64::Bmi, V>),
+    #[cfg(target_arch = "riscv64")]
+    Zbb(Reader<riscv64::Zbb, V>),
     Portable(Reader<portable::Keccak, V>),
+}
+
+/// Ends the message of whichever sponge `$value` holds and wraps the
+/// reader in the same arm.
+macro_rules! finalize {
+    ($value:expr, $s:ident => $body:expr) => {
+        match $value {
+            #[cfg(target_arch = "aarch64")]
+            Inner::Armv8($s) => InnerReader::Armv8($body),
+            #[cfg(target_arch = "x86_64")]
+            Inner::Bmi($s) => InnerReader::Bmi($body),
+            #[cfg(target_arch = "riscv64")]
+            Inner::Zbb($s) => InnerReader::Zbb($body),
+            Inner::Portable($s) => InnerReader::Portable($body),
+        }
+    };
 }
 
 impl<V: XofVariant> XofReader for AutoReader<V> {
@@ -347,11 +398,7 @@ impl<V: XofVariant> Xof for Auto<V> {
     }
 
     fn finalize_xof(&mut self) -> Self::Reader {
-        AutoReader(match &mut self.0 {
-            #[cfg(target_arch = "aarch64")]
-            Inner::Armv8(s) => InnerReader::Armv8(s.finalize_xof()),
-            Inner::Portable(s) => InnerReader::Portable(s.finalize_xof()),
-        })
+        AutoReader(finalize!(&mut self.0, s => s.finalize_xof()))
     }
 }
 
@@ -375,15 +422,7 @@ pub(crate) trait SuffixXof: BitXof + BlockType + Clone {
 
 impl<V: XofVariant> SuffixXof for Auto<V> {
     fn finalize_suffix_xof(&mut self, suffix: u8) -> Self::Reader {
-        AutoReader(match &mut self.0 {
-            #[cfg(target_arch = "aarch64")]
-            Inner::Armv8(s) => {
-                InnerReader::Armv8(s.finalize_suffix_xof(suffix))
-            }
-            Inner::Portable(s) => {
-                InnerReader::Portable(s.finalize_suffix_xof(suffix))
-            }
-        })
+        AutoReader(finalize!(&mut self.0, s => s.finalize_suffix_xof(suffix)))
     }
 
     fn finalize_bits_suffix_xof(
@@ -392,15 +431,9 @@ impl<V: XofVariant> SuffixXof for Auto<V> {
         last: u8,
         bits: u32,
     ) -> Result<Self::Reader, Error> {
-        Ok(AutoReader(match &mut self.0 {
-            #[cfg(target_arch = "aarch64")]
-            Inner::Armv8(s) => InnerReader::Armv8(
-                s.finalize_bits_suffix_xof(suffix, last, bits)?,
-            ),
-            Inner::Portable(s) => InnerReader::Portable(
-                s.finalize_bits_suffix_xof(suffix, last, bits)?,
-            ),
-        }))
+        Ok(AutoReader(finalize!(&mut self.0, s => {
+            s.finalize_bits_suffix_xof(suffix, last, bits)?
+        })))
     }
 }
 
@@ -425,15 +458,9 @@ impl<V: XofVariant> BitXof for Auto<V> {
         last: u8,
         bits: u32,
     ) -> Result<Self::Reader, Error> {
-        Ok(AutoReader(match &mut self.0 {
-            #[cfg(target_arch = "aarch64")]
-            Inner::Armv8(s) => {
-                InnerReader::Armv8(s.finalize_bits_xof(last, bits)?)
-            }
-            Inner::Portable(s) => {
-                InnerReader::Portable(s.finalize_bits_xof(last, bits)?)
-            }
-        }))
+        Ok(AutoReader(finalize!(&mut self.0, s => {
+            s.finalize_bits_xof(last, bits)?
+        })))
     }
 }
 

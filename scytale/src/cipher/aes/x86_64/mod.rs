@@ -26,7 +26,7 @@ use crate::features::{self, Features, x86_64::Feature as F};
 /// takes the portable path, rather than every call carrying a branch
 /// for hardware that does not exist.
 pub(crate) fn has_aesni() -> bool {
-    features::has(AESNI)
+    features::allows(super::KERNELS, super::Kernel::AesNi)
 }
 
 /// What [`has_aesni`] asks for.
@@ -49,7 +49,7 @@ pub(crate) const AESNI_AVX: Features =
 /// registers: VAES (leaf 7, ECX bit 9), AVX2 (leaf 7, EBX bit 5), and
 /// the OS saving the upper register halves (XCR0 bits 1 and 2).
 pub(crate) fn has_vaes256() -> bool {
-    features::has(VAES256)
+    features::allows(super::KERNELS, super::Kernel::Vaes)
 }
 
 /// What [`has_vaes256`] asks for. The wider loops finish with the

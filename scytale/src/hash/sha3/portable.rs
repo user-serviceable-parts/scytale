@@ -123,14 +123,6 @@ impl Permutation for Keccak {
     }
 
     fn permute(self, state: &mut [u64; LANES]) {
-        #[cfg(target_arch = "x86_64")]
-        if super::x86_64::permute(state) {
-            return;
-        }
-        #[cfg(target_arch = "riscv64")]
-        if super::riscv64::permute(state) {
-            return;
-        }
         keccak_f1600(state)
     }
 }

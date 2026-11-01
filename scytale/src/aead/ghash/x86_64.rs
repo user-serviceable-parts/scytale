@@ -128,7 +128,7 @@ impl Multiply {
 /// (bit 9). Every processor with the first has the second, but the
 /// group multiply below uses both, so both are checked.
 pub(super) fn has_carryless_multiply() -> bool {
-    features::has(PCLMUL)
+    features::allows(super::KERNELS, super::Kernel::Pclmul)
 }
 
 /// What [`has_carryless_multiply`] asks for.

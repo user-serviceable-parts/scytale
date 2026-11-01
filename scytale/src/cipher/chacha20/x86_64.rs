@@ -38,7 +38,7 @@ pub type ChaCha20 = Cipher<Avx2>;
 /// instructions (leaf 7, EBX bit 5) and the OS saving the upper
 /// register halves (XCR0 bits 1 and 2), as for VAES.
 pub(crate) fn has_avx2() -> bool {
-    features::has(super::AVX2)
+    features::allows(super::KERNELS, super::Kernel::Avx2)
 }
 
 /// The keystream generator with AVX2.

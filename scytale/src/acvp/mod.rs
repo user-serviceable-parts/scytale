@@ -1128,7 +1128,14 @@ mod inventory {
         /// What the job said the processor has, if it said.
         declared: Option<Features>,
         wrong: RefCell<Vec<String>>,
+        /// Whether every row must be available: the `-cpu max` jobs
+        /// set [`EXPECT_ALL`], so a kernel no machine in CI can build
+        /// fails there instead of skipping forever.
+        expect_all: bool,
     }
+
+    /// Set, to anything, where every row is expected to run.
+    const EXPECT_ALL: &str = "SCYTALE_EXPECT_ALL";
 
     impl Audit {
         fn new() -> Self {
@@ -1140,6 +1147,8 @@ mod inventory {
             let audit = Audit {
                 declared,
                 wrong: RefCell::new(Vec::new()),
+                expect_all: std::env::var(EXPECT_ALL)
+                    .is_ok_and(|v| !v.is_empty()),
             };
             let Some(declared) = audit.declared else {
                 return audit;
@@ -1189,6 +1198,12 @@ mod inventory {
         ) {
             let state = if available { "run" } else { "not available" };
             println!("  {name:<32} {state}");
+            if self.expect_all && !available {
+                self.wrong.borrow_mut().push(format!(
+                    "{suite} {name}: not available, and {EXPECT_ALL} says \
+                     every kernel must be"
+                ));
+            }
             let expected = self.expects(requires);
             if expected != available {
                 let needs: Vec<String> =
@@ -1304,21 +1319,37 @@ mod inventory {
             chacha20::ChaCha20::with_kernel(&key, k).is_some()
         });
 
-        // The arithmetic behind the curves, RSA and the MACs, and the
-        // POLYVAL loop GCM-SIV hashes with: neither is a row in any
-        // list, so this is the one place that holds its probe to the
-        // processor.
+        // The kernels no dispatching type stands over: a hash with
+        // no kernel in the value, the multiply inside GHASH, and the
+        // arithmetic behind the curves, RSA and Poly1305. Each is a
+        // list all the same, and what its code asks of the set in
+        // force is what is reported here.
+        use crate::aead::ghash;
+        use crate::hash::sha1;
+        kernels(&audit, "SHA-1", sha1::KERNELS, &|k| {
+            features::allows(sha1::KERNELS, k)
+        });
+        kernels(&audit, "GHASH", ghash::KERNELS, &|k| {
+            features::allows(ghash::KERNELS, k)
+        });
         #[cfg(target_arch = "x86_64")]
         {
-            println!("Arithmetic");
+            use crate::mac::poly1305;
+            use crate::math::{ec, limbs};
+            kernels(&audit, "Limb arithmetic", limbs::x86_64::KERNELS, &|k| {
+                features::allows(limbs::x86_64::KERNELS, k)
+            });
+            kernels(&audit, "P-256 point table", ec::x86_64::KERNELS, &|k| {
+                features::allows(ec::x86_64::KERNELS, k)
+            });
+            kernels(&audit, "Poly1305", poly1305::x86_64::KERNELS, &|k| {
+                features::allows(poly1305::x86_64::KERNELS, k)
+            });
+            // The POLYVAL loop GCM-SIV hashes with borrows GCM's
+            // narrower row rather than having one of its own.
+            println!("POLYVAL");
             audit.row(
-                "Arithmetic",
-                "montgomery::x86_64::Adx",
-                crate::math::montgomery::x86_64::probe().is_some(),
-                &[crate::math::montgomery::x86_64::ADX],
-            );
-            audit.row(
-                "Arithmetic",
+                "POLYVAL",
                 "gcm::x86_64::Polyval",
                 crate::aead::gcm::x86_64::Polyval::new(&[0; 16]).is_some(),
                 &[crate::aead::gcm::x86_64::NARROW],

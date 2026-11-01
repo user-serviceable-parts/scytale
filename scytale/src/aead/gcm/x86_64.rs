@@ -575,10 +575,10 @@ impl Polyval {
     /// The hash under converted key `key`, or `None` where the
     /// features in force have not the instructions for it.
     ///
-    /// Not chosen from a row: the hash stands alone, with no list to
-    /// have settled the instructions, so it asks for them here.
+    /// Not chosen from a row of its own: the hash stands alone, so it
+    /// asks for the row whose loop it borrows, GCM's narrower one.
     pub(crate) fn new(key: &[u8; BLOCK]) -> Option<Self> {
-        features::has(NARROW).then_some(())?;
+        features::allows(super::KERNELS, Kernel::Aesni).then_some(())?;
         Some(Polyval {
             subkey: Subkey::of(key, Kernel::Aesni)?,
             digest: Digest::new(false),

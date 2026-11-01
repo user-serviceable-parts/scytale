@@ -39,7 +39,8 @@ pub type Sha512 = Engine64<Zknh, variant::Sha512>;
 
 /// Whether the Zknh instructions are available.
 pub(crate) fn has_zknh() -> bool {
-    features::has(super::super::ZKNH)
+    // The same row in both lists; either list answers.
+    features::allows(super::super::KERNELS32, super::super::Kernel::Zknh)
 }
 
 /// The sigma functions as Zknh instructions.

@@ -28,6 +28,7 @@
 
 #![allow(unsafe_code)]
 
+use super::{KERNELS, Kernel};
 use crate::features::{self, Features, riscv64::Feature as R};
 
 mod zbc;
@@ -38,50 +39,30 @@ pub(crate) mod zvkg;
 /// leading term, written in GHASH's reversed bit order.
 const POLYNOMIAL: u64 = 0xc200_0000_0000_0000;
 
-/// Which multiply this processor has, named for the extension that
-/// provides it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Choice {
-    /// The whole field multiplication in one instruction.
-    Zvkg,
-    /// A vector carry-less multiply.
-    Zvbc,
-    /// A scalar carry-less multiply.
-    Zbc,
-}
-
 /// The whole field multiplication in one instruction, on registers of
 /// a block or more.
 pub(crate) const ZVKG: Features = features::riscv(&[R::V, R::Zvkg]);
 /// The vector carry-less multiply, with the byte reverse from Zvkb
 /// (which Zvbb includes), on registers of a block or more.
-const ZVBC: Features = features::riscv(&[R::V, R::Zvbc, R::Zvkb]);
+pub(super) const ZVBC: Features = features::riscv(&[R::V, R::Zvbc, R::Zvkb]);
 /// The scalar carry-less multiply, from Zbc.
-const ZBC: Features = features::riscv(&[R::Zbc]);
+pub(super) const ZBC: Features = features::riscv(&[R::Zbc]);
 /// The same instruction, from Zbkc; the scalar cryptography profile
 /// brings this one and not Zbc.
-const ZBKC: Features = features::riscv(&[R::Zbkc]);
+pub(super) const ZBKC: Features = features::riscv(&[R::Zbkc]);
 
-/// Every backend, best first, each with what it needs. One backend
-/// may appear twice, under two sets that each suffice.
-const RANKING: &[(Choice, Features)] = &[
-    (Choice::Zvkg, ZVKG),
-    (Choice::Zvbc, ZVBC),
-    (Choice::Zbc, ZBC),
-    (Choice::Zbc, ZBKC),
-];
-
-/// The best multiply the features in force allow, or none.
-fn choice() -> Option<Choice> {
-    features::select(RANKING)
+/// The best multiply the features in force allow, or none. The rows
+/// are the family's, in [`KERNELS`].
+fn choice() -> Option<Kernel> {
+    features::select(KERNELS)
 }
 
 /// The best multiply the extensions in `ext` offer, on a processor
 /// whose vector registers are `bytes` wide.
 #[cfg(test)]
-fn best_of(ext: u64, bytes: usize) -> Option<Choice> {
+fn best_of(ext: u64, bytes: usize) -> Option<Kernel> {
     let found = crate::arch::riscv64::detected_from(ext, bytes);
-    RANKING
+    KERNELS
         .iter()
         .find(|(_, needs)| needs.is_subset(found))
         .map(|(c, _)| *c)
@@ -93,7 +74,7 @@ fn best_of(ext: u64, bytes: usize) -> Option<Choice> {
 /// on it are safe; which backend answers is carried in the value, so
 /// there is no arm for "none".
 #[derive(Clone, Copy)]
-pub(crate) struct Multiply(Choice);
+pub(crate) struct Multiply(Kernel);
 
 /// The multiply, where the processor has one. Asked once.
 pub(crate) fn probe() -> Option<Multiply> {
@@ -104,18 +85,18 @@ impl Multiply {
     /// How many blocks the group multiply takes at once.
     pub(crate) fn group(self) -> usize {
         match self.0 {
-            Choice::Zvkg => zvkg::GROUP,
-            Choice::Zvbc => zvbc::GROUP,
-            Choice::Zbc => zbc::GROUP,
+            Kernel::Zvkg => zvkg::GROUP,
+            Kernel::Zvbc => zvbc::GROUP,
+            Kernel::Zbc => zbc::GROUP,
         }
     }
 
     /// Prepares the subkey for [`Multiply::multiply`].
     pub(crate) fn prepare(self, h: &[u64; 2]) -> [u64; 2] {
         match self.0 {
-            Choice::Zvkg => zvkg::prepare(h),
-            Choice::Zvbc => zvbc::prepare(h),
-            Choice::Zbc => zbc::prepare(h),
+            Kernel::Zvkg => zvkg::prepare(h),
+            Kernel::Zvbc => zvbc::prepare(h),
+            Kernel::Zbc => zbc::prepare(h),
         }
     }
 
@@ -125,9 +106,9 @@ impl Multiply {
         // instructions of the backend it names.
         unsafe {
             match self.0 {
-                Choice::Zvkg => zvkg::multiply(value, h),
-                Choice::Zvbc => zvbc::multiply(value, h),
-                Choice::Zbc => zbc::multiply(value, h),
+                Kernel::Zvkg => zvkg::multiply(value, h),
+                Kernel::Zvbc => zvbc::multiply(value, h),
+                Kernel::Zbc => zbc::multiply(value, h),
             }
         }
     }
@@ -150,9 +131,9 @@ impl Multiply {
         // SAFETY: as for `multiply`, and the length was just checked.
         unsafe {
             match self.0 {
-                Choice::Zvkg => zvkg::multiply_group(value, powers, blocks),
-                Choice::Zvbc => zvbc::multiply_group(value, powers, blocks),
-                Choice::Zbc => zbc::multiply_group(value, powers, blocks),
+                Kernel::Zvkg => zvkg::multiply_group(value, powers, blocks),
+                Kernel::Zvbc => zvbc::multiply_group(value, powers, blocks),
+                Kernel::Zbc => zbc::multiply_group(value, powers, blocks),
             }
         }
     }
@@ -220,7 +201,7 @@ mod tests {
     /// pick.
     struct Backend {
         name: &'static str,
-        choice: Choice,
+        choice: Kernel,
         group: usize,
         prepare: fn(&[u64; 2]) -> [u64; 2],
         multiply: unsafe fn(&mut [u64; 2], &[u64; 2]),
@@ -230,7 +211,7 @@ mod tests {
     const BACKENDS: [Backend; 3] = [
         Backend {
             name: "zvkg",
-            choice: Choice::Zvkg,
+            choice: Kernel::Zvkg,
             group: zvkg::GROUP,
             prepare: zvkg::prepare,
             multiply: zvkg::multiply,
@@ -238,7 +219,7 @@ mod tests {
         },
         Backend {
             name: "zvbc",
-            choice: Choice::Zvbc,
+            choice: Kernel::Zvbc,
             group: zvbc::GROUP,
             prepare: zvbc::prepare,
             multiply: zvbc::multiply,
@@ -246,7 +227,7 @@ mod tests {
         },
         Backend {
             name: "zbc",
-            choice: Choice::Zbc,
+            choice: Kernel::Zbc,
             group: zbc::GROUP,
             prepare: zbc::prepare,
             multiply: zbc::multiply,
@@ -256,10 +237,8 @@ mod tests {
 
     /// Whether this processor has `choice`, which is what decides
     /// whether a test can run that backend's instructions at all.
-    fn here(choice: Choice) -> bool {
-        RANKING
-            .iter()
-            .any(|&(c, needs)| c == choice && features::has(needs))
+    fn here(choice: Kernel) -> bool {
+        features::allows(KERNELS, choice)
     }
 
     /// The portable multiply is the reference; every backend has to
@@ -339,25 +318,25 @@ mod tests {
 
         // The vector profiles that carry a multiply, and the ones
         // that carry none.
-        assert_eq!(best_of(profile::ZVKNG, 16), Some(Choice::Zvkg));
-        assert_eq!(best_of(profile::ZVKNC, 16), Some(Choice::Zvbc));
+        assert_eq!(best_of(profile::ZVKNG, 16), Some(Kernel::Zvkg));
+        assert_eq!(best_of(profile::ZVKNC, 16), Some(Kernel::Zvbc));
         assert_eq!(best_of(profile::ZVKN, 16), None);
         assert_eq!(best_of(profile::RVA23, 16), None);
 
         // Zkn has no vector unit and Zbkc with it, which is the whole
         // reason the scalar backend exists.
-        assert_eq!(best_of(profile::ZKN, 0), Some(Choice::Zbc));
+        assert_eq!(best_of(profile::ZKN, 0), Some(Kernel::Zbc));
 
         // Zvkg wins wherever it is, whatever else is there.
         assert_eq!(
             best_of(profile::ZVKNG | profile::ZVKNC | profile::ZKN, 16),
-            Some(Choice::Zvkg)
+            Some(Kernel::Zvkg)
         );
         // The scalar multiply is taken over nothing, even beside a
         // vector unit that cannot help.
         assert_eq!(
             best_of(profile::RVA23 | profile::ZKN, 16),
-            Some(Choice::Zbc)
+            Some(Kernel::Zbc)
         );
 
         // Registers too narrow for a 128-bit element group put the

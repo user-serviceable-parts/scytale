@@ -61,7 +61,7 @@ impl<const K: usize> fmt::Debug for Aes<K> {
 
 /// Whether the AES instructions are available.
 pub(crate) fn has_aes() -> bool {
-    features::has(super::super::ARMV8)
+    features::allows(super::super::KERNELS, super::super::Kernel::Armv8)
 }
 
 impl<const K: usize> Aes<K> {

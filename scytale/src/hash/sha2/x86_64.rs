@@ -35,7 +35,7 @@ pub type Sha256 = Engine32<ShaNi, variant::Sha256>;
 /// Every such processor also has the SSSE3 and SSE4.1 shuffles the
 /// code uses.
 pub(crate) fn has_sha() -> bool {
-    features::has(super::SHA_NI)
+    features::allows(super::KERNELS32, super::Kernel::ShaNi)
 }
 
 /// The compression function via SHA-NI.

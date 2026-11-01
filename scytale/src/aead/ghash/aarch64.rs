@@ -195,7 +195,7 @@ impl Multiply {
 
 /// Whether the polynomial multiply is available.
 pub(crate) fn has_carryless_multiply() -> bool {
-    features::has(PMULL)
+    features::allows(super::KERNELS, super::Kernel::Pmull)
 }
 
 /// What [`has_carryless_multiply`] asks for.

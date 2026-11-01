@@ -14,19 +14,27 @@
 
 #![allow(unsafe_code)]
 
-use super::engine::LANES;
+use super::engine::{LANES, Permutation};
 use super::portable::keccak_f1600;
-use crate::features::{self, riscv64::Feature};
+use crate::features::{self, Features, riscv64::Feature};
 
-/// Applies the permutation where the processor has Zbb, returning
-/// whether it did.
-pub(crate) fn permute(state: &mut [u64; LANES]) -> bool {
-    if !has_zbb() {
-        return false;
+/// The permutation compiled for Zbb. No public constructor: a value
+/// exists only by way of `probe`.
+#[derive(Clone, Copy)]
+pub struct Zbb(());
+
+impl super::engine::Sealed for Zbb {}
+
+impl Permutation for Zbb {
+    fn probe() -> Option<Self> {
+        features::allows(super::KERNELS, super::Kernel::Zbb).then_some(Zbb(()))
     }
-    // SAFETY: the extension was just confirmed.
-    unsafe { permute_zbb(state) };
-    true
+
+    fn permute(self, state: &mut [u64; LANES]) {
+        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // extension.
+        unsafe { permute_zbb(state) }
+    }
 }
 
 /// The portable permutation, inlined here and compiled for the
@@ -39,12 +47,8 @@ unsafe fn permute_zbb(state: &mut [u64; LANES]) {
     keccak_f1600(state);
 }
 
-/// Whether the processor has Zbb, which the kernel answers for.
-/// `extensions` keeps its answer, so asking for every permutation
-/// costs a load.
-fn has_zbb() -> bool {
-    features::has(features::riscv(&[Feature::Zbb]))
-}
+/// What the Zbb row needs.
+pub(crate) const ZBB: Features = features::riscv(&[Feature::Zbb]);
 
 #[cfg(test)]
 mod tests {
@@ -55,6 +59,10 @@ mod tests {
     /// permuting it.
     #[test]
     fn matches_the_baseline_build() {
+        let Some(zbb) = Zbb::probe() else {
+            std::eprintln!("Zbb not available; skipping");
+            return;
+        };
         let mut expected = [0u64; LANES];
         for round in 0..4 {
             for (i, lane) in expected.iter_mut().enumerate() {
@@ -64,9 +72,7 @@ mod tests {
             }
             let mut actual = expected;
             keccak_f1600(&mut expected);
-            if !permute(&mut actual) {
-                return;
-            }
+            zbb.permute(&mut actual);
             assert_eq!(actual, expected, "round {round}");
         }
     }

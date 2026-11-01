@@ -16,7 +16,7 @@ use super::engine::{Engine32, Engine64};
 use super::portable::{K256, K512};
 #[cfg(test)]
 use super::variant;
-use crate::features::{self, aarch64::Feature};
+use crate::features;
 
 // Named for the vector suites and the benchmark, which drive each
 // engine in turn; the dispatching types reach it directly.
@@ -35,18 +35,12 @@ pub type Sha512 = Engine64<Armv8, variant::Sha512>;
 
 /// Whether the SHA-256 instructions are available.
 pub(crate) fn has_sha256() -> bool {
-    features::has(super::ARMV8_256)
-}
-
-/// Whether the SHA-1 instructions are available. SHA-1 lives in
-/// [`sha1`](crate::hash::sha1), but the question is this family's.
-pub(crate) fn has_sha1() -> bool {
-    features::has(features::arm(&[Feature::Sha1]))
+    features::allows(super::KERNELS32, super::Kernel::Armv8)
 }
 
 /// Whether the SHA-512 instructions are available.
 pub(crate) fn has_sha512() -> bool {
-    features::has(super::ARMV8_512)
+    features::allows(super::KERNELS64, super::Kernel::Armv8)
 }
 
 /// The compression functions via the ARMv8 instructions.

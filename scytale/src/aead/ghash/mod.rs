@@ -73,6 +73,69 @@ use self::riscv64 as arch;
 use self::x86_64 as arch;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::features::Features;
+
+/// Which carry-less multiply a hash runs on, named for the
+/// instructions.
+///
+/// There is no portable row: the portable multiply is what the
+/// arithmetic falls back to when no row is met, and a value of an
+/// architecture's `Multiply` is the proof that its instructions are
+/// there, so there is nothing for a row needing nothing to mint.
+// An architecture with no multiply written out has an empty list,
+// which only the inventory reads.
+#[cfg_attr(
+    not(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    )),
+    allow(dead_code)
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kernel {
+    /// PCLMULQDQ.
+    #[cfg(target_arch = "x86_64")]
+    Pclmul,
+    /// The polynomial multiply of the ARMv8 cryptography extension.
+    #[cfg(target_arch = "aarch64")]
+    Pmull,
+    /// The whole field multiplication in one instruction.
+    #[cfg(target_arch = "riscv64")]
+    Zvkg,
+    /// A vector carry-less multiply.
+    #[cfg(target_arch = "riscv64")]
+    Zvbc,
+    /// A scalar carry-less multiply, from Zbc or Zbkc.
+    #[cfg(target_arch = "riscv64")]
+    Zbc,
+}
+
+/// Every multiply, best first, each with what it needs. One may
+/// appear twice, under two sets that each suffice.
+#[cfg_attr(
+    not(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    )),
+    allow(dead_code)
+)]
+pub(crate) const KERNELS: &[(Kernel, Features)] = &[
+    #[cfg(target_arch = "x86_64")]
+    (Kernel::Pclmul, x86_64::PCLMUL),
+    #[cfg(target_arch = "aarch64")]
+    (Kernel::Pmull, aarch64::PMULL),
+    #[cfg(target_arch = "riscv64")]
+    (Kernel::Zvkg, riscv64::ZVKG),
+    #[cfg(target_arch = "riscv64")]
+    (Kernel::Zvbc, riscv64::ZVBC),
+    #[cfg(target_arch = "riscv64")]
+    (Kernel::Zbc, riscv64::ZBC),
+    #[cfg(target_arch = "riscv64")]
+    (Kernel::Zbc, riscv64::ZBKC),
+];
+
 /// Divides the subkey by `x` and puts its halves in the order a
 /// vector register wants them, least significant first.
 ///

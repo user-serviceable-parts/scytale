@@ -42,7 +42,7 @@ pub type Shake256 = Sponge<Armv8, variant::Shake256>;
 
 /// Whether the SHA3 instructions are available.
 pub(crate) fn has_sha3() -> bool {
-    features::has(super::ARMV8)
+    features::allows(super::KERNELS, super::Kernel::Armv8)
 }
 
 /// The permutation via the SHA3 instructions. No public constructor:

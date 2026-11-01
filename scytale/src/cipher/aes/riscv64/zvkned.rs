@@ -21,7 +21,7 @@
 
 use core::fmt;
 
-use super::{has_vrev8, has_zvkned};
+use super::has_zvkned;
 use crate::cipher::BlockCipher;
 use crate::cipher::aes::{BLOCK_SIZE, KeySize, MAX_WORDS, expand_words};
 use crate::{BlockType, Key, KeyType};
@@ -38,10 +38,6 @@ pub struct Aes<const K: usize> {
     keys: [u32; MAX_WORDS],
     #[zeroize(skip)]
     size: KeySize,
-    /// Whether `vrev8.v` is here, asked once at key expansion so that
-    /// the counter loop costs nothing to choose.
-    #[zeroize(skip)]
-    rev8: bool,
 }
 
 impl<const K: usize> fmt::Debug for Aes<K> {
@@ -95,11 +91,7 @@ impl<const K: usize> Aes<K> {
                     keys = expand_words(key, size, |w| sub_word(w))
                 }
             }
-            Aes {
-                keys,
-                size,
-                rev8: has_vrev8(),
-            }
+            Aes { keys, size }
         }
     }
 
