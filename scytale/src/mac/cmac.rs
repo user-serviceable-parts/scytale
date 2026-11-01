@@ -81,14 +81,17 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Cmac<C> {
         Self::with_engine(key, MacEngine::new())
     }
 
-    /// The MAC over the chaining loop `implementation` names, or
-    /// `None` where this processor or cipher has no such thing.
+    /// The MAC over the chaining loop of the kernel named, or `None`
+    /// where this processor cannot run it or it is not written for
+    /// this cipher. The kernels are CBC's.
     #[cfg(test)]
-    pub(crate) fn with_implementation(
+    pub(crate) fn with_kernel(
         key: &C::Key,
-        implementation: crate::implementation::Implementation,
+        kernel: crate::kernel::Kernel,
     ) -> Option<Self> {
-        Some(Self::with_engine(key, MacEngine::with(implementation)?))
+        let kernels = crate::cipher::mode::cbc::kernels::<C>();
+        crate::features::available(kernels, kernel).then_some(())?;
+        Some(Self::with_engine(key, MacEngine::with(kernel)?))
     }
 
     fn with_engine(key: &C::Key, engine: MacEngine<C>) -> Self {
@@ -353,8 +356,8 @@ mod tests {
     /// to many blocks, in one piece and in two.
     #[test]
     fn the_engines_agree() {
-        use crate::cipher::mode::cbc::CHOICES;
-        use crate::implementation::Implementation;
+        use crate::cipher::mode::cbc::KERNELS;
+        use crate::kernel::Kernel;
         let data: std::vec::Vec<u8> =
             (0..1000u32).map(|i| (i * 7 + 3) as u8).collect();
         fn each<C: BlockCipher<Block = [u8; BLOCK]>>(
@@ -362,19 +365,15 @@ mod tests {
             data: &[u8],
         ) {
             let mut engines = 0;
-            for &implementation in CHOICES {
-                let Some(mut mac) =
-                    Cmac::<C>::with_implementation(key, implementation)
-                else {
+            for &(kernel, _) in KERNELS {
+                let Some(mut mac) = Cmac::<C>::with_kernel(key, kernel) else {
                     continue;
                 };
                 engines += 1;
                 for len in [0, 1, 16, 17, 32, 48, 64, 200, 1000] {
-                    let mut reference = Cmac::<C>::with_implementation(
-                        key,
-                        Implementation::Portable,
-                    )
-                    .expect("portable");
+                    let mut reference =
+                        Cmac::<C>::with_kernel(key, Kernel::Portable)
+                            .expect("portable");
                     reference.update(&data[..len]);
                     let expected = reference.finalize();
                     mac.update(&data[..len]);
@@ -385,7 +384,7 @@ mod tests {
                     assert_eq!(
                         mac.finalize(),
                         expected,
-                        "{len} in two, {implementation:?}"
+                        "{len} in two, {kernel:?}"
                     );
                 }
             }

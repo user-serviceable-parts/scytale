@@ -50,7 +50,7 @@
 //!
 //! # Availability
 //!
-//! [`supported`] asks for the vector AES instructions, a byte reverse,
+//! [`ZVKNED`] asks for the vector AES instructions, a byte reverse,
 //! and `vgmul`. The other two carry-less multiplies RISC-V offers
 //! would each need a reduction written out, which does not fit beside
 //! the round keys; a processor with one of those runs GCM as the
@@ -66,9 +66,10 @@ use crate::cipher::mode::{ByteOrder, add_counter};
 // architecture is.
 use crate::align::At16;
 use crate::cipher::BlockCipher;
+use crate::cipher::aes::riscv64::Schedule;
 pub(crate) use crate::cipher::aes::riscv64::{Keys, keys};
-use crate::cipher::aes::riscv64::{Schedule, has_vrev8, has_zvkned};
-use crate::implementation::Implementation;
+use crate::features::{self, Features};
+use crate::kernel::Kernel;
 use zeroize::Zeroize;
 
 /// Blocks the loop takes at once, which is also how many powers of
@@ -88,9 +89,15 @@ static STEP: At16<[u32; 4 * GROUP]> = {
     At16(w)
 };
 
+/// What the loops here need: the vector AES instructions, a byte
+/// reverse (which either of two extensions brings) and `vgmul`.
+pub(crate) const ZVKNED: Features = crate::cipher::aes::ZVKNED
+    .union(crate::cipher::aes::VREV8)
+    .union(ghash::riscv64::ZVKG);
+
 /// Whether the loops here can run.
-pub(crate) fn supported() -> bool {
-    has_zvkned() && has_vrev8() && ghash::riscv64::has_vector_ghash()
+fn supported() -> bool {
+    features::has(ZVKNED)
 }
 
 /// Everything the hash works out from the subkey and never changes.
@@ -164,13 +171,10 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     /// processor lacks the instructions or `C` is not a cipher this is
     /// written for.
     ///
-    /// There is one implementation here, so anything but
-    /// [`Implementation::Zvkned`] is answered with nothing.
-    pub(crate) fn of(
-        h: &[u8; BLOCK],
-        implementation: Implementation,
-    ) -> Option<Self> {
-        if implementation != Implementation::Zvkned {
+    /// There is one kernel here, so anything but [`Kernel::Zvkned`]
+    /// is answered with nothing.
+    pub(crate) fn of(h: &[u8; BLOCK], kernel: Kernel) -> Option<Self> {
+        if kernel != Kernel::Zvkned {
             return None;
         }
         Some(Engine {
@@ -378,14 +382,6 @@ fn counter_tail(
     }
 }
 
-/// Whether GCM-SIV can run `implementation` on this processor.
-///
-/// The same instructions the counter loop needs, since that is what
-/// GCM-SIV borrows.
-pub(crate) fn siv_supported(implementation: Implementation) -> bool {
-    implementation == Implementation::Zvkned && supported()
-}
-
 /// Counter mode over `data` with GCM-SIV's counter, which is the first
 /// four bytes of the block, least significant first, and nothing
 /// hashed beside it.
@@ -397,12 +393,12 @@ pub(crate) fn siv_supported(implementation: Implementation) -> bool {
 ///
 /// `data` is a whole number of blocks.
 pub(crate) fn siv_counter(
-    implementation: Implementation,
+    kernel: Kernel,
     schedule: Schedule<'_>,
     counter: &mut [u8; BLOCK],
     data: &mut [u8],
 ) {
-    debug_assert_eq!(implementation, Implementation::Zvkned);
+    debug_assert_eq!(kernel, Kernel::Zvkned);
     debug_assert_eq!(data.len() % BLOCK, 0);
     if data.is_empty() {
         return;

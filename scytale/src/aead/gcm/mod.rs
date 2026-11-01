@@ -101,7 +101,8 @@ use crate::aead::Aead;
 use crate::cipher::mode::{ByteOrder, counter_blocks, xor};
 use crate::cipher::{BlockCipher, OneBlock};
 use crate::constant_time;
-use crate::implementation::Implementation;
+use crate::features::{self, Dispatcher, Features};
+use crate::kernel::{self, Kernel};
 use crate::{Error, KeyType};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -178,42 +179,90 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Clone for Engine<C> {
     }
 }
 
-/// Every implementation, best first.
+/// Every kernel, best first, with what each needs.
 ///
-/// A caller never names one: the mode takes the best the processor
-/// has. The tests and the vector suites do name them, so that every
-/// implementation is validated and not only the one this machine
-/// would pick.
-pub(crate) const CHOICES: &[Implementation] = &[
+/// A caller never names one: the mode takes the first row the
+/// features in force meet. The tests and the vector suites do name
+/// them, so that every kernel is validated and not only the one this
+/// machine would pick.
+pub(crate) const KERNELS: &[(Kernel, Features)] = &[
     #[cfg(target_arch = "x86_64")]
-    Implementation::Vaes,
+    (Kernel::Vaes, x86_64::WIDE),
     #[cfg(target_arch = "x86_64")]
-    Implementation::Aesni,
+    (Kernel::Aesni, x86_64::NARROW),
     #[cfg(target_arch = "aarch64")]
-    Implementation::Armv8,
+    (Kernel::Armv8, aarch64::ARMV8),
     #[cfg(target_arch = "riscv64")]
-    Implementation::Zvkned,
-    Implementation::Portable,
+    (Kernel::Zvkned, riscv64::ZVKNED),
+    (Kernel::Portable, Features::new()),
 ];
 
+/// What the list publishes: the needs, without the names.
+const PROFILES: [Features; KERNELS.len()] = features::profiles_of(KERNELS);
+
+/// Whether the kernels written for the AES instructions can read
+/// `C`'s key schedule. Nothing can on an architecture without them,
+/// and the list then has the portable row alone anyway, so `C` goes
+/// unread there.
+#[cfg_attr(
+    not(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    )),
+    allow(clippy::extra_unused_type_parameters)
+)]
+fn readable<C: BlockCipher<Block = [u8; BLOCK]>>() -> bool {
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    ))]
+    {
+        native::keys::<C>().is_some()
+    }
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    )))]
+    {
+        true
+    }
+}
+
+/// The kernels `C` can run with; see [`kernel::rows_for`]. GCM-SIV
+/// borrows the same loops, so these are its rows too.
+pub(crate) fn kernels<C: BlockCipher<Block = [u8; BLOCK]>>()
+-> &'static [(Kernel, Features)] {
+    kernel::rows_for(KERNELS, readable::<C>())
+}
+
+/// Their profiles, cut the same way.
+pub(crate) fn profiles<C: BlockCipher<Block = [u8; BLOCK]>>()
+-> &'static [Features] {
+    kernel::rows_for(&PROFILES, readable::<C>())
+}
+
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
-    /// The best engine for this cipher on this processor, under hash
-    /// subkey `h`.
+    /// The engine of the first kernel the features in force allow for
+    /// this cipher, under hash subkey `h`.
     fn new(h: &[u8; BLOCK]) -> Self {
-        for &implementation in CHOICES {
-            if let Some(engine) = Self::with(h, implementation) {
-                return engine;
-            }
-        }
-        Engine::Generic(PhantomData)
+        // The list ends in the portable row, which needs nothing, so
+        // there is always one; the fallback is for the type checker.
+        features::select(kernels::<C>())
+            .and_then(|kernel| Self::with(h, kernel))
+            .unwrap_or(Engine::Generic(PhantomData))
     }
 
-    /// The engine `implementation` names, or `None` where this processor or
-    /// this cipher has no such thing.
-    fn with(h: &[u8; BLOCK], implementation: Implementation) -> Option<Self> {
+    /// The engine `kernel` names, or `None` where it is not written
+    /// for this cipher. That the processor has its instructions is
+    /// the caller's to have settled from the kernel's row, by the set
+    /// in force or by what was detected.
+    fn with(h: &[u8; BLOCK], kernel: Kernel) -> Option<Self> {
         let _ = h;
-        match implementation {
-            Implementation::Portable => Some(Engine::Generic(PhantomData)),
+        match kernel {
+            Kernel::Portable => Some(Engine::Generic(PhantomData)),
             #[cfg(any(
                 target_arch = "aarch64",
                 target_arch = "riscv64",
@@ -381,22 +430,28 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
         }
     }
 
-    /// The mode over the implementation `implementation` names, or `None`
-    /// where this processor or this cipher has no such thing.
+    /// The feature profiles this mode tells apart, best first; see
+    /// [`Dispatcher`]. For a cipher whose key schedule the AES
+    /// instructions cannot read, the portable one alone.
+    pub fn profiles() -> &'static [Features] {
+        profiles::<C>()
+    }
+
+    /// The mode over the kernel named, or `None` where this processor
+    /// cannot run it or it is not written for this cipher.
     ///
-    /// For the tests and the vector suites, which run every
-    /// implementation rather than only the one [`new`](Self::new)
-    /// would take.
+    /// For the tests and the vector suites, which run every kernel
+    /// rather than only the one [`new`](Self::new) would take. It
+    /// asks the processor, not the set in force, so a test may build
+    /// any kernel the machine has without editing the set.
     #[cfg(test)]
-    pub(crate) fn with_implementation(
-        key: &C::Key,
-        implementation: Implementation,
-    ) -> Option<Self> {
+    pub(crate) fn with_kernel(key: &C::Key, kernel: Kernel) -> Option<Self> {
+        features::available(kernels::<C>(), kernel).then_some(())?;
         let cipher = C::new(key);
         let mut h = [0u8; BLOCK];
         cipher.encrypt_one(&mut h);
         Some(Gcm {
-            engine: Engine::<C>::with(&h, implementation)?,
+            engine: Engine::<C>::with(&h, kernel)?,
             cipher,
             h,
         })
@@ -424,6 +479,14 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
         Ok(Decryptor {
             core: Core::try_new(self, nonce)?,
         })
+    }
+}
+
+impl<C: BlockCipher<Block = [u8; BLOCK]>> features::sealed::Sealed for Gcm<C> {}
+
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Dispatcher for Gcm<C> {
+    fn profiles() -> &'static [Features] {
+        Gcm::<C>::profiles()
     }
 }
 
@@ -1152,15 +1215,15 @@ mod tests {
         const MAX: usize = 9 * 16 * BLOCK + 3;
         let key = [0x9du8; 16];
         let generic = Gcm::<portable::bitsliced::Aes<16>>::new(&Key::from(key));
-        // Every implementation this processor has, not only the one
+        // Every kernel this processor has, not only the one
         // the mode would pick.
-        let all: Vec<Gcm<Aes128>> = CHOICES
+        let all: Vec<Gcm<Aes128>> = KERNELS
             .iter()
-            .filter_map(|&c| {
-                Gcm::<Aes128>::with_implementation(&Key::from(key), c)
+            .filter_map(|&(k, _)| {
+                Gcm::<Aes128>::with_kernel(&Key::from(key), k)
             })
             .collect();
-        assert!(!all.is_empty(), "no implementation to test");
+        assert!(!all.is_empty(), "no kernel to test");
         let nonce = [0x33u8; 12];
         let aad = [0x77u8; 21];
 
@@ -1262,7 +1325,7 @@ mod tests {
     fn the_native_engine_is_chosen_where_there_is_one() {
         #[cfg(target_arch = "x86_64")]
         {
-            if !x86_64::supported() {
+            if !features::available(KERNELS, Kernel::Aesni) {
                 // Nothing to check on a processor without them.
                 return;
             }
@@ -1278,16 +1341,12 @@ mod tests {
             // AES-NI one is too wherever this test runs at all, so
             // both are validated and not just the one this machine
             // would take.
-            let portable = Implementation::Portable;
-            assert!(
-                Gcm::<Aes128>::with_implementation(&key, portable).is_some()
-            );
+            let portable = Kernel::Portable;
+            assert!(Gcm::<Aes128>::with_kernel(&key, portable).is_some());
             #[cfg(target_arch = "x86_64")]
             {
-                let aesni = Implementation::Aesni;
-                assert!(
-                    Gcm::<Aes128>::with_implementation(&key, aesni).is_some()
-                );
+                let aesni = Kernel::Aesni;
+                assert!(Gcm::<Aes128>::with_kernel(&key, aesni).is_some());
             }
         }
     }

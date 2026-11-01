@@ -1500,7 +1500,7 @@ mod inventory {
         }
 
         /// One row, under the heading `suite` where it has one: the
-        /// modes all call their implementations by the same names.
+        /// modes all call their kernels by the same names.
         fn row(
             &self,
             suite: &str,
@@ -1533,45 +1533,9 @@ mod inventory {
         }
     }
 
-    /// What a mode's implementation needs. The counter, chaining and
-    /// tweak loops need what the cipher's own instructions need, in
-    /// the encoding they are written in; the two with a hash in the
-    /// loop need its multiply as well.
-    #[allow(unused_variables)]
-    fn mode_requires(suite: &str, name: &str) -> Vec<Features> {
-        let hashes = matches!(suite, "AES-GCM" | "AES-GCM-SIV");
-        match name {
-            // Written in the VEX encodings, so AES-NI is not enough.
-            #[cfg(target_arch = "x86_64")]
-            "aesni" if hashes => vec![crate::aead::gcm::x86_64::NARROW],
-            #[cfg(target_arch = "x86_64")]
-            "aesni" => vec![aes::x86_64::AESNI_AVX],
-            #[cfg(target_arch = "x86_64")]
-            "vaes" if hashes => vec![crate::aead::gcm::x86_64::WIDE],
-            #[cfg(target_arch = "x86_64")]
-            "vaes" => vec![aes::x86_64::VAES256],
-            #[cfg(target_arch = "aarch64")]
-            "armv8" if hashes => {
-                vec![aes::ARMV8.union(crate::aead::ghash::aarch64::PMULL)]
-            }
-            #[cfg(target_arch = "aarch64")]
-            "armv8" => vec![aes::ARMV8],
-            // The counters are reversed with `vrev8`, which either
-            // of two extensions brings.
-            #[cfg(target_arch = "riscv64")]
-            "zvkned" if hashes => vec![
-                aes::ZVKNED
-                    .union(aes::VREV8)
-                    .union(crate::aead::ghash::riscv64::ZVKG),
-            ],
-            #[cfg(target_arch = "riscv64")]
-            "zvkned" => vec![aes::ZVKNED.union(aes::VREV8)],
-            _ => Vec::new(),
-        }
-    }
-
-    /// Every implementation of every mode that has more than one,
-    /// under the cipher `C`.
+    /// Every kernel of every mode that has more than one, under the
+    /// cipher `C`. What each needs comes from its row in the mode's
+    /// list, the same row that chooses it.
     fn modes<C>(audit: &Audit)
     where
         C: crate::cipher::BlockCipher<
@@ -1581,36 +1545,35 @@ mod inventory {
     {
         use crate::aead::{ccm, gcm, gcm_siv};
         use crate::cipher::mode::{cbc, ctr, xts};
-        use crate::implementation::Implementation;
+        use crate::kernel::Kernel;
 
         let key = crate::Key::from([0x42u8; 16]);
         let tweak = crate::Key::from([0x99u8; 16]);
         let one = |suite: &str,
-                   all: &[Implementation],
-                   has: &dyn Fn(Implementation) -> bool| {
+                   all: &[(Kernel, Features)],
+                   has: &dyn Fn(Kernel) -> bool| {
             println!("{suite}");
-            for &i in all {
-                let needs = mode_requires(suite, i.name());
-                audit.row(suite, i.name(), has(i), &needs);
+            for &(k, needs) in all {
+                audit.row(suite, k.name(), has(k), &[needs]);
             }
         };
-        one("AES-CBC", cbc::CHOICES, &|i| {
-            cbc::Cbc::<C>::with_implementation(&key, i).is_some()
+        one("AES-CBC", cbc::KERNELS, &|k| {
+            cbc::Cbc::<C>::with_kernel(&key, k).is_some()
         });
-        one("AES-CTR", ctr::CHOICES, &|i| {
-            ctr::Ctr::<C>::with_implementation(&key, i).is_some()
+        one("AES-CTR", ctr::KERNELS, &|k| {
+            ctr::Ctr::<C>::with_kernel(&key, k).is_some()
         });
-        one("AES-XTS", xts::CHOICES, &|i| {
-            xts::Xts::<C>::with_implementation(&key, &tweak, i).is_some()
+        one("AES-XTS", xts::KERNELS, &|k| {
+            xts::Xts::<C>::with_kernel(&key, &tweak, k).is_some()
         });
-        one("AES-CCM", ccm::CHOICES, &|i| {
-            ccm::Ccm::<C>::with_implementation(&key, i).is_some()
+        one("AES-CCM", ccm::KERNELS, &|k| {
+            ccm::Ccm::<C>::with_kernel(&key, k).is_some()
         });
-        one("AES-GCM", gcm::CHOICES, &|i| {
-            gcm::Gcm::<C>::with_implementation(&key, i).is_some()
+        one("AES-GCM", gcm::KERNELS, &|k| {
+            gcm::Gcm::<C>::with_kernel(&key, k).is_some()
         });
-        one("AES-GCM-SIV", gcm_siv::CHOICES, &|i| {
-            gcm_siv::GcmSiv::<C>::with_implementation(&key, i).is_some()
+        one("AES-GCM-SIV", gcm_siv::KERNELS, &|k| {
+            gcm_siv::GcmSiv::<C>::with_kernel(&key, k).is_some()
         });
     }
 
@@ -1792,9 +1755,10 @@ mod inventory {
             &[chacha20::ZBB, chacha20::ZBKB],
         );
 
-        // The arithmetic behind the curves, RSA and the MACs, which
-        // has no suite of its own to skip and so no other place to
-        // say whether its written-out path was the one that ran.
+        // The arithmetic behind the curves, RSA and the MACs, and the
+        // POLYVAL loop GCM-SIV hashes with: neither is a row in any
+        // list, so this is the one place that holds its probe to the
+        // processor.
         #[cfg(target_arch = "x86_64")]
         {
             println!("Arithmetic");
@@ -1802,6 +1766,11 @@ mod inventory {
                 "montgomery::x86_64::Adx",
                 crate::math::montgomery::x86_64::probe().is_some(),
                 &[crate::math::montgomery::x86_64::ADX],
+            );
+            audit.report(
+                "gcm::x86_64::Polyval",
+                crate::aead::gcm::x86_64::Polyval::new(&[0; 16]).is_some(),
+                &[crate::aead::gcm::x86_64::NARROW],
             );
         }
         audit.finish();

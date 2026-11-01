@@ -24,7 +24,7 @@ const MCT_ITERATIONS: usize = 1000;
 
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
-/// Runs them against every implementation this processor has, not
+/// Runs them against every kernel this processor has, not
 /// only the one the mode would pick: which that is depends on the
 /// machine, so anything else leaves whichever the machine did not
 /// choose unvalidated.
@@ -34,18 +34,16 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     };
     let mut count = 0;
     let mut engines = 0;
-    for &implementation in cbc::CHOICES {
-        if Cbc::<C>::with_implementation(&C::zero_key(), implementation)
-            .is_none()
-        {
+    for &(kernel, _) in cbc::KERNELS {
+        if Cbc::<C>::with_kernel(&C::zero_key(), kernel).is_none() {
             continue;
         }
         engines += 1;
         for (group, encrypt) in &groups {
-            count += aft::<C>(group, *encrypt, implementation);
+            count += aft::<C>(group, *encrypt, kernel);
         }
     }
-    assert!(engines >= 1, "no implementation to test");
+    assert!(engines >= 1, "no kernel to test");
     // Guard against a truncated or wrong file passing vacuously.
     assert!(count >= 500, "only {count} AFT cases");
 }
@@ -57,14 +55,12 @@ pub fn run_mct<C: BlockCipher<Block = [u8; 16]>>() {
         return;
     };
     let mut count = 0;
-    for &implementation in cbc::CHOICES {
-        if Cbc::<C>::with_implementation(&C::zero_key(), implementation)
-            .is_none()
-        {
+    for &(kernel, _) in cbc::KERNELS {
+        if Cbc::<C>::with_kernel(&C::zero_key(), kernel).is_none() {
             continue;
         }
         for (group, encrypt) in &groups {
-            count += mct::<C>(group, *encrypt, implementation);
+            count += mct::<C>(group, *encrypt, kernel);
         }
     }
     assert!(count >= 200, "only {count} MCT steps");
@@ -77,20 +73,20 @@ fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
 
 fn cbc<C: BlockCipher<Block = [u8; 16]>>(
     key: &[u8],
-    implementation: crate::implementation::Implementation,
+    kernel: crate::kernel::Kernel,
 ) -> Option<Cbc<C>> {
-    Cbc::with_implementation(&key_of::<C>(key)?, implementation)
+    Cbc::with_kernel(&key_of::<C>(key)?, kernel)
 }
 
 /// Algorithm Functional Test: one message, one IV.
 fn aft<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
-    implementation: crate::implementation::Implementation,
+    kernel: crate::kernel::Kernel,
 ) -> usize {
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {
-        let Some(cbc) = cbc::<C>(&hex(&t["key"]), implementation) else {
+        let Some(cbc) = cbc::<C>(&hex(&t["key"]), kernel) else {
             continue;
         };
         let iv = hex(&t["iv"]);
@@ -119,7 +115,7 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
 fn mct<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
-    implementation: crate::implementation::Implementation,
+    kernel: crate::kernel::Kernel,
 ) -> usize {
     let (input_name, output_name) =
         if encrypt { ("pt", "ct") } else { ("ct", "pt") };
@@ -140,7 +136,7 @@ fn mct<C: BlockCipher<Block = [u8; 16]>>(
             assert_eq!(iv, hex(&step["iv"]), "{tag} iv");
             assert_eq!(input, hex(&step[input_name]), "{tag} input");
 
-            let cbc = cbc::<C>(&key, implementation).expect("width");
+            let cbc = cbc::<C>(&key, kernel).expect("width");
             let (last, previous) = if encrypt {
                 step_encrypt(&cbc, &iv, &input)
             } else {

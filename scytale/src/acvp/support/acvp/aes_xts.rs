@@ -21,7 +21,7 @@ const FILE: &str = "ACVP-AES-XTS-1.0/internalProjection.json";
 
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
-/// Runs them against every implementation this processor has, not
+/// Runs them against every kernel this processor has, not
 /// only the one the mode would pick: which that is depends on the
 /// machine, so anything else leaves whichever the machine did not
 /// choose unvalidated.
@@ -31,20 +31,18 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     };
     let mut cases = 0;
     let mut engines = 0;
-    for &implementation in xts::CHOICES {
+    for &(kernel, _) in xts::KERNELS {
         let (data, tweak) = (C::zero_key(), one_key::<C>());
-        if Xts::<C>::with_implementation(&data, &tweak, implementation)
-            .is_none()
-        {
+        if Xts::<C>::with_kernel(&data, &tweak, kernel).is_none() {
             continue;
         }
         engines += 1;
         for (group, encrypt) in &groups {
             let bits = group["payloadLen"].as_u64().expect("payloadLen");
-            cases += aft::<C>(group, *encrypt, bits as usize, implementation);
+            cases += aft::<C>(group, *encrypt, bits as usize, kernel);
         }
     }
-    assert!(engines >= 1, "no implementation to test");
+    assert!(engines >= 1, "no kernel to test");
     assert!(cases >= 133, "only {cases} AFT cases");
 }
 
@@ -67,7 +65,7 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
     bits: usize,
-    implementation: crate::implementation::Implementation,
+    kernel: crate::kernel::Kernel,
 ) -> usize {
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {
@@ -78,8 +76,7 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
         else {
             continue;
         };
-        let xts = Xts::<C>::with_implementation(&data, &tweak, implementation)
-            .expect("implementation");
+        let xts = Xts::<C>::with_kernel(&data, &tweak, kernel).expect("kernel");
         let tweak: [u8; 16] = hex(&t["tweakValue"]).try_into().expect("tweak");
         let (input, expected) = if encrypt {
             (hex(&t["pt"]), hex(&t["ct"]))

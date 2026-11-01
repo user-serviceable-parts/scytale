@@ -71,7 +71,8 @@ use super::{ByteOrder, counter_blocks, xor};
 use crate::ByteArray;
 use crate::KeyType;
 use crate::cipher::{BlockCipher, OneBlock};
-use crate::implementation::Implementation;
+use crate::features::{self, Dispatcher, Features};
+use crate::kernel::{self, Kernel};
 
 /// What does the work, settled when the mode is built, because it is
 /// the processor that decides and the processor does not change.
@@ -112,40 +113,91 @@ impl<C: BlockCipher> Clone for Engine<C> {
     }
 }
 
-/// Every implementation, best first.
+/// Every kernel, best first, with what each needs.
 ///
-/// A caller never names one: the mode takes the best the processor
-/// has. The tests and the vector suites do name them, so that every
-/// implementation is validated and not only the one this machine
-/// would pick.
-pub(crate) const CHOICES: &[Implementation] = &[
+/// A caller never names one: the mode takes the first row the
+/// features in force meet. The tests and the vector suites do name
+/// them, so that every kernel is validated and not only the one this
+/// machine would pick.
+pub(crate) const KERNELS: &[(Kernel, Features)] = &[
     #[cfg(target_arch = "x86_64")]
-    Implementation::Vaes,
+    (Kernel::Vaes, crate::cipher::aes::x86_64::VAES256),
     #[cfg(target_arch = "x86_64")]
-    Implementation::Aesni,
+    (Kernel::Aesni, crate::cipher::aes::x86_64::AESNI_AVX),
     #[cfg(target_arch = "aarch64")]
-    Implementation::Armv8,
+    (Kernel::Armv8, crate::cipher::aes::ARMV8),
+    // The counters are reversed with `vrev8`, which either of two
+    // extensions brings.
     #[cfg(target_arch = "riscv64")]
-    Implementation::Zvkned,
-    Implementation::Portable,
+    (
+        Kernel::Zvkned,
+        crate::cipher::aes::ZVKNED.union(crate::cipher::aes::VREV8),
+    ),
+    (Kernel::Portable, Features::new()),
 ];
 
+/// What the list publishes: the needs, without the names.
+const PROFILES: [Features; KERNELS.len()] = features::profiles_of(KERNELS);
+
+/// Whether the kernels written for the AES instructions can read
+/// `C`'s key schedule. Nothing can on an architecture without them,
+/// and the list then has the portable row alone anyway, so `C` goes
+/// unread there.
+#[cfg_attr(
+    not(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    )),
+    allow(clippy::extra_unused_type_parameters)
+)]
+fn readable<C: BlockCipher>() -> bool {
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    ))]
+    {
+        native::keys::<C>().is_some()
+    }
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    )))]
+    {
+        true
+    }
+}
+
+/// The kernels `C` can run with; see [`kernel::rows_for`].
+pub(crate) fn kernels<C: BlockCipher>() -> &'static [(Kernel, Features)] {
+    kernel::rows_for(KERNELS, readable::<C>())
+}
+
+/// Their profiles, cut the same way.
+pub(crate) fn profiles<C: BlockCipher>() -> &'static [Features] {
+    kernel::rows_for(&PROFILES, readable::<C>())
+}
+
 impl<C: BlockCipher> Engine<C> {
-    /// The best engine for this cipher on this processor.
+    /// The engine of the first kernel the features in force allow for
+    /// this cipher.
     fn new() -> Self {
-        for &implementation in CHOICES {
-            if let Some(engine) = Self::with(implementation) {
-                return engine;
-            }
-        }
-        Engine::Generic(PhantomData)
+        // The list ends in the portable row, which needs nothing, so
+        // there is always one; the fallback is for the type checker.
+        features::select(kernels::<C>())
+            .and_then(Self::with)
+            .unwrap_or(Engine::Generic(PhantomData))
     }
 
-    /// The engine `implementation` names, or `None` where this processor or
-    /// this cipher has no such thing.
-    fn with(implementation: Implementation) -> Option<Self> {
-        match implementation {
-            Implementation::Portable => Some(Engine::Generic(PhantomData)),
+    /// The engine `kernel` names, or `None` where it is not written
+    /// for this cipher. That the processor has its instructions is
+    /// the caller's to have settled from the kernel's row, by the set
+    /// in force or by what was detected.
+    fn with(kernel: Kernel) -> Option<Self> {
+        match kernel {
+            Kernel::Portable => Some(Engine::Generic(PhantomData)),
             #[cfg(any(
                 target_arch = "aarch64",
                 target_arch = "riscv64",
@@ -196,6 +248,17 @@ impl<C: BlockCipher> KeyType for Ctr<C> {
     }
 }
 
+impl<C: BlockCipher> features::sealed::Sealed for Ctr<C> {}
+
+impl<C: BlockCipher> Dispatcher for Ctr<C>
+where
+    C::Block: ByteArray,
+{
+    fn profiles() -> &'static [Features] {
+        Ctr::<C>::profiles()
+    }
+}
+
 /// Counter mode over a block cipher.
 #[derive(Clone)]
 pub struct Ctr<C: BlockCipher> {
@@ -221,20 +284,26 @@ where
         }
     }
 
-    /// The mode over the implementation `implementation` names, or `None`
-    /// where this processor or this cipher has no such thing.
+    /// The feature profiles this mode tells apart, best first; see
+    /// [`Dispatcher`]. For a cipher whose key schedule the AES
+    /// instructions cannot read, the portable one alone.
+    pub fn profiles() -> &'static [Features] {
+        profiles::<C>()
+    }
+
+    /// The mode over the kernel named, or `None` where this processor
+    /// cannot run it or it is not written for this cipher.
     ///
-    /// For the tests and the vector suites, which run every
-    /// implementation rather than only the one [`new`](Self::new)
-    /// would take.
+    /// For the tests and the vector suites, which run every kernel
+    /// rather than only the one [`new`](Self::new) would take. It
+    /// asks the processor, not the set in force, so a test may build
+    /// any kernel the machine has without editing the set.
     #[cfg(test)]
-    pub(crate) fn with_implementation(
-        key: &C::Key,
-        implementation: Implementation,
-    ) -> Option<Self> {
+    pub(crate) fn with_kernel(key: &C::Key, kernel: Kernel) -> Option<Self> {
+        features::available(kernels::<C>(), kernel).then_some(())?;
         Some(Ctr {
             cipher: C::new(key),
-            engine: Engine::with(implementation)?,
+            engine: Engine::with(kernel)?,
         })
     }
 
@@ -439,10 +508,24 @@ impl<C: BlockCipher> fmt::Debug for Stream<'_, C> {
 mod tests {
     use super::*;
     use crate::Key;
-    use crate::cipher::aes::{Aes, Aes128};
+    use crate::cipher::aes::{Aes, Aes128, portable};
 
     /// Enough to cover several bulk groups and a partial tail.
     const MAX: usize = 20 * 16 + 5;
+
+    /// The profiles end in the one that needs nothing and each is
+    /// reachable; a cipher whose schedule the instructions cannot
+    /// read, the portable cipher here, is offered that one alone.
+    #[test]
+    fn profiles_follow_the_cipher() {
+        assert!(features::rows_are_reachable(KERNELS));
+        let all = Ctr::<Aes128>::profiles();
+        assert_eq!(all.len(), KERNELS.len());
+        assert!(all[all.len() - 1].is_empty());
+        let portable = Ctr::<portable::bitsliced::Aes<16>>::profiles();
+        assert_eq!(portable, &[Features::new()]);
+        assert_eq!(<Ctr<Aes128> as Dispatcher>::profiles(), all);
+    }
 
     fn unhex<const N: usize>(s: &str) -> [u8; N] {
         let mut out = [0u8; N];
@@ -488,11 +571,9 @@ mod tests {
         }
     }
 
-    /// The cipher counts in the last four bytes and drops the carry
-    /// there, so a run crossing that boundary is split in two and the
-    /// Every implementation this processor has must agree with the
-    /// keystream taken a block at a time, at every length around the
-    /// group boundaries of both widths.
+    /// Every kernel this processor has must agree with the keystream
+    /// taken a block at a time, at every length around the group
+    /// boundaries of both widths.
     #[test]
     fn the_engines_agree() {
         // Past the wider group more than once, with an odd tail.
@@ -512,28 +593,21 @@ mod tests {
 
         let key = Key::from(key);
         let mut engines = 0;
-        for &implementation in CHOICES {
-            let Some(ctr) =
-                Ctr::<Aes128>::with_implementation(&key, implementation)
-            else {
+        for &(kernel, _) in KERNELS {
+            let Some(ctr) = Ctr::<Aes128>::with_kernel(&key, kernel) else {
                 continue;
             };
             engines += 1;
             for n in 0..=N {
                 let mut got = [0u8; N];
                 ctr.encrypt(&start, &mut got[..n]);
-                assert_eq!(
-                    got[..n],
-                    want[..n],
-                    "{n} bytes, {implementation:?}"
-                );
+                assert_eq!(got[..n], want[..n], "{n} bytes, {kernel:?}");
             }
         }
-        assert!(engines >= 1, "no implementation to test");
-        // The generic one is always to be had, and on a processor
-        // with the instructions the narrower written-out one is too.
-        let portable = Implementation::Portable;
-        assert!(Ctr::<Aes128>::with_implementation(&key, portable).is_some());
+        assert!(engines >= 1, "no kernel to test");
+        // The portable one is always to be had.
+        let portable = Kernel::Portable;
+        assert!(Ctr::<Aes128>::with_kernel(&key, portable).is_some());
     }
 
     /// The loops add to the last byte of the block without carrying

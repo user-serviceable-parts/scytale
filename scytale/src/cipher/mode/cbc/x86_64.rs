@@ -29,10 +29,9 @@
 #![allow(unsafe_code)]
 
 use crate::cipher::BlockCipher;
-use crate::cipher::aes::x86_64::{
-    KeysEitherWay as Keys, has_aesni_avx, has_vaes256, keys_either_way,
-};
-use crate::implementation::Implementation;
+use crate::cipher::aes::x86_64::KeysEitherWay as Keys;
+pub(super) use crate::cipher::aes::x86_64::keys_either_way;
+use crate::kernel::Kernel;
 
 /// The block these loops work in.
 const BLOCK: usize = 16;
@@ -69,13 +68,14 @@ impl<C> Clone for Engine<C> {
 }
 
 impl<C: BlockCipher> Engine<C> {
-    /// The engine `implementation` names, or `None` where this
-    /// processor lacks its instructions or `C` is not a cipher this is
-    /// written for.
-    pub(crate) fn of(implementation: Implementation) -> Option<Self> {
-        let wide = match implementation {
-            Implementation::Vaes if has_vaes() => true,
-            Implementation::Aesni if has_aesni_avx() => false,
+    /// The engine `kernel` names, or `None` where it is not one of
+    /// this file's or `C` is not a cipher it is written for. That the
+    /// processor has the instructions is settled by whoever chose the
+    /// kernel, from its row in the mode's list.
+    pub(crate) fn of(kernel: Kernel) -> Option<Self> {
+        let wide = match kernel {
+            Kernel::Vaes => true,
+            Kernel::Aesni => false,
             _ => return None,
         };
         Some(Engine {
@@ -223,12 +223,6 @@ impl<C: BlockCipher> Engine<C> {
             }
         }
     }
-}
-
-/// Whether the processor and operating system support VAES on 256-bit
-/// registers, as the cipher asks.
-fn has_vaes() -> bool {
-    has_vaes256()
 }
 
 // A chain waits on every round of the block before it, so its
