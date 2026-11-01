@@ -53,18 +53,14 @@
 use core::fmt;
 
 use super::Aead;
-#[cfg(any(
-    target_arch = "aarch64",
-    target_arch = "riscv64",
-    target_arch = "x86_64"
-))]
 use super::gcm;
 use super::ghash::BLOCK;
 use super::polyval::Polyval;
 use crate::cipher::mode::{ByteOrder, counter_blocks, xor};
 use crate::cipher::{BlockCipher, OneBlock};
 use crate::constant_time;
-use crate::implementation::Implementation;
+use crate::features::{self, Dispatcher, Features};
+use crate::kernel::Kernel;
 use crate::{Error, Key, KeyType};
 use zeroize::Zeroize;
 
@@ -156,7 +152,7 @@ pub struct GcmSiv<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> {
         )),
         allow(dead_code)
     )]
-    implementation: Implementation,
+    kernel: Kernel,
 }
 
 /// How to reach a cipher's round keys; see [`GcmSiv::native`].
@@ -184,23 +180,29 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> fmt::Debug
     }
 }
 
-/// Every implementation, best first.
-///
-/// A caller never names one: the mode takes the best the processor
-/// has. The tests and the vector suites do name them, so that every
-/// implementation is validated and not only the one this machine
-/// would pick.
-pub(crate) const CHOICES: &[Implementation] = &[
-    #[cfg(target_arch = "x86_64")]
-    Implementation::Vaes,
-    #[cfg(target_arch = "x86_64")]
-    Implementation::Aesni,
-    #[cfg(target_arch = "aarch64")]
-    Implementation::Armv8,
-    #[cfg(target_arch = "riscv64")]
-    Implementation::Zvkned,
-    Implementation::Portable,
-];
+/// Every kernel, best first, with what each needs: GCM's, since
+/// GCM-SIV borrows GCM's loops.
+#[cfg(test)]
+pub(crate) const KERNELS: &[(Kernel, Features)] = gcm::KERNELS;
+
+/// The kernels `C` can run with; see [`kernel::rows_for`].
+fn kernels<C: BlockCipher<Block = [u8; BLOCK]>>()
+-> &'static [(Kernel, Features)] {
+    gcm::kernels::<C>()
+}
+
+impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> features::sealed::Sealed
+    for GcmSiv<C>
+{
+}
+
+impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> Dispatcher
+    for GcmSiv<C>
+{
+    fn profiles() -> &'static [Features] {
+        GcmSiv::<C>::profiles()
+    }
+}
 
 impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> KeyType for GcmSiv<C> {
     type Key = C::Key;
@@ -283,33 +285,50 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> Aead for GcmSiv<C> {
 impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
     /// Takes the key that all others are derived from.
     pub fn new(key: &C::Key) -> Self {
-        for &implementation in CHOICES {
-            if let Some(mode) = Self::with_implementation(key, implementation) {
-                return mode;
-            }
-        }
-        Self::generic(key)
+        // The list ends in the portable row, which needs nothing, so
+        // there is always one; the fallback is for the type checker.
+        features::select(kernels::<C>())
+            .and_then(|kernel| Self::with(key, kernel))
+            .unwrap_or_else(|| Self::generic(key))
     }
 
-    /// The mode over the implementation `implementation` names, or `None`
-    /// where this processor or this cipher has no such thing.
-    pub(crate) fn with_implementation(
-        key: &C::Key,
-        implementation: Implementation,
-    ) -> Option<Self> {
-        match implementation {
-            Implementation::Portable => Some(Self::generic(key)),
+    /// The feature profiles this mode tells apart, best first; see
+    /// [`Dispatcher`]. For a cipher whose key schedule the AES
+    /// instructions cannot read, the portable one alone.
+    pub fn profiles() -> &'static [Features] {
+        gcm::profiles::<C>()
+    }
+
+    /// The mode over the kernel named, or `None` where this processor
+    /// cannot run it or it is not written for this cipher.
+    ///
+    /// For the tests and the vector suites, which run every kernel
+    /// rather than only the one [`new`](Self::new) would take. It
+    /// asks the processor, not the set in force, so a test may build
+    /// any kernel the machine has without editing the set.
+    #[cfg(test)]
+    pub(crate) fn with_kernel(key: &C::Key, kernel: Kernel) -> Option<Self> {
+        features::available(kernels::<C>(), kernel).then_some(())?;
+        Self::with(key, kernel)
+    }
+
+    /// The mode over the kernel named, or `None` where it is not
+    /// written for this cipher. That the processor has its
+    /// instructions is the caller's to have settled from the kernel's
+    /// row, by the set in force or by what was detected.
+    fn with(key: &C::Key, kernel: Kernel) -> Option<Self> {
+        match kernel {
+            Kernel::Portable => Some(Self::generic(key)),
             #[cfg(any(
                 target_arch = "aarch64",
                 target_arch = "riscv64",
                 target_arch = "x86_64"
             ))]
             hardware => {
-                gcm::native::siv_supported(hardware).then_some(())?;
                 let keys = gcm::native::keys::<C>()?;
                 Some(GcmSiv {
                     native: Some(keys),
-                    implementation: hardware,
+                    kernel: hardware,
                     ..Self::generic(key)
                 })
             }
@@ -323,7 +342,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
             cipher: C::new(key),
             key_len: key.as_ref().len(),
             native: None,
-            implementation: Implementation::Portable,
+            kernel: Kernel::Portable,
         }
     }
 
@@ -337,7 +356,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
         if let Some(schedule) = self.native.and_then(|keys| keys(cipher)) {
             let (whole, tail) = data.as_chunks_mut::<BLOCK>();
             gcm::native::siv_counter(
-                self.implementation,
+                self.kernel,
                 schedule,
                 counter,
                 whole.as_flattened_mut(),
@@ -389,7 +408,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
                     // In turn: the counter written out, and then the
                     // hash over what it produced.
                     gcm::native::siv_counter(
-                        self.implementation,
+                        self.kernel,
                         schedule,
                         counter,
                         whole,
@@ -728,7 +747,7 @@ mod tests {
         );
     }
 
-    /// Every implementation this processor has must agree, at every
+    /// Every kernel this processor has must agree, at every
     /// length around the group boundaries the loops work in.
     #[test]
     fn the_engines_agree() {
@@ -744,11 +763,8 @@ mod tests {
             *b = (i * 9 + 4) as u8;
         }
 
-        let generic = GcmSiv::<Aes128>::with_implementation(
-            &key,
-            Implementation::Portable,
-        )
-        .unwrap();
+        let generic =
+            GcmSiv::<Aes128>::with_kernel(&key, Kernel::Portable).unwrap();
         for len in 0..MAX {
             let mut want = [0u8; MAX];
             want[..len].copy_from_slice(&message[..len]);
@@ -757,9 +773,8 @@ mod tests {
                 .encrypt(&nonce, &aad, &mut want[..len], &mut wanted_tag)
                 .expect("encrypt");
 
-            for &implementation in CHOICES {
-                let Some(siv) =
-                    GcmSiv::<Aes128>::with_implementation(&key, implementation)
+            for &(kernel, _) in KERNELS {
+                let Some(siv) = GcmSiv::<Aes128>::with_kernel(&key, kernel)
                 else {
                     continue;
                 };
@@ -768,22 +783,12 @@ mod tests {
                 let mut tag = [0u8; TAG];
                 siv.encrypt(&nonce, &aad, &mut got[..len], &mut tag)
                     .unwrap();
-                assert_eq!(
-                    got[..len],
-                    want[..len],
-                    "{len}, {implementation:?}"
-                );
-                assert_eq!(tag, wanted_tag, "tag {len}, {implementation:?}");
+                assert_eq!(got[..len], want[..len], "{len}, {kernel:?}");
+                assert_eq!(tag, wanted_tag, "tag {len}, {kernel:?}");
 
                 siv.decrypt(&nonce, &aad, &mut got[..len], &tag)
-                    .unwrap_or_else(|e| {
-                        panic!("{len}, {implementation:?}: {e:?}")
-                    });
-                assert_eq!(
-                    got[..len],
-                    message[..len],
-                    "{len}, {implementation:?}"
-                );
+                    .unwrap_or_else(|e| panic!("{len}, {kernel:?}: {e:?}"));
+                assert_eq!(got[..len], message[..len], "{len}, {kernel:?}");
             }
         }
     }

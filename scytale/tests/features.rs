@@ -10,8 +10,10 @@
 
 use std::sync::{Mutex, MutexGuard};
 
+use scytale::aead::{Ccm, Gcm, GcmSiv};
 use scytale::cipher::aes::Aes128;
 use scytale::cipher::chacha20::ChaCha20;
+use scytale::cipher::mode::{Cbc, Ctr, Xts};
 use scytale::features::{
     self, Dispatcher, Feature, Features, aarch64, riscv64, x86_64,
 };
@@ -127,6 +129,12 @@ fn profiles_end_in_nothing_and_are_each_reachable() {
     check::<Sha3_256>();
     check::<Shake128>();
     check::<ChaCha20>();
+    check::<Cbc<Aes128>>();
+    check::<Ctr<Aes128>>();
+    check::<Xts<Aes128>>();
+    check::<Gcm<Aes128>>();
+    check::<GcmSiv<Aes128>>();
+    check::<Ccm<Aes128>>();
     // The trait and the inherent method agree.
     assert_eq!(<Sha256 as Dispatcher>::profiles(), Sha256::profiles());
 }

@@ -18,7 +18,7 @@ use serde_json::Value;
 const FILE: &str = "ACVP-AES-CCM-1.0/internalProjection.json";
 
 /// Runs the one-shot (AFT) groups against `C`, through every
-/// implementation this processor has; a no-op without the vendored
+/// kernel this processor has; a no-op without the vendored
 /// vectors.
 pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     let Some(groups) = groups::<C>("AFT") else {
@@ -27,20 +27,18 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     let mut cases = 0;
     let mut rejections = 0;
     let mut engines = 0;
-    for &implementation in ccm::CHOICES {
-        if Ccm::<C>::with_implementation(&C::zero_key(), implementation)
-            .is_none()
-        {
+    for &(kernel, _) in ccm::KERNELS {
+        if Ccm::<C>::with_kernel(&C::zero_key(), kernel).is_none() {
             continue;
         }
         engines += 1;
         for (group, encrypt) in &groups {
-            let (n, r) = aft::<C>(group, *encrypt, implementation);
+            let (n, r) = aft::<C>(group, *encrypt, kernel);
             cases += n;
             rejections += r;
         }
     }
-    assert!(engines >= 1, "no implementation to test");
+    assert!(engines >= 1, "no kernel to test");
     // Guard against a truncated or wrong file passing vacuously, and
     // against the rejection cases quietly disappearing. The file has
     // 2,770 cases a width, 457 or more of them rejections.
@@ -59,7 +57,7 @@ fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
 fn aft<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
-    implementation: crate::implementation::Implementation,
+    kernel: crate::kernel::Kernel,
 ) -> (usize, usize) {
     let tag_len = group["tagLen"].as_u64().expect("tagLen") as usize / 8;
     let mut cases = 0;
@@ -70,8 +68,7 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
         let Some(key) = key_of::<C>(&hex(&t["key"])) else {
             continue;
         };
-        let ccm = Ccm::<C>::with_implementation(&key, implementation)
-            .expect("implementation");
+        let ccm = Ccm::<C>::with_kernel(&key, kernel).expect("kernel");
         let nonce = hex(&t["iv"]);
         let aad = hex(&t["aad"]);
         let sealed = hex(&t["ct"]);

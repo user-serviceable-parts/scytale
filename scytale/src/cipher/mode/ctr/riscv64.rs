@@ -38,8 +38,9 @@
 
 use super::super::{ByteOrder, add_counter};
 use crate::cipher::BlockCipher;
-use crate::cipher::aes::riscv64::{Keys, has_vrev8, has_zvkned, keys};
-use crate::implementation::Implementation;
+use crate::cipher::aes::riscv64::Keys;
+pub(super) use crate::cipher::aes::riscv64::keys;
+use crate::kernel::Kernel;
 
 /// The block these loops work in.
 const BLOCK: usize = 16;
@@ -59,16 +60,16 @@ impl<C> Clone for Engine<C> {
 }
 
 impl<C: BlockCipher> Engine<C> {
-    /// The engine for this cipher, or `None` where this processor
-    /// lacks the instructions or `C` is not a cipher this is written
-    /// for.
+    /// The engine for this cipher, or `None` where `C` is not a cipher
+    /// this is written for. That the processor has the instructions
+    /// is settled by whoever chose the kernel, from its row in the
+    /// mode's list.
     ///
     /// The loop takes whatever vector length it finds, so there is
-    /// one implementation here, and anything but
-    /// [`Implementation::Zvkned`] is answered with nothing.
-    pub(crate) fn of(implementation: Implementation) -> Option<Self> {
-        let wanted = implementation == Implementation::Zvkned;
-        if !wanted || !has_zvkned() || !has_vrev8() {
+    /// one kernel here, and anything but [`Kernel::Zvkned`] is
+    /// answered with nothing.
+    pub(crate) fn of(kernel: Kernel) -> Option<Self> {
+        if kernel != Kernel::Zvkned {
             return None;
         }
         Some(Engine { keys: keys::<C>()? })

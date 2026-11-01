@@ -21,7 +21,7 @@ const TAG: usize = 16;
 
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
-/// Runs them against every implementation this processor has, not
+/// Runs them against every kernel this processor has, not
 /// only the one the mode would pick: which that is depends on the
 /// machine, so anything else leaves whichever the machine did not
 /// choose unvalidated.
@@ -32,20 +32,18 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16], Key: SivKey>>() {
     let mut cases = 0;
     let mut rejections = 0;
     let mut engines = 0;
-    for &implementation in gcm_siv::CHOICES {
-        if GcmSiv::<C>::with_implementation(&C::zero_key(), implementation)
-            .is_none()
-        {
+    for &(kernel, _) in gcm_siv::KERNELS {
+        if GcmSiv::<C>::with_kernel(&C::zero_key(), kernel).is_none() {
             continue;
         }
         engines += 1;
         for (group, encrypt) in &groups {
-            let (n, r) = aft::<C>(group, *encrypt, implementation);
+            let (n, r) = aft::<C>(group, *encrypt, kernel);
             cases += n;
             rejections += r;
         }
     }
-    assert!(engines >= 1, "no implementation to test");
+    assert!(engines >= 1, "no kernel to test");
     assert!(cases >= 33, "only {cases} AFT cases");
     assert!(
         rejections >= 1,
@@ -61,7 +59,7 @@ fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
 fn aft<C: BlockCipher<Block = [u8; 16], Key: SivKey>>(
     group: &Value,
     encrypt: bool,
-    implementation: crate::implementation::Implementation,
+    kernel: crate::kernel::Kernel,
 ) -> (usize, usize) {
     let mut cases = 0;
     let mut rejections = 0;
@@ -71,8 +69,7 @@ fn aft<C: BlockCipher<Block = [u8; 16], Key: SivKey>>(
         let Some(key) = key_of::<C>(&hex(&t["key"])) else {
             continue;
         };
-        let siv = GcmSiv::<C>::with_implementation(&key, implementation)
-            .expect("implementation");
+        let siv = GcmSiv::<C>::with_kernel(&key, kernel).expect("kernel");
         let nonce: [u8; 12] = hex(&t["iv"]).try_into().expect("nonce");
         let aad = hex(&t["aad"]);
         let sealed = hex(&t["ct"]);

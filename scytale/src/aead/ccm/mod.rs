@@ -77,11 +77,12 @@ use core::fmt;
 
 use super::Aead;
 use crate::cipher::mode::cbc::MacEngine;
-use crate::cipher::mode::{Ctr, xor};
+use crate::cipher::mode::{Ctr, ctr, xor};
 use crate::cipher::{BlockCipher, OneBlock};
 use crate::constant_time;
+use crate::features::{self, Dispatcher, Features};
 #[cfg(test)]
-use crate::implementation::Implementation;
+use crate::kernel::Kernel;
 use crate::{Error, KeyType};
 
 /// The block width CCM is defined over.
@@ -99,12 +100,12 @@ const MAX_TAG: usize = BLOCK;
 const NONCE: usize = 12;
 const TAG: usize = BLOCK;
 
-/// Every implementation, best first.
+/// Every kernel, best first, with what each needs.
 ///
 /// These are counter mode's; the MAC takes the chaining loop of the
 /// same name where CBC has one, and the portable chain where not.
 #[cfg(test)]
-pub(crate) const CHOICES: &[Implementation] = crate::cipher::mode::ctr::CHOICES;
+pub(crate) const KERNELS: &[(Kernel, Features)] = ctr::KERNELS;
 
 /// CCM over a block cipher.
 #[derive(Clone)]
@@ -124,6 +125,14 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Ccm<C> {
     /// Deliberately omits everything: it is all derived from the key.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Ccm").finish_non_exhaustive()
+    }
+}
+
+impl<C: BlockCipher<Block = [u8; BLOCK]>> features::sealed::Sealed for Ccm<C> {}
+
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Dispatcher for Ccm<C> {
+    fn profiles() -> &'static [Features] {
+        Ccm::<C>::profiles()
     }
 }
 
@@ -176,25 +185,32 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
         }
     }
 
-    /// The mode over the implementation `implementation` names, or
-    /// `None` where this processor or this cipher has no such thing.
+    /// The feature profiles this mode tells apart, best first; see
+    /// [`Dispatcher`]. They are counter mode's: for a cipher whose
+    /// key schedule the AES instructions cannot read, the portable
+    /// one alone.
+    pub fn profiles() -> &'static [Features] {
+        ctr::profiles::<C>()
+    }
+
+    /// The mode over the kernel named, or `None` where this processor
+    /// cannot run it or it is not written for this cipher.
     ///
-    /// For the tests, the vector suites and the benchmark. The
-    /// implementation is counter mode's; the MAC runs the chaining
-    /// loop of that name, or the portable one where CBC has none.
+    /// For the tests, the vector suites and the benchmark, which run
+    /// every kernel rather than only the one [`new`](Self::new) would
+    /// take. The kernel is counter mode's, which settles that the
+    /// processor has it; the MAC runs the chaining loop of that name,
+    /// or the portable one where CBC has none.
     #[cfg(test)]
-    pub(crate) fn with_implementation(
-        key: &C::Key,
-        implementation: Implementation,
-    ) -> Option<Self> {
+    pub(crate) fn with_kernel(key: &C::Key, kernel: Kernel) -> Option<Self> {
         Some(Ccm {
-            ctr: Ctr::with_implementation(key, implementation)?,
-            chain: MacEngine::with(implementation)
-                .or_else(|| MacEngine::with(Implementation::Portable))?,
+            ctr: Ctr::with_kernel(key, kernel)?,
+            chain: MacEngine::with(kernel)
+                .or_else(|| MacEngine::with(Kernel::Portable))?,
             #[cfg(target_arch = "aarch64")]
-            native: aarch64::Engine::of(implementation),
+            native: aarch64::Engine::of(kernel),
             #[cfg(target_arch = "x86_64")]
-            native: x86_64::Engine::of(implementation),
+            native: x86_64::Engine::of(kernel),
         })
     }
 
@@ -341,20 +357,18 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
     }
 }
 
-/// The interleaved loop this processor has, best first.
+/// The interleaved loop for the kernel counter mode would take, where
+/// there is one written for it.
 #[cfg(target_arch = "aarch64")]
 fn best_native<C: BlockCipher>() -> Option<aarch64::Engine<C>> {
-    crate::cipher::mode::ctr::CHOICES
-        .iter()
-        .find_map(|&implementation| aarch64::Engine::of(implementation))
+    features::select(ctr::kernels::<C>()).and_then(aarch64::Engine::of)
 }
 
-/// The interleaved loop this processor has, best first.
+/// The interleaved loop for the kernel counter mode would take, where
+/// there is one written for it.
 #[cfg(target_arch = "x86_64")]
 fn best_native<C: BlockCipher>() -> Option<x86_64::Engine<C>> {
-    crate::cipher::mode::ctr::CHOICES
-        .iter()
-        .find_map(|&implementation| x86_64::Engine::of(implementation))
+    features::select(ctr::kernels::<C>()).and_then(x86_64::Engine::of)
 }
 
 /// Refuses nonce and tag lengths the standard does not define, and a
@@ -462,11 +476,11 @@ mod tests {
             .collect()
     }
 
-    /// Every implementation this processor has, under `key`.
+    /// Every kernel this processor has, under `key`.
     fn every(key: &[u8; 16]) -> Vec<Ccm<Aes128>> {
-        CHOICES
+        KERNELS
             .iter()
-            .filter_map(|&i| Ccm::with_implementation(&Key::from(*key), i))
+            .filter_map(|&(k, _)| Ccm::with_kernel(&Key::from(*key), k))
             .collect()
     }
 
@@ -695,10 +709,10 @@ mod tests {
         assert_eq!(&sealed, b"a message longer than a block");
     }
 
-    /// Every implementation agrees with the one `new` picks, across
+    /// Every kernel agrees with the one `new` picks, across
     /// lengths that land either side of block and group boundaries.
     #[test]
-    fn implementations_agree() {
+    fn kernels_agree() {
         let key = [0x33u8; 16];
         let reference = Ccm::<Aes128>::new(&Key::from(key));
         let aad = counting(1, 37);

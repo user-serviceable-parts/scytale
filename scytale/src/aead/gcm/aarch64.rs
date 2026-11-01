@@ -30,7 +30,7 @@
 //!
 //! # Availability
 //!
-//! [`supported`] asks for the AES instructions and the 64-bit
+//! [`ARMV8`] asks for the AES instructions and the 64-bit
 //! polynomial multiply, which arrive together as the cryptography
 //! extension. Without them GCM uses the generic wrapper.
 
@@ -44,9 +44,10 @@ use crate::cipher::mode::{ByteOrder, add_counter};
 // architecture is.
 use crate::align::At16;
 use crate::cipher::BlockCipher;
+use crate::cipher::aes::aarch64::Schedule;
 pub(crate) use crate::cipher::aes::aarch64::{Keys, keys};
-use crate::cipher::aes::aarch64::{Schedule, armv8::has_aes};
-use crate::implementation::Implementation;
+use crate::features::{self, Features};
+use crate::kernel::Kernel;
 use zeroize::Zeroize;
 
 /// Blocks the loop takes at once, which is also how many powers of
@@ -73,9 +74,14 @@ static OFFSETS: At16<[u32; 4 * GROUP + 4]> = {
 static BSWAP: At16<[u8; BLOCK]> =
     At16([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
 
+/// What the loops here need: the AES instructions and the carry-less
+/// multiply.
+pub(crate) const ARMV8: Features =
+    crate::cipher::aes::ARMV8.union(ghash::aarch64::PMULL);
+
 /// Whether the loops here can run.
-pub(crate) fn supported() -> bool {
-    has_aes() && ghash::aarch64::has_carryless_multiply()
+fn supported() -> bool {
+    features::has(ARMV8)
 }
 
 /// Everything the hash works out from the subkey and never changes.
@@ -137,13 +143,10 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     /// processor lacks the instructions or `C` is not a cipher this is
     /// written for.
     ///
-    /// There is one implementation here, so anything but
-    /// [`Implementation::Armv8`] is answered with nothing.
-    pub(crate) fn of(
-        h: &[u8; BLOCK],
-        implementation: Implementation,
-    ) -> Option<Self> {
-        if implementation != Implementation::Armv8 {
+    /// There is one kernel here, so anything but [`Kernel::Armv8`] is
+    /// answered with nothing.
+    pub(crate) fn of(h: &[u8; BLOCK], kernel: Kernel) -> Option<Self> {
+        if kernel != Kernel::Armv8 {
             return None;
         }
         Some(Engine {
@@ -307,14 +310,6 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Hasher<'a, C> {
     }
 }
 
-/// Whether GCM-SIV can run `implementation` on this processor.
-///
-/// The same instructions the counter loop needs, since that is what
-/// GCM-SIV borrows.
-pub(crate) fn siv_supported(implementation: Implementation) -> bool {
-    implementation == Implementation::Armv8 && supported()
-}
-
 /// Counter mode over `data` with GCM-SIV's counter, which is the first
 /// four bytes of the block, least significant first, and nothing
 /// hashed beside it.
@@ -331,12 +326,12 @@ pub(crate) fn siv_supported(implementation: Implementation) -> bool {
 ///
 /// `data` is a whole number of blocks.
 pub(crate) fn siv_counter(
-    implementation: Implementation,
+    kernel: Kernel,
     schedule: Schedule<'_>,
     counter: &mut [u8; BLOCK],
     data: &mut [u8],
 ) {
-    debug_assert_eq!(implementation, Implementation::Armv8);
+    debug_assert_eq!(kernel, Kernel::Armv8);
     debug_assert_eq!(data.len() % BLOCK, 0);
     let (rk, rounds) = (schedule.keys(), schedule.rounds());
     let mut data = data;

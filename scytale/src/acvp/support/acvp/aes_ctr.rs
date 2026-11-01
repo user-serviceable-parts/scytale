@@ -32,7 +32,7 @@ const FILE: &str = "ACVP-AES-CTR-1.0/internalProjection.json";
 
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
-/// Runs them against every implementation this processor has, not
+/// Runs them against every kernel this processor has, not
 /// only the one the mode would pick: which that is depends on the
 /// machine, so anything else leaves whichever the machine did not
 /// choose unvalidated.
@@ -42,18 +42,16 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     };
     let mut count = 0;
     let mut engines = 0;
-    for &implementation in ctr::CHOICES {
-        if Ctr::<C>::with_implementation(&C::zero_key(), implementation)
-            .is_none()
-        {
+    for &(kernel, _) in ctr::KERNELS {
+        if Ctr::<C>::with_kernel(&C::zero_key(), kernel).is_none() {
             continue;
         }
         engines += 1;
         for (group, encrypt) in &groups {
-            count += aft::<C>(group, *encrypt, implementation);
+            count += aft::<C>(group, *encrypt, kernel);
         }
     }
-    assert!(engines >= 1, "no implementation to test");
+    assert!(engines >= 1, "no kernel to test");
     // Guard against a truncated or wrong file passing vacuously.
     assert!(count >= 33, "only {count} AFT cases");
 }
@@ -73,15 +71,14 @@ fn truncate(data: &mut [u8], bits: usize) {
 fn aft<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
-    implementation: crate::implementation::Implementation,
+    kernel: crate::kernel::Kernel,
 ) -> usize {
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {
         let Some(key) = key_of::<C>(&hex(&t["key"])) else {
             continue;
         };
-        let ctr = Ctr::<C>::with_implementation(&key, implementation)
-            .expect("implementation");
+        let ctr = Ctr::<C>::with_kernel(&key, kernel).expect("kernel");
         let counter = hex(&t["iv"]);
         let bits = t["payloadLen"].as_u64().expect("payloadLen") as usize;
         let (input, expected) = if encrypt {

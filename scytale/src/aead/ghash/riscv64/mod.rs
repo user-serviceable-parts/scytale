@@ -158,17 +158,6 @@ impl Multiply {
     }
 }
 
-/// Whether the one-instruction multiply is the one this processor
-/// would use.
-///
-/// GCM's own loop is written around it: it is the only one of the
-/// three that fits in a register beside the cipher's round keys, so a
-/// processor with one of the others runs GCM as the portable mode over
-/// its own accelerated hash instead.
-pub(crate) fn has_vector_ghash() -> bool {
-    choice() == Some(Choice::Zvkg)
-}
-
 /// Finishes a field multiplication from its three Karatsuba pieces,
 /// given a carry-less multiply. The scalar backend uses this; the
 /// vector one has no scalar multiply to give and reduces inside its

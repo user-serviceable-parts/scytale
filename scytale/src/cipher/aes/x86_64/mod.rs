@@ -32,21 +32,16 @@ pub(crate) fn has_aesni() -> bool {
 /// What [`has_aesni`] asks for.
 pub(crate) const AESNI: Features = features::x86(&[F::Aes, F::Ssse3]);
 
-/// Whether the processor has AES-NI *and* AVX, with the operating
-/// system saving its state: AES-NI and SSSE3 as above, then OSXSAVE
-/// and AVX (leaf 1, ECX bits 27 and 28) and XCR0 bits 1 and 2.
+/// AES-NI *and* AVX, with the operating system saving its state:
+/// AES-NI and SSSE3 as above, then OSXSAVE and AVX (leaf 1, ECX bits
+/// 27 and 28) and XCR0 bits 1 and 2.
 ///
 /// AES-NI does not imply AVX. A loop written in the VEX encodings --
 /// `vmovdqu`, `vpxor`, `vaesenc` -- needs both, and asking only for
 /// AES-NI puts an illegal instruction on every Westmere and on the
 /// whole Silvermont and Goldmont line, which have the cipher and not
-/// the encoding. Any suite whose assembly is VEX-encoded asks this
-/// rather than [`has_aesni`].
-pub(crate) fn has_aesni_avx() -> bool {
-    features::has(AESNI_AVX)
-}
-
-/// What [`has_aesni_avx`] asks for.
+/// the encoding. Any mode whose assembly is VEX-encoded needs this
+/// rather than [`AESNI`].
 pub(crate) const AESNI_AVX: Features =
     features::x86(&[F::Aes, F::Ssse3, F::Avx]);
 

@@ -88,21 +88,21 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xpn<C> {
         Xpn { gcm: Gcm::new(key) }
     }
 
-    /// The same over the implementation `implementation` names, or `None`
-    /// where this processor or this cipher has no such thing.
+    /// The same over the kernel named, or `None` where this processor
+    /// cannot run it or it is not written for this cipher.
     ///
-    /// For the benchmark, which names an implementation rather than
-    /// take whichever this processor would pick, and so built only
-    /// where the benchmark is. There is nothing of XPN's own to
-    /// choose: it is [`Gcm`] with the nonce assembled differently, so
-    /// the implementation is GCM's.
+    /// For the benchmark, which names a kernel rather than take
+    /// whichever this processor would pick, and so built only where
+    /// the benchmark is. There is nothing of XPN's own to choose: it
+    /// is [`Gcm`] with the nonce assembled differently, so the kernel
+    /// is GCM's.
     #[cfg(all(test, not(target_family = "wasm")))]
-    pub(crate) fn with_implementation(
+    pub(crate) fn with_kernel(
         key: &C::Key,
-        implementation: crate::implementation::Implementation,
+        kernel: crate::kernel::Kernel,
     ) -> Option<Self> {
         Some(Xpn {
-            gcm: Gcm::with_implementation(key, implementation)?,
+            gcm: Gcm::with_kernel(key, kernel)?,
         })
     }
 

@@ -33,7 +33,7 @@
 //!
 //! # Availability
 //!
-//! [`supported`] asks for AES-NI, SSSE3 and `pclmulqdq`. Without them
+//! [`NARROW`] asks for AES-NI, SSSE3 and `pclmulqdq`. Without them
 //! there is no engine here and GCM uses the generic wrapper, which
 //! reaches the same answer with the counter loop and the group hash
 //! this processor does have.
@@ -51,7 +51,7 @@ use crate::cipher::aes::x86_64::Schedule;
 pub(crate) use crate::cipher::aes::x86_64::{Keys, keys};
 use crate::cipher::mode::{ByteOrder, add_counter};
 use crate::features::{self, Features, x86_64::Feature as F};
-use crate::implementation::Implementation;
+use crate::kernel::Kernel;
 use zeroize::Zeroize;
 
 /// Blocks the loop takes at once, which is also how many powers of
@@ -220,8 +220,8 @@ fn prepare(h: &[u64; 2]) -> [u64; 2] {
 ///
 /// # Safety
 /// Requires `pclmulqdq` and AVX with the operating system saving
-/// its state: the body is VEX-encoded throughout. [`supported`] is
-/// the probe that says so.
+/// its state: the body is VEX-encoded throughout, which is what
+/// [`NARROW`] asks for.
 unsafe fn powers_of(h: &[u64; 2]) -> Powers {
     let mut powers = At16([[0u64; 2]; 2 * GROUP]);
     let mut power = [1u64 << 63, 0];
@@ -283,29 +283,15 @@ unsafe fn wide_powers_of(h: &[u64; 2]) -> At32<[[u64; 2]; 2 * WIDE_AGGREGATE]> {
 pub(crate) const NARROW: Features =
     AESNI.union(features::x86(&[F::Pclmulqdq, F::Avx]));
 
-/// Whether the wider loop can run here as well: VAES and
-/// VPCLMULQDQ, which have shipped together on every processor that
-/// has either (leaf 7, ECX bits 9 and 10), AVX2 (leaf 7, EBX bit 5),
-/// and the operating system saving the upper halves.
-///
-/// Asked separately from [`supported`], and only ever narrowing what
-/// that allows: a processor with these runs the wider loop over as
-/// much of a message as it covers and the narrower one over the rest.
-fn wide_supported() -> bool {
-    features::has(WIDE)
-}
-
 /// What the wider loop needs: [`NARROW`], and VAES with VPCLMULQDQ,
-/// which have shipped together on every processor that has either,
-/// on 256-bit registers.
+/// which have shipped together on every processor that has either
+/// (leaf 7, ECX bits 9 and 10), AVX2 (leaf 7, EBX bit 5), and the
+/// operating system saving the upper halves. Only ever narrowing
+/// what [`NARROW`] allows: a processor with these runs the wider loop
+/// over as much of a message as it covers and the narrower one over
+/// the rest.
 pub(crate) const WIDE: Features =
     NARROW.union(features::x86(&[F::Avx2, F::Vaes, F::Vpclmulqdq]));
-
-/// Whether the loops here can run: AES-NI and SSSE3, which
-/// [`has_aesni`] asks for together, and `pclmulqdq` with AVX.
-pub(crate) fn supported() -> bool {
-    features::has(NARROW)
-}
 
 /// What AES-GCM's bulk work needs and what it does not change: the
 /// way to the round keys, and the powers of the hash subkey.
@@ -361,23 +347,23 @@ impl Drop for Digest {
 }
 
 impl Subkey {
-    /// The powers of hash subkey `h` for `implementation`, or `None`
-    /// where this processor has not its instructions.
+    /// The powers of hash subkey `h` for `kernel`, or `None` where it
+    /// is not one of this file's. That the processor has the
+    /// instructions is settled by whoever chose the kernel, from its
+    /// row in the mode's list.
     ///
     /// VAES also wants a table four times the work to build: worth it
     /// for a key that many messages go under, not for one derived per
     /// message as GCM-SIV derives its own.
-    pub(crate) fn of(
-        h: &[u8; BLOCK],
-        implementation: Implementation,
-    ) -> Option<Self> {
-        let wide = match implementation {
-            Implementation::Vaes if wide_supported() => true,
-            Implementation::Aesni if supported() => false,
+    pub(crate) fn of(h: &[u8; BLOCK], kernel: Kernel) -> Option<Self> {
+        let wide = match kernel {
+            Kernel::Vaes => true,
+            Kernel::Aesni => false,
             _ => return None,
         };
         let h = prepare(&[halve(&h[..8]), halve(&h[8..])]);
-        // SAFETY: `supported` has just confirmed the instructions.
+        // SAFETY: the kernel was chosen from a row whose needs the
+        // processor meets, which is these instructions.
         let powers = unsafe { powers_of(&h) };
         // SAFETY: as above.
         let wide = wide.then(|| unsafe { wide_powers_of(&h) });
@@ -386,16 +372,15 @@ impl Subkey {
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
-    /// The engine `implementation` names, under hash subkey `h`, or
-    /// `None` where this processor lacks its instructions or `C` is
-    /// not a cipher this is written for.
-    pub(crate) fn of(
-        h: &[u8; BLOCK],
-        implementation: Implementation,
-    ) -> Option<Self> {
+    /// The engine `kernel` names, under hash subkey `h`, or `None`
+    /// where it is not one of this file's or `C` is not a cipher it is
+    /// written for. That the processor has the instructions is
+    /// settled by whoever chose the kernel, from its row in the
+    /// mode's list.
+    pub(crate) fn of(h: &[u8; BLOCK], kernel: Kernel) -> Option<Self> {
         Some(Engine {
             keys: keys::<C>()?,
-            subkey: Subkey::of(h, implementation)?,
+            subkey: Subkey::of(h, kernel)?,
         })
     }
 }
@@ -580,7 +565,7 @@ impl Polyval {
     /// processor has not the instructions for it.
     pub(crate) fn new(key: &[u8; BLOCK]) -> Option<Self> {
         Some(Polyval {
-            subkey: Subkey::of(key, Implementation::Aesni)?,
+            subkey: Subkey::of(key, Kernel::Aesni)?,
             digest: Digest::new(false),
         })
     }
@@ -644,23 +629,10 @@ impl Polyval {
             // Fewer than a group is left, if anything: not enough to
             // be worth running the two together, so they go in turn.
             if !rest.is_empty() {
-                siv_counter(Implementation::Aesni, schedule, counter, rest);
+                siv_counter(Kernel::Aesni, schedule, counter, rest);
                 self.hash(rest);
             }
         }
-    }
-}
-
-/// Whether GCM-SIV can run `implementation` on this processor.
-///
-/// The same instructions the counter loop needs, since that is what
-/// GCM-SIV borrows. The hash beside it is narrower by choice, as
-/// [`Polyval`] explains, whichever of these is taken.
-pub(crate) fn siv_supported(implementation: Implementation) -> bool {
-    match implementation {
-        Implementation::Vaes => wide_supported(),
-        Implementation::Aesni => supported(),
-        _ => false,
     }
 }
 
@@ -670,14 +642,14 @@ pub(crate) fn siv_supported(implementation: Implementation) -> bool {
 /// `data` is a whole number of blocks, and `counter` is left on the
 /// block after the last.
 pub(crate) fn siv_counter(
-    implementation: Implementation,
+    kernel: Kernel,
     schedule: Schedule<'_>,
     counter: &mut [u8; BLOCK],
     data: &mut [u8],
 ) {
     debug_assert_eq!(data.len() % BLOCK, 0);
     let (rk, rounds) = (schedule.keys(), schedule.rounds());
-    let wide = implementation == Implementation::Vaes;
+    let wide = kernel == Kernel::Vaes;
     let mut data = data;
     while !data.is_empty() {
         let room = (256 - counter[0] as usize) * BLOCK;
@@ -1631,7 +1603,7 @@ macro_rules! epilogue {
 ///
 /// # Safety
 /// Requires `pclmulqdq` and AVX with the operating system saving
-/// its state: the body is VEX-encoded throughout. [`supported`] is
+/// its state: the body is VEX-encoded throughout. [`NARROW`] is
 /// the probe that says so.
 unsafe fn multiply(value: &mut [u64; 2], h: &[u64; 2]) {
     unsafe {
@@ -1678,8 +1650,8 @@ macro_rules! hash_run {
     ($name:ident, $p:literal, $w:literal, $s:literal, $bc:literal,
      $fold:ident, $rev:ident, $zero:literal) => {
         /// # Safety
-        /// Requires the instructions [`supported`] asks for, and for
-        /// the wider width those [`wide_supported`] asks for. `data`
+        /// Requires the instructions [`NARROW`] asks for, and for
+        /// the wider width those [`WIDE`] asks for. `data`
         /// must be `steps` registers of blocks, `1 <= steps <= 8`,
         /// and `pw` must point at the entry the first of them meets.
         unsafe fn $name(
@@ -1976,7 +1948,7 @@ macro_rules! counter_groups {
     ($name:ident, $offs:ident, $p:literal, $w:literal, $span:literal,
      $bc:literal, $zero:literal) => {
         /// # Safety
-        /// Requires the instructions [`supported`] asks for. `rk`
+        /// Requires the instructions [`NARROW`] asks for. `rk`
         /// must point at `rounds + 1` round keys and `counter` at a
         /// block; `data` must be `groups` groups of writable bytes
         /// with `groups >= 1`. The counter is left to the caller,
@@ -2050,7 +2022,7 @@ macro_rules! immediate_groups {
         /// Decrypts `runs` runs in place and hashes them as it goes.
         ///
         /// # Safety
-        /// Requires the instructions [`supported`] asks for. `rk`
+        /// Requires the instructions [`NARROW`] asks for. `rk`
         /// must point at `rounds + 1` round keys and `counter` at a
         /// block. `data` must be `runs` runs of writable bytes with
         /// `runs >= 1`. `y` is the running hash and `powers` the

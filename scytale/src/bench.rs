@@ -113,7 +113,7 @@ use crate::cipher::chacha20;
 use crate::cipher::mode::{Cbc, Cfb1, Cfb8, Cfb128, Ctr, Kw, Kwp, Ofb, Xts};
 use crate::cipher::mode::{Ff1, Ff3_1};
 use crate::cipher::{BlockCipher, aes};
-use crate::implementation::Implementation;
+use crate::kernel::Kernel;
 #[allow(unused_imports)]
 use std::{
     boxed::Box, eprintln, format, print, println, string::String,
@@ -427,12 +427,12 @@ fn report(run: &mut Run) -> bool {
         use crate::cipher::aes::x86_64;
         ran |= section::<x86_64::vaes::Aes<16>, x86_64::vaes::Aes<32>>(
             "vaes",
-            Implementation::Vaes,
+            Kernel::Vaes,
             run,
         );
         ran |= section::<x86_64::aesni::Aes<16>, x86_64::aesni::Aes<32>>(
             "aesni",
-            Implementation::Aesni,
+            Kernel::Aesni,
             run,
         );
     }
@@ -441,7 +441,7 @@ fn report(run: &mut Run) -> bool {
         use crate::cipher::aes::aarch64;
         ran |= section::<aarch64::armv8::Aes<16>, aarch64::armv8::Aes<32>>(
             "armv8",
-            Implementation::Armv8,
+            Kernel::Armv8,
             run,
         );
     }
@@ -450,27 +450,23 @@ fn report(run: &mut Run) -> bool {
         use crate::cipher::aes::riscv64;
         ran |= section::<riscv64::zvkned::Aes<16>, riscv64::zvkned::Aes<32>>(
             "zvkned",
-            Implementation::Zvkned,
+            Kernel::Zvkned,
             run,
         );
         // The scalar cipher has no mode written against it, so its
         // rows are the portable constructions over it.
         ran |= section::<riscv64::zkn::Aes<16>, riscv64::zkn::Aes<32>>(
             "zkn",
-            Implementation::Portable,
+            Kernel::Portable,
             run,
         );
     }
     ran |= section::<Bitsliced<16>, Bitsliced<32>>(
         "bitsliced",
-        Implementation::Portable,
+        Kernel::Portable,
         run,
     );
-    ran |= section::<Ttable<16>, Ttable<32>>(
-        "ttable",
-        Implementation::Portable,
-        run,
-    );
+    ran |= section::<Ttable<16>, Ttable<32>>("ttable", Kernel::Portable, run);
 
     // The hashes, likewise. SHA-224 and SHA-384 cost the same as
     // SHA-256 and SHA-512 and are not measured separately.
@@ -626,16 +622,12 @@ fn explain(filters: &[String]) {
 /// An implementation the processor cannot run is left out rather than
 /// reported as nothing, and so is one every filter rejected.
 /// `name` is the AES implementation the section is headed with, and
-/// `implementation` is what the modes in it are built on: the engine
-/// written for the same instructions where there is one, and the
-/// portable construction over this cipher where there is not. A mode
-/// with nothing for either is left out of the section rather than
+/// `kernel` is what the modes in it are built on: the loop written
+/// for the same instructions where there is one, and the portable
+/// construction over this cipher where there is not. A mode with
+/// nothing for either is left out of the section rather than
 /// measured twice under two names.
-fn section<A, B>(
-    name: &str,
-    implementation: Implementation,
-    run: &mut Run,
-) -> bool
+fn section<A, B>(name: &str, kernel: Kernel, run: &mut Run) -> bool
 where
     A: BlockCipher<Block = [u8; 16], Key = Key<[u8; 16]>>,
     B: BlockCipher<Block = [u8; 16], Key = Key<[u8; 32]>>,
@@ -649,7 +641,7 @@ where
         return false;
     }
 
-    let mut keys = match Keys::<A, B>::try_new(implementation) {
+    let mut keys = match Keys::<A, B>::try_new(kernel) {
         Ok(keys) => keys,
         // No such instructions here.
         Err(Error::NotSupported) => return false,
@@ -2185,35 +2177,35 @@ where
     A: BlockCipher<Block = [u8; 16], Key = Key<[u8; 16]>>,
     B: BlockCipher<Block = [u8; 16], Key = Key<[u8; 32]>>,
 {
-    /// The keys for one implementation.
+    /// The keys for one kernel.
     ///
     /// A mode written out for particular instructions is built on
     /// those and no others, so that a row appears under the name of
     /// the code that ran it. Where a mode has nothing written for
     /// them it yields `None`, and its rows are left out of the
     /// section rather than filled in with something else.
-    fn try_new(implementation: Implementation) -> Result<Self, Error> {
+    fn try_new(kernel: Kernel) -> Result<Self, Error> {
         let k128 = Key::from(KEY128);
         let k256 = Key::from(KEY256);
         Ok(Keys {
             ecb128: A::new(&k128),
             ecb256: B::new(&k256),
-            cbc: Cbc::with_implementation(&k128, implementation),
+            cbc: Cbc::with_kernel(&k128, kernel),
             cfb1: Cfb1::new(&k128),
             cfb8: Cfb8::new(&k128),
             cfb128: Cfb128::new(&k128),
             ofb: Ofb::new(&k128),
-            ctr: Ctr::with_implementation(&k128, implementation),
-            ctr256: Ctr::with_implementation(&k256, implementation),
-            gcm128: Gcm::with_implementation(&k128, implementation),
-            gcm256: Gcm::with_implementation(&k256, implementation),
-            siv: GcmSiv::with_implementation(&k128, implementation),
-            xpn: Xpn::with_implementation(&k128, implementation),
-            ccm: Ccm::with_implementation(&k128, implementation),
-            xts: Xts::with_implementation(
+            ctr: Ctr::with_kernel(&k128, kernel),
+            ctr256: Ctr::with_kernel(&k256, kernel),
+            gcm128: Gcm::with_kernel(&k128, kernel),
+            gcm256: Gcm::with_kernel(&k256, kernel),
+            siv: GcmSiv::with_kernel(&k128, kernel),
+            xpn: Xpn::with_kernel(&k128, kernel),
+            ccm: Ccm::with_kernel(&k128, kernel),
+            xts: Xts::with_kernel(
                 &Key::from(KEY_XTS_DATA),
                 &Key::from(KEY_XTS_TWEAK),
-                implementation,
+                kernel,
             ),
             kw: Kw::new(&k128),
             kwp: Kwp::new(&k128),
@@ -3751,9 +3743,8 @@ fn self_test() -> bool {
     );
 
     // Every named row is built, or a filter would silently drop it.
-    let mut keys =
-        Keys::<Ttable<16>, Ttable<32>>::try_new(Implementation::Portable)
-            .expect("t-table keys");
+    let mut keys = Keys::<Ttable<16>, Ttable<32>>::try_new(Kernel::Portable)
+        .expect("t-table keys");
     let built = keys.tasks();
     check(
         "every algorithm has a task",

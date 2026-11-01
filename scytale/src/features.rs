@@ -743,6 +743,22 @@ pub(crate) fn select<K: Copy>(kernels: &[(K, Features)]) -> Option<K> {
         .map(|(kernel, _)| *kernel)
 }
 
+/// Whether `kernel` is a row of `kernels` that this processor can run,
+/// the virtual features granted. The test constructors ask this
+/// rather than the set in force, so a test may build any kernel the
+/// machine has without editing the set, which is global to the
+/// process.
+#[cfg(test)]
+pub(crate) fn available<K: PartialEq>(
+    kernels: &[(K, Features)],
+    kernel: K,
+) -> bool {
+    let granted = detected() | Features::of(&[Feature::Isolated]);
+    kernels
+        .iter()
+        .any(|(k, needs)| *k == kernel && needs.is_subset(granted))
+}
+
 /// The requirements alone, in order: what a family publishes as its
 /// profiles. `N` is the length of `kernels`, checked when the constant
 /// is evaluated.
