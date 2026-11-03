@@ -252,6 +252,14 @@ jobs:
           # library.
           cargo test -p scytale-acvp --no-default-features \
               --target "$TARGET"
+          # Then once more under every feature profile this processor
+          # reaches, the answers compared, so each kernel the emulated
+          # processor can run answers the vectors itself. Edits the
+          # process-wide set, so it runs alone; the alias in
+          # .cargo/config.toml cannot take a target.
+          cargo test -p scytale-acvp --no-default-features --lib \
+              --target "$TARGET" \
+              profile::tests::every_profile -- --ignored --test-threads=1
         env:
           SCYTALE_CPU_FEATURES: ${{ matrix.features }}
           # Empty for the rows that do not set it, which the
