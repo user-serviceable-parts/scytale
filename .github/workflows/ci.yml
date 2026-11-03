@@ -28,12 +28,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Both runners have every extension the library uses, and
+          # the inventory holds them to it: one that lacks something
+          # fails there instead of skipping rows in silence. On x86
+          # that is also the only test of the wide GCM rows, since
+          # QEMU does not emulate VPCLMULQDQ.
           - arch: x86-64
             runner: ubuntu-latest
+            expect_all: 1
           - arch: arm64
             runner: ubuntu-24.04-arm
-          - arch: riscv64
-            runner: ubuntu-24.04-riscv
+            expect_all: 1
+          # The RISE runner is off until the RVA23 machines arrive:
+          # it has no extension the library uses, so it tests only
+          # the portable code, which the emulated jobs test in a
+          # tenth of the time. Clippy for the target runs there.
+          # - arch: riscv64
+          #   runner: ubuntu-24.04-riscv
     steps:
       - uses: actions/checkout@v7
 
@@ -85,6 +96,8 @@ jobs:
         # suites live in the library's own test build, since an
         # integration test cannot see the implementations.
         run: cargo test --lib acvp::inventory -- --nocapture
+        env:
+          SCYTALE_EXPECT_ALL: ${{ matrix.expect_all }}
 
       - name: Clippy
         # The same profile as the tests, so this analyses the code
@@ -201,7 +214,8 @@ jobs:
               ca-certificates curl gcc libc6-dev qemu-user $cross
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
               | sh -s -- -y --profile minimal \
-                    --default-toolchain stable --target "$target"
+                    --default-toolchain stable --target "$target" \
+                    --component clippy
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           echo "TARGET=$target" >> "$GITHUB_ENV"
 
@@ -228,6 +242,14 @@ jobs:
           # Empty for the rows that do not set it, which the
           # inventory reads as unset.
           SCYTALE_EXPECT_ALL: ${{ matrix.expect_all }}
+
+      - name: Clippy
+        # The lints for the target, which the native runner used to
+        # run; once per architecture is enough.
+        if: matrix.arch == 'riscv64' && matrix.cpu == 'max'
+        run: |
+          cargo clippy --workspace --all-targets --profile test \
+              --target "$TARGET" -- -D warnings
 
   # Targets the jobs above do not build. wasm32 is an architecture
   # with no loops written out for it, which is a different shape of
@@ -306,8 +328,12 @@ jobs:
           echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
 
       - name: Test
-        # As `cargo test-extended`, which cannot take a target.
+        # As `cargo test-extended`, which cannot take a target. The
+        # inventory goes first and alone so that its table is in the
+        # log, portable rows though they all are.
         run: |
+          cargo test -p scytale --lib --target ${{ matrix.target }} \
+              acvp::inventory -- --nocapture
           cargo test --workspace --target ${{ matrix.target }} \
               -- --include-ignored --skip bench::speed \
               --skip features::tests::alone

@@ -101,12 +101,13 @@ against these crates; the rustls one needs Go, a C compiler and `cpp`
 for BoGo. `scripts/test-openssl-interop` needs OpenSSL 3.
 
 Continuous integration covers the same ground on every push: every
-crate's tests natively on x86-64, arm64 and riscv64 runners and on
-32-bit x86 and WebAssembly, the library's under qemu as older and
-newer processors of each architecture, the library built for targets
-with no operating system, the style checks, the downstream suites,
-the interop, and the packaging of every crate. The benchmark runs on
-the native runners when the `Bench` workflow is started by hand.
+crate's tests natively on x86-64 and arm64 runners and on 32-bit x86
+and WebAssembly, the library's under qemu as older and newer
+processors of each architecture, riscv64 among them, the library
+built for targets with no operating system, the style checks, the
+downstream suites, the interop, and the packaging of every crate. The
+benchmark runs on the native runners when the `Bench` workflow is
+started by hand.
 
 ## Security
 
