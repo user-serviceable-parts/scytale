@@ -249,9 +249,19 @@ mod tests {
     #[test]
     fn walk_starts_detected_and_ends_portable() {
         let (runnable, _) = walk();
-        assert_eq!(runnable.first(), Some(&features::detected()));
-        assert_eq!(runnable.last(), Some(&Features::new()));
-        assert_eq!(features::get(), features::detected());
+        let detected = features::detected();
+        let portable = Features::new();
+        assert_eq!(runnable.first(), Some(&detected));
+        // The empty set closes the walk, unless it opened it: a
+        // processor with nothing written for it walks the empty set
+        // and then the same isolated.
+        let last = if detected == portable {
+            portable.with(Feature::Isolated)
+        } else {
+            portable
+        };
+        assert_eq!(runnable.last(), Some(&last));
+        assert_eq!(features::get(), detected);
     }
 
     #[test]

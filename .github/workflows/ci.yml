@@ -240,11 +240,12 @@ jobs:
               export "CARGO_TARGET_${name}_LINKER=$arch-linux-gnu-gcc"
           fi
           export "CARGO_TARGET_${name}_RUNNER=$runner"
-          cargo test --lib --target "$TARGET" -- --nocapture \
+          cargo test -p scytale --lib --target "$TARGET" -- --nocapture \
               vectors::inventory
-          cargo test --lib --target "$TARGET"
-          cargo test --lib --target "$TARGET" features::tests::alone -- \
-              --ignored --test-threads=1
+          cargo test --workspace --exclude scytale-acvp --lib \
+              --target "$TARGET"
+          cargo test -p scytale --lib --target "$TARGET" \
+              features::tests::alone -- --ignored --test-threads=1
           # The ACVP suites through the public API, quick form: the
           # Monte Carlo and large-data groups wait for real hardware.
           # Without the session, which would want the target's TLS
