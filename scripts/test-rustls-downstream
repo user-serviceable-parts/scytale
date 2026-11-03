@@ -64,10 +64,10 @@ then
     exit 1
 fi
 
-cargo test -p rustls-test --no-default-features --features "$features"
+cargo test --release -p rustls-test --no-default-features --features "$features"
 
 # aws-lc-rs is in this one on purpose: it is the other side.
-cargo test -p rustls-provider-test
+cargo test --release -p rustls-provider-test
 
 command -v go > /dev/null || {
     echo "BoGo needs Go on the path" >&2

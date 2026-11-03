@@ -70,7 +70,7 @@ echo "==> webpki $WEBPKI_TAG"
 (
     cd webpki
     check --no-default-features --features ring,alloc,std
-    cargo test --no-default-features --features ring,alloc,std
+    cargo test --release --no-default-features --features ring,alloc,std
 )
 
 echo "==> rustls $RUSTLS_TAG"
@@ -78,8 +78,8 @@ echo "==> rustls $RUSTLS_TAG"
     cd rustls
     features=ring,tls12,logging,std
     check -p rustls --no-default-features --features "$features"
-    cargo test -p rustls --no-default-features --features "$features" \
-        --all-targets
+    cargo test --release -p rustls --no-default-features \
+        --features "$features" --all-targets
 )
 
 echo "webpki and rustls passed against scytale-ring"

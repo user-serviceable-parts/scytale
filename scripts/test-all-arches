@@ -64,13 +64,13 @@ run_target() {
     target=$1
     echo "==> $target"
     if [ "$target" = "$host" ]; then
-        cargo test --workspace -- --include-ignored \
+        cargo test --release --workspace -- --include-ignored \
             --skip bench::speed --skip features::tests::alone \
-            --skip profile::tests::every_profile
-        cargo test -p scytale --lib features::tests::alone -- \
+            --skip profile::tests::every_profile --skip tests::vendored
+        cargo test --release -p scytale --lib features::tests::alone -- \
             --ignored --test-threads=1
-        cargo test -p scytale-acvp --lib profile::tests::every_profile -- \
-            --ignored --test-threads=1
+        cargo test --release -p scytale-acvp --lib \
+            profile::tests::every_profile -- --ignored --test-threads=1
         return
     fi
     if ! command -v cross >/dev/null 2>&1; then

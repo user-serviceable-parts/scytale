@@ -81,7 +81,7 @@ jobs:
         # through the public types on a machine that has the
         # hardware. The test build takes SCYTALE_FEATURES as the set
         # in force; see features::baseline.
-        run: cargo test -p scytale --lib
+        run: cargo test --release -p scytale --lib
         env:
           SCYTALE_FEATURES: none
 
@@ -103,7 +103,7 @@ jobs:
         # says which implementations this processor could run. The
         # suites live in the library's own test build, since an
         # integration test cannot see the implementations.
-        run: cargo test --lib vectors::inventory -- --nocapture
+        run: cargo test --release --lib vectors::inventory -- --nocapture
         env:
           SCYTALE_EXPECT_ALL: ${{ matrix.expect_all }}
 
@@ -111,7 +111,7 @@ jobs:
         # The same profile as the tests, so this analyses the code
         # rather than building a second tree of it.
         run: |
-          cargo clippy --workspace --all-targets --profile test \
+          cargo clippy --workspace --all-targets --release \
               -- -D warnings
 
       - name: Docs
@@ -240,16 +240,16 @@ jobs:
               export "CARGO_TARGET_${name}_LINKER=$arch-linux-gnu-gcc"
           fi
           export "CARGO_TARGET_${name}_RUNNER=$runner"
-          cargo test -p scytale --lib --target "$TARGET" -- --nocapture \
-              vectors::inventory
-          cargo test --workspace --exclude scytale-acvp --lib \
+          cargo test --release -p scytale --lib --target "$TARGET" \
+              -- --nocapture vectors::inventory
+          cargo test --release --workspace --exclude scytale-acvp --lib \
               --target "$TARGET"
-          cargo test -p scytale --lib --target "$TARGET" \
+          cargo test --release -p scytale --lib --target "$TARGET" \
               features::tests::alone -- --ignored --test-threads=1
           # The ACVP suites through the public API, every suite in
           # full. Without the session, which would want the target's
           # TLS library.
-          cargo test -p scytale-acvp --no-default-features \
+          cargo test --release -p scytale-acvp --no-default-features \
               --target "$TARGET" \
               -- --include-ignored --skip profile::tests::every_profile \
               --skip tests::vendored
@@ -258,7 +258,7 @@ jobs:
           # processor can run answers the vectors itself. Edits the
           # process-wide set, so it runs alone; the alias in
           # .cargo/config.toml cannot take a target.
-          cargo test -p scytale-acvp --no-default-features --lib \
+          cargo test --release -p scytale-acvp --no-default-features --lib \
               --target "$TARGET" \
               profile::tests::every_profile -- --ignored --test-threads=1
         env:
@@ -273,9 +273,9 @@ jobs:
         if: matrix.arch == 'riscv64' && matrix.cpu == 'max'
         run: |
           cargo clippy --workspace --exclude scytale-acvp --all-targets \
-              --profile test --target "$TARGET" -- -D warnings
+              --release --target "$TARGET" -- -D warnings
           cargo clippy -p scytale-acvp --no-default-features \
-              --all-targets --profile test --target "$TARGET" \
+              --all-targets --release --target "$TARGET" \
               -- -D warnings
 
   # Targets the jobs above do not build. wasm32 is an architecture
@@ -359,19 +359,19 @@ jobs:
         # inventory goes first and alone so that its table is in the
         # log, portable rows though they all are.
         run: |
-          cargo test -p scytale --lib --target ${{ matrix.target }} \
+          cargo test --release -p scytale --lib --target ${{ matrix.target }} \
               vectors::inventory -- --nocapture
-          cargo test --workspace --exclude scytale-acvp \
+          cargo test --release --workspace --exclude scytale-acvp \
               --target ${{ matrix.target }} \
               -- --include-ignored --skip bench::speed \
               --skip features::tests::alone
-          cargo test -p scytale-acvp --no-default-features \
+          cargo test --release -p scytale-acvp --no-default-features \
               --target ${{ matrix.target }} \
               -- --include-ignored --skip profile::tests::every_profile \
               --skip tests::vendored
-          cargo test -p scytale --lib --target ${{ matrix.target }} \
+          cargo test --release -p scytale --lib --target ${{ matrix.target }} \
               features::tests::alone -- --ignored --test-threads=1
-          cargo test -p scytale-acvp --no-default-features --lib \
+          cargo test --release -p scytale-acvp --no-default-features --lib \
               --target ${{ matrix.target }} \
               profile::tests::every_profile -- --ignored --test-threads=1
         env:
@@ -396,9 +396,9 @@ jobs:
         # and the three targets above never show it to the lints.
         run: |
           cargo clippy --workspace --exclude scytale-acvp --all-targets \
-              --profile test --target ${{ matrix.target }} -- -D warnings
+              --release --target ${{ matrix.target }} -- -D warnings
           cargo clippy -p scytale-acvp --no-default-features \
-              --all-targets --profile test --target ${{ matrix.target }} \
+              --all-targets --release --target ${{ matrix.target }} \
               -- -D warnings
         env:
           CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
