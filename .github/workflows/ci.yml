@@ -17,8 +17,8 @@ env:
 
 jobs:
   # Every architecture runs its own tests natively: no emulation, so
-  # the assembly is exercised on real hardware. The vendored ACVP
-  # vectors are in the checkout, so the full suites run.
+  # the assembly is exercised on real hardware. The vendored vector
+  # files are in the checkout, so the full suites run.
   #
   # The RISC-V runners are the RISE ones, installed as a GitHub App.
   test:
@@ -90,12 +90,20 @@ jobs:
         # single-threaded; the alias in .cargo/config.toml.
         run: cargo test-alone
 
+      - name: ACVP suites under every implementation
+        # Every symmetric suite answered once per feature profile
+        # this processor can run, the answers compared: each kernel
+        # is reached by the profile that selects it. Edits the same
+        # process-wide setting, so it too runs alone; the alias in
+        # .cargo/config.toml.
+        run: cargo test-every-profile
+
       - name: Implementations tested
         # The binary is built by now, so this costs a second and
         # says which implementations this processor could run. The
         # suites live in the library's own test build, since an
         # integration test cannot see the implementations.
-        run: cargo test --lib acvp::inventory -- --nocapture
+        run: cargo test --lib vectors::inventory -- --nocapture
         env:
           SCYTALE_EXPECT_ALL: ${{ matrix.expect_all }}
 
@@ -233,10 +241,16 @@ jobs:
           fi
           export "CARGO_TARGET_${name}_RUNNER=$runner"
           cargo test --lib --target "$TARGET" -- --nocapture \
-              acvp::inventory
+              vectors::inventory
           cargo test --lib --target "$TARGET"
           cargo test --lib --target "$TARGET" features::tests::alone -- \
               --ignored --test-threads=1
+          # The ACVP suites through the public API, quick form: the
+          # Monte Carlo and large-data groups wait for real hardware.
+          # Without the session, which would want the target's TLS
+          # library.
+          cargo test -p scytale-acvp --no-default-features \
+              --target "$TARGET"
         env:
           SCYTALE_CPU_FEATURES: ${{ matrix.features }}
           # Empty for the rows that do not set it, which the
@@ -248,8 +262,11 @@ jobs:
         # run; once per architecture is enough.
         if: matrix.arch == 'riscv64' && matrix.cpu == 'max'
         run: |
-          cargo clippy --workspace --all-targets --profile test \
-              --target "$TARGET" -- -D warnings
+          cargo clippy --workspace --exclude scytale-acvp --all-targets \
+              --profile test --target "$TARGET" -- -D warnings
+          cargo clippy -p scytale-acvp --no-default-features \
+              --all-targets --profile test --target "$TARGET" \
+              -- -D warnings
 
   # Targets the jobs above do not build. wasm32 is an architecture
   # with no loops written out for it, which is a different shape of
@@ -333,12 +350,19 @@ jobs:
         # log, portable rows though they all are.
         run: |
           cargo test -p scytale --lib --target ${{ matrix.target }} \
-              acvp::inventory -- --nocapture
-          cargo test --workspace --target ${{ matrix.target }} \
+              vectors::inventory -- --nocapture
+          cargo test --workspace --exclude scytale-acvp \
+              --target ${{ matrix.target }} \
               -- --include-ignored --skip bench::speed \
               --skip features::tests::alone
+          cargo test -p scytale-acvp --no-default-features \
+              --target ${{ matrix.target }} \
+              -- --include-ignored --skip profile::tests::every_profile
           cargo test -p scytale --lib --target ${{ matrix.target }} \
               features::tests::alone -- --ignored --test-threads=1
+          cargo test -p scytale-acvp --no-default-features --lib \
+              --target ${{ matrix.target }} \
+              profile::tests::every_profile -- --ignored --test-threads=1
         env:
           # Per target, because a plain RUSTFLAGS would replace these
           # rather than add to them and the linker flag would be lost.
@@ -360,8 +384,11 @@ jobs:
         # Some code is built only where there is no hardware backend,
         # and the three targets above never show it to the lints.
         run: |
-          cargo clippy --workspace --all-targets --profile test \
-              --target ${{ matrix.target }} -- -D warnings
+          cargo clippy --workspace --exclude scytale-acvp --all-targets \
+              --profile test --target ${{ matrix.target }} -- -D warnings
+          cargo clippy -p scytale-acvp --no-default-features \
+              --all-targets --profile test --target ${{ matrix.target }} \
+              -- -D warnings
         env:
           CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
           CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS:
@@ -387,8 +414,8 @@ jobs:
         # ring-tests holds ring's own files, under ring's rules, so
         # only the shim's sources are held to this repository's.
         run: |
-          long=$(find scytale scytale-cli scytale-ring/src rustls-scytale \
-              -name '*.rs' \
+          long=$(find scytale scytale-cli scytale-acvp scytale-ring/src \
+              rustls-scytale -name '*.rs' \
               -exec awk 'length > 80 {print FILENAME": "FNR}' {} +)
           if [ -n "$long" ]; then
               echo "lines over 80 columns:" >&2
@@ -399,8 +426,8 @@ jobs:
       - name: ASCII only
         run: |
           if grep -rnP --include='*.rs' '[^\x00-\x7F]' \
-              scytale/src scytale-cli/src scytale-ring/src \
-              rustls-scytale/src rustls-scytale/tests; then
+              scytale/src scytale-cli/src scytale-acvp/src \
+              scytale-ring/src rustls-scytale/src rustls-scytale/tests; then
               echo "non-ASCII characters found" >&2
               exit 1
           fi

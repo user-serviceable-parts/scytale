@@ -65,8 +65,11 @@ run_target() {
     echo "==> $target"
     if [ "$target" = "$host" ]; then
         cargo test --workspace -- --include-ignored \
-            --skip bench::speed --skip features::tests::alone
+            --skip bench::speed --skip features::tests::alone \
+            --skip profile::tests::every_profile
         cargo test -p scytale --lib features::tests::alone -- \
+            --ignored --test-threads=1
+        cargo test -p scytale-acvp --lib profile::tests::every_profile -- \
             --ignored --test-threads=1
         return
     fi
@@ -78,15 +81,13 @@ run_target() {
         echo "missing rust-std: rustup target add $target" >&2
         exit 1
     fi
-    # The large data tests are left out under emulation. Each is one
-    # test, so one thread, hashing gigabytes through qemu: it is what
-    # the run sat on, one processor busy, long after every other test
-    # had finished. What they check is that the length survives a
-    # message past 2^32 bits, which is the engine's arithmetic and the
-    # same code on every architecture, and the host run above and CI
-    # both do it natively. The Monte Carlo suites stay: they chain
-    # calls through each hardware backend, and for the RISC-V ones
-    # this is the only place they run.
+    # The ACVP suites run in their quick form under emulation: the
+    # large data tests hash gigabytes through qemu, which is what the
+    # run sat on, one processor busy, long after every other test had
+    # finished, and the host run above and CI both do them natively.
+    # The every-profile run stays: it chains the Monte Carlo suites
+    # through each hardware backend, and for the RISC-V ones this is
+    # the only place they run.
     if [ "$target" = riscv64gc-unknown-linux-gnu ] \
         && [ -z "$QEMU_SWEEP" ]; then
         export SCYTALE_CPU_FEATURES="$RISCV_FEATURES"
@@ -96,17 +97,25 @@ run_target() {
     if [ "$QEMU_CPU" = max ]; then
         export SCYTALE_EXPECT_ALL=1
     fi
-    cross test --workspace --target "$target" -- \
-        --include-ignored --skip bench::speed --skip sha_ldt \
+    # The container has no TLS library for the target, so the
+    # harness runs without its session.
+    cross test --workspace --exclude scytale-acvp --target "$target" -- \
+        --include-ignored --skip bench::speed \
         --skip features::tests::alone
+    cross test -p scytale-acvp --no-default-features --target "$target"
     cross test -p scytale --lib --target "$target" \
         features::tests::alone -- --ignored --test-threads=1
+    cross test -p scytale-acvp --no-default-features --lib \
+        --target "$target" profile::tests::every_profile -- \
+        --ignored --test-threads=1
     if [ "$target" = riscv64gc-unknown-linux-gnu ] \
         && [ -z "$QEMU_SWEEP" ]; then
         for cpu in $RISCV_CONFIGS; do
             echo "==> $target QEMU_CPU=$cpu"
-            QEMU_CPU=$cpu cross test --workspace --target "$target" -- \
-                --skip bench::speed
+            QEMU_CPU=$cpu cross test --workspace --exclude scytale-acvp \
+                --target "$target" -- --skip bench::speed
+            QEMU_CPU=$cpu cross test -p scytale-acvp --no-default-features \
+                --target "$target"
         done
         unset SCYTALE_CPU_FEATURES
     fi

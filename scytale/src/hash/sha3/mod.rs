@@ -222,6 +222,13 @@ macro_rules! dispatch {
 #[derive(Clone)]
 pub(crate) struct Auto<V: engine::Variant>(Inner<V>);
 
+/// The kernels every function of the family chooses among, with
+/// their needs: one Keccak permutation serves them all.
+#[cfg(test)]
+pub(crate) fn kernels() -> &'static [(Kernel, Features)] {
+    KERNELS
+}
+
 #[derive(Clone)]
 enum Inner<V: engine::Variant> {
     #[cfg(target_arch = "aarch64")]
@@ -280,12 +287,6 @@ impl<V: engine::Variant> Auto<V> {
             Inner::Zbb(_) => Kernel::Zbb,
             Inner::Portable(_) => Kernel::Portable,
         }
-    }
-
-    /// The kernels this family chooses among, with their needs.
-    #[cfg(test)]
-    pub(crate) fn kernels() -> &'static [(Kernel, Features)] {
-        KERNELS
     }
 
     /// Starts a function on `kernel` alone, or `None` where the set
@@ -816,12 +817,6 @@ macro_rules! digest {
                 &PROFILES
             }
 
-            /// The kernels this hash chooses among, with their needs.
-            #[cfg(test)]
-            pub(crate) fn kernels() -> &'static [(Kernel, Features)] {
-                KERNELS
-            }
-
             /// Starts a hash on `kernel` alone, or `None` where the
             /// set in force does not allow it.
             #[cfg(test)]
@@ -904,13 +899,6 @@ macro_rules! shake {
             /// first; see [`Dispatcher`].
             pub fn profiles() -> &'static [Features] {
                 &PROFILES
-            }
-
-            /// The kernels this function chooses among, with their
-            /// needs.
-            #[cfg(test)]
-            pub(crate) fn kernels() -> &'static [(Kernel, Features)] {
-                KERNELS
             }
 
             /// Starts a function on `kernel` alone, or `None` where
