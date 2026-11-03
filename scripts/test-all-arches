@@ -66,11 +66,11 @@ run_target() {
     if [ "$target" = "$host" ]; then
         cargo test --release --workspace -- --include-ignored \
             --skip bench::speed --skip features::tests::alone \
-            --skip profile::tests::every_profile --skip tests::vendored
+            --skip profile::tests::alone --skip tests::vendored
         cargo test --release -p scytale --lib features::tests::alone -- \
             --ignored --test-threads=1
         cargo test --release -p scytale-acvp --lib \
-            profile::tests::every_profile -- --ignored --test-threads=1
+            profile::tests::alone -- --ignored --test-threads=1
         return
     fi
     if ! command -v cross >/dev/null 2>&1; then
@@ -106,7 +106,7 @@ run_target() {
     cross test -p scytale --lib --target "$target" \
         features::tests::alone -- --ignored --test-threads=1
     cross test -p scytale-acvp --no-default-features --lib \
-        --target "$target" profile::tests::every_profile -- \
+        --target "$target" profile::tests::alone -- \
         --ignored --test-threads=1
     if [ "$target" = riscv64gc-unknown-linux-gnu ] \
         && [ -z "$QEMU_SWEEP" ]; then

@@ -9,7 +9,7 @@ test-extended = [
     "test", "--release", "--workspace", "--",
     "--include-ignored", "--skip", "bench::speed",
     "--skip", "features::tests::alone",
-    "--skip", "profile::tests::every_profile",
+    "--skip", "profile::tests::alone",
     "--skip", "tests::vendored",
 ]
 # The tests that edit the process-wide set of features in force, run
@@ -22,5 +22,5 @@ test-alone = [
 # which edits the same process-wide set; see scytale-acvp/README.md.
 test-every-profile = [
     "test", "--release", "-p", "scytale-acvp", "--lib",
-    "profile::tests::every_profile", "--", "--ignored", "--test-threads=1",
+    "profile::tests::alone", "--", "--ignored", "--test-threads=1",
 ]

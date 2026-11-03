@@ -252,7 +252,7 @@ jobs:
           # TLS library.
           cargo test --release -p scytale-acvp --no-default-features \
               --target "$TARGET" \
-              -- --include-ignored --skip profile::tests::every_profile \
+              -- --include-ignored --skip profile::tests::alone \
               --skip tests::vendored
           # Then once more under every feature profile this processor
           # reaches, the answers compared, so each kernel the emulated
@@ -261,7 +261,7 @@ jobs:
           # .cargo/config.toml cannot take a target.
           cargo test --release -p scytale-acvp --no-default-features --lib \
               --target "$TARGET" \
-              profile::tests::every_profile -- --ignored --test-threads=1
+              profile::tests::alone -- --ignored --test-threads=1
         env:
           SCYTALE_CPU_FEATURES: ${{ matrix.features }}
           # Empty for the rows that do not set it, which the
@@ -373,13 +373,13 @@ jobs:
               --skip features::tests::alone --skip vectors::inventory
           cargo test --release -p scytale-acvp --no-default-features \
               --target ${{ matrix.target }} \
-              -- --include-ignored --skip profile::tests::every_profile \
+              -- --include-ignored --skip profile::tests::alone \
               --skip tests::vendored
           cargo test --release -p scytale --lib --target ${{ matrix.target }} \
               features::tests::alone -- --ignored --test-threads=1
           cargo test --release -p scytale-acvp --no-default-features --lib \
               --target ${{ matrix.target }} \
-              profile::tests::every_profile -- --ignored --test-threads=1
+              profile::tests::alone -- --ignored --test-threads=1
         env:
           # Per target, because a plain RUSTFLAGS would replace these
           # rather than add to them and the linker flag would be lost.

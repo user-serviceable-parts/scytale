@@ -202,70 +202,81 @@ mod tests {
     use crate::suite::{SUITES, vendored};
     use serde_json::json;
 
-    /// Every symmetric suite answered under every profile this
-    /// processor can run but the detected one, each answer compared
-    /// with the file: the check that each kernel is right. The
-    /// detected profile is what the ordinary run of every suite
-    /// answered under, so it is not run again here. Process-wide, so
-    /// it runs alone (`cargo test-alone`), and ignored by default for
-    /// its length. The large-data groups are left out: each hashes
-    /// gigabytes, which checks length handling the one-shot groups
-    /// already cover, not the kernel.
-    #[test]
-    #[ignore]
-    fn every_profile() {
-        let (profiles, refused) = walk();
-        for p in refused {
-            eprintln!("profile {p}: not on this processor, skipped");
-        }
-        assert_eq!(profiles.first(), Some(&features::detected()));
-        let profiles = &profiles[1..];
-        let symmetric = |s: &&Suite| {
-            let a = s.algorithm;
-            a.starts_with("ACVP-AES")
-                || a.starts_with("SHA")
-                || a.starts_with("cSHAKE")
-                || a.starts_with("KMAC")
-                || a.starts_with("TupleHash")
-                || a.starts_with("HMAC")
-                || a.starts_with("CMAC")
-                || a.ends_with("DRBG")
-                || a == "PBKDF"
-                || a == "KDF"
-        };
-        let mut suites = 0;
-        for suite in SUITES.iter().filter(symmetric) {
-            let Some(mut doc) = vendored(suite) else {
-                continue;
-            };
-            if let Some(groups) = doc["testGroups"].as_array_mut() {
-                groups.retain(|g| g["testType"] != "LDT");
-            }
-            let answered = answer_under(suite, &doc, &Seed::fixed(), profiles)
-                .unwrap_or_else(|e| panic!("{}: {e}", suite.directory));
-            crate::suite::compare(suite, &doc, &answered)
-                .unwrap_or_else(|e| panic!("{}: {e}", suite.directory));
-            suites += 1;
-        }
-        assert!(suites == 0 || suites >= 50, "only {suites} suites");
-    }
+    /// The tests that edit the process-wide set of features in
+    /// force. Another test building a cipher while the set changes
+    /// under it can see its mode and cipher disagree, so these are
+    /// ignored by default and run alone, single-threaded; see
+    /// `cargo test-every-profile`.
+    mod alone {
+        use super::*;
 
-    #[test]
-    fn walk_starts_detected_and_ends_portable() {
-        let (runnable, _) = walk();
-        let detected = features::detected();
-        let portable = Features::new();
-        assert_eq!(runnable.first(), Some(&detected));
-        // The empty set closes the walk, unless it opened it: a
-        // processor with nothing written for it walks the empty set
-        // and then the same isolated.
-        let last = if detected == portable {
-            portable.with(Feature::Isolated)
-        } else {
-            portable
-        };
-        assert_eq!(runnable.last(), Some(&last));
-        assert_eq!(features::get(), detected);
+        /// Every symmetric suite answered under every profile this
+        /// processor can run but the detected one, each answer compared
+        /// with the file: the check that each kernel is right. The
+        /// detected profile is what the ordinary run of every suite
+        /// answered under, so it is not run again here. Process-wide, so
+        /// it runs alone (`cargo test-alone`), and ignored by default for
+        /// its length. The large-data groups are left out: each hashes
+        /// gigabytes, which checks length handling the one-shot groups
+        /// already cover, not the kernel.
+        #[test]
+        #[ignore]
+        fn every_profile() {
+            let (profiles, refused) = walk();
+            for p in refused {
+                eprintln!("profile {p}: not on this processor, skipped");
+            }
+            assert_eq!(profiles.first(), Some(&features::detected()));
+            let profiles = &profiles[1..];
+            let symmetric = |s: &&Suite| {
+                let a = s.algorithm;
+                a.starts_with("ACVP-AES")
+                    || a.starts_with("SHA")
+                    || a.starts_with("cSHAKE")
+                    || a.starts_with("KMAC")
+                    || a.starts_with("TupleHash")
+                    || a.starts_with("HMAC")
+                    || a.starts_with("CMAC")
+                    || a.ends_with("DRBG")
+                    || a == "PBKDF"
+                    || a == "KDF"
+            };
+            let mut suites = 0;
+            for suite in SUITES.iter().filter(symmetric) {
+                let Some(mut doc) = vendored(suite) else {
+                    continue;
+                };
+                if let Some(groups) = doc["testGroups"].as_array_mut() {
+                    groups.retain(|g| g["testType"] != "LDT");
+                }
+                let answered =
+                    answer_under(suite, &doc, &Seed::fixed(), profiles)
+                        .unwrap_or_else(|e| panic!("{}: {e}", suite.directory));
+                crate::suite::compare(suite, &doc, &answered)
+                    .unwrap_or_else(|e| panic!("{}: {e}", suite.directory));
+                suites += 1;
+            }
+            assert!(suites == 0 || suites >= 50, "only {suites} suites");
+        }
+
+        #[test]
+        #[ignore]
+        fn walk_starts_detected_and_ends_portable() {
+            let (runnable, _) = walk();
+            let detected = features::detected();
+            let portable = Features::new();
+            assert_eq!(runnable.first(), Some(&detected));
+            // The empty set closes the walk, unless it opened it: a
+            // processor with nothing written for it walks the empty set
+            // and then the same isolated.
+            let last = if detected == portable {
+                portable.with(Feature::Isolated)
+            } else {
+                portable
+            };
+            assert_eq!(runnable.last(), Some(&last));
+            assert_eq!(features::get(), detected);
+        }
     }
 
     #[test]
