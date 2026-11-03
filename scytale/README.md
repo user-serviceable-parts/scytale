@@ -71,9 +71,9 @@ Wycheproof][wycheproof] files, more than a hundred thousand vector
 cases before the Monte Carlo suites add several million chained calls
 of their own. Every implementation of a primitive is put through the
 whole vector set for it, at every key size, and the whole suite runs
-on x86-64, aarch64 and riscv64 hardware rather than on the machine
-that happens to be to hand. The Goals section below says exactly what
-that means.
+on x86-64 and aarch64 hardware, and on riscv64 under emulation, rather
+than on the machine that happens to be to hand. The Goals section
+below says exactly what that means.
 
 Work from here will focus on speed and algorithms that are still
 missing. The API is still being stabilized, and the version number is
