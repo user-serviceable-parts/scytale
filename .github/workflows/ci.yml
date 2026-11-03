@@ -349,10 +349,15 @@ jobs:
 
       - name: Install Wasmtime
         if: matrix.target == 'wasm32-wasip1'
+        # A pinned version: asked for the latest, the installer looks
+        # it up through GitHub's API, and when that answer is not a
+        # release it prints an error and exits zero, so the job ran
+        # on without a runtime. The check is for the same reason.
         run: |
           curl --proto '=https' --tlsv1.2 -sSf \
-              https://wasmtime.dev/install.sh | bash
+              https://wasmtime.dev/install.sh | bash -s -- --version v50.0.1
           echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+          test -x "$HOME/.wasmtime/bin/wasmtime"
 
       - name: Test
         # As `cargo test-extended`, which cannot take a target. The
