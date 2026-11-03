@@ -73,7 +73,7 @@ jobs:
       - name: Test
         # The alias in .cargo/config.toml; includes the slow Monte
         # Carlo suites, which are quick enough on real hardware.
-        run: cargo test-extended
+        run: cargo test-extended -- --skip vectors::inventory
 
       - name: Test with nothing in force
         # The library's own suite once more with the hardware
@@ -102,7 +102,8 @@ jobs:
         # The binary is built by now, so this costs a second and
         # says which implementations this processor could run. The
         # suites live in the library's own test build, since an
-        # integration test cannot see the implementations.
+        # integration test cannot see the implementations. The runs
+        # above skip it, so this is its only run.
         run: cargo test --release --lib vectors::inventory -- --nocapture
         env:
           SCYTALE_EXPECT_ALL: ${{ matrix.expect_all }}
@@ -243,7 +244,7 @@ jobs:
           cargo test --release -p scytale --lib --target "$TARGET" \
               -- --nocapture vectors::inventory
           cargo test --release --workspace --exclude scytale-acvp --lib \
-              --target "$TARGET"
+              --target "$TARGET" -- --skip vectors::inventory
           cargo test --release -p scytale --lib --target "$TARGET" \
               features::tests::alone -- --ignored --test-threads=1
           # The ACVP suites through the public API, every suite in
@@ -369,7 +370,7 @@ jobs:
           cargo test --release --workspace --exclude scytale-acvp \
               --target ${{ matrix.target }} \
               -- --include-ignored --skip bench::speed \
-              --skip features::tests::alone
+              --skip features::tests::alone --skip vectors::inventory
           cargo test --release -p scytale-acvp --no-default-features \
               --target ${{ matrix.target }} \
               -- --include-ignored --skip profile::tests::every_profile \

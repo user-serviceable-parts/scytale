@@ -203,12 +203,14 @@ mod tests {
     use serde_json::json;
 
     /// Every symmetric suite answered under every profile this
-    /// processor can run, the answers compared: the check that each
-    /// kernel agrees with the rest. Process-wide, so it runs alone
-    /// (`cargo test-alone`), and ignored by default for its length.
-    /// The large-data groups are left out: each hashes gigabytes,
-    /// which checks length handling the one-shot groups already
-    /// cover, not the kernel.
+    /// processor can run but the detected one, each answer compared
+    /// with the file: the check that each kernel is right. The
+    /// detected profile is what the ordinary run of every suite
+    /// answered under, so it is not run again here. Process-wide, so
+    /// it runs alone (`cargo test-alone`), and ignored by default for
+    /// its length. The large-data groups are left out: each hashes
+    /// gigabytes, which checks length handling the one-shot groups
+    /// already cover, not the kernel.
     #[test]
     #[ignore]
     fn every_profile() {
@@ -216,6 +218,8 @@ mod tests {
         for p in refused {
             eprintln!("profile {p}: not on this processor, skipped");
         }
+        assert_eq!(profiles.first(), Some(&features::detected()));
+        let profiles = &profiles[1..];
         let symmetric = |s: &&Suite| {
             let a = s.algorithm;
             a.starts_with("ACVP-AES")
@@ -237,7 +241,7 @@ mod tests {
             if let Some(groups) = doc["testGroups"].as_array_mut() {
                 groups.retain(|g| g["testType"] != "LDT");
             }
-            let answered = answer_under(suite, &doc, &Seed::fixed(), &profiles)
+            let answered = answer_under(suite, &doc, &Seed::fixed(), profiles)
                 .unwrap_or_else(|e| panic!("{}: {e}", suite.directory));
             crate::suite::compare(suite, &doc, &answered)
                 .unwrap_or_else(|e| panic!("{}: {e}", suite.directory));
