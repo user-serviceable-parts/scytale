@@ -858,29 +858,39 @@ mod tests {
         let next = AtomicUsize::new(0);
         let counts: Vec<AtomicUsize> =
             SUITES.iter().map(|_| AtomicUsize::new(0)).collect();
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
-        std::thread::scope(|scope| {
-            for _ in 0..workers {
-                scope.spawn(|| {
-                    loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(suite) = SUITES.get(i) else {
-                            break;
-                        };
-                        let started = std::time::Instant::now();
-                        let count = check_all(suite);
-                        eprintln!(
-                            "{}: {count} cases in {:.1} s",
-                            suite.directory,
-                            started.elapsed().as_secs_f64()
-                        );
-                        counts[i].store(count, Ordering::Relaxed);
-                    }
-                });
+        let work = || {
+            loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(suite) = SUITES.get(i) else {
+                    break;
+                };
+                let started = std::time::Instant::now();
+                let count = check_all(suite);
+                eprintln!(
+                    "{}: {count} cases in {:.1} s",
+                    suite.directory,
+                    started.elapsed().as_secs_f64()
+                );
+                counts[i].store(count, Ordering::Relaxed);
             }
-        });
+        };
+        // WebAssembly has no threads: spawning one aborts the run.
+        let workers = if cfg!(target_family = "wasm") {
+            1
+        } else {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        };
+        if workers == 1 {
+            work();
+        } else {
+            std::thread::scope(|scope| {
+                for _ in 0..workers {
+                    scope.spawn(work);
+                }
+            });
+        }
         let total: usize =
             counts.iter().map(|c| c.load(Ordering::Relaxed)).sum();
         eprintln!("total: {total} cases in {} suites", SUITES.len());
