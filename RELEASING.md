@@ -80,7 +80,7 @@ forgotten.
   the drivers answer and compare, once per suite, after every
   documented skip. Recompute it if a suite was added or removed:
   `SCYTALE_VECTORS=required cargo test -p scytale-acvp
-  vendored_extended -- --ignored --nocapture` prints the count per
+  extended -- --ignored --nocapture` prints the count per
   suite and the total.
 - Any speed figure in `scytale/README.md` or the shim's README that a
   change this release could have moved: rerun `scripts/bench` for it

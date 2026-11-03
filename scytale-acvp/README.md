@@ -35,7 +35,7 @@ gigabytes, and the whole of SLH-DSA wait for
 cargo test-extended
 ```
 
-which runs `vendored_extended`, every suite in full, and prints the
+which runs `extended`, every suite in full, and prints the
 count of cases compared. `SCYTALE_VECTORS=required` makes a missing
 file a failure rather than a skip.
 

@@ -246,12 +246,13 @@ jobs:
               --target "$TARGET"
           cargo test -p scytale --lib --target "$TARGET" \
               features::tests::alone -- --ignored --test-threads=1
-          # The ACVP suites through the public API, quick form: the
-          # Monte Carlo and large-data groups wait for real hardware.
-          # Without the session, which would want the target's TLS
-          # library.
+          # The ACVP suites through the public API, every suite in
+          # full. Without the session, which would want the target's
+          # TLS library.
           cargo test -p scytale-acvp --no-default-features \
-              --target "$TARGET"
+              --target "$TARGET" \
+              -- --include-ignored --skip profile::tests::every_profile \
+              --skip tests::vendored
           # Then once more under every feature profile this processor
           # reaches, the answers compared, so each kernel the emulated
           # processor can run answers the vectors itself. Edits the
@@ -366,7 +367,8 @@ jobs:
               --skip features::tests::alone
           cargo test -p scytale-acvp --no-default-features \
               --target ${{ matrix.target }} \
-              -- --include-ignored --skip profile::tests::every_profile
+              -- --include-ignored --skip profile::tests::every_profile \
+              --skip tests::vendored
           cargo test -p scytale --lib --target ${{ matrix.target }} \
               features::tests::alone -- --ignored --test-threads=1
           cargo test -p scytale-acvp --no-default-features --lib \

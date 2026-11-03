@@ -2,12 +2,15 @@
 # Runs every test, including the long ones marked #[ignore]. Two
 # ignored groups are left out: the benchmark, which measures rather
 # than checks (use scripts/bench), and the tests that edit the
-# features in force, which must run alone (see test-alone).
+# features in force, which must run alone (see test-alone). The quick
+# ACVP checks are left out too: the extended one answers every case
+# they do and more.
 test-extended = [
     "test", "--workspace", "--",
     "--include-ignored", "--skip", "bench::speed",
     "--skip", "features::tests::alone",
     "--skip", "profile::tests::every_profile",
+    "--skip", "tests::vendored",
 ]
 # The tests that edit the process-wide set of features in force, run
 # single-threaded so that no other test sees a narrowed set.

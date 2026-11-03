@@ -853,7 +853,7 @@ mod tests {
     /// hundredfold, and the files are read one per worker at a time.
     #[test]
     #[ignore]
-    fn vendored_extended() {
+    fn extended() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let next = AtomicUsize::new(0);
         let counts: Vec<AtomicUsize> =
