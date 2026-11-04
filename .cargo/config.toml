@@ -1,13 +1,15 @@
 [alias]
-# Runs every test, including the long ones marked #[ignore]. Two
+# Runs every test, including the long ones marked #[ignore]. Three
 # ignored groups are left out: the benchmark, which measures rather
-# than checks (use scripts/bench), and the tests that edit the
-# features in force, which must run alone (see test-alone). The quick
-# ACVP checks are left out too: the extended one answers every case
-# they do and more.
+# than checks (use scripts/bench), the tests that edit the features
+# in force, which must run alone (see test-alone), and the printer
+# that generates the curves' base tables, which is how that file is
+# made rather than a check on it. The quick ACVP checks are left out
+# too: the extended one answers every case they do and more.
 test-extended = [
     "test", "--release", "--workspace", "--",
     "--include-ignored", "--skip", "bench::speed",
+    "--skip", "print_base_tables",
     "--skip", "features::tests::alone",
     "--skip", "profile::tests::alone",
     "--skip", "tests::vendored",

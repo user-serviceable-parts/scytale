@@ -65,7 +65,8 @@ run_target() {
     echo "==> $target"
     if [ "$target" = "$host" ]; then
         cargo test --release --workspace -- --include-ignored \
-            --skip bench::speed --skip features::tests::alone \
+            --skip bench::speed --skip print_base_tables \
+            --skip features::tests::alone \
             --skip profile::tests::alone --skip tests::vendored
         cargo test --release -p scytale --lib features::tests::alone -- \
             --ignored --test-threads=1
@@ -100,7 +101,7 @@ run_target() {
     # The container has no TLS library for the target, so the
     # harness runs without its session.
     cross test --workspace --exclude scytale-acvp --target "$target" -- \
-        --include-ignored --skip bench::speed \
+        --include-ignored --skip bench::speed --skip print_base_tables \
         --skip features::tests::alone
     cross test -p scytale-acvp --no-default-features --target "$target"
     cross test -p scytale --lib --target "$target" \

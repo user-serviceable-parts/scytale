@@ -138,6 +138,25 @@ jobs:
   # pass in silence as a skipped test. It also checks the emulator
   # offers what is written here, so a list cannot go stale.
   #
+  # A row here can prove two things only: that the probes choose the
+  # right kernels on that set of features, and that those kernels run
+  # on that processor without trapping. The inventory is the first,
+  # and executing each kernel once is the second: a Monte Carlo group
+  # runs the same loop a thousand times and a large-data group runs
+  # it over more bytes, and neither reaches an instruction the
+  # one-shot cases did not. Whether each kernel is right is settled
+  # elsewhere, by the walk over every feature profile, and the walk
+  # is the union of every type's profile list, so a processor with
+  # everything answers under every profile a lesser one detects. A
+  # lesser row walking its own lesser profiles would prove nothing
+  # more: a loop that asks for less than it uses cannot fault on a
+  # processor that has more. So most rows run the quick tier, the
+  # library's tests and the quick ACVP checks, and one row per
+  # architecture runs the full tier, the suites in full and the walk.
+  # For x86-64 and aarch64 that is the native job, whose runner has
+  # every feature and is held to running every kernel. RISC-V has no
+  # native runner, so its `max` row is marked `full`.
+  #
   # The container is for its QEMU: the runner's own is too old to
   # report the RISC-V cryptography extensions, and it lacks some of
   # the x86-64 ones.
@@ -149,7 +168,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # No AES-NI: everything portable but the SSSE3 loops.
+          # No AES-NI: everything portable, the probes saying no to
+          # all of it.
           - arch: x86_64
             cpu: Nehalem
             features: ssse3 sse4.1
@@ -165,10 +185,22 @@ jobs:
           - arch: x86_64
             cpu: Haswell
             features: ssse3 sse4.1 aes pclmulqdq avx avx2 bmi1 bmi2
+          # ADX without the SHA extensions or VAES: Broadwell through
+          # Comet Lake, and the Xeons of those years.
+          - arch: x86_64
+            cpu: Skylake-Client
+            features: ssse3 sse4.1 aes pclmulqdq avx avx2 bmi1 bmi2 adx
           # An Atom: the SHA extensions without AVX.
           - arch: x86_64
             cpu: Denverton
             features: ssse3 sse4.1 aes pclmulqdq sha
+          # The SHA extensions and ADX without VAES: Zen 1 and 2.
+          # (QEMU's Milan model has no VAES either, so it would
+          # decide the same.)
+          - arch: x86_64
+            cpu: EPYC-Rome
+            features: >-
+              ssse3 sse4.1 aes pclmulqdq avx avx2 bmi1 bmi2 adx sha
           # Everything QEMU emulates, which is VAES without
           # VPCLMULQDQ: the wide AES modes without wide GCM.
           - arch: x86_64
@@ -179,14 +211,12 @@ jobs:
           - arch: aarch64
             cpu: cortex-a53
             features: aes pmull sha1 sha2
-          # SHA-512 and SHA-3 as well.
+          # SHA-512 and SHA-3 as well, which is everything any
+          # backend uses, so every row must run: one that cannot
+          # would otherwise skip forever. (QEMU's `max` adds nothing
+          # the library looks for.)
           - arch: aarch64
             cpu: neoverse-v1
-            features: aes pmull sha1 sha2 sha512 sha3
-          # Everything the architecture has, so every row must run:
-          # one that cannot would otherwise skip forever.
-          - arch: aarch64
-            cpu: max
             features: aes pmull sha1 sha2 sha512 sha3
             expect_all: 1
           # The base profile, which QEMU gives Zbb and Zbc: the
@@ -195,13 +225,15 @@ jobs:
             cpu: rv64
             features: zbb zbc
           # The vector and scalar cryptography extensions, which no
-          # runner has.
+          # runner has: the only place these kernels run at all, so
+          # this row is the architecture's full tier.
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
             expect_all: 1
+            full: 1
     steps:
       - uses: actions/checkout@v7
 
@@ -247,26 +279,34 @@ jobs:
               --target "$TARGET" -- --skip vectors::inventory
           cargo test --release -p scytale --lib --target "$TARGET" \
               features::tests::alone -- --ignored --test-threads=1
-          # The ACVP suites through the public API, every suite in
-          # full. Without the session, which would want the target's
-          # TLS library.
+          # The ACVP suites through the public API, without the
+          # session, which would want the target's TLS library. The
+          # quick tier answers each suite once under the detected
+          # profile, less the groups that only hash more bytes.
+          if [ -z "$FULL" ]; then
+              cargo test --release -p scytale-acvp --no-default-features \
+                  --target "$TARGET"
+              exit
+          fi
+          # The full tier: every suite in full, then once more under
+          # every feature profile this processor reaches, the answers
+          # compared, so each kernel the emulated processor can run
+          # answers the vectors itself. Edits the process-wide set,
+          # so it runs alone; the alias in .cargo/config.toml cannot
+          # take a target.
           cargo test --release -p scytale-acvp --no-default-features \
               --target "$TARGET" \
               -- --include-ignored --skip profile::tests::alone \
               --skip tests::vendored
-          # Then once more under every feature profile this processor
-          # reaches, the answers compared, so each kernel the emulated
-          # processor can run answers the vectors itself. Edits the
-          # process-wide set, so it runs alone; the alias in
-          # .cargo/config.toml cannot take a target.
           cargo test --release -p scytale-acvp --no-default-features --lib \
               --target "$TARGET" \
               profile::tests::alone -- --ignored --test-threads=1
         env:
           SCYTALE_CPU_FEATURES: ${{ matrix.features }}
-          # Empty for the rows that do not set it, which the
+          # Empty for the rows that do not set them, which the
           # inventory reads as unset.
           SCYTALE_EXPECT_ALL: ${{ matrix.expect_all }}
+          FULL: ${{ matrix.full }}
 
       - name: Clippy
         # The lints for the target, which the native runner used to
@@ -370,6 +410,7 @@ jobs:
           cargo test --release --workspace --exclude scytale-acvp \
               --target ${{ matrix.target }} \
               -- --include-ignored --skip bench::speed \
+              --skip print_base_tables \
               --skip features::tests::alone --skip vectors::inventory
           cargo test --release -p scytale-acvp --no-default-features \
               --target ${{ matrix.target }} \

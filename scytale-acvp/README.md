@@ -27,9 +27,9 @@ NIST's under NIST's.
 SCYTALE_VECTORS=required cargo test -p scytale-acvp
 ```
 
-runs the quick form of every suite. The Monte Carlo groups, which
-chain a thousand calls per case, the large-data groups, which hash
-gigabytes, and the whole of SLH-DSA wait for
+runs the quick form of every suite: everything but the large-data
+groups, which hash gigabytes, and all but one signature per group of
+SLH-DSA signing. Those wait for
 
 ```sh
 cargo test-extended
