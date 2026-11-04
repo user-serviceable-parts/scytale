@@ -85,13 +85,14 @@ features in force, so `SCYTALE_FEATURES=none cargo test -p scytale
 and every fallback, through the public types. CI does this on every
 host it tests on.
 
-Each crate's README says what it is tested against. The ACVP,
-Wycheproof and HPKE vectors are in `scytale/tests/vectors` and ring's
-suite in `scytale-ring/ring-tests`; neither is in a published crate.
-The ACVP vectors are the sample files NIST publishes in its
-ACVP-Server repository, prompts and expected answers together, checked
-offline. Nothing here runs the ACVP protocol against NIST's servers,
-and none of this is a CAVP validation.
+Each crate's README says what it is tested against. The Wycheproof
+and HPKE vectors are in `scytale/tests/vectors`, the ACVP vectors in
+`scytale-acvp/vectors` and ring's suite in `scytale-ring/ring-tests`;
+none is in a published crate. The ACVP vectors are the sample files
+NIST publishes in its ACVP-Server repository, prompts and expected
+answers together, checked offline by the same drivers that
+`scytale-acvp` runs against NIST's servers; see its README. None of
+this is a CAVP validation.
 
 `scripts/test-all-arches` runs the host architecture directly and the
 others with [cross](https://github.com/cross-rs/cross), which needs

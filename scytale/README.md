@@ -92,13 +92,16 @@ Cryptographic Validation Protocol (ACVP), and against Project
 Wycheproof, whose cases are chosen to break implementations rather
 than to exercise them. The ACVP vectors are the files in NIST's
 ACVP-Server repository, each holding the prompts and the expected
-answers, and they are checked offline. That is not the ACVP protocol
-run against NIST's servers, and it is not a CAVP validation: scytale
-has none. The corpus is 132 files holding 103,716 cases, and every case
-this build can run is run; the Monte Carlo groups chain a thousand
-cipher calls per case, with the key re-derived at each step. Every
-implementation is put through the whole vector set for its primitive,
-at every key size, the modes and the AEADs included: each kernel
+answers. The drivers that answer them live in the repository's
+`scytale-acvp` crate, which runs them offline against those files
+and online against NIST's servers through the ACVP protocol; it is
+not a CAVP validation, and scytale has none. The ACVP corpus is 87
+suites holding 84,803 cases, and every case this build can run
+is run; the Monte Carlo groups chain a thousand cipher calls per
+case, with the key re-derived at each step. Every implementation is
+put through the whole vector set for its primitive, at every key
+size, the modes and the AEADs included: the harness answers each
+suite once per feature profile the processor can run, so each kernel
 written for a particular instruction set is tested as itself rather
 than only the one this processor would pick. Every implementation is
 also compared byte for byte against the portable one across a range of
@@ -110,7 +113,7 @@ instructions, is a command away in a checkout of the
 [repository][repo]:
 
 ```sh
-cargo test --lib acvp::inventory -- --nocapture
+cargo test --lib vectors::inventory -- --nocapture
 ```
 
 **Fast.** Where a processor has instructions for a primitive, scytale
@@ -593,11 +596,12 @@ to be tested in its own right.
 
 The standards' own vectors are built into the unit tests, so
 `cargo test` on the published crate checks every primitive against
-them. The ACVP sample vectors, Project Wycheproof and CFRG HPKE
-vectors are not shipped, to keep the crate small; the suites that read
-them run from a checkout of the [repository][repo], whose README says
-how, and in its continuous integration on every push, natively on
-x86-64, arm64 and riscv64.
+them. The Project Wycheproof and CFRG HPKE vectors are not shipped,
+to keep the crate small; the suites that read them run from a
+checkout of the [repository][repo], whose README says how, and in
+its continuous integration on every push, natively on x86-64, arm64
+and riscv64. The ACVP suites run there too, from the `scytale-acvp`
+crate, through this crate's public API.
 
 The public-key algorithms and the KDFs run against both: the ACVP
 sample vectors for ML-KEM, ML-DSA, SLH-DSA, RSA, KTS-IFC, ECDSA,

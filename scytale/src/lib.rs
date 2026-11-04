@@ -122,14 +122,14 @@
 #![warn(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
-// The vector suites in `acvp` read files and parse JSON, so the
+// The vector suites in `vectors` read files and parse JSON, so the
 // library's own test build has the standard library; nothing else
 // does.
 #[cfg(test)]
 extern crate std;
 
 #[cfg(test)]
-mod acvp;
+mod vectors;
 
 // The benchmark times a thread by its processor clock, and wasm has
 // no such clock to read. It measures rather than checks, so the
