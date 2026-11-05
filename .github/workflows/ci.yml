@@ -71,8 +71,9 @@ jobs:
           grep -m1 -E '^(isa|Features|flags)' /proc/cpuinfo || true
 
       - name: Test
-        # The alias in .cargo/config.toml; includes the slow Monte
-        # Carlo suites, which are quick enough on real hardware.
+        # The alias in .cargo/config.toml: every crate's tests,
+        # including the long ones marked #[ignore]. The ACVP suites
+        # here are their quick form; the full run is below.
         run: cargo test-extended -- --skip vectors::inventory
 
       - name: Test with nothing in force
@@ -91,11 +92,11 @@ jobs:
         run: cargo test-alone
 
       - name: ACVP suites under every implementation
-        # Every symmetric suite answered once per feature profile
-        # this processor can run, the answers compared: each kernel
-        # is reached by the profile that selects it. Edits the same
-        # process-wide setting, so it too runs alone; the alias in
-        # .cargo/config.toml.
+        # Every suite in full, the large-data groups included, under
+        # every feature profile this processor can run, each answer
+        # compared with the file: every kernel the processor has
+        # answers every vector. Edits the same process-wide setting,
+        # so it too runs alone; the alias in .cargo/config.toml.
         run: cargo test-every-profile
 
       - name: Implementations tested
@@ -156,7 +157,7 @@ jobs:
   # For x86-64 and aarch64 that is the native job, whose runner has
   # every feature and is held to running every kernel. RISC-V has no
   # native runner, so its `max` processor gets the full tier here,
-  # spread over the rows that carry a `part`.
+  # spread over the rows that carry a `shard`.
   #
   # The container is for its QEMU: the runner's own is too old to
   # report the RISC-V cryptography extensions, and it lacks some of
@@ -164,7 +165,7 @@ jobs:
   emulated:
     name: >-
       test (${{ matrix.arch }}, ${{ matrix.cpu }}${{
-      matrix.part && format(', {0}', matrix.part) || '' }})
+      matrix.shard && format(', shard {0}', matrix.shard) || '' }})
     runs-on: ubuntu-latest
     container: debian:trixie
     strategy:
@@ -230,72 +231,118 @@ jobs:
           # The vector and scalar cryptography extensions, which no
           # runner has: the only place these kernels run at all, so
           # this processor also gets the architecture's full tier,
-          # in the rows that follow.
+          # in the shard rows that follow.
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
             expect_all: 1
-          # The full tier, as jobs of four cores each, since the
-          # runners have no more and the whole of it on one is an
-          # hour under emulation: the extended run in four parts,
-          # each named for what it holds, and the profile walk. The
-          # four lists together must name every suite in the
-          # registry; each part's log ends with the count it ran, of
-          # the registry's total, and a name that matches nothing
-          # fails the job. The hashes are the large-data groups, a
-          # job to themselves. SLH-DSA is one as well: its signing
-          # suite is a single worker's work and the longest of any.
+          # The full tier: every suite in full, the large-data groups
+          # included, under every profile the processor can run, so
+          # that every RISC-V kernel answers every vector. That is
+          # some 200 core-minutes a profile under emulation, and a
+          # runner has four cores, so the run is spread over jobs:
+          # each takes every n-th unit of work (a test group, or one
+          # case of a large-data group) of every profile, and the
+          # count is the one number below. Each log ends with the
+          # share it ran and the profiles it ran under.
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
-            part: hashes
-            suites: >-
-              SHA2-224 SHA2-256 SHA2-384 SHA2-512 SHA2-512/224
-              SHA2-512/256 SHA3-224 SHA3-256 SHA3-384 SHA3-512
-              SHAKE-128 SHAKE-256
+            shard: 1/16
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
-            part: ciphers
-            suites: >-
-              ACVP-AES-CBC ACVP-AES-CCM ACVP-AES-CFB1 ACVP-AES-CFB8
-              ACVP-AES-CFB128 ACVP-AES-CTR ACVP-AES-ECB ACVP-AES-FF1
-              ACVP-AES-FF3-1 ACVP-AES-GCM ACVP-AES-GCM-SIV
-              ACVP-AES-GMAC ACVP-AES-KW ACVP-AES-KWP ACVP-AES-OFB
-              ACVP-AES-XPN ACVP-AES-XTS CMAC-AES KMAC-128 KMAC-256
-              cSHAKE-128 cSHAKE-256 TupleHash-128 TupleHash-256
-              HMAC-SHA-1 HMAC-SHA2-224 HMAC-SHA2-256 HMAC-SHA2-384
-              HMAC-SHA2-512 HMAC-SHA2-512/224 HMAC-SHA2-512/256
-              HMAC-SHA3-224 HMAC-SHA3-256 HMAC-SHA3-384 HMAC-SHA3-512
-              PBKDF KDF KDA kdf-components TLS-v1.2 ctrDRBG hashDRBG
-              hmacDRBG
+            shard: 2/16
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
-            part: keys
-            suites: >-
-              RSA ECDSA DetECDSA EDDSA XECDH KTS-IFC ML-KEM ML-DSA
+            shard: 3/16
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
-            part: slh-dsa
-            suites: SLH-DSA
+            shard: 4/16
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
-            part: walk
+            shard: 5/16
+          - arch: riscv64
+            cpu: max
+            features: >-
+              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
+              zvbb zvbc zvkb zvkg
+            shard: 6/16
+          - arch: riscv64
+            cpu: max
+            features: >-
+              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
+              zvbb zvbc zvkb zvkg
+            shard: 7/16
+          - arch: riscv64
+            cpu: max
+            features: >-
+              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
+              zvbb zvbc zvkb zvkg
+            shard: 8/16
+          - arch: riscv64
+            cpu: max
+            features: >-
+              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
+              zvbb zvbc zvkb zvkg
+            shard: 9/16
+          - arch: riscv64
+            cpu: max
+            features: >-
+              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
+              zvbb zvbc zvkb zvkg
+            shard: 10/16
+          - arch: riscv64
+            cpu: max
+            features: >-
+              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
+              zvbb zvbc zvkb zvkg
+            shard: 11/16
+          - arch: riscv64
+            cpu: max
+            features: >-
+              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
+              zvbb zvbc zvkb zvkg
+            shard: 12/16
+          - arch: riscv64
+            cpu: max
+            features: >-
+              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
+              zvbb zvbc zvkb zvkg
+            shard: 13/16
+          - arch: riscv64
+            cpu: max
+            features: >-
+              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
+              zvbb zvbc zvkb zvkg
+            shard: 14/16
+          - arch: riscv64
+            cpu: max
+            features: >-
+              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
+              zvbb zvbc zvkb zvkg
+            shard: 15/16
+          - arch: riscv64
+            cpu: max
+            features: >-
+              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
+              zvbb zvbc zvkb zvkg
+            shard: 16/16
     steps:
       - uses: actions/checkout@v7
 
@@ -326,7 +373,7 @@ jobs:
         # Cargo reads the linker and the runner from variables named
         # for the target. The inventory goes first and alone so that
         # its table is in the log.
-        if: ${{ !matrix.part }}
+        if: ${{ !matrix.shard }}
         run: |
           arch=${{ matrix.arch }}
           name=$(echo "$TARGET" | tr 'a-z-' 'A-Z_')
@@ -354,16 +401,11 @@ jobs:
           # inventory reads as unset.
           SCYTALE_EXPECT_ALL: ${{ matrix.expect_all }}
 
-      - name: Test as ${{ matrix.cpu }}, ${{ matrix.part }}
-        # The full tier's part: the named suites in full, with the
-        # time each took in the log, which is what the parts are
-        # balanced from; or the walk, every symmetric suite once more
-        # under every feature profile this processor reaches, the
-        # answers compared, so each kernel the emulated processor can
-        # run answers the vectors itself. The walk edits the
-        # process-wide set, so it runs alone; the alias in
-        # .cargo/config.toml cannot take a target.
-        if: ${{ matrix.part }}
+      - name: Test as ${{ matrix.cpu }}, shard ${{ matrix.shard }}
+        # This job's share of the full run; see the matrix. Edits the
+        # process-wide set of features, so it runs alone; the alias
+        # in .cargo/config.toml cannot take a target.
+        if: ${{ matrix.shard }}
         run: |
           arch=${{ matrix.arch }}
           name=$(echo "$TARGET" | tr 'a-z-' 'A-Z_')
@@ -373,23 +415,18 @@ jobs:
               export "CARGO_TARGET_${name}_LINKER=$arch-linux-gnu-gcc"
           fi
           export "CARGO_TARGET_${name}_RUNNER=$runner"
-          if [ "${{ matrix.part }}" = walk ]; then
-              cargo test --release -p scytale-acvp --no-default-features \
-                  --lib --target "$TARGET" \
-                  profile::tests::alone -- --ignored --test-threads=1
-              exit
-          fi
           cargo test --release -p scytale-acvp --no-default-features \
               --lib --target "$TARGET" \
-              suite::tests::extended -- --ignored --nocapture
+              profile::tests::alone -- --ignored --test-threads=1 \
+              --nocapture
         env:
           SCYTALE_CPU_FEATURES: ${{ matrix.features }}
-          SCYTALE_SUITES: ${{ matrix.suites }}
+          SCYTALE_SHARD: ${{ matrix.shard }}
 
       - name: Clippy
         # The lints for the target, which the native runner used to
         # run; once per architecture is enough.
-        if: matrix.arch == 'riscv64' && matrix.cpu == 'max' && !matrix.part
+        if: matrix.arch == 'riscv64' && matrix.cpu == 'max' && !matrix.shard
         run: |
           cargo clippy --workspace --exclude scytale-acvp --all-targets \
               --release --target "$TARGET" -- -D warnings
@@ -479,9 +516,11 @@ jobs:
           test -x "$HOME/.wasmtime/bin/wasmtime"
 
       - name: Test
-        # As `cargo test-extended`, which cannot take a target. The
-        # inventory goes first and alone so that its table is in the
-        # log, portable rows though they all are.
+        # As `cargo test-extended` and `cargo test-every-profile`,
+        # which cannot take a target. The inventory goes first and
+        # alone so that its table is in the log, portable rows though
+        # they all are. The full ACVP run is last: every suite in
+        # full under the one profile these targets have.
         run: |
           cargo test --release -p scytale --lib --target ${{ matrix.target }} \
               vectors::inventory -- --nocapture
@@ -491,14 +530,13 @@ jobs:
               --skip print_base_tables \
               --skip features::tests::alone --skip vectors::inventory
           cargo test --release -p scytale-acvp --no-default-features \
-              --target ${{ matrix.target }} \
-              -- --include-ignored --skip profile::tests::alone \
-              --skip tests::vendored
+              --target ${{ matrix.target }}
           cargo test --release -p scytale --lib --target ${{ matrix.target }} \
               features::tests::alone -- --ignored --test-threads=1
           cargo test --release -p scytale-acvp --no-default-features --lib \
               --target ${{ matrix.target }} \
-              profile::tests::alone -- --ignored --test-threads=1
+              profile::tests::alone -- --ignored --test-threads=1 \
+              --nocapture
         env:
           # Per target, because a plain RUSTFLAGS would replace these
           # rather than add to them and the linker flag would be lost.

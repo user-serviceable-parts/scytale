@@ -720,8 +720,8 @@ pub fn fixed_rng() -> CtrDrbg<FixedEntropy> {
 /// The quick check of `suite`: the vendored file less its slow
 /// groups, answered with a fixed generator and compared with the
 /// file. The large-data groups hash gigabytes and SLH-DSA signs for
-/// a minute, so those wait for [`check_all`], which `cargo
-/// test-extended` runs. The Monte Carlo groups stay: a thousand
+/// a minute, so those wait for the full run, `cargo
+/// test-every-profile`. The Monte Carlo groups stay: a thousand
 /// chained calls per case is milliseconds, and they are the only
 /// groups that carry state from one call into the next. Returns the
 /// cases compared.
@@ -758,29 +758,6 @@ fn trim(suite: &Suite, doc: &mut Value) {
             }
         }
     }
-}
-
-/// The whole vendored file of `suite` answered and compared, every
-/// field against the field of that name, or through `suite.verify`
-/// where the file's answers came from NIST's randomness. Returns the
-/// cases compared.
-///
-/// # Panics
-///
-/// On any difference, naming the group and case, or if fewer cases
-/// than the suite's minimum were compared.
-pub fn check_all(suite: &Suite) -> usize {
-    let Some(doc) = vendored(suite) else {
-        return 0;
-    };
-    let count = compared(suite, &doc);
-    assert!(
-        count >= suite.minimum,
-        "{}: only {count} cases, expected at least {}",
-        suite.directory,
-        suite.minimum
-    );
-    count
 }
 
 fn compared(suite: &Suite, doc: &Value) -> usize {
@@ -870,103 +847,6 @@ fn same(a: &Value, b: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Every suite in full: the Monte Carlo and large-data groups
-    /// and all of SLH-DSA. Slow; `cargo test-extended` runs it, and
-    /// prints the count the README quotes. `SCYTALE_SUITES` names a
-    /// subset, as the `run` command's `--algorithms` does; that is
-    /// how CI spreads the run over several jobs.
-    ///
-    /// The suites run on as many threads as the processor has, as
-    /// the harness would run them were they tests of their own, so
-    /// that the long ones overlap: the gigabytes of hashing and the
-    /// SLH-DSA signatures are an hour serially. A worker takes the
-    /// next suite rather than a share, since the lengths vary a
-    /// hundredfold, and the files are read one per worker at a time.
-    #[test]
-    #[ignore]
-    fn extended() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let names: Vec<String> = std::env::var("SCYTALE_SUITES")
-            .unwrap_or_default()
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
-        let suites = chosen(&names).unwrap_or_else(|e| panic!("{e}"));
-        let next = AtomicUsize::new(0);
-        let counts: Vec<AtomicUsize> =
-            suites.iter().map(|_| AtomicUsize::new(0)).collect();
-        let work = || {
-            loop {
-                let i = next.fetch_add(1, Ordering::Relaxed);
-                let Some(suite) = suites.get(i) else {
-                    break;
-                };
-                let started = std::time::Instant::now();
-                let count = check_all(suite);
-                eprintln!(
-                    "{}: {count} cases in {:.1} s",
-                    suite.directory,
-                    started.elapsed().as_secs_f64()
-                );
-                counts[i].store(count, Ordering::Relaxed);
-            }
-        };
-        // WebAssembly has no threads: spawning one aborts the run.
-        let workers = if cfg!(target_family = "wasm") {
-            1
-        } else {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
-        };
-        if workers == 1 {
-            work();
-        } else {
-            std::thread::scope(|scope| {
-                for _ in 0..workers {
-                    scope.spawn(work);
-                }
-            });
-        }
-        let total: usize =
-            counts.iter().map(|c| c.load(Ordering::Relaxed)).sum();
-        eprintln!(
-            "total: {total} cases in {} of {} suites",
-            suites.len(),
-            SUITES.len()
-        );
-    }
-
-    #[test]
-    fn chosen_by_nothing_is_every_suite() {
-        assert_eq!(chosen(&[]).unwrap().len(), SUITES.len());
-    }
-
-    #[test]
-    fn chosen_by_algorithm_is_each_of_its_suites_once() {
-        let names = ["RSA".to_string(), "RSA".to_string()];
-        let rsa = chosen(&names).unwrap();
-        assert_eq!(
-            rsa.len(),
-            SUITES.iter().filter(|s| s.algorithm == "RSA").count()
-        );
-        assert!(rsa.iter().all(|s| s.algorithm == "RSA"));
-    }
-
-    #[test]
-    fn chosen_by_directory_is_that_suite() {
-        let names = ["ACVP-SHA2-256-1.0".to_string()];
-        let found = chosen(&names).unwrap();
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].directory, "ACVP-SHA2-256-1.0");
-    }
-
-    #[test]
-    fn chosen_by_unknown_name_is_an_error() {
-        let names = ["SHA2-255".to_string()];
-        assert!(chosen(&names).is_err());
-    }
 
     #[test]
     fn registry_names_every_vendored_directory() {

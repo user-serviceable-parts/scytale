@@ -83,12 +83,10 @@ run_target() {
         exit 1
     fi
     # The ACVP suites run in their quick form under emulation: the
-    # large data tests hash gigabytes through qemu, which is what the
-    # run sat on, one processor busy, long after every other test had
-    # finished, and the host run above and CI both do them natively.
-    # The every-profile run stays: it chains the Monte Carlo suites
-    # through each hardware backend, and for the RISC-V ones this is
-    # the only place they run.
+    # full run under every profile is hours through qemu on one
+    # machine, and CI does it, spread over jobs. To take one share of
+    # it here, run the host's profile::tests::alone command below
+    # through cross with SCYTALE_SHARD=i/n.
     if [ "$target" = riscv64gc-unknown-linux-gnu ] \
         && [ -z "$QEMU_SWEEP" ]; then
         export SCYTALE_CPU_FEATURES="$RISCV_FEATURES"
@@ -106,9 +104,6 @@ run_target() {
     cross test -p scytale-acvp --no-default-features --target "$target"
     cross test -p scytale --lib --target "$target" \
         features::tests::alone -- --ignored --test-threads=1
-    cross test -p scytale-acvp --no-default-features --lib \
-        --target "$target" profile::tests::alone -- \
-        --ignored --test-threads=1
     if [ "$target" = riscv64gc-unknown-linux-gnu ] \
         && [ -z "$QEMU_SWEEP" ]; then
         for cpu in $RISCV_CONFIGS; do

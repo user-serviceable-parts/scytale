@@ -32,19 +32,18 @@ groups, which hash gigabytes, and all but one signature per group of
 SLH-DSA signing. Those wait for
 
 ```sh
-cargo test-extended
+cargo test-every-profile
 ```
 
-which runs `extended`, every suite in full, and prints the
-count of cases compared. `SCYTALE_VECTORS=required` makes a missing
-file a failure rather than a skip. `SCYTALE_SUITES` names the suites
-`extended` runs, as the `run` command's `--algorithms` does, and is
-how CI spreads the run over several jobs.
-
-`cargo test-every-profile` answers every symmetric suite once per
-feature profile this processor can run and insists the answers agree:
-the check that each hardware kernel does what the portable one does.
-It edits the process-wide set of features in force, so it runs alone.
+which answers every suite in full under every feature profile this
+processor can run, each answer compared with the file: every kernel
+the processor has answers every vector. The work is pooled across
+the cores, and it prints the cases compared per suite and profile.
+It edits the process-wide set of features in force, so it runs
+alone.
+`SCYTALE_SHARD=i/n` runs the i-th of n equal shares, which is how CI
+spreads it over jobs. `SCYTALE_VECTORS=required` makes a missing
+file a failure rather than a skip.
 
 ## Online
 

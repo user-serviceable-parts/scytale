@@ -196,6 +196,85 @@ fn differing_field(a: &Value, b: &Value, except: &str) -> Option<String> {
     b.keys().find(|k| !a.contains_key(*k)).cloned()
 }
 
+/// One piece of the full run: a test group of a suite, or one case of
+/// it where the group's cases are minutes apiece.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unit {
+    pub suite: usize,
+    pub group: usize,
+    pub case: Option<usize>,
+}
+
+/// Every unit of `docs`, which are the suites' vendored documents in
+/// registry order, in a fixed order: a unit per group, except that the
+/// large-data groups and SLH-DSA signing give a unit per case.
+pub fn units(docs: &[Option<Value>]) -> Vec<Unit> {
+    let mut out = Vec::new();
+    for (suite, doc) in docs.iter().enumerate() {
+        let Some(groups) =
+            doc.as_ref().and_then(|d| d["testGroups"].as_array())
+        else {
+            continue;
+        };
+        let s = &crate::suite::SUITES[suite];
+        let signing = s.algorithm == "SLH-DSA" && s.mode == Some("sigGen");
+        for (group, g) in groups.iter().enumerate() {
+            let cases = g["tests"].as_array().map_or(0, Vec::len);
+            if (g["testType"] == "LDT" || signing) && cases > 0 {
+                for case in 0..cases {
+                    out.push(Unit {
+                        suite,
+                        group,
+                        case: Some(case),
+                    });
+                }
+            } else {
+                out.push(Unit {
+                    suite,
+                    group,
+                    case: None,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Answers `unit` of `doc` with a fresh fixed generator and compares
+/// the answer with `doc`; returns the cases compared.
+pub fn answer_unit(
+    suite: &Suite,
+    doc: &Value,
+    unit: &Unit,
+) -> Result<usize, Error> {
+    let mut group = doc["testGroups"][unit.group].clone();
+    if let Some(case) = unit.case {
+        let test = group["tests"][case].clone();
+        group["tests"] = Value::Array(vec![test]);
+    }
+    let mut cut = doc.clone();
+    cut["testGroups"] = Value::Array(vec![group]);
+    let mut rng = crate::suite::fixed_rng();
+    let answered = (suite.answer)(&cut, &mut rng)?;
+    crate::suite::compare(suite, doc, &answered)
+}
+
+/// `SCYTALE_SHARD` parsed: `i/n` gives shard `i` of `n`, one-based;
+/// empty is the whole, `1/1`.
+pub fn shard(spec: &str) -> Result<(usize, usize), Error> {
+    if spec.is_empty() {
+        return Ok((1, 1));
+    }
+    let bad = || Error::new(format!("{spec}: want i/n with 1 <= i <= n"));
+    let (i, n) = spec.split_once('/').ok_or_else(bad)?;
+    let i: usize = i.parse().map_err(|_| bad())?;
+    let n: usize = n.parse().map_err(|_| bad())?;
+    if i == 0 || n == 0 || i > n {
+        return Err(bad());
+    }
+    Ok((i, n))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,53 +289,133 @@ mod tests {
     mod alone {
         use super::*;
 
-        /// Every symmetric suite answered under every profile this
-        /// processor can run but the detected one, each answer compared
-        /// with the file: the check that each kernel is right. The
-        /// detected profile is what the ordinary run of every suite
-        /// answered under, so it is not run again here. Process-wide, so
-        /// it runs alone (`cargo test-alone`), and ignored by default for
-        /// its length. The large-data groups are left out: each hashes
-        /// gigabytes, which checks length handling the one-shot groups
-        /// already cover, not the kernel.
+        /// Every suite in full, the large-data groups and every
+        /// SLH-DSA signature included, under every profile this
+        /// processor can run, each answer compared with the file:
+        /// the check that each kernel is right, and the figure the
+        /// README quotes. Process-wide, so it runs alone (`cargo
+        /// test-every-profile`), and ignored by default for its
+        /// length.
+        ///
+        /// The work is cut into units, a test group each, or a single
+        /// case of a large-data group or of SLH-DSA signing, since
+        /// those cases are minutes apiece. One worker per core takes
+        /// the next unit of the profile in force, and the profile
+        /// changes only between pools. `SCYTALE_SHARD` as `i/n` takes
+        /// every n-th unit across every profile, which is how CI
+        /// spreads the run over as many jobs as it needs.
         #[test]
         #[ignore]
         fn every_profile() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::time::{Duration, Instant};
+
             let (profiles, refused) = walk();
             for p in refused {
                 eprintln!("profile {p}: not on this processor, skipped");
             }
             assert_eq!(profiles.first(), Some(&features::detected()));
-            let profiles = &profiles[1..];
-            let symmetric = |s: &&Suite| {
-                let a = s.algorithm;
-                a.starts_with("ACVP-AES")
-                    || a.starts_with("SHA")
-                    || a.starts_with("cSHAKE")
-                    || a.starts_with("KMAC")
-                    || a.starts_with("TupleHash")
-                    || a.starts_with("HMAC")
-                    || a.starts_with("CMAC")
-                    || a.ends_with("DRBG")
-                    || a == "PBKDF"
-                    || a == "KDF"
+            let (index, shards) =
+                shard(&std::env::var("SCYTALE_SHARD").unwrap_or_default())
+                    .unwrap_or_else(|e| panic!("SCYTALE_SHARD: {e}"));
+
+            let docs: Vec<Option<Value>> =
+                SUITES.iter().map(vendored).collect();
+            let units = units(&docs);
+            let mine = |profile: usize, unit: usize| {
+                (profile * units.len() + unit) % shards == index - 1
             };
-            let mut suites = 0;
-            for suite in SUITES.iter().filter(symmetric) {
-                let Some(mut doc) = vendored(suite) else {
-                    continue;
+
+            let mut total = 0;
+            let mut ran = 0;
+            let mut detected = 0;
+            let workers = if cfg!(target_family = "wasm") {
+                1
+            } else {
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1)
+            };
+            for (p, &profile) in profiles.iter().enumerate() {
+                features::set(profile).expect("walk said runnable");
+                let next = AtomicUsize::new(0);
+                let cases: Vec<AtomicUsize> =
+                    SUITES.iter().map(|_| AtomicUsize::new(0)).collect();
+                let nanos: Vec<AtomicUsize> =
+                    SUITES.iter().map(|_| AtomicUsize::new(0)).collect();
+                let work = || {
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(unit) = units.get(i) else {
+                            break;
+                        };
+                        if !mine(p, i) {
+                            continue;
+                        }
+                        let started = Instant::now();
+                        let suite = &SUITES[unit.suite];
+                        let doc = docs[unit.suite].as_ref().expect("unit");
+                        let count = answer_unit(suite, doc, unit)
+                            .unwrap_or_else(|e| {
+                                panic!(
+                                    "profile {profile}: {}: {e}",
+                                    suite.directory
+                                )
+                            });
+                        cases[unit.suite].fetch_add(count, Ordering::Relaxed);
+                        nanos[unit.suite].fetch_add(
+                            started.elapsed().as_nanos() as usize,
+                            Ordering::Relaxed,
+                        );
+                    }
                 };
-                if let Some(groups) = doc["testGroups"].as_array_mut() {
-                    groups.retain(|g| g["testType"] != "LDT");
+                if workers == 1 {
+                    work();
+                } else {
+                    std::thread::scope(|scope| {
+                        for _ in 0..workers {
+                            scope.spawn(work);
+                        }
+                    });
                 }
-                let answered =
-                    answer_under(suite, &doc, &Seed::fixed(), profiles)
-                        .unwrap_or_else(|e| panic!("{}: {e}", suite.directory));
-                crate::suite::compare(suite, &doc, &answered)
-                    .unwrap_or_else(|e| panic!("{}: {e}", suite.directory));
-                suites += 1;
+                features::reset();
+                for (s, suite) in SUITES.iter().enumerate() {
+                    let count = cases[s].load(Ordering::Relaxed);
+                    let took = Duration::from_nanos(
+                        nanos[s].load(Ordering::Relaxed) as u64,
+                    );
+                    if count > 0 {
+                        eprintln!(
+                            "profile {profile}: {}: {count} cases in {:.1} s",
+                            suite.directory,
+                            took.as_secs_f64()
+                        );
+                    }
+                    // The minimum is a whole suite's, so only a whole
+                    // run under the detected profile can hold a suite
+                    // to it. A shard prints its share instead.
+                    if p == 0 && shards == 1 && docs[s].is_some() {
+                        assert!(
+                            count >= suite.minimum,
+                            "{}: only {count} cases, expected at least {}",
+                            suite.directory,
+                            suite.minimum
+                        );
+                    }
+                    if p == 0 {
+                        detected += count;
+                    }
+                    total += count;
+                }
+                ran += (0..units.len()).filter(|&i| mine(p, i)).count();
             }
-            assert!(suites == 0 || suites >= 50, "only {suites} suites");
+            eprintln!(
+                "detected profile: {detected} cases; total: {total} cases \
+                 in {ran} of {} units under {} profiles, \
+                 shard {index}/{shards}",
+                units.len() * profiles.len(),
+                profiles.len()
+            );
         }
 
         #[test]
@@ -277,6 +436,60 @@ mod tests {
             assert_eq!(runnable.last(), Some(&last));
             assert_eq!(features::get(), detected);
         }
+    }
+
+    #[test]
+    fn shard_parses_i_of_n() {
+        assert_eq!(shard("").unwrap(), (1, 1));
+        assert_eq!(shard("3/8").unwrap(), (3, 8));
+        assert_eq!(shard("8/8").unwrap(), (8, 8));
+        for bad in ["0/8", "9/8", "x", "3", "3/", "/8", "3/0"] {
+            assert!(shard(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn units_split_large_data_by_case_and_keep_other_groups() {
+        // Registry order: a plain suite first; the units name it by
+        // index, so the first document stands for whichever suite
+        // that is.
+        let doc = json!({"testGroups": [
+            {"tgId": 1, "testType": "AFT", "tests": [{"tcId": 1}, {"tcId": 2}]},
+            {"tgId": 2, "testType": "MCT", "tests": [{"tcId": 3}]},
+            {"tgId": 3, "testType": "LDT", "tests": [{"tcId": 4}, {"tcId": 5}]},
+        ]});
+        let docs = [Some(doc), None];
+        let got = units(&docs);
+        let unit = |group, case| Unit {
+            suite: 0,
+            group,
+            case,
+        };
+        assert_eq!(
+            got,
+            [
+                unit(0, None),
+                unit(1, None),
+                unit(2, Some(0)),
+                unit(2, Some(1))
+            ]
+        );
+    }
+
+    #[test]
+    fn units_split_slh_dsa_signing_by_case() {
+        let signing = SUITES
+            .iter()
+            .position(|s| s.algorithm == "SLH-DSA" && s.mode == Some("sigGen"))
+            .expect("registered");
+        let mut docs: Vec<Option<Value>> =
+            SUITES.iter().map(|_| None).collect();
+        docs[signing] = Some(json!({"testGroups": [
+            {"tgId": 1, "testType": "AFT", "tests": [{"tcId": 1}, {"tcId": 2}]},
+        ]}));
+        let got = units(&docs);
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().all(|u| u.suite == signing && u.case.is_some()));
     }
 
     #[test]

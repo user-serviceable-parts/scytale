@@ -5,7 +5,8 @@
 # in force, which must run alone (see test-alone), and the printer
 # that generates the curves' base tables, which is how that file is
 # made rather than a check on it. The quick ACVP checks are left out
-# too: the extended one answers every case they do and more.
+# too: the full run, test-every-profile, answers every case they do
+# and more.
 test-extended = [
     "test", "--release", "--workspace", "--",
     "--include-ignored", "--skip", "bench::speed",
@@ -20,9 +21,12 @@ test-alone = [
     "test", "--release", "-p", "scytale", "--lib",
     "features::tests::alone", "--", "--ignored", "--test-threads=1",
 ]
-# The ACVP suites under every implementation this processor can run,
-# which edits the same process-wide set; see scytale-acvp/README.md.
+# The full ACVP run: every suite in full under every implementation
+# this processor can run, pooled across its cores, which edits the
+# same process-wide set; takes SCYTALE_SHARD; see
+# scytale-acvp/README.md.
 test-every-profile = [
     "test", "--release", "-p", "scytale-acvp", "--lib",
     "profile::tests::alone", "--", "--ignored", "--test-threads=1",
+    "--nocapture",
 ]
