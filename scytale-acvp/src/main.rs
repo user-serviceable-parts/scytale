@@ -6,7 +6,7 @@ mod cli {
     use clap::{Parser, Subcommand};
     use scytale_acvp::profile::{Seed, walk};
     use scytale_acvp::replay::replay;
-    use scytale_acvp::suite::{self, Suite, registrations};
+    use scytale_acvp::suite::{self, registrations};
     use scytale_acvp::support::Error;
     use scytale_acvp::totp;
     use std::path::PathBuf;
