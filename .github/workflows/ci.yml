@@ -155,13 +155,16 @@ jobs:
   # architecture runs the full tier, the suites in full and the walk.
   # For x86-64 and aarch64 that is the native job, whose runner has
   # every feature and is held to running every kernel. RISC-V has no
-  # native runner, so its `max` row is marked `full`.
+  # native runner, so its `max` processor gets the full tier here,
+  # spread over the rows that carry a `part`.
   #
   # The container is for its QEMU: the runner's own is too old to
   # report the RISC-V cryptography extensions, and it lacks some of
   # the x86-64 ones.
   emulated:
-    name: test (${{ matrix.arch }}, ${{ matrix.cpu }})
+    name: >-
+      test (${{ matrix.arch }}, ${{ matrix.cpu }}${{
+      matrix.part && format(', {0}', matrix.part) || '' }})
     runs-on: ubuntu-latest
     container: debian:trixie
     strategy:
@@ -226,14 +229,73 @@ jobs:
             features: zbb zbc
           # The vector and scalar cryptography extensions, which no
           # runner has: the only place these kernels run at all, so
-          # this row is the architecture's full tier.
+          # this processor also gets the architecture's full tier,
+          # in the rows that follow.
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
             expect_all: 1
-            full: 1
+          # The full tier, as jobs of four cores each, since the
+          # runners have no more and the whole of it on one is an
+          # hour under emulation: the extended run in four parts,
+          # each named for what it holds, and the profile walk. The
+          # four lists together must name every suite in the
+          # registry; each part's log ends with the count it ran, of
+          # the registry's total, and a name that matches nothing
+          # fails the job. The hashes are the large-data groups, a
+          # job to themselves. SLH-DSA is one as well: its signing
+          # suite is a single worker's work and the longest of any.
+          - arch: riscv64
+            cpu: max
+            features: >-
+              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
+              zvbb zvbc zvkb zvkg
+            part: hashes
+            suites: >-
+              SHA2-224 SHA2-256 SHA2-384 SHA2-512 SHA2-512/224
+              SHA2-512/256 SHA3-224 SHA3-256 SHA3-384 SHA3-512
+              SHAKE-128 SHAKE-256
+          - arch: riscv64
+            cpu: max
+            features: >-
+              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
+              zvbb zvbc zvkb zvkg
+            part: ciphers
+            suites: >-
+              ACVP-AES-CBC ACVP-AES-CCM ACVP-AES-CFB1 ACVP-AES-CFB8
+              ACVP-AES-CFB128 ACVP-AES-CTR ACVP-AES-ECB ACVP-AES-FF1
+              ACVP-AES-FF3-1 ACVP-AES-GCM ACVP-AES-GCM-SIV
+              ACVP-AES-GMAC ACVP-AES-KW ACVP-AES-KWP ACVP-AES-OFB
+              ACVP-AES-XPN ACVP-AES-XTS CMAC-AES KMAC-128 KMAC-256
+              cSHAKE-128 cSHAKE-256 TupleHash-128 TupleHash-256
+              HMAC-SHA-1 HMAC-SHA2-224 HMAC-SHA2-256 HMAC-SHA2-384
+              HMAC-SHA2-512 HMAC-SHA2-512/224 HMAC-SHA2-512/256
+              HMAC-SHA3-224 HMAC-SHA3-256 HMAC-SHA3-384 HMAC-SHA3-512
+              PBKDF KDF KDA kdf-components TLS-v1.2 ctrDRBG hashDRBG
+              hmacDRBG
+          - arch: riscv64
+            cpu: max
+            features: >-
+              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
+              zvbb zvbc zvkb zvkg
+            part: keys
+            suites: >-
+              RSA ECDSA DetECDSA EDDSA XECDH KTS-IFC ML-KEM ML-DSA
+          - arch: riscv64
+            cpu: max
+            features: >-
+              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
+              zvbb zvbc zvkb zvkg
+            part: slh-dsa
+            suites: SLH-DSA
+          - arch: riscv64
+            cpu: max
+            features: >-
+              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
+              zvbb zvbc zvkb zvkg
+            part: walk
     steps:
       - uses: actions/checkout@v7
 
@@ -264,6 +326,7 @@ jobs:
         # Cargo reads the linker and the runner from variables named
         # for the target. The inventory goes first and alone so that
         # its table is in the log.
+        if: ${{ !matrix.part }}
         run: |
           arch=${{ matrix.arch }}
           name=$(echo "$TARGET" | tr 'a-z-' 'A-Z_')
@@ -283,35 +346,50 @@ jobs:
           # session, which would want the target's TLS library. The
           # quick tier answers each suite once under the detected
           # profile, less the groups that only hash more bytes.
-          if [ -z "$FULL" ]; then
-              cargo test --release -p scytale-acvp --no-default-features \
-                  --target "$TARGET"
-              exit
-          fi
-          # The full tier: every suite in full, then once more under
-          # every feature profile this processor reaches, the answers
-          # compared, so each kernel the emulated processor can run
-          # answers the vectors itself. Edits the process-wide set,
-          # so it runs alone; the alias in .cargo/config.toml cannot
-          # take a target.
           cargo test --release -p scytale-acvp --no-default-features \
-              --target "$TARGET" \
-              -- --include-ignored --skip profile::tests::alone \
-              --skip tests::vendored
-          cargo test --release -p scytale-acvp --no-default-features --lib \
-              --target "$TARGET" \
-              profile::tests::alone -- --ignored --test-threads=1
+              --target "$TARGET"
         env:
           SCYTALE_CPU_FEATURES: ${{ matrix.features }}
-          # Empty for the rows that do not set them, which the
+          # Empty for the rows that do not set it, which the
           # inventory reads as unset.
           SCYTALE_EXPECT_ALL: ${{ matrix.expect_all }}
-          FULL: ${{ matrix.full }}
+
+      - name: Test as ${{ matrix.cpu }}, ${{ matrix.part }}
+        # The full tier's part: the named suites in full, with the
+        # time each took in the log, which is what the parts are
+        # balanced from; or the walk, every symmetric suite once more
+        # under every feature profile this processor reaches, the
+        # answers compared, so each kernel the emulated processor can
+        # run answers the vectors itself. The walk edits the
+        # process-wide set, so it runs alone; the alias in
+        # .cargo/config.toml cannot take a target.
+        if: ${{ matrix.part }}
+        run: |
+          arch=${{ matrix.arch }}
+          name=$(echo "$TARGET" | tr 'a-z-' 'A-Z_')
+          runner="qemu-$arch -cpu ${{ matrix.cpu }}"
+          if [ "$arch" != x86_64 ]; then
+              runner="$runner -L /usr/$arch-linux-gnu"
+              export "CARGO_TARGET_${name}_LINKER=$arch-linux-gnu-gcc"
+          fi
+          export "CARGO_TARGET_${name}_RUNNER=$runner"
+          if [ "${{ matrix.part }}" = walk ]; then
+              cargo test --release -p scytale-acvp --no-default-features \
+                  --lib --target "$TARGET" \
+                  profile::tests::alone -- --ignored --test-threads=1
+              exit
+          fi
+          cargo test --release -p scytale-acvp --no-default-features \
+              --lib --target "$TARGET" \
+              suite::tests::extended -- --ignored --nocapture
+        env:
+          SCYTALE_CPU_FEATURES: ${{ matrix.features }}
+          SCYTALE_SUITES: ${{ matrix.suites }}
 
       - name: Clippy
         # The lints for the target, which the native runner used to
         # run; once per architecture is enough.
-        if: matrix.arch == 'riscv64' && matrix.cpu == 'max'
+        if: matrix.arch == 'riscv64' && matrix.cpu == 'max' && !matrix.part
         run: |
           cargo clippy --workspace --exclude scytale-acvp --all-targets \
               --release --target "$TARGET" -- -D warnings

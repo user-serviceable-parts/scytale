@@ -37,7 +37,9 @@ cargo test-extended
 
 which runs `extended`, every suite in full, and prints the
 count of cases compared. `SCYTALE_VECTORS=required` makes a missing
-file a failure rather than a skip.
+file a failure rather than a skip. `SCYTALE_SUITES` names the suites
+`extended` runs, as the `run` command's `--algorithms` does, and is
+how CI spreads the run over several jobs.
 
 `cargo test-every-profile` answers every symmetric suite once per
 feature profile this processor can run and insists the answers agree:

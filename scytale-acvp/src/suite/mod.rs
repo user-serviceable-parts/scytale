@@ -673,6 +673,29 @@ pub fn find(name: &str) -> Vec<&'static Suite> {
         .collect()
 }
 
+/// The suites `names` pick out, each name resolved by [`find`], or
+/// every suite if there are none. A name nothing matches is an error:
+/// a list that meant to cover a suite and missed it must say so,
+/// not run less. A suite named twice runs once.
+pub fn chosen(names: &[String]) -> Result<Vec<&'static Suite>, Error> {
+    if names.is_empty() {
+        return Ok(SUITES.iter().collect());
+    }
+    let mut out = Vec::new();
+    for name in names {
+        let found = find(name);
+        if found.is_empty() {
+            return Err(Error::new(format!("no suite named {name}")));
+        }
+        for s in found {
+            if !out.iter().any(|o: &&Suite| std::ptr::eq(*o, s)) {
+                out.push(s);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The vendored file of `suite`, or `None` if the vectors are not in
 /// this copy.
 pub fn vendored(suite: &Suite) -> Option<Value> {
@@ -850,7 +873,9 @@ mod tests {
 
     /// Every suite in full: the Monte Carlo and large-data groups
     /// and all of SLH-DSA. Slow; `cargo test-extended` runs it, and
-    /// prints the count the README quotes.
+    /// prints the count the README quotes. `SCYTALE_SUITES` names a
+    /// subset, as the `run` command's `--algorithms` does; that is
+    /// how CI spreads the run over several jobs.
     ///
     /// The suites run on as many threads as the processor has, as
     /// the harness would run them were they tests of their own, so
@@ -862,13 +887,19 @@ mod tests {
     #[ignore]
     fn extended() {
         use std::sync::atomic::{AtomicUsize, Ordering};
+        let names: Vec<String> = std::env::var("SCYTALE_SUITES")
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let suites = chosen(&names).unwrap_or_else(|e| panic!("{e}"));
         let next = AtomicUsize::new(0);
         let counts: Vec<AtomicUsize> =
-            SUITES.iter().map(|_| AtomicUsize::new(0)).collect();
+            suites.iter().map(|_| AtomicUsize::new(0)).collect();
         let work = || {
             loop {
                 let i = next.fetch_add(1, Ordering::Relaxed);
-                let Some(suite) = SUITES.get(i) else {
+                let Some(suite) = suites.get(i) else {
                     break;
                 };
                 let started = std::time::Instant::now();
@@ -900,7 +931,41 @@ mod tests {
         }
         let total: usize =
             counts.iter().map(|c| c.load(Ordering::Relaxed)).sum();
-        eprintln!("total: {total} cases in {} suites", SUITES.len());
+        eprintln!(
+            "total: {total} cases in {} of {} suites",
+            suites.len(),
+            SUITES.len()
+        );
+    }
+
+    #[test]
+    fn chosen_by_nothing_is_every_suite() {
+        assert_eq!(chosen(&[]).unwrap().len(), SUITES.len());
+    }
+
+    #[test]
+    fn chosen_by_algorithm_is_each_of_its_suites_once() {
+        let names = ["RSA".to_string(), "RSA".to_string()];
+        let rsa = chosen(&names).unwrap();
+        assert_eq!(
+            rsa.len(),
+            SUITES.iter().filter(|s| s.algorithm == "RSA").count()
+        );
+        assert!(rsa.iter().all(|s| s.algorithm == "RSA"));
+    }
+
+    #[test]
+    fn chosen_by_directory_is_that_suite() {
+        let names = ["ACVP-SHA2-256-1.0".to_string()];
+        let found = chosen(&names).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].directory, "ACVP-SHA2-256-1.0");
+    }
+
+    #[test]
+    fn chosen_by_unknown_name_is_an_error() {
+        let names = ["SHA2-255".to_string()];
+        assert!(chosen(&names).is_err());
     }
 
     #[test]
