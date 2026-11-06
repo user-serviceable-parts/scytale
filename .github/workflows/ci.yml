@@ -71,10 +71,11 @@ jobs:
           grep -m1 -E '^(isa|Features|flags)' /proc/cpuinfo || true
 
       - name: Test
-        # The alias in .cargo/config.toml: every crate's tests,
-        # including the long ones marked #[ignore]. The ACVP suites
-        # here are their quick form; the full run is below.
-        run: cargo test-extended -- --skip vectors::inventory
+        # Every crate's tests but scytale-acvp's, which is the check
+        # against the vendored vectors and has jobs of its own below.
+        run: |
+          cargo test --release --workspace --exclude scytale-acvp \
+              -- --skip vectors::inventory
 
       - name: Test with nothing in force
         # The library's own suite once more with the hardware
@@ -87,17 +88,11 @@ jobs:
           SCYTALE_FEATURES: none
 
       - name: Test with the features in force edited
-        # These change a process-wide setting, so they run alone and
-        # single-threaded; the alias in .cargo/config.toml.
-        run: cargo test-alone
-
-      - name: ACVP suites under every implementation
-        # Every suite in full, the large-data groups included, under
-        # every feature profile this processor can run, each answer
-        # compared with the file: every kernel the processor has
-        # answers every vector. Edits the same process-wide setting,
-        # so it too runs alone; the alias in .cargo/config.toml.
-        run: cargo test-every-profile
+        # These change a process-wide setting, so they are ignored by
+        # default and run here alone, single-threaded.
+        run: |
+          cargo test --release -p scytale --lib features::tests::alone \
+              -- --ignored --test-threads=1
 
       - name: Implementations tested
         # The binary is built by now, so this costs a second and
@@ -121,6 +116,49 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  # The check against the vendored vectors on the native runners:
+  # every suite in full under every kernel the processor can run,
+  # each once; see scytale-acvp/README.md. The work is spread over
+  # jobs by SCYTALE_SHARD, each taking every n-th unit of it.
+  vendored:
+    name: test (${{ matrix.arch }}, shard ${{ matrix.shard }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86-64
+            runner: ubuntu-latest
+            shard: 1/3
+          - arch: x86-64
+            runner: ubuntu-latest
+            shard: 2/3
+          - arch: x86-64
+            runner: ubuntu-latest
+            shard: 3/3
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            shard: 1/1
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          if command -v rustup > /dev/null; then
+              rustup update --no-self-update stable
+              rustup default stable
+          else
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+                  | sh -s -- -y --profile minimal \
+                        --default-toolchain stable
+              echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Test
+        run: cargo test --release -p scytale-acvp
+        env:
+          SCYTALE_SHARD: ${{ matrix.shard }}
+
   # Every runner here and every machine anyone develops on is a recent
   # processor, so which loop a lesser one is given is decided by code
   # that never runs: on real hardware only one answer to each probe is
@@ -142,22 +180,13 @@ jobs:
   # A row here can prove two things only: that the probes choose the
   # right kernels on that set of features, and that those kernels run
   # on that processor without trapping. The inventory is the first,
-  # and executing each kernel once is the second: a Monte Carlo group
-  # runs the same loop a thousand times and a large-data group runs
-  # it over more bytes, and neither reaches an instruction the
-  # one-shot cases did not. Whether each kernel is right is settled
-  # elsewhere, by the walk over every feature profile, and the walk
-  # is the union of every type's profile list, so a processor with
-  # everything answers under every profile a lesser one detects. A
-  # lesser row walking its own lesser profiles would prove nothing
-  # more: a loop that asks for less than it uses cannot fault on a
-  # processor that has more. So most rows run the quick tier, the
-  # library's tests and the quick ACVP checks, and one row per
-  # architecture runs the full tier, the suites in full and the walk.
-  # For x86-64 and aarch64 that is the native job, whose runner has
-  # every feature and is held to running every kernel. RISC-V has no
-  # native runner, so its `max` processor gets the full tier here,
-  # spread over the rows that carry a `shard`.
+  # and the library's tests, which execute each kernel, are the
+  # second. Whether each kernel is right is settled by the check
+  # against the vendored vectors, which answers every suite under
+  # every kernel the processor can run, each once: for x86-64 and
+  # aarch64 on the native runners, which have every feature. RISC-V
+  # has no native runner, so its `max` processor gets that check
+  # here, spread over the rows that carry a `shard`.
   #
   # The container is for its QEMU: the runner's own is too old to
   # report the RISC-V cryptography extensions, and it lacks some of
@@ -238,111 +267,88 @@ jobs:
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
             expect_all: 1
-          # The full tier: every suite in full, the large-data groups
-          # included, under every profile the processor can run, so
-          # that every RISC-V kernel answers every vector. That is
-          # some 200 core-minutes a profile under emulation, and a
-          # runner has four cores, so the run is spread over jobs:
-          # each takes every n-th unit of work (a test group, or one
-          # case of a large-data group) of every profile, and the
-          # count is the one number below. Each log ends with the
-          # share it ran and the profiles it ran under.
+          # The check against the vendored vectors: every suite in
+          # full, the large-data groups included, under every kernel
+          # the processor can run, each once, so that every RISC-V
+          # kernel answers every vector. That is some 200
+          # core-minutes a kernel set under emulation, and a runner
+          # has four cores, so the run is spread over jobs: each
+          # takes every n-th unit of work, a test group or one case
+          # of a long group, and the count is the one number below.
+          # Each log says which suites ran under which profile and
+          # why, and ends with the share it ran.
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
-            shard: 1/16
+            shard: 1/12
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
-            shard: 2/16
+            shard: 2/12
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
-            shard: 3/16
+            shard: 3/12
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
-            shard: 4/16
+            shard: 4/12
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
-            shard: 5/16
+            shard: 5/12
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
-            shard: 6/16
+            shard: 6/12
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
-            shard: 7/16
+            shard: 7/12
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
-            shard: 8/16
+            shard: 8/12
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
-            shard: 9/16
+            shard: 9/12
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
-            shard: 10/16
+            shard: 10/12
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
-            shard: 11/16
+            shard: 11/12
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
-            shard: 12/16
-          - arch: riscv64
-            cpu: max
-            features: >-
-              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
-              zvbb zvbc zvkb zvkg
-            shard: 13/16
-          - arch: riscv64
-            cpu: max
-            features: >-
-              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
-              zvbb zvbc zvkb zvkg
-            shard: 14/16
-          - arch: riscv64
-            cpu: max
-            features: >-
-              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
-              zvbb zvbc zvkb zvkg
-            shard: 15/16
-          - arch: riscv64
-            cpu: max
-            features: >-
-              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
-              zvbb zvbc zvkb zvkg
-            shard: 16/16
+            shard: 12/12
     steps:
       - uses: actions/checkout@v7
 
@@ -389,12 +395,6 @@ jobs:
               --target "$TARGET" -- --skip vectors::inventory
           cargo test --release -p scytale --lib --target "$TARGET" \
               features::tests::alone -- --ignored --test-threads=1
-          # The ACVP suites through the public API, without the
-          # session, which would want the target's TLS library. The
-          # quick tier answers each suite once under the detected
-          # profile, less the groups that only hash more bytes.
-          cargo test --release -p scytale-acvp --no-default-features \
-              --target "$TARGET"
         env:
           SCYTALE_CPU_FEATURES: ${{ matrix.features }}
           # Empty for the rows that do not set it, which the
@@ -402,9 +402,9 @@ jobs:
           SCYTALE_EXPECT_ALL: ${{ matrix.expect_all }}
 
       - name: Test as ${{ matrix.cpu }}, shard ${{ matrix.shard }}
-        # This job's share of the full run; see the matrix. Edits the
-        # process-wide set of features, so it runs alone; the alias
-        # in .cargo/config.toml cannot take a target.
+        # This job's share of the check against the vendored vectors;
+        # see the matrix. Without the session, which would want the
+        # target's TLS library.
         if: ${{ matrix.shard }}
         run: |
           arch=${{ matrix.arch }}
@@ -416,9 +416,7 @@ jobs:
           fi
           export "CARGO_TARGET_${name}_RUNNER=$runner"
           cargo test --release -p scytale-acvp --no-default-features \
-              --lib --target "$TARGET" \
-              profile::tests::alone -- --ignored --test-threads=1 \
-              --nocapture
+              --target "$TARGET"
         env:
           SCYTALE_CPU_FEATURES: ${{ matrix.features }}
           SCYTALE_SHARD: ${{ matrix.shard }}
@@ -516,27 +514,19 @@ jobs:
           test -x "$HOME/.wasmtime/bin/wasmtime"
 
       - name: Test
-        # As `cargo test-extended` and `cargo test-every-profile`,
-        # which cannot take a target. The inventory goes first and
-        # alone so that its table is in the log, portable rows though
-        # they all are. The full ACVP run is last: every suite in
-        # full under the one profile these targets have.
+        # As the native job, for a target. The inventory goes first
+        # and alone so that its table is in the log, portable rows
+        # though they all are. The check against the vendored vectors
+        # is last, whole: these targets have one kernel of everything.
         run: |
           cargo test --release -p scytale --lib --target ${{ matrix.target }} \
               vectors::inventory -- --nocapture
           cargo test --release --workspace --exclude scytale-acvp \
-              --target ${{ matrix.target }} \
-              -- --include-ignored --skip bench::speed \
-              --skip print_base_tables \
-              --skip features::tests::alone --skip vectors::inventory
-          cargo test --release -p scytale-acvp --no-default-features \
-              --target ${{ matrix.target }}
+              --target ${{ matrix.target }} -- --skip vectors::inventory
           cargo test --release -p scytale --lib --target ${{ matrix.target }} \
               features::tests::alone -- --ignored --test-threads=1
-          cargo test --release -p scytale-acvp --no-default-features --lib \
-              --target ${{ matrix.target }} \
-              profile::tests::alone -- --ignored --test-threads=1 \
-              --nocapture
+          cargo test --release -p scytale-acvp --no-default-features \
+              --target ${{ matrix.target }}
         env:
           # Per target, because a plain RUSTFLAGS would replace these
           # rather than add to them and the linker flag would be lost.

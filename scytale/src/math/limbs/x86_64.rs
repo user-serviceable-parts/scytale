@@ -43,6 +43,10 @@ pub(crate) enum Kernel {
 pub(crate) const KERNELS: &[(Kernel, Features)] =
     &[(Kernel::Adx, ADX), (Kernel::Portable, Features::new())];
 
+/// What the list publishes: the needs, without the names.
+pub(crate) const PROFILES: [Features; KERNELS.len()] =
+    features::profiles_of(KERNELS);
+
 /// The multiply, where the processor reports ADX (CPUID leaf 7, EBX
 /// bit 19) and BMI2 for `mulx` (bit 8). Asked once.
 pub(super) fn probe() -> Option<Adx> {

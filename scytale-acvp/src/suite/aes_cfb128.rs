@@ -122,13 +122,3 @@ fn next_input(iv: &[u8], outputs: &[Vec<u8>], j: usize) -> Vec<u8> {
         outputs[j - HISTORY].clone()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("ACVP-AES-CFB128") {
-            super::super::check(suite);
-        }
-    }
-}

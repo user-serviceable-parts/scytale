@@ -105,6 +105,10 @@ pub(crate) enum Kernel {
 pub(crate) const KERNELS: &[(Kernel, Features)] =
     &[(Kernel::Avx2, AVX2), (Kernel::Portable, Features::new())];
 
+/// What the list publishes: the needs, without the names.
+pub(crate) const PROFILES: [Features; KERNELS.len()] =
+    features::profiles_of(KERNELS);
+
 /// Whether the processor and operating system support AVX2.
 pub(super) fn supported() -> bool {
     features::allows(KERNELS, Kernel::Avx2)

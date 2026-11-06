@@ -404,7 +404,8 @@ pub(crate) const KERNELS: &[(Kernel, Features)] = &[
 ];
 
 /// What the list publishes: the needs, without the names.
-const PROFILES: [Features; KERNELS.len()] = features::profiles_of(KERNELS);
+pub(crate) const PROFILES: [Features; KERNELS.len()] =
+    features::profiles_of(KERNELS);
 
 /// Applies a method to whichever implementation is in use.
 macro_rules! dispatch {

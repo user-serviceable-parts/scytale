@@ -177,15 +177,3 @@ fn split(msg: &[u8], bits: usize) -> (&[u8], u8, u32) {
         _ => (msg, 0, 0),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for name in ["KMAC-128", "KMAC-256"] {
-            for suite in super::super::find(name) {
-                super::super::check(suite);
-            }
-        }
-    }
-}

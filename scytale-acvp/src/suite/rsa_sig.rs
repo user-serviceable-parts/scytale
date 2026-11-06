@@ -250,18 +250,3 @@ pub fn verify_sig_gen(
     });
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::super::{SUITES, check};
-
-    #[test]
-    fn vendored() {
-        for suite in SUITES.iter().filter(|s| {
-            s.algorithm == "RSA"
-                && matches!(s.mode, Some("sigGen") | Some("sigVer"))
-        }) {
-            check(suite);
-        }
-    }
-}

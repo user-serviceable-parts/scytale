@@ -63,16 +63,3 @@ fn answer_as<H: Hash + Clone + BlockType + Default>(
         })
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::super::{SUITES, check};
-
-    #[test]
-    fn vendored() {
-        for suite in SUITES.iter().filter(|s| s.algorithm.starts_with("HMAC-"))
-        {
-            check(suite);
-        }
-    }
-}

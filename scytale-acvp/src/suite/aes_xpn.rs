@@ -75,13 +75,3 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
         Err(e) => Err(e.into()),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("ACVP-AES-XPN") {
-            super::super::check(suite);
-        }
-    }
-}

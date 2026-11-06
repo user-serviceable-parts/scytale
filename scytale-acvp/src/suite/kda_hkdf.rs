@@ -164,13 +164,3 @@ fn single<H: Hash + Clone + BlockType + Default>(
     hkdf::derive::<H>(&salt, &ikm, &[&info], &mut dkm)?;
     Ok(dkm)
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("HKDF") {
-            super::super::check(suite);
-        }
-    }
-}

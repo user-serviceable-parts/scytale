@@ -68,9 +68,7 @@ English ended up.
 Everything builds with a stable Rust toolchain, 1.88 or later.
 
 ```sh
-cargo test                     # every crate's tests
-cargo test-extended            # adds the long tests marked #[ignore]
-cargo test-every-profile       # the ACVP suites in full, every kernel
+cargo test --workspace         # every crate's tests
 scripts/ci-check               # formatting and style, as CI's style job
 scripts/test-all-arches        # every architecture, foreign ones emulated
 scripts/test-ring-downstream   # rustls and rustls-webpki on scytale-ring

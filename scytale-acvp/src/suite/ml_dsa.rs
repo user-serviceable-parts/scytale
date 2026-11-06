@@ -186,13 +186,3 @@ fn sig_ver<S: Set>(t: &Value) -> Result<Value, Error> {
     );
     Ok(json!({ "testPassed": passed }))
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("ML-DSA") {
-            super::super::check(suite);
-        }
-    }
-}

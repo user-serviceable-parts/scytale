@@ -179,15 +179,3 @@ pub fn rightmost_16(out: &[u8], bits: usize) -> u16 {
         acc << 1 | u16::from(out[p / 8] >> (7 - p % 8) & 1)
     })
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for name in ["cSHAKE-128", "cSHAKE-256"] {
-            for suite in super::super::find(name) {
-                super::super::check(suite);
-            }
-        }
-    }
-}

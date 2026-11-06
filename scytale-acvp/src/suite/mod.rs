@@ -717,57 +717,6 @@ pub fn fixed_rng() -> CtrDrbg<FixedEntropy> {
     CtrDrbg::try_new(FixedEntropy::default()).expect("fixed entropy")
 }
 
-/// The quick check of `suite`: the vendored file less its slow
-/// groups, answered with a fixed generator and compared with the
-/// file. The large-data groups hash gigabytes and SLH-DSA signs for
-/// a minute, so those wait for the full run, `cargo
-/// test-every-profile`. The Monte Carlo groups stay: a thousand
-/// chained calls per case is milliseconds, and they are the only
-/// groups that carry state from one call into the next. Returns the
-/// cases compared.
-///
-/// # Panics
-///
-/// On any difference, naming the group and case, or if nothing was
-/// compared in a suite whose minimum says something should be.
-pub fn check(suite: &Suite) -> usize {
-    let Some(mut doc) = vendored(suite) else {
-        return 0;
-    };
-    trim(suite, &mut doc);
-    let count = compared(suite, &doc);
-    assert!(
-        count > 0 || suite.minimum == 0,
-        "{}: nothing compared",
-        suite.directory
-    );
-    count
-}
-
-/// Cuts `doc` down to what the quick check answers: the large-data
-/// groups go, and SLH-DSA signing keeps one case per group.
-fn trim(suite: &Suite, doc: &mut Value) {
-    let Some(groups) = doc["testGroups"].as_array_mut() else {
-        return;
-    };
-    groups.retain(|g| g["testType"] != "LDT");
-    if suite.algorithm == "SLH-DSA" && suite.mode == Some("sigGen") {
-        for group in groups {
-            if let Some(tests) = group["tests"].as_array_mut() {
-                tests.truncate(1);
-            }
-        }
-    }
-}
-
-fn compared(suite: &Suite, doc: &Value) -> usize {
-    let mut rng = fixed_rng();
-    let answered = (suite.answer)(doc, &mut rng)
-        .unwrap_or_else(|e| panic!("{}: {e}", suite.directory));
-    compare(suite, doc, &answered)
-        .unwrap_or_else(|e| panic!("{}: {e}", suite.directory))
-}
-
 /// Compares `answered` with `expected`, the vendored file or the
 /// server's `/expected`; returns the cases compared.
 pub fn compare(
@@ -864,59 +813,6 @@ mod tests {
             SUITES.iter().map(|s| s.directory.to_string()).collect();
         listed.sort();
         assert_eq!(on_disk, listed);
-    }
-
-    #[test]
-    fn trim_drops_large_data_and_keeps_monte_carlo() {
-        let file = || {
-            json!({"testGroups": [
-                {"tgId": 1, "testType": "AFT", "tests": [{"tcId": 1}]},
-                {"tgId": 2, "testType": "MCT", "tests": [{"tcId": 2}]},
-                {"tgId": 3, "testType": "LDT", "tests": [{"tcId": 3}]},
-            ]})
-        };
-        let suite = plain("x", "x", |_, _| Ok(Value::Null), 0);
-        let mut doc = file();
-        trim(&suite, &mut doc);
-        let kinds: Vec<&str> = doc["testGroups"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|g| g["testType"].as_str().unwrap())
-            .collect();
-        assert_eq!(kinds, ["AFT", "MCT"]);
-    }
-
-    #[test]
-    fn trim_keeps_one_slh_dsa_signature_per_group() {
-        let suite = rev(
-            "x",
-            "SLH-DSA",
-            Some("sigGen"),
-            "FIPS205",
-            |_, _| Ok(Value::Null),
-            0,
-        );
-        let mut doc = json!({"testGroups": [
-            {"tgId": 1, "testType": "AFT",
-             "tests": [{"tcId": 1}, {"tcId": 2}, {"tcId": 3}]},
-        ]});
-        trim(&suite, &mut doc);
-        assert_eq!(doc["testGroups"][0]["tests"].as_array().unwrap().len(), 1);
-        // Only signing is cut: verification is quick.
-        let suite = rev(
-            "x",
-            "SLH-DSA",
-            Some("sigVer"),
-            "FIPS205",
-            |_, _| Ok(Value::Null),
-            0,
-        );
-        let mut doc = json!({"testGroups": [
-            {"tgId": 1, "testType": "AFT", "tests": [{"tcId": 1}, {"tcId": 2}]},
-        ]});
-        trim(&suite, &mut doc);
-        assert_eq!(doc["testGroups"][0]["tests"].as_array().unwrap().len(), 2);
     }
 
     #[test]

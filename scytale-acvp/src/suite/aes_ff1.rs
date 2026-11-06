@@ -75,13 +75,3 @@ fn aft(
     });
     Ok(json!({ output: spell(&data, alphabet)? }))
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("ACVP-AES-FF1") {
-            super::super::check(suite);
-        }
-    }
-}

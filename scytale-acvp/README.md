@@ -24,26 +24,23 @@ verified instead: the answered signature under the answered key, and
 NIST's under NIST's.
 
 ```sh
-SCYTALE_VECTORS=required cargo test -p scytale-acvp
+cargo test -p scytale-acvp
 ```
 
-runs the quick form of every suite: everything but the large-data
-groups, which hash gigabytes, and all but one signature per group of
-SLH-DSA signing. Those wait for
+answers every suite in full, the large-data groups and every SLH-DSA
+signature included, under every kernel this processor can run, each
+once. A kernel is reached through the feature profiles the library's
+types publish, and a suite is answered under a profile only when the
+profile changes a kernel the suite is built from, so SHA-2 on x86-64
+runs twice, SHA-NI and portable, and not once per profile. The work
+is cut into test groups and spread over the cores, and the report
+says which suites ran under which profile and why, and the cases
+compared per suite. The run edits the process-wide set of features,
+so it is a binary of its own, outside the harness.
 
-```sh
-cargo test-every-profile
-```
-
-which answers every suite in full under every feature profile this
-processor can run, each answer compared with the file: every kernel
-the processor has answers every vector. The work is pooled across
-the cores, and it prints the cases compared per suite and profile.
-It edits the process-wide set of features in force, so it runs
-alone.
 `SCYTALE_SHARD=i/n` runs the i-th of n equal shares, which is how CI
-spreads it over jobs. `SCYTALE_VECTORS=required` makes a missing
-file a failure rather than a skip.
+spreads the run over jobs. `SCYTALE_VECTORS=required` makes a missing
+vector file a failure rather than a skip.
 
 ## Online
 

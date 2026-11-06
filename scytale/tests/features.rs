@@ -10,7 +10,7 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use scytale::aead::{Ccm, Gcm, GcmSiv};
+use scytale::aead::{Ccm, ChaCha20Poly1305, Gcm, GcmSiv, Xpn};
 use scytale::cipher::aes::Aes128;
 use scytale::cipher::chacha20::ChaCha20;
 use scytale::cipher::mode::{Cbc, Ctr, Xts};
@@ -18,9 +18,14 @@ use scytale::features::{
     self, Dispatcher, Feature, Features, aarch64, riscv64, x86_64,
 };
 use scytale::hash::Hash;
+use scytale::hash::sha1::Sha1;
 use scytale::hash::sha2::{Sha224, Sha256, Sha384, Sha512};
 use scytale::hash::sha3::{Sha3_256, Shake128};
+use scytale::kex::ecdh;
+use scytale::mac::poly1305::Poly1305;
+use scytale::sig::ecdsa;
 use scytale::{Error, Key};
+use scytale::{pke, sig};
 
 static LOCK: Mutex<()> = Mutex::new(());
 
@@ -135,6 +140,16 @@ fn profiles_end_in_nothing_and_are_each_reachable() {
     check::<Gcm<Aes128>>();
     check::<GcmSiv<Aes128>>();
     check::<Ccm<Aes128>>();
+    check::<Xpn<Aes128>>();
+    check::<Sha1>();
+    check::<Poly1305>();
+    check::<ChaCha20Poly1305>();
+    check::<ecdh::p256::PrivateKey>();
+    check::<ecdh::p384::PublicKey>();
+    check::<ecdsa::p256::PrivateKey>();
+    check::<ecdsa::p521::PublicKey>();
+    check::<sig::rsa::PrivateKey>();
+    check::<pke::rsa::PublicKey>();
     // The trait and the inherent method agree.
     assert_eq!(<Sha256 as Dispatcher>::profiles(), Sha256::profiles());
 }

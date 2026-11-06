@@ -1,12 +1,10 @@
 #!/bin/sh
-# Runs the tests, including the long ones marked #[ignore], for each
-# architecture. The benchmark is ignored too and is left out: it
-# measures rather than checks, and a sweep under qemu would take
-# hours. Use scripts/bench for that. The host architecture runs
-# natively and runs everything; the others run with `cross`, which
-# builds in a container holding the cross linker, the target's libc
-# and qemu, and leave out the large data tests, as said below. For
-# development only; CI tests on real hardware.
+# Runs every crate's tests for each architecture. The host runs
+# natively and runs everything, the check against the vendored
+# vectors included; the others run with `cross`, which builds in a
+# container holding the cross linker, the target's libc and qemu, and
+# leave that check out, as said below. For development only; CI tests
+# on real hardware.
 #
 # Requirements: `cargo install cross`, `rustup target add <target>`
 # for each foreign target, and Docker or Podman.
@@ -64,14 +62,9 @@ run_target() {
     target=$1
     echo "==> $target"
     if [ "$target" = "$host" ]; then
-        cargo test --release --workspace -- --include-ignored \
-            --skip bench::speed --skip print_base_tables \
-            --skip features::tests::alone \
-            --skip profile::tests::alone --skip tests::vendored
+        cargo test --release --workspace
         cargo test --release -p scytale --lib features::tests::alone -- \
             --ignored --test-threads=1
-        cargo test --release -p scytale-acvp --lib \
-            profile::tests::alone -- --ignored --test-threads=1
         return
     fi
     if ! command -v cross >/dev/null 2>&1; then
@@ -82,11 +75,11 @@ run_target() {
         echo "missing rust-std: rustup target add $target" >&2
         exit 1
     fi
-    # The ACVP suites run in their quick form under emulation: the
-    # full run under every profile is hours through qemu on one
-    # machine, and CI does it, spread over jobs. To take one share of
-    # it here, run the host's profile::tests::alone command below
-    # through cross with SCYTALE_SHARD=i/n.
+    # The check against the vendored vectors is left out under
+    # emulation: it is hours through qemu on one machine, and CI
+    # does it, spread over jobs. To take one share of it here:
+    #   SCYTALE_SHARD=i/n cross test -p scytale-acvp \
+    #       --no-default-features --target "$target"
     if [ "$target" = riscv64gc-unknown-linux-gnu ] \
         && [ -z "$QEMU_SWEEP" ]; then
         export SCYTALE_CPU_FEATURES="$RISCV_FEATURES"
@@ -96,12 +89,7 @@ run_target() {
     if [ "$QEMU_CPU" = max ]; then
         export SCYTALE_EXPECT_ALL=1
     fi
-    # The container has no TLS library for the target, so the
-    # harness runs without its session.
-    cross test --workspace --exclude scytale-acvp --target "$target" -- \
-        --include-ignored --skip bench::speed --skip print_base_tables \
-        --skip features::tests::alone
-    cross test -p scytale-acvp --no-default-features --target "$target"
+    cross test --workspace --exclude scytale-acvp --target "$target"
     cross test -p scytale --lib --target "$target" \
         features::tests::alone -- --ignored --test-threads=1
     if [ "$target" = riscv64gc-unknown-linux-gnu ] \
@@ -109,8 +97,6 @@ run_target() {
         for cpu in $RISCV_CONFIGS; do
             echo "==> $target QEMU_CPU=$cpu"
             QEMU_CPU=$cpu cross test --workspace --exclude scytale-acvp \
-                --target "$target" -- --skip bench::speed
-            QEMU_CPU=$cpu cross test -p scytale-acvp --no-default-features \
                 --target "$target"
         done
         unset SCYTALE_CPU_FEATURES

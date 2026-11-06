@@ -862,6 +862,72 @@ pub(crate) const fn profiles_of<K, const N: usize>(
     profiles
 }
 
+/// How many rows [`combined`] yields for `a` and `b`.
+pub(crate) const fn combined_len(a: &[Features], b: &[Features]) -> usize {
+    let mut n = 0;
+    let mut i = 0;
+    while i < a.len() {
+        let mut j = 0;
+        while j < b.len() {
+            if !union_before(a, b, i, j) {
+                n += 1;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    n
+}
+
+/// The profiles of a type whose kernel is two choices made apart, as
+/// GCM's cipher loop and its multiply: the union of every pair, in
+/// order, each once. `N` is what [`combined_len`] gives.
+pub(crate) const fn combined<const N: usize>(
+    a: &[Features],
+    b: &[Features],
+) -> [Features; N] {
+    let mut out = [Features::new(); N];
+    let mut n = 0;
+    let mut i = 0;
+    while i < a.len() {
+        let mut j = 0;
+        while j < b.len() {
+            if !union_before(a, b, i, j) {
+                out[n] = a[i].union(b[j]);
+                n += 1;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    assert!(n == N, "combined: wrong length");
+    out
+}
+
+/// Whether the union of `a[i]` and `b[j]` is also the union of an
+/// earlier pair.
+const fn union_before(
+    a: &[Features],
+    b: &[Features],
+    i: usize,
+    j: usize,
+) -> bool {
+    let u = a[i].union(b[j]);
+    let mut p = 0;
+    while p <= i {
+        let mut q = 0;
+        let last = if p == i { j } else { b.len() };
+        while q < last {
+            if a[p].union(b[q]).0 == u.0 {
+                return true;
+            }
+            q += 1;
+        }
+        p += 1;
+    }
+    false
+}
+
 /// Whether every row of `kernels` can be chosen: no row's requirements
 /// include a higher row's, since the higher one would then be taken
 /// whenever the lower one could be. Setting exactly a row's

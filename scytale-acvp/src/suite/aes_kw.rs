@@ -59,13 +59,3 @@ fn aft(t: &Value, encrypt: bool, forward: bool) -> Result<Value, Error> {
         }
     })
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("ACVP-AES-KW") {
-            super::super::check(suite);
-        }
-    }
-}

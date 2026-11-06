@@ -260,13 +260,4 @@ mod tests {
         let key = &answered["testGroups"][0]["tests"][0]["keyOut"];
         assert_eq!(key.as_str().unwrap().len(), 2);
     }
-
-    #[test]
-    fn vendored() {
-        for name in ["KDF-1.0", "KDF-KMAC-Sp800-108r1"] {
-            for suite in super::super::find(name) {
-                super::super::check(suite);
-            }
-        }
-    }
 }

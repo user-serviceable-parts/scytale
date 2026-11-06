@@ -159,15 +159,3 @@ fn mct<T: Tuple>(
     }
     Ok(json!({ "resultsArray": results }))
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for name in ["TupleHash-128", "TupleHash-256"] {
-            for suite in super::super::find(name) {
-                super::super::check(suite);
-            }
-        }
-    }
-}

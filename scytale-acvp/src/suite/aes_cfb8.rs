@@ -115,13 +115,3 @@ fn next_input(iv: &[u8], outputs: &[u8], j: usize) -> u8 {
         outputs[j - HISTORY]
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("ACVP-AES-CFB8") {
-            super::super::check(suite);
-        }
-    }
-}

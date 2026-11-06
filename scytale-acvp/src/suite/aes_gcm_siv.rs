@@ -72,13 +72,3 @@ fn aft<C: BlockCipher<Block = [u8; 16], Key: SivKey>>(
         Err(e) => Err(e.into()),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("ACVP-AES-GCM-SIV") {
-            super::super::check(suite);
-        }
-    }
-}

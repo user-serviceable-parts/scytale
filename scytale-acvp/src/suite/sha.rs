@@ -220,17 +220,3 @@ where
     }
     Ok(json!({ "md": hex_value(hash.finalize().as_ref()) }))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::super::{SUITES, check};
-
-    #[test]
-    fn vendored() {
-        for suite in SUITES.iter().filter(|s| {
-            s.algorithm.starts_with("SHA2-") || s.algorithm.starts_with("SHA3-")
-        }) {
-            check(suite);
-        }
-    }
-}

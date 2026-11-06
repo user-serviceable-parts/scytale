@@ -467,7 +467,7 @@ mod limbs {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{SUITES, check, find, fixed_rng};
+    use super::super::{find, fixed_rng};
     use super::*;
     use crate::support::to_hex;
 
@@ -609,18 +609,5 @@ mod tests {
             json!(format!("80{}", "00".repeat(255)));
         let err = answer(&doc, &mut fixed_rng()).unwrap_err();
         assert!(err.message.contains("no key"), "{}", err.message);
-    }
-
-    #[test]
-    fn vendored() {
-        for suite in SUITES.iter().filter(|s| {
-            s.algorithm == "RSA"
-                && matches!(
-                    s.mode,
-                    Some("signaturePrimitive") | Some("decryptionPrimitive")
-                )
-        }) {
-            check(suite);
-        }
     }
 }

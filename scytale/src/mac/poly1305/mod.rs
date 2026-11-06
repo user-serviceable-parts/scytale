@@ -29,6 +29,7 @@ use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::Mac;
+use crate::features::{self, Dispatcher, Features};
 use crate::{Key, KeyType};
 
 /// The key length in bytes: `r` then `s`.
@@ -198,6 +199,30 @@ impl Poly1305 {
         tag[..8].copy_from_slice(&lo.to_le_bytes());
         tag[8..].copy_from_slice(&hi.to_le_bytes());
         tag
+    }
+}
+
+/// What the type publishes: on x86-64 its rows, elsewhere the one
+/// loop, which needs nothing.
+#[cfg(target_arch = "x86_64")]
+pub(crate) const PROFILES: [Features; x86_64::PROFILES.len()] =
+    x86_64::PROFILES;
+#[cfg(not(target_arch = "x86_64"))]
+pub(crate) const PROFILES: [Features; 1] = [Features::new()];
+
+impl Poly1305 {
+    /// The feature profiles this authenticator tells apart, best
+    /// first; see [`Dispatcher`].
+    pub fn profiles() -> &'static [Features] {
+        &PROFILES
+    }
+}
+
+impl features::sealed::Sealed for Poly1305 {}
+
+impl Dispatcher for Poly1305 {
+    fn profiles() -> &'static [Features] {
+        Poly1305::profiles()
     }
 }
 

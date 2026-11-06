@@ -64,13 +64,3 @@ fn case<H: Hash + Clone + BlockType + Default>(
         "keyBlock": hex_value(&key_block),
     }))
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("TLS-v1.2") {
-            super::super::check(suite);
-        }
-    }
-}

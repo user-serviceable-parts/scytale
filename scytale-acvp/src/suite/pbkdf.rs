@@ -51,13 +51,3 @@ fn derived(t: &Value, derive: Derive) -> Result<Value, Error> {
     derive(password.as_bytes(), &salt, iterations, &mut key)?;
     Ok(json!({ "derivedKey": hex_value(&key) }))
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("PBKDF") {
-            super::super::check(suite);
-        }
-    }
-}

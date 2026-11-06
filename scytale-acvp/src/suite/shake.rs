@@ -104,15 +104,3 @@ fn mct<X: BitXof + Default>(
     }
     Ok(json!({ "resultsArray": steps }))
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for name in ["SHAKE-128", "SHAKE-256"] {
-            for suite in super::super::find(name) {
-                super::super::check(suite);
-            }
-        }
-    }
-}

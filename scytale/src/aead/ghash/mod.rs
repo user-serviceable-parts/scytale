@@ -136,6 +136,18 @@ pub(crate) const KERNELS: &[(Kernel, Features)] = &[
     (Kernel::Zbc, riscv64::ZBKC),
 ];
 
+/// What the list publishes: each row's needs, and the portable
+/// multiply, which needs nothing, closing it.
+pub(crate) const PROFILES: [Features; KERNELS.len() + 1] = {
+    let mut profiles = [Features::new(); KERNELS.len() + 1];
+    let mut i = 0;
+    while i < KERNELS.len() {
+        profiles[i] = KERNELS[i].1;
+        i += 1;
+    }
+    profiles
+};
+
 /// Divides the subkey by `x` and puts its halves in the order a
 /// vector register wants them, least significant first.
 ///

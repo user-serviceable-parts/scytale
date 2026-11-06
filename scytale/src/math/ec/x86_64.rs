@@ -47,6 +47,10 @@ pub(crate) enum Kernel {
 pub(crate) const KERNELS: &[(Kernel, Features)] =
     &[(Kernel::Avx2, AVX2), (Kernel::Portable, Features::new())];
 
+/// What the list publishes: the needs, without the names.
+pub(crate) const PROFILES: [Features; KERNELS.len()] =
+    features::profiles_of(KERNELS);
+
 /// AVX2 (CPUID leaf 7, EBX bit 5) with the operating system saving
 /// the upper halves of the registers (XCR0 bits 1 and 2). Asked once.
 pub(crate) fn probe() -> Option<Avx2> {

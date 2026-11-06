@@ -44,7 +44,7 @@ use core::fmt;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::features::{self, Features};
+use crate::features::{self, Dispatcher, Features};
 use crate::hash::{BitHash, Hash};
 use crate::{BlockType, Error};
 
@@ -80,6 +80,9 @@ pub(crate) const KERNELS: &[(Kernel, Features)] = &[
     (Kernel::Armv8, ARMV8),
     (Kernel::Portable, Features::new()),
 ];
+
+/// What the list publishes: the needs, without the names.
+const PROFILES: [Features; KERNELS.len()] = features::profiles_of(KERNELS);
 
 /// A SHA-1 computation in progress.
 pub struct Sha1 {
@@ -203,6 +206,22 @@ impl Sha1 {
             chunk.copy_from_slice(&word.to_be_bytes());
         }
         out
+    }
+}
+
+impl Sha1 {
+    /// The feature profiles this hash tells apart, best first; see
+    /// [`Dispatcher`].
+    pub fn profiles() -> &'static [Features] {
+        &PROFILES
+    }
+}
+
+impl features::sealed::Sealed for Sha1 {}
+
+impl Dispatcher for Sha1 {
+    fn profiles() -> &'static [Features] {
+        Sha1::profiles()
     }
 }
 

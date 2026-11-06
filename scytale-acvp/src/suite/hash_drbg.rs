@@ -144,15 +144,3 @@ fn aft<D: Drbg>(group: &Value) -> Result<Option<Value>, Error> {
         Ok(json!({ "returnedBits": hex_value(&out) }))
     })
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for name in ["hashDRBG", "hmacDRBG"] {
-            for suite in super::super::find(name) {
-                super::super::check(suite);
-            }
-        }
-    }
-}

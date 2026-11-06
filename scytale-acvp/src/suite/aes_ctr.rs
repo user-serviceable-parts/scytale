@@ -87,13 +87,6 @@ mod tests {
     use crate::support::{hex, list};
     use serde_json::json;
 
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("ACVP-AES-CTR") {
-            super::super::check(suite);
-        }
-    }
-
     /// As the server prompts, with no IV for encryption: the answer
     /// must carry an IV under which its ciphertext decrypts.
     #[test]
