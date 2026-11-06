@@ -161,9 +161,12 @@ pub fn answer_tests(
     Ok(Some(json!({ "tests": tests })))
 }
 
-/// Leaves `group` unanswered, saying why on stderr.
-pub fn skip(group: &Value, why: &str) -> Result<Option<Value>, Error> {
-    eprintln!("tgId {}: skipped, {why}", group["tgId"]);
+/// Leaves `group` unanswered: the file asks for something the
+/// library does not offer, which `why` names for the reader of the
+/// driver. Quietly, since the vendored check meets each such group
+/// once per profile and counts them instead; the server marks them
+/// failed, which is what a registration that asks for them earns.
+pub fn skip(_group: &Value, _why: &str) -> Result<Option<Value>, Error> {
     Ok(None)
 }
 

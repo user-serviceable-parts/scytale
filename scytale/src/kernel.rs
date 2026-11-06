@@ -67,7 +67,7 @@ pub(crate) fn rows_for<T>(rows: &'static [T], readable: bool) -> &'static [T] {
 mod tests {
     use super::*;
     use crate::Key;
-    use crate::aead::{Ccm, Gcm, GcmSiv, ccm, gcm, gcm_siv};
+    use crate::aead::{Ccm, Gcm, GcmSiv, ccm, gcm, gcm_siv, ghash};
     use crate::cipher::aes::Aes128;
     use crate::cipher::mode::{Cbc, Ctr, Xts, cbc, ctr, xts};
     use crate::features::{self, Features};
@@ -99,15 +99,19 @@ mod tests {
             Xts::<Aes128>::profiles(),
             xts.kernel(),
         );
+        // The GCM modes choose their multiply apart, so their
+        // profiles are the cipher rows joined with GHASH's.
         let gcm = Gcm::<Aes128>::new(&key);
-        features::dispatches(
+        features::dispatches_combined(
             gcm::KERNELS,
+            &ghash::PROFILES,
             Gcm::<Aes128>::profiles(),
             gcm.kernel(),
         );
         let siv = GcmSiv::<Aes128>::new(&key);
-        features::dispatches(
+        features::dispatches_combined(
             gcm_siv::KERNELS,
+            &ghash::PROFILES,
             GcmSiv::<Aes128>::profiles(),
             siv.kernel(),
         );

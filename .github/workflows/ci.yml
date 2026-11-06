@@ -159,6 +159,66 @@ jobs:
         env:
           SCYTALE_SHARD: ${{ matrix.shard }}
 
+  # The same check for RISC-V, which has no native runner: under
+  # QEMU's `max` processor, which has every extension the library
+  # uses, so every RISC-V kernel answers every vector. That is some
+  # 200 core-minutes a kernel set under emulation and a runner has
+  # four cores, so the run is spread over the shards listed here,
+  # each taking every n-th unit of work, a test group or one case of
+  # a long group. The count is the one number in the list.
+  #
+  # The job sits here, ahead of the short emulated rows, because the
+  # runners start jobs in the order written and twenty run at once:
+  # the long jobs take the first wave and the short ones fill in as
+  # slots free up. The container is for its QEMU, as below.
+  vendored-emulated:
+    name: test (riscv64, max, shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - 1/12
+          - 2/12
+          - 3/12
+          - 4/12
+          - 5/12
+          - 6/12
+          - 7/12
+          - 8/12
+          - 9/12
+          - 10/12
+          - 11/12
+          - 12/12
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust, QEMU and the cross linker
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+              ca-certificates curl gcc libc6-dev qemu-user \
+              gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal \
+                    --default-toolchain stable \
+                    --target riscv64gc-unknown-linux-gnu
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Test as max, shard ${{ matrix.shard }}
+        # Without the session, which would want the target's TLS
+        # library.
+        run: |
+          cargo test --release -p scytale-acvp --no-default-features \
+              --target riscv64gc-unknown-linux-gnu
+        env:
+          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER:
+            riscv64-linux-gnu-gcc
+          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER:
+            qemu-riscv64 -cpu max -L /usr/riscv64-linux-gnu
+          SCYTALE_SHARD: ${{ matrix.shard }}
+
   # Every runner here and every machine anyone develops on is a recent
   # processor, so which loop a lesser one is given is decided by code
   # that never runs: on real hardware only one answer to each probe is
@@ -184,17 +244,15 @@ jobs:
   # second. Whether each kernel is right is settled by the check
   # against the vendored vectors, which answers every suite under
   # every kernel the processor can run, each once: for x86-64 and
-  # aarch64 on the native runners, which have every feature. RISC-V
-  # has no native runner, so its `max` processor gets that check
-  # here, spread over the rows that carry a `shard`.
+  # aarch64 on the native runners, which have every feature, and for
+  # RISC-V, which has no native runner, under its `max` processor in
+  # the vendored-emulated job above.
   #
   # The container is for its QEMU: the runner's own is too old to
   # report the RISC-V cryptography extensions, and it lacks some of
   # the x86-64 ones.
   emulated:
-    name: >-
-      test (${{ matrix.arch }}, ${{ matrix.cpu }}${{
-      matrix.shard && format(', shard {0}', matrix.shard) || '' }})
+    name: test (${{ matrix.arch }}, ${{ matrix.cpu }})
     runs-on: ubuntu-latest
     container: debian:trixie
     strategy:
@@ -259,96 +317,14 @@ jobs:
             features: zbb zbc
           # The vector and scalar cryptography extensions, which no
           # runner has: the only place these kernels run at all, so
-          # this processor also gets the architecture's full tier,
-          # in the shard rows that follow.
+          # this processor also gets the check against the vendored
+          # vectors, in the vendored-emulated job above.
           - arch: riscv64
             cpu: max
             features: >-
               v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
               zvbb zvbc zvkb zvkg
             expect_all: 1
-          # The check against the vendored vectors: every suite in
-          # full, the large-data groups included, under every kernel
-          # the processor can run, each once, so that every RISC-V
-          # kernel answers every vector. That is some 200
-          # core-minutes a kernel set under emulation, and a runner
-          # has four cores, so the run is spread over jobs: each
-          # takes every n-th unit of work, a test group or one case
-          # of a long group, and the count is the one number below.
-          # Each log says which suites ran under which profile and
-          # why, and ends with the share it ran.
-          - arch: riscv64
-            cpu: max
-            features: >-
-              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
-              zvbb zvbc zvkb zvkg
-            shard: 1/12
-          - arch: riscv64
-            cpu: max
-            features: >-
-              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
-              zvbb zvbc zvkb zvkg
-            shard: 2/12
-          - arch: riscv64
-            cpu: max
-            features: >-
-              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
-              zvbb zvbc zvkb zvkg
-            shard: 3/12
-          - arch: riscv64
-            cpu: max
-            features: >-
-              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
-              zvbb zvbc zvkb zvkg
-            shard: 4/12
-          - arch: riscv64
-            cpu: max
-            features: >-
-              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
-              zvbb zvbc zvkb zvkg
-            shard: 5/12
-          - arch: riscv64
-            cpu: max
-            features: >-
-              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
-              zvbb zvbc zvkb zvkg
-            shard: 6/12
-          - arch: riscv64
-            cpu: max
-            features: >-
-              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
-              zvbb zvbc zvkb zvkg
-            shard: 7/12
-          - arch: riscv64
-            cpu: max
-            features: >-
-              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
-              zvbb zvbc zvkb zvkg
-            shard: 8/12
-          - arch: riscv64
-            cpu: max
-            features: >-
-              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
-              zvbb zvbc zvkb zvkg
-            shard: 9/12
-          - arch: riscv64
-            cpu: max
-            features: >-
-              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
-              zvbb zvbc zvkb zvkg
-            shard: 10/12
-          - arch: riscv64
-            cpu: max
-            features: >-
-              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
-              zvbb zvbc zvkb zvkg
-            shard: 11/12
-          - arch: riscv64
-            cpu: max
-            features: >-
-              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
-              zvbb zvbc zvkb zvkg
-            shard: 12/12
     steps:
       - uses: actions/checkout@v7
 
@@ -379,7 +355,6 @@ jobs:
         # Cargo reads the linker and the runner from variables named
         # for the target. The inventory goes first and alone so that
         # its table is in the log.
-        if: ${{ !matrix.shard }}
         run: |
           arch=${{ matrix.arch }}
           name=$(echo "$TARGET" | tr 'a-z-' 'A-Z_')
@@ -401,30 +376,10 @@ jobs:
           # inventory reads as unset.
           SCYTALE_EXPECT_ALL: ${{ matrix.expect_all }}
 
-      - name: Test as ${{ matrix.cpu }}, shard ${{ matrix.shard }}
-        # This job's share of the check against the vendored vectors;
-        # see the matrix. Without the session, which would want the
-        # target's TLS library.
-        if: ${{ matrix.shard }}
-        run: |
-          arch=${{ matrix.arch }}
-          name=$(echo "$TARGET" | tr 'a-z-' 'A-Z_')
-          runner="qemu-$arch -cpu ${{ matrix.cpu }}"
-          if [ "$arch" != x86_64 ]; then
-              runner="$runner -L /usr/$arch-linux-gnu"
-              export "CARGO_TARGET_${name}_LINKER=$arch-linux-gnu-gcc"
-          fi
-          export "CARGO_TARGET_${name}_RUNNER=$runner"
-          cargo test --release -p scytale-acvp --no-default-features \
-              --target "$TARGET"
-        env:
-          SCYTALE_CPU_FEATURES: ${{ matrix.features }}
-          SCYTALE_SHARD: ${{ matrix.shard }}
-
       - name: Clippy
         # The lints for the target, which the native runner used to
         # run; once per architecture is enough.
-        if: matrix.arch == 'riscv64' && matrix.cpu == 'max' && !matrix.shard
+        if: matrix.arch == 'riscv64' && matrix.cpu == 'max'
         run: |
           cargo clippy --workspace --exclude scytale-acvp --all-targets \
               --release --target "$TARGET" -- -D warnings

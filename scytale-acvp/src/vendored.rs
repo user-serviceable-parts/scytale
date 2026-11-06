@@ -37,38 +37,49 @@ use crate::profile::walk;
 use crate::suite::{SUITES, Suite, compare, fixed_rng, vendored};
 use crate::support::Error;
 
-/// A type's published profiles.
-pub type Profiles = fn() -> &'static [Features];
+/// A public type the suites are built from: its name, for the
+/// report, and its published profiles.
+pub type Built = (&'static str, fn() -> &'static [Features]);
 
-/// The public types `suite` is built from, as their profiles: the
-/// ones whose kernels its answers run through. Naming a type the
-/// suite does not use costs a run; missing one hides a kernel.
-pub fn built_from(suite: &Suite) -> Result<Vec<Profiles>, Error> {
-    let aes: Profiles = Aes128::profiles;
-    let sha1: Profiles = Sha1::profiles;
-    let sha256: Profiles = Sha256::profiles;
-    let sha512: Profiles = Sha512::profiles;
-    let sha3: Profiles = Sha3_256::profiles;
+/// The public types `suite` is built from: the ones whose kernels its
+/// answers run through. Naming a type the suite does not use costs a
+/// run; missing one hides a kernel.
+pub fn built_from(suite: &Suite) -> Result<Vec<Built>, Error> {
+    let aes: Built = ("Aes128", Aes128::profiles);
+    let sha1: Built = ("Sha1", Sha1::profiles);
+    let sha256: Built = ("Sha256", Sha256::profiles);
+    let sha512: Built = ("Sha512", Sha512::profiles);
+    let sha3: Built = ("Sha3_256", Sha3_256::profiles);
     let hashes = [sha1, sha256, sha512, sha3];
-    let curves: [Profiles; 3] = [
-        <ecdsa::p256::PrivateKey as Dispatcher>::profiles,
-        <ecdsa::p384::PrivateKey as Dispatcher>::profiles,
-        <ecdsa::p521::PrivateKey as Dispatcher>::profiles,
+    let curves: [Built; 3] = [
+        ("P-256", <ecdsa::p256::PrivateKey as Dispatcher>::profiles),
+        ("P-384", <ecdsa::p384::PrivateKey as Dispatcher>::profiles),
+        ("P-521", <ecdsa::p521::PrivateKey as Dispatcher>::profiles),
     ];
-    let rsa: Profiles = <rsa::PrivateKey as Dispatcher>::profiles;
+    let rsa: Built = ("RSA", <rsa::PrivateKey as Dispatcher>::profiles);
     let a = suite.algorithm;
     let types = match a {
-        "ACVP-AES-CBC" => vec![aes, <Cbc<Aes128> as Dispatcher>::profiles],
-        "ACVP-AES-CTR" => vec![aes, <Ctr<Aes128> as Dispatcher>::profiles],
-        "ACVP-AES-XTS" => vec![aes, <Xts<Aes128> as Dispatcher>::profiles],
+        "ACVP-AES-CBC" => {
+            vec![aes, ("Cbc", <Cbc<Aes128> as Dispatcher>::profiles)]
+        }
+        "ACVP-AES-CTR" => {
+            vec![aes, ("Ctr", <Ctr<Aes128> as Dispatcher>::profiles)]
+        }
+        "ACVP-AES-XTS" => {
+            vec![aes, ("Xts", <Xts<Aes128> as Dispatcher>::profiles)]
+        }
         "ACVP-AES-GCM" | "ACVP-AES-GMAC" => {
-            vec![aes, <Gcm<Aes128> as Dispatcher>::profiles]
+            vec![aes, ("Gcm", <Gcm<Aes128> as Dispatcher>::profiles)]
         }
-        "ACVP-AES-XPN" => vec![aes, <Xpn<Aes128> as Dispatcher>::profiles],
+        "ACVP-AES-XPN" => {
+            vec![aes, ("Xpn", <Xpn<Aes128> as Dispatcher>::profiles)]
+        }
         "ACVP-AES-GCM-SIV" => {
-            vec![aes, <GcmSiv<Aes128> as Dispatcher>::profiles]
+            vec![aes, ("GcmSiv", <GcmSiv<Aes128> as Dispatcher>::profiles)]
         }
-        "ACVP-AES-CCM" => vec![aes, <Ccm<Aes128> as Dispatcher>::profiles],
+        "ACVP-AES-CCM" => {
+            vec![aes, ("Ccm", <Ccm<Aes128> as Dispatcher>::profiles)]
+        }
         "CMAC-AES" | "ctrDRBG" => vec![aes],
         _ if a.starts_with("ACVP-AES-") => vec![aes],
         "SHA2-224" | "SHA2-256" | "HMAC-SHA2-224" | "HMAC-SHA2-256" => {
@@ -113,16 +124,31 @@ pub fn built_from(suite: &Suite) -> Result<Vec<Profiles>, Error> {
 /// first published profile the set meets, which is how the library
 /// chooses. Every list ends with the empty set, so there is always
 /// one.
-pub fn rows(types: &[Profiles], profile: Features) -> Vec<usize> {
+pub fn rows(types: &[Built], profile: Features) -> Vec<usize> {
     types
         .iter()
-        .map(|profiles| {
+        .map(|(_, profiles)| {
             profiles()
                 .iter()
                 .position(|p| p.is_subset(profile))
                 .expect("every list ends empty")
         })
         .collect()
+}
+
+/// The rows `types` took, each as the type's name and the feature set
+/// of its row: what the report says a suite-profile pair ran under.
+fn describe(types: &[Built], rows: &[usize]) -> String {
+    let taken: Vec<String> = types
+        .iter()
+        .zip(rows)
+        .map(|((name, profiles), &row)| format!("{name} {}", profiles()[row]))
+        .collect();
+    if taken.is_empty() {
+        "no kernel to choose".into()
+    } else {
+        taken.join(", ")
+    }
 }
 
 /// One piece of the run: a test group of a suite, or one case of it
@@ -177,12 +203,13 @@ pub fn units(docs: &[Option<Value>]) -> Vec<Unit> {
 }
 
 /// Answers `unit` of `doc` with a fresh fixed generator and compares
-/// the answer with `doc`; returns the cases compared.
+/// the answer with `doc`; returns the cases compared, or `None` for a
+/// group the driver skipped.
 pub fn answer_unit(
     suite: &Suite,
     doc: &Value,
     unit: &Unit,
-) -> Result<usize, Error> {
+) -> Result<Option<usize>, Error> {
     let mut group = doc["testGroups"][unit.group].clone();
     if let Some(case) = unit.case {
         let test = group["tests"][case].clone();
@@ -192,7 +219,10 @@ pub fn answer_unit(
     cut["testGroups"] = Value::Array(vec![group]);
     let mut rng = fixed_rng();
     let answered = (suite.answer)(&cut, &mut rng)?;
-    compare(suite, doc, &answered)
+    if answered["testGroups"].as_array().is_some_and(Vec::is_empty) {
+        return Ok(None);
+    }
+    compare(suite, doc, &answered).map(Some)
 }
 
 /// `SCYTALE_SHARD` parsed: `i/n` gives shard `i` of `n`, one-based;
@@ -261,7 +291,7 @@ pub fn run() -> Result<Report, Error> {
     }
 
     let docs: Vec<Option<Value>> = SUITES.iter().map(vendored).collect();
-    let types: Vec<Vec<Profiles>> =
+    let types: Vec<Vec<Built>> =
         SUITES.iter().map(built_from).collect::<Result<_, _>>()?;
     let all = units(&docs);
 
@@ -284,8 +314,9 @@ pub fn run() -> Result<Report, Error> {
             }
             pairs += 1;
             println!(
-                "profile {profile}: {}: kernels {kernels:?}",
-                suite.directory
+                "profile {profile}: {}: {}",
+                suite.directory,
+                describe(&types[s], &kernels)
             );
             work.extend(all.iter().filter(|u| u.suite == s).map(|u| (p, *u)));
         }
@@ -325,6 +356,8 @@ pub fn run() -> Result<Report, Error> {
         let next = AtomicUsize::new(0);
         let counts: Vec<AtomicUsize> =
             SUITES.iter().map(|_| AtomicUsize::new(0)).collect();
+        let skipped: Vec<AtomicUsize> =
+            SUITES.iter().map(|_| AtomicUsize::new(0)).collect();
         let nanos: Vec<AtomicU64> =
             SUITES.iter().map(|_| AtomicU64::new(0)).collect();
         let work = || {
@@ -339,7 +372,14 @@ pub fn run() -> Result<Report, Error> {
                 let count = answer_unit(suite, doc, unit).unwrap_or_else(|e| {
                     panic!("profile {profile}: {}: {e}", suite.directory)
                 });
-                counts[unit.suite].fetch_add(count, Ordering::Relaxed);
+                match count {
+                    Some(n) => {
+                        counts[unit.suite].fetch_add(n, Ordering::Relaxed);
+                    }
+                    None => {
+                        skipped[unit.suite].fetch_add(1, Ordering::Relaxed);
+                    }
+                }
                 nanos[unit.suite].fetch_add(
                     started.elapsed().as_nanos() as u64,
                     Ordering::Relaxed,
@@ -358,12 +398,18 @@ pub fn run() -> Result<Report, Error> {
         features::reset();
         for (s, suite) in SUITES.iter().enumerate() {
             let count = counts[s].load(Ordering::Relaxed);
-            if count == 0 {
+            let left = skipped[s].load(Ordering::Relaxed);
+            if count == 0 && left == 0 {
                 continue;
             }
             let took = Duration::from_nanos(nanos[s].load(Ordering::Relaxed));
+            let left = if left == 0 {
+                String::new()
+            } else {
+                format!(", {left} groups skipped")
+            };
             println!(
-                "profile {profile}: {}: {count} cases in {:.1} s",
+                "profile {profile}: {}: {count} cases in {:.1} s{left}",
                 suite.directory,
                 took.as_secs_f64()
             );
@@ -415,7 +461,7 @@ mod tests {
         for suite in SUITES {
             let types = built_from(suite)
                 .unwrap_or_else(|e| panic!("{}: {e}", suite.directory));
-            for profiles in types {
+            for (_, profiles) in types {
                 for p in profiles() {
                     // The walk is built from the same hand list of
                     // types, so a profile it does not reach is a type
@@ -443,11 +489,13 @@ mod tests {
 
     #[test]
     fn rows_are_the_first_profile_the_set_meets() {
-        let types: [Profiles; 2] = [isolated_or_nothing, nothing];
+        let types: [Built; 2] = [("a", isolated_or_nothing), ("b", nothing)];
         let isolated = Features::of(&[Feature::Isolated]);
         assert_eq!(rows(&types, isolated), [0, 0]);
         assert_eq!(rows(&types, Features::new()), [1, 0]);
         assert_eq!(rows(&[], isolated), Vec::<usize>::new());
+        assert_eq!(describe(&types, &[1, 0]), "a none, b none");
+        assert_eq!(describe(&[], &[]), "no kernel to choose");
     }
 
     #[test]

@@ -960,6 +960,40 @@ pub(crate) fn dispatches<K: Copy + PartialEq + core::fmt::Debug>(
     let needs: std::vec::Vec<Features> =
         kernels.iter().map(|(_, needs)| *needs).collect();
     assert_eq!(profiles, needs);
+    dispatches_to(kernels, built);
+}
+
+/// As [`dispatches`], for a type whose profiles are its rows joined
+/// with `other`, the rows of a second kernel chosen apart.
+#[cfg(test)]
+pub(crate) fn dispatches_combined<K: Copy + PartialEq + core::fmt::Debug>(
+    kernels: &[(K, Features)],
+    other: &[Features],
+    profiles: &[Features],
+    built: K,
+) {
+    assert!(rows_are_reachable(kernels), "{kernels:?}");
+    let last = kernels.last().map(|(_, needs)| *needs);
+    assert_eq!(last, Some(Features::new()), "the search must always end");
+    let mut joined = std::vec::Vec::new();
+    for (_, needs) in kernels {
+        for &o in other {
+            let u = needs.union(o);
+            if !joined.contains(&u) {
+                joined.push(u);
+            }
+        }
+    }
+    assert_eq!(profiles, joined);
+    dispatches_to(kernels, built);
+}
+
+/// A new value takes the first row the set in force meets.
+#[cfg(test)]
+fn dispatches_to<K: Copy + PartialEq + core::fmt::Debug>(
+    kernels: &[(K, Features)],
+    built: K,
+) {
     let in_force = get();
     let expected = kernels
         .iter()

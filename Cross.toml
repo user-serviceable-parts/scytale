@@ -16,4 +16,4 @@ dockerfile = "scripts/cross/riscv64gc-unknown-linux-gnu.Dockerfile"
 # sets QEMU_CPU so the emulated CPU has them, and says which it
 # expects in SCYTALE_CPU_FEATURES, which the inventory test holds
 # the probes to.
-env.passthrough = ["QEMU_CPU", "SCYTALE_CPU_FEATURES"]
+env.passthrough = ["QEMU_CPU", "SCYTALE_CPU_FEATURES", "SCYTALE_SHARD"]
