@@ -800,6 +800,9 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: stable
+          # This repository has no go.mod, so the action's module
+          # cache has nothing to key on and only warns.
+          cache: false
 
       - name: Test
         run: scripts/test-rustls-downstream
