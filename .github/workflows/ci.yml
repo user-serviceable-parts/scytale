@@ -61,14 +61,22 @@ jobs:
               echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
 
-      # The compiled dependencies, keyed on the lock file and the
-      # toolchain and kept between runs; the workspace crates are
-      # rebuilt every time, since they change. Jobs that build the
-      # same thing share one cache through `shared-key`, and one of
-      # them saves it, so sixteen shards do not upload sixteen copies.
-      - uses: Swatinem/rust-cache@v2
+      # The compiled dependencies, keyed on the lock file and kept
+      # between runs; the workspace crates are rebuilt every time,
+      # since they change. Jobs that build the same thing share one
+      # key, and one of them saves it at the end of the job, so
+      # sixteen shards do not upload sixteen copies. Only actions
+      # GitHub owns are allowed here, which rules out rust-cache.
+      - uses: actions/cache/restore@v4
+        id: cache
         with:
-          shared-key: native-${{ matrix.arch }}
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: >-
+            native-${{ matrix.arch }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Report toolchain and processor
         run: |
@@ -125,6 +133,17 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+      - uses: actions/cache/save@v4
+        # Saved once per key, by one job of those that share it.
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
   # The check against the vendored vectors on the native runners:
   # every suite in full under every kernel the processor can run,
   # each once; see scytale-acvp/README.md. The work is spread over
@@ -163,15 +182,32 @@ jobs:
               echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache/restore@v4
+        id: cache
         with:
-          shared-key: vendored-${{ matrix.arch }}
-          save-if: ${{ startsWith(matrix.shard, '1/') }}
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: >-
+            vendored-${{ matrix.arch }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Test
         run: cargo test --release -p scytale-acvp
         env:
           SCYTALE_SHARD: ${{ matrix.shard }}
+
+      - uses: actions/cache/save@v4
+        # Saved once per key, by one job of those that share it.
+        if: ${{ startsWith(matrix.shard, '1/') && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
   # The same check for RISC-V, which has no native runner: under
   # QEMU's `max` processor, which has every extension the library
@@ -221,11 +257,16 @@ jobs:
                     --target riscv64gc-unknown-linux-gnu
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      # zstd above is for the cache's archives.
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache/restore@v4
+        id: cache
         with:
-          shared-key: vendored-riscv64
-          save-if: ${{ startsWith(matrix.shard, '1/') }}
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: >-
+            vendored-riscv64-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Test as max, shard ${{ matrix.shard }}
         # Without the session, which would want the target's TLS
@@ -239,6 +280,17 @@ jobs:
           CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER:
             qemu-riscv64 -cpu max -L /usr/riscv64-linux-gnu
           SCYTALE_SHARD: ${{ matrix.shard }}
+
+      - uses: actions/cache/save@v4
+        # Saved once per key, by one job of those that share it.
+        if: ${{ startsWith(matrix.shard, '1/') && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
   # Every runner here and every machine anyone develops on is a recent
   # processor, so which loop a lesser one is given is decided by code
@@ -373,13 +425,17 @@ jobs:
           echo "TARGET=$target" >> "$GITHUB_ENV"
 
       # The rows of an architecture build the same thing and differ
-      # only in the processor they run on, so they share, and the
-      # one that also runs clippy saves.
-      - uses: Swatinem/rust-cache@v2
+      # only in the processor they run on, so they share one key.
+      - uses: actions/cache/restore@v4
+        id: cache
         with:
-          shared-key: emulated-${{ matrix.arch }}
-          save-if: >-
-            ${{ matrix.cpu == 'max' || matrix.cpu == 'neoverse-v1' }}
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: >-
+            emulated-${{ matrix.arch }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Test as ${{ matrix.cpu }}
         # Cargo reads the linker and the runner from variables named
@@ -417,6 +473,17 @@ jobs:
               --all-targets --release --target "$TARGET" \
               -- -D warnings
 
+      - uses: actions/cache/save@v4
+        # Saved once per key, by one job of those that share it.
+        if: ${{ (matrix.cpu == 'max' || matrix.cpu == 'neoverse-v1') && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
   # Targets the jobs above do not build. wasm32 is an architecture
   # with no loops written out for it, which is a different shape of
   # build: the engine enums have only their one generic variant, the
@@ -446,14 +513,32 @@ jobs:
           rustup default stable
           rustup target add ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache/restore@v4
+        id: cache
         with:
-          shared-key: build-${{ matrix.target }}
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: >-
+            build-${{ matrix.target }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build
         run: cargo build -p scytale --target ${{ matrix.target }}
         env:
           RUSTFLAGS: -D warnings
+
+      - uses: actions/cache/save@v4
+        # Saved once per key, by one job of those that share it.
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
   # Thirty-two bits. Every target tested above has a sixty-four bit
   # `usize`, and a length or a counter held in one behaves differently
@@ -497,11 +582,16 @@ jobs:
           rustup component add clippy
           rustup target add ${{ matrix.target }}
 
-      # The first shard of a target saves; the whole run has none.
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache/restore@v4
+        id: cache
         with:
-          shared-key: narrow-${{ matrix.target }}
-          save-if: ${{ !matrix.shard || startsWith(matrix.shard, '1/') }}
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: >-
+            narrow-${{ matrix.target }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install Wasmtime
         if: matrix.target == 'wasm32-wasip1'
@@ -561,6 +651,17 @@ jobs:
           CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
           CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS:
             -C linker-flavor=ld.lld
+
+      - uses: actions/cache/save@v4
+        # Saved once per key, by one job of those that share it.
+        if: ${{ (!matrix.shard || startsWith(matrix.shard, '1/')) && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
   # Architecture-independent checks, so once is enough.
   style:
