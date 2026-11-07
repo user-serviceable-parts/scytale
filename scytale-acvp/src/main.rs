@@ -6,7 +6,7 @@ mod cli {
     use clap::{Parser, Subcommand};
     use scytale_acvp::profile::{Seed, walk};
     use scytale_acvp::replay::replay;
-    use scytale_acvp::suite::{self, Suite, registrations};
+    use scytale_acvp::suite::{self, registrations};
     use scytale_acvp::support::Error;
     use scytale_acvp::totp;
     use std::path::PathBuf;
@@ -134,7 +134,7 @@ mod cli {
                 random_seed,
                 credentials,
             } => {
-                let suites = chosen(&algorithms)?;
+                let suites = suite::chosen(&algorithms)?;
                 let registrations = registrations(&suites)?;
                 let http = scytale_acvp::http::Http::try_new(
                     &credentials.cert,
@@ -177,7 +177,7 @@ mod cli {
                     profiles: profiles(every_kernel),
                     save: Some(dir.clone()),
                     sample: false,
-                    suites: chosen(&algorithms)?,
+                    suites: suite::chosen(&algorithms)?,
                 };
                 let verdict = run.resume(&dir)?;
                 Ok(report(&verdict))
@@ -209,7 +209,7 @@ mod cli {
                 Ok(if problems.is_empty() { 0 } else { 1 })
             }
             Command::Registration { algorithms } => {
-                let suites = chosen(&algorithms)?;
+                let suites = suite::chosen(&algorithms)?;
                 let registrations = registrations(&suites)?;
                 println!("{}", serde_json::to_string_pretty(&registrations)?);
                 Ok(0)
@@ -230,26 +230,6 @@ mod cli {
             println!("{why}");
         }
         if verdict.failed.is_empty() { 0 } else { 1 }
-    }
-
-    /// The suites named, or every suite.
-    fn chosen(names: &[String]) -> Result<Vec<&'static Suite>, Error> {
-        if names.is_empty() {
-            return Ok(suite::SUITES.iter().collect());
-        }
-        let mut out = Vec::new();
-        for name in names {
-            let found = suite::find(name);
-            if found.is_empty() {
-                return Err(Error::new(format!("no suite named {name}")));
-            }
-            for s in found {
-                if !out.iter().any(|o: &&Suite| std::ptr::eq(*o, s)) {
-                    out.push(s);
-                }
-            }
-        }
-        Ok(out)
     }
 
     fn seed(random: bool) -> Result<Seed, Error> {

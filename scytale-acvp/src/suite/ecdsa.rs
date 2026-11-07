@@ -406,16 +406,9 @@ fn verify_as<C: Curve, H: SigHash>(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{check, find, fixed_rng};
+    use super::super::{find, fixed_rng};
     use super::*;
     use crate::support::list;
-
-    #[test]
-    fn vendored() {
-        for suite in find("ECDSA").into_iter().chain(find("DetECDSA")) {
-            check(suite);
-        }
-    }
 
     /// RFC 6979 fixes the nonce, so the deterministic suite's answers
     /// must be the file's to the byte, which the verifying check

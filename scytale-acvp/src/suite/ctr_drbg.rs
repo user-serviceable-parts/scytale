@@ -96,13 +96,3 @@ fn aft(t: &Value, bits: usize, derivation: bool) -> Result<Value, Error> {
     // The bits answered are those of the last request.
     Ok(json!({ "returnedBits": hex_value(&out) }))
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("ctrDRBG") {
-            super::super::check(suite);
-        }
-    }
-}

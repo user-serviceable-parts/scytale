@@ -38,6 +38,22 @@ use zeroize::Zeroize;
 
 use crate::Error;
 use crate::Random;
+
+/// The feature profiles an RSA key tells apart, best first; see
+/// [`crate::features::Dispatcher`]: on x86-64 the carry-chain
+/// multiply or the portable one, elsewhere no choice.
+pub(crate) fn profiles() -> &'static [crate::features::Features] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        &crate::math::limbs::x86_64::PROFILES
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        const NONE: [crate::features::Features; 1] =
+            [crate::features::Features::new()];
+        &NONE
+    }
+}
 use crate::codec::pem;
 use crate::der::{self, Algorithm, Reader, Writer};
 use crate::hash::Hash;

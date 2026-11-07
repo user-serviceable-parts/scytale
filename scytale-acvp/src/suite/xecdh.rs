@@ -78,13 +78,6 @@ mod tests {
     use super::*;
     use crate::support::list;
 
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("XECDH") {
-            super::super::check(suite);
-        }
-    }
-
     /// The server's prompt gives no private key, so the driver draws
     /// one; the secret it answers must be the one the server reaches.
     #[test]

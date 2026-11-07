@@ -163,13 +163,3 @@ fn decapsulation<S: Set>(t: &Value, seeded: bool) -> Result<Value, Error> {
     };
     Ok(json!({ "k": hex_value(&k) }))
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("ML-KEM") {
-            super::super::check(suite);
-        }
-    }
-}

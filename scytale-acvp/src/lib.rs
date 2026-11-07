@@ -24,5 +24,6 @@ pub mod replay;
 pub mod suite;
 pub mod support;
 pub mod totp;
+pub mod vendored;
 
 pub use support::Error;

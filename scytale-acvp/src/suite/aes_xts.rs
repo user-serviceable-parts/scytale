@@ -134,13 +134,6 @@ mod tests {
         assert_eq!(back, [0b0001_0010, 0b0111_1100, 0]);
     }
 
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("ACVP-AES-XTS") {
-            super::super::check(suite);
-        }
-    }
-
     /// As the server prompts the sequence-number groups: without the
     /// tweak value, which the sequence number must reproduce.
     #[test]

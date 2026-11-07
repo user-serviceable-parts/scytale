@@ -96,7 +96,7 @@ pub(crate) use self::x86_64 as native;
 use core::fmt;
 use core::marker::PhantomData;
 
-use super::ghash::{BLOCK, Ghash};
+use super::ghash::{self, BLOCK, Ghash};
 use crate::aead::Aead;
 use crate::cipher::mode::{ByteOrder, counter_blocks, xor};
 use crate::cipher::{BlockCipher, OneBlock};
@@ -200,6 +200,18 @@ pub(crate) const KERNELS: &[(Kernel, Features)] = &[
 /// What the list publishes: the needs, without the names.
 const PROFILES: [Features; KERNELS.len()] = features::profiles_of(KERNELS);
 
+/// What the mode publishes: its rows joined with GHASH's, since the
+/// multiply is chosen apart from the cipher loop; see
+/// [`features::combined`].
+const COMBINED: [Features;
+    features::combined_len(&PROFILES, &ghash::PROFILES)] =
+    features::combined(&PROFILES, &ghash::PROFILES);
+
+/// The same over the portable cipher loop alone, for a cipher whose
+/// schedule the AES instructions cannot read.
+const COMBINED_PORTABLE: [Features; ghash::PROFILES.len()] =
+    features::combined(&[Features::new()], &ghash::PROFILES);
+
 /// Whether the kernels written for the AES instructions can read
 /// `C`'s key schedule. Nothing can on an architecture without them,
 /// and the list then has the portable row alone anyway, so `C` goes
@@ -238,10 +250,14 @@ pub(crate) fn kernels<C: BlockCipher<Block = [u8; BLOCK]>>()
     kernel::rows_for(KERNELS, readable::<C>())
 }
 
-/// Their profiles, cut the same way.
+/// Their profiles, cut the same way, each joined with GHASH's.
 pub(crate) fn profiles<C: BlockCipher<Block = [u8; BLOCK]>>()
 -> &'static [Features] {
-    kernel::rows_for(&PROFILES, readable::<C>())
+    if readable::<C>() {
+        &COMBINED
+    } else {
+        &COMBINED_PORTABLE
+    }
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {

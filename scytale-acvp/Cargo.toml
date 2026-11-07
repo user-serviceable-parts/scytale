@@ -15,6 +15,14 @@ name = "scytale-acvp"
 path = "src/main.rs"
 doc = false
 
+# The check against the vendored vectors, which `cargo test` runs. A
+# binary of its own, without the harness: it edits the process-wide
+# set of features, so nothing may run beside it, and its report is
+# for reading.
+[[test]]
+name = "vendored"
+harness = false
+
 [features]
 default = ["session"]
 # The session against a server, which links the system TLS library;

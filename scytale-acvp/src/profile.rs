@@ -16,18 +16,22 @@
 use crate::suite::Suite;
 use crate::support::{Error, FixedEntropy};
 use scytale::Random;
-use scytale::aead::{Ccm, Gcm, GcmSiv};
+use scytale::aead::{Ccm, ChaCha20Poly1305, Gcm, GcmSiv, Xpn};
 use scytale::cipher::aes::{Aes128, Aes192, Aes256};
 use scytale::cipher::chacha20::ChaCha20;
 use scytale::cipher::mode::{Cbc, Ctr, Xts};
 use scytale::features::{self, Dispatcher, Feature, Features};
+use scytale::hash::sha1::Sha1;
 use scytale::hash::sha2::{
     Sha224, Sha256, Sha384, Sha512, Sha512_224, Sha512_256,
 };
 use scytale::hash::sha3::{
     Sha3_224, Sha3_256, Sha3_384, Sha3_512, Shake128, Shake256,
 };
+use scytale::kex::ecdh;
+use scytale::mac::poly1305::Poly1305;
 use scytale::random::{CtrDrbg, MIN_SEED};
+use scytale::sig::{self, ecdsa};
 use serde_json::Value;
 
 /// The seed every profile's generator starts from, so the answers
@@ -58,7 +62,7 @@ impl Seed {
 /// The profiles every dispatching type tells apart, in walking order:
 /// the set in force, the same isolated, each type's rows best first,
 /// and the empty set.
-fn candidates() -> Vec<Features> {
+pub(crate) fn candidates() -> Vec<Features> {
     let mut out = Vec::new();
     let mut push = |f: Features| {
         if !out.contains(&f) {
@@ -78,6 +82,8 @@ fn candidates() -> Vec<Features> {
         <Gcm<Aes128> as Dispatcher>::profiles(),
         GcmSiv::<Aes128>::profiles(),
         <Ccm<Aes128> as Dispatcher>::profiles(),
+        <Xpn<Aes128> as Dispatcher>::profiles(),
+        Sha1::profiles(),
         Sha224::profiles(),
         Sha256::profiles(),
         Sha384::profiles(),
@@ -91,6 +97,13 @@ fn candidates() -> Vec<Features> {
         Shake128::profiles(),
         Shake256::profiles(),
         ChaCha20::profiles(),
+        Poly1305::profiles(),
+        ChaCha20Poly1305::profiles(),
+        <ecdh::p256::PrivateKey as Dispatcher>::profiles(),
+        <ecdh::p384::PrivateKey as Dispatcher>::profiles(),
+        <ecdh::p521::PrivateKey as Dispatcher>::profiles(),
+        <ecdsa::p256::PrivateKey as Dispatcher>::profiles(),
+        <sig::rsa::PrivateKey as Dispatcher>::profiles(),
     ];
     for list in lists {
         for &profile in *list {
@@ -199,85 +212,7 @@ fn differing_field(a: &Value, b: &Value, except: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::suite::{SUITES, vendored};
     use serde_json::json;
-
-    /// The tests that edit the process-wide set of features in
-    /// force. Another test building a cipher while the set changes
-    /// under it can see its mode and cipher disagree, so these are
-    /// ignored by default and run alone, single-threaded; see
-    /// `cargo test-every-profile`.
-    mod alone {
-        use super::*;
-
-        /// Every symmetric suite answered under every profile this
-        /// processor can run but the detected one, each answer compared
-        /// with the file: the check that each kernel is right. The
-        /// detected profile is what the ordinary run of every suite
-        /// answered under, so it is not run again here. Process-wide, so
-        /// it runs alone (`cargo test-alone`), and ignored by default for
-        /// its length. The large-data groups are left out: each hashes
-        /// gigabytes, which checks length handling the one-shot groups
-        /// already cover, not the kernel.
-        #[test]
-        #[ignore]
-        fn every_profile() {
-            let (profiles, refused) = walk();
-            for p in refused {
-                eprintln!("profile {p}: not on this processor, skipped");
-            }
-            assert_eq!(profiles.first(), Some(&features::detected()));
-            let profiles = &profiles[1..];
-            let symmetric = |s: &&Suite| {
-                let a = s.algorithm;
-                a.starts_with("ACVP-AES")
-                    || a.starts_with("SHA")
-                    || a.starts_with("cSHAKE")
-                    || a.starts_with("KMAC")
-                    || a.starts_with("TupleHash")
-                    || a.starts_with("HMAC")
-                    || a.starts_with("CMAC")
-                    || a.ends_with("DRBG")
-                    || a == "PBKDF"
-                    || a == "KDF"
-            };
-            let mut suites = 0;
-            for suite in SUITES.iter().filter(symmetric) {
-                let Some(mut doc) = vendored(suite) else {
-                    continue;
-                };
-                if let Some(groups) = doc["testGroups"].as_array_mut() {
-                    groups.retain(|g| g["testType"] != "LDT");
-                }
-                let answered =
-                    answer_under(suite, &doc, &Seed::fixed(), profiles)
-                        .unwrap_or_else(|e| panic!("{}: {e}", suite.directory));
-                crate::suite::compare(suite, &doc, &answered)
-                    .unwrap_or_else(|e| panic!("{}: {e}", suite.directory));
-                suites += 1;
-            }
-            assert!(suites == 0 || suites >= 50, "only {suites} suites");
-        }
-
-        #[test]
-        #[ignore]
-        fn walk_starts_detected_and_ends_portable() {
-            let (runnable, _) = walk();
-            let detected = features::detected();
-            let portable = Features::new();
-            assert_eq!(runnable.first(), Some(&detected));
-            // The empty set closes the walk, unless it opened it: a
-            // processor with nothing written for it walks the empty set
-            // and then the same isolated.
-            let last = if detected == portable {
-                portable.with(Feature::Isolated)
-            } else {
-                portable
-            };
-            assert_eq!(runnable.last(), Some(&last));
-            assert_eq!(features::get(), detected);
-        }
-    }
 
     #[test]
     fn differ_names_the_case_and_field() {

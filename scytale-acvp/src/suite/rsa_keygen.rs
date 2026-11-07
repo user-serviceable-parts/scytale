@@ -155,14 +155,7 @@ fn working_key(test: &Value, bits: usize) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::suite::{SUITES, check, compare, fixed_rng};
-
-    #[test]
-    fn vendored() {
-        for suite in SUITES.iter().filter(|s| s.mode == Some("keyGen")) {
-            check(suite);
-        }
-    }
+    use crate::suite::{SUITES, compare, fixed_rng};
 
     /// A group of the shape the server sends, answered and verified:
     /// the check the sample file cannot make.

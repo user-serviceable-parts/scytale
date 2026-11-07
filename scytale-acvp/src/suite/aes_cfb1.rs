@@ -142,13 +142,3 @@ fn pack(bits: &[u8]) -> Vec<u8> {
         })
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("ACVP-AES-CFB1") {
-            super::super::check(suite);
-        }
-    }
-}

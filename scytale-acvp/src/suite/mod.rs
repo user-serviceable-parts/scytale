@@ -161,9 +161,12 @@ pub fn answer_tests(
     Ok(Some(json!({ "tests": tests })))
 }
 
-/// Leaves `group` unanswered, saying why on stderr.
-pub fn skip(group: &Value, why: &str) -> Result<Option<Value>, Error> {
-    eprintln!("tgId {}: skipped, {why}", group["tgId"]);
+/// Leaves `group` unanswered: the file asks for something the
+/// library does not offer, which `why` names for the reader of the
+/// driver. Quietly, since the vendored check meets each such group
+/// once per profile and counts them instead; the server marks them
+/// failed, which is what a registration that asks for them earns.
+pub fn skip(_group: &Value, _why: &str) -> Result<Option<Value>, Error> {
     Ok(None)
 }
 
@@ -673,6 +676,29 @@ pub fn find(name: &str) -> Vec<&'static Suite> {
         .collect()
 }
 
+/// The suites `names` pick out, each name resolved by [`find`], or
+/// every suite if there are none. A name nothing matches is an error:
+/// a list that meant to cover a suite and missed it must say so,
+/// not run less. A suite named twice runs once.
+pub fn chosen(names: &[String]) -> Result<Vec<&'static Suite>, Error> {
+    if names.is_empty() {
+        return Ok(SUITES.iter().collect());
+    }
+    let mut out = Vec::new();
+    for name in names {
+        let found = find(name);
+        if found.is_empty() {
+            return Err(Error::new(format!("no suite named {name}")));
+        }
+        for s in found {
+            if !out.iter().any(|o: &&Suite| std::ptr::eq(*o, s)) {
+                out.push(s);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The vendored file of `suite`, or `None` if the vectors are not in
 /// this copy.
 pub fn vendored(suite: &Suite) -> Option<Value> {
@@ -692,73 +718,6 @@ pub fn vendored(suite: &Suite) -> Option<Value> {
 /// of the calls, so two runs of one suite answer alike.
 pub fn fixed_rng() -> CtrDrbg<FixedEntropy> {
     CtrDrbg::try_new(FixedEntropy::default()).expect("fixed entropy")
-}
-
-/// The quick check of `suite`: the vendored file less its slow
-/// groups, answered with a fixed generator and compared with the
-/// file. The Monte Carlo groups chain a thousand calls per case, the
-/// large-data groups hash gigabytes, and SLH-DSA signs for a minute,
-/// so those wait for [`check_all`], which `cargo test-extended` runs.
-/// Returns the cases compared.
-///
-/// # Panics
-///
-/// On any difference, naming the group and case, or if nothing was
-/// compared in a suite whose minimum says something should be.
-pub fn check(suite: &Suite) -> usize {
-    let Some(mut doc) = vendored(suite) else {
-        return 0;
-    };
-    if let Some(groups) = doc["testGroups"].as_array_mut() {
-        groups.retain(|g| {
-            !matches!(g["testType"].as_str(), Some("MCT") | Some("LDT"))
-        });
-        if suite.algorithm == "SLH-DSA" && suite.mode == Some("sigGen") {
-            for group in groups {
-                if let Some(tests) = group["tests"].as_array_mut() {
-                    tests.truncate(1);
-                }
-            }
-        }
-    }
-    let count = compared(suite, &doc);
-    assert!(
-        count > 0 || suite.minimum == 0,
-        "{}: nothing compared",
-        suite.directory
-    );
-    count
-}
-
-/// The whole vendored file of `suite` answered and compared, every
-/// field against the field of that name, or through `suite.verify`
-/// where the file's answers came from NIST's randomness. Returns the
-/// cases compared.
-///
-/// # Panics
-///
-/// On any difference, naming the group and case, or if fewer cases
-/// than the suite's minimum were compared.
-pub fn check_all(suite: &Suite) -> usize {
-    let Some(doc) = vendored(suite) else {
-        return 0;
-    };
-    let count = compared(suite, &doc);
-    assert!(
-        count >= suite.minimum,
-        "{}: only {count} cases, expected at least {}",
-        suite.directory,
-        suite.minimum
-    );
-    count
-}
-
-fn compared(suite: &Suite, doc: &Value) -> usize {
-    let mut rng = fixed_rng();
-    let answered = (suite.answer)(doc, &mut rng)
-        .unwrap_or_else(|e| panic!("{}: {e}", suite.directory));
-    compare(suite, doc, &answered)
-        .unwrap_or_else(|e| panic!("{}: {e}", suite.directory))
 }
 
 /// Compares `answered` with `expected`, the vendored file or the
@@ -840,61 +799,6 @@ fn same(a: &Value, b: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Every suite in full: the Monte Carlo and large-data groups
-    /// and all of SLH-DSA. Slow; `cargo test-extended` runs it, and
-    /// prints the count the README quotes.
-    ///
-    /// The suites run on as many threads as the processor has, as
-    /// the harness would run them were they tests of their own, so
-    /// that the long ones overlap: the gigabytes of hashing and the
-    /// SLH-DSA signatures are an hour serially. A worker takes the
-    /// next suite rather than a share, since the lengths vary a
-    /// hundredfold, and the files are read one per worker at a time.
-    #[test]
-    #[ignore]
-    fn extended() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let next = AtomicUsize::new(0);
-        let counts: Vec<AtomicUsize> =
-            SUITES.iter().map(|_| AtomicUsize::new(0)).collect();
-        let work = || {
-            loop {
-                let i = next.fetch_add(1, Ordering::Relaxed);
-                let Some(suite) = SUITES.get(i) else {
-                    break;
-                };
-                let started = std::time::Instant::now();
-                let count = check_all(suite);
-                eprintln!(
-                    "{}: {count} cases in {:.1} s",
-                    suite.directory,
-                    started.elapsed().as_secs_f64()
-                );
-                counts[i].store(count, Ordering::Relaxed);
-            }
-        };
-        // WebAssembly has no threads: spawning one aborts the run.
-        let workers = if cfg!(target_family = "wasm") {
-            1
-        } else {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
-        };
-        if workers == 1 {
-            work();
-        } else {
-            std::thread::scope(|scope| {
-                for _ in 0..workers {
-                    scope.spawn(work);
-                }
-            });
-        }
-        let total: usize =
-            counts.iter().map(|c| c.load(Ordering::Relaxed)).sum();
-        eprintln!("total: {total} cases in {} suites", SUITES.len());
-    }
 
     #[test]
     fn registry_names_every_vendored_directory() {

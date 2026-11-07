@@ -70,13 +70,3 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
     }
     Ok(json!({ "testPassed": passed }))
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("CMAC-AES") {
-            super::super::check(suite);
-        }
-    }
-}

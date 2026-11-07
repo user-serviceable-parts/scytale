@@ -142,13 +142,3 @@ fn step_decrypt<C: BlockCipher<Block = [u8; 16]>>(
     }
     Ok((output, previous))
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("ACVP-AES-CBC") {
-            super::super::check(suite);
-        }
-    }
-}

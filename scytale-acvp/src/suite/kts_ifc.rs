@@ -318,7 +318,7 @@ pub fn verify(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{SUITES, check, find, fixed_rng};
+    use super::super::{find, fixed_rng};
     use super::*;
     use crate::support::list;
 
@@ -383,12 +383,5 @@ mod tests {
         doc["testGroups"][0]["kasMode"] = json!("kdfKc");
         let why = skip_reason(&doc["testGroups"][0]).unwrap().unwrap();
         assert!(why.starts_with("kdfKc"));
-    }
-
-    #[test]
-    fn vendored() {
-        for suite in SUITES.iter().filter(|s| s.algorithm == "KTS-IFC") {
-            check(suite);
-        }
     }
 }

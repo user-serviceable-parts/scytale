@@ -458,6 +458,36 @@ pub(crate) struct Engine<'a, const L: usize> {
     one: Uint<L>,
 }
 
+/// The feature profiles a key over a curve of `L` limbs tells apart,
+/// best first; see [`crate::features::Dispatcher`]. P-256 has the
+/// carry-chain field arithmetic and the vector table read, chosen
+/// apart, so its rows are the two lists joined; P-384 has the
+/// arithmetic alone; P-521 has nothing written for it. Elsewhere
+/// than x86-64 the curve code has no choice to make.
+pub(crate) fn profiles<const L: usize>() -> &'static [crate::features::Features]
+{
+    use crate::features::Features;
+    #[cfg(target_arch = "x86_64")]
+    {
+        use crate::features;
+        use crate::math::limbs::x86_64::PROFILES as ADX;
+        const P256: [Features;
+            features::combined_len(&ADX, &x86_64::PROFILES)] =
+            features::combined(&ADX, &x86_64::PROFILES);
+        const NONE: [Features; 1] = [Features::new()];
+        match L {
+            4 => &P256,
+            6 => &ADX,
+            _ => &NONE,
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        const NONE: [Features; 1] = [Features::new()];
+        &NONE
+    }
+}
+
 impl<'a, const L: usize> Engine<'a, L> {
     pub(crate) fn new(curve: &'a Curve<L>) -> Self {
         let field = &curve.field;

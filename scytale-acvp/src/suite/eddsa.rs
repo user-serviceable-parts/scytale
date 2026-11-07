@@ -181,13 +181,6 @@ mod tests {
     use super::super::fixed_rng;
     use super::*;
 
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("EDDSA") {
-            super::super::check(suite);
-        }
-    }
-
     /// The server's prompt gives no secret, so the driver draws one;
     /// what it answers must hang together.
     #[test]

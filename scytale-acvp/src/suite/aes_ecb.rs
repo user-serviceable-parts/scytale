@@ -89,13 +89,3 @@ fn mct(t: &Value, encrypt: bool) -> Result<Value, Error> {
     }
     Ok(json!({ "resultsArray": steps }))
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for suite in super::super::find("ACVP-AES-ECB") {
-            super::super::check(suite);
-        }
-    }
-}

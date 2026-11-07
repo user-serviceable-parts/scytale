@@ -193,15 +193,3 @@ fn x963_case<H: Hash + Default>(
     x963::derive::<H>(&hex(t, "z")?, &shared, out)?;
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vendored() {
-        for name in ["OneStep", "OneStepNoCounter", "ansix9.63"] {
-            for suite in super::super::find(name) {
-                super::super::check(suite);
-            }
-        }
-    }
-}

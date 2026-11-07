@@ -98,7 +98,7 @@ library's most demanding tests.
 
 ```sh
 scripts/ci-check                 # the style job, as CI runs it
-cargo test-extended              # every test, ignored ones included
+cargo test --release --workspace # every crate's tests
 scripts/test-all-arches          # the foreign architectures under cross
 scripts/test-ring-downstream     # rustls and webpki on scytale-ring
 scripts/test-rustls-downstream   # rustls's tests and BoGo on the provider
@@ -107,7 +107,7 @@ scripts/test-openssl-interop     # every provider suite against OpenSSL
 
 The last needs Go, a C compiler and `cpp` for BoGo.
 
-and the CI jobs that `test-extended` does not cover on the host:
+and the CI steps that `cargo test` does not cover on the host:
 
 ```sh
 SCYTALE_FEATURES=none cargo test -p scytale --lib

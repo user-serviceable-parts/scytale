@@ -65,6 +65,7 @@ use super::gcm::{Gcm, SHORT_NONCE, TAG};
 use super::ghash::BLOCK;
 use crate::Error;
 use crate::cipher::BlockCipher;
+use crate::features::{self, Dispatcher, Features};
 
 /// The length of both the salt and the frame identifier.
 const HALF: usize = SHORT_NONCE;
@@ -82,10 +83,25 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Xpn<C> {
     }
 }
 
+impl<C: BlockCipher<Block = [u8; BLOCK]>> features::sealed::Sealed for Xpn<C> {}
+
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Dispatcher for Xpn<C> {
+    fn profiles() -> &'static [Features] {
+        Xpn::<C>::profiles()
+    }
+}
+
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Xpn<C> {
     /// Takes the key the cipher runs under.
     pub fn new(key: &C::Key) -> Self {
         Xpn { gcm: Gcm::new(key) }
+    }
+
+    /// The feature profiles this mode tells apart, best first: GCM's,
+    /// since there is nothing of XPN's own to choose; see
+    /// [`Dispatcher`].
+    pub fn profiles() -> &'static [Features] {
+        Gcm::<C>::profiles()
     }
 
     /// The same over the kernel named, or `None` where this processor
