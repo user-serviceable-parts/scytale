@@ -237,9 +237,10 @@ too.
 | SHAKE128, SHAKE256 | any length | extendable output |
 | cSHAKE128, cSHAKE256 (SP 800-185) | any length | SHAKE with a function name and customization |
 | TupleHash128, TupleHash256 (SP 800-185) | any length | a sequence of strings, each boundary counted; TupleHashXOF; whole bytes |
+| BLAKE2b-256, BLAKE2b-512 (RFC 7693) | 32, 64 bytes | no length extension; fastest in portable code |
 | SHA-1 (FIPS 180-4) | 20 bytes | broken for collisions; for HMAC, HKDF and OAEP in old protocols only |
 
-All of them but TupleHash take bit strings as well as bytes, as
+All of them but TupleHash and BLAKE2b take bit strings as well as bytes, as
 the standards define them. ParallelHash (SP 800-185) is left out:
 the standard and NIST's validation vectors disagree on how a
 message's trailing bits are blocked, and the question is open with
@@ -258,8 +259,9 @@ NIST.
 
 | Construction | Notes |
 | --- | --- |
+| Argon2id (RFC 9106) | from a password, at a cost in memory; the caller supplies the memory |
 | HKDF (RFC 5869) | over any hash; from a secret that is already random |
-| PBKDF2 (SP 800-132) | over any hash; from a password |
+| PBKDF2 (SP 800-132) | over any hash; from a password where a standard names it |
 | TLS 1.2 PRF (RFC 5246) | over any hash; for implementations of that protocol |
 | SP 800-108 counter, feedback and double-pipeline modes | over any MAC; the counter any width the standard allows, anywhere it allows |
 | KDF-KMAC (SP 800-108r1) | KMAC128 and KMAC256 |
@@ -596,7 +598,7 @@ to be tested in its own right.
 
 The standards' own vectors are built into the unit tests, so
 `cargo test` on the published crate checks every primitive against
-them. The Project Wycheproof and CFRG HPKE vectors are not shipped,
+them. The Project Wycheproof, CFRG HPKE and BLAKE2 reference vectors are not shipped,
 to keep the crate small; the suites that read them run from a
 checkout of the [repository][repo], whose README says how, and in
 its continuous integration on every push, natively on x86-64, arm64

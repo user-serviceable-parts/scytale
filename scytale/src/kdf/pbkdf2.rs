@@ -10,8 +10,8 @@
 //!
 //! PBKDF2 is what the standards name, and it is not the best
 //! password hash: it needs no memory, so purpose-built hardware runs
-//! it far faster than yours. Where the choice is yours, prefer a
-//! memory-hard function.
+//! it far faster than yours. Where the choice is yours, prefer the
+//! memory-hard [`argon2`](super::argon2).
 //!
 //! ```
 //! use scytale::hash::sha2::Sha256;

@@ -127,11 +127,12 @@ type Ttable<const K: usize> = aes::portable::ttable::Aes<K>;
 use crate::BlockType;
 use crate::Error;
 use crate::Random;
+use crate::hash::blake2::{Blake2b256, Blake2b512};
 use crate::hash::sha1::Sha1;
 use crate::hash::sha3::TupleHash128;
 use crate::hash::{Hash, Xof, XofReader};
 use crate::hash::{sha2, sha3};
-use crate::kdf::{hkdf, one_step, pbkdf2, sp800_108, tls12, x963};
+use crate::kdf::{argon2, hkdf, one_step, pbkdf2, sp800_108, tls12, x963};
 use crate::kex::{ecdh, x25519};
 use crate::mac::Mac;
 use crate::mac::cmac::Cmac;
@@ -551,6 +552,7 @@ fn report(run: &mut Run) -> bool {
             sha3::portable::Shake256::try_new,
         ),
     );
+    ran |= blake2_section(run);
     ran |= single_section(run);
 
     ran |= kdf_ops(run);
@@ -577,6 +579,8 @@ fn every_row_name() -> impl Iterator<Item = &'static str> {
     ALGORITHMS
         .iter()
         .chain(HASHES.iter())
+        .chain(SHA3.iter())
+        .chain(BLAKE2.iter())
         .chain(CHACHA.iter())
         .chain(DISPATCHING.iter())
         .chain(KDF_JOBS.iter())
@@ -824,6 +828,45 @@ fn chacha_section<C: StreamCipher>(
 }
 
 const SHA3: [&str; 4] = ["sha3-256", "sha3-512", "shake128", "shake256"];
+
+/// The BLAKE2b rows: one implementation, written out over `u64`.
+const BLAKE2: [&str; 2] = ["blake2b-256", "blake2b-512"];
+
+/// Measures BLAKE2b, returning whether it ran anything.
+fn blake2_section(run: &mut Run) -> bool {
+    let wanted: Vec<&'static str> = BLAKE2
+        .iter()
+        .copied()
+        .filter(|name| run.options.wants("portable", name))
+        .collect();
+    if wanted.is_empty() {
+        return false;
+    }
+    let mut b256 = Blake2b256::new();
+    let mut b512 = Blake2b512::new();
+    let mut tasks: Vec<Task<'_>> = vec![
+        (
+            "blake2b-256",
+            Box::new(|d: &mut [u8]| {
+                b256.reset();
+                b256.update(d);
+                black_box(b256.finalize());
+            }) as Operation<'_>,
+        ),
+        (
+            "blake2b-512",
+            Box::new(|d: &mut [u8]| {
+                b512.reset();
+                b512.update(d);
+                black_box(b512.finalize());
+            }),
+        ),
+    ];
+    tasks.retain(|(name, _)| wanted.contains(name));
+
+    throughput_table(run, "portable", &mut tasks);
+    true
+}
 
 /// Measures one implementation of SHA-3, returning whether it ran
 /// anything; an implementation the processor cannot run is left out.
@@ -1181,7 +1224,8 @@ fn per_call(seconds: f64) -> String {
     }
 }
 
-const KDF_JOBS: [&str; 9] = [
+const KDF_JOBS: [&str; 10] = [
+    "argon2id-64mib",
     "hkdf-sha-256",
     "hkdf-sha-512",
     "pbkdf2-sha-256",
@@ -1195,13 +1239,37 @@ const KDF_JOBS: [&str; 9] = [
 
 /// Key derivation: one derivation of a 32-byte key, which is what a
 /// caller asks for. HKDF's cost is two hashes of a short input;
-/// PBKDF2's is its iteration count, and nothing else. The TLS 1.2
-/// PRF is measured making a master secret, 48 bytes from two randoms.
+/// PBKDF2's is its iteration count, and nothing else. Argon2id runs at
+/// RFC 9106's second recommended setting, 64 MiB and three passes, one
+/// lane. The TLS 1.2 PRF is measured making a master secret, 48 bytes
+/// from two randoms.
 fn kdf_ops(run: &mut Run) -> bool {
     if !any_wanted("kdf", &KDF_JOBS, &run.options) {
         return false;
     }
+    let params = argon2::Params {
+        passes: 3,
+        memory_kib: 64 * 1024,
+        lanes: 1,
+    };
+    let mut work = vec![argon2::Block::ZERO; params.memory_kib as usize];
     let jobs: Vec<Job<'_>> = vec![
+        (
+            "argon2id-64mib",
+            Box::new(move || {
+                let mut out = [0u8; 32];
+                let _ = argon2::argon2id(
+                    &KEY128,
+                    &KEY128,
+                    &[],
+                    &[],
+                    params,
+                    &mut work,
+                    &mut out,
+                );
+                black_box(out);
+            }) as Once<'_>,
+        ),
         (
             "hkdf-sha-256",
             Box::new(|| {
@@ -1213,7 +1281,7 @@ fn kdf_ops(run: &mut Run) -> bool {
                     &mut out,
                 );
                 black_box(out);
-            }) as Once<'_>,
+            }),
         ),
         (
             "hkdf-sha-512",

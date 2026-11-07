@@ -1,5 +1,5 @@
-//! The Wycheproof and CFRG vector suites, and the inventory of the
-//! implementations this build holds.
+//! The Wycheproof, CFRG and BLAKE2 vector suites, and the inventory
+//! of the implementations this build holds.
 //!
 //! Inside the crate rather than in `tests/`, because an integration
 //! test is a separate crate and would see only the public types,
@@ -105,6 +105,18 @@ mod pke {
     #[test]
     fn cfrg_hpke() {
         support::cfrg::run();
+    }
+}
+
+/// BLAKE2b (RFC 7693), through the reference implementation's
+/// known answers: there is no ACVP or Wycheproof suite for it. One
+/// implementation, so nothing to repeat per kernel.
+mod blake2 {
+    use super::*;
+
+    #[test]
+    fn reference_known_answers() {
+        support::blake2::run();
     }
 }
 
