@@ -67,7 +67,7 @@ jobs:
       # key, and one of them saves it at the end of the job, so
       # sixteen shards do not upload sixteen copies. Only actions
       # GitHub owns are allowed here, which rules out rust-cache.
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: cache
         with:
           path: |
@@ -133,7 +133,7 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@v6
         # Saved once per key, by one job of those that share it.
         if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         with:
@@ -182,7 +182,7 @@ jobs:
               echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
 
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: cache
         with:
           path: |
@@ -198,7 +198,7 @@ jobs:
         env:
           SCYTALE_SHARD: ${{ matrix.shard }}
 
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@v6
         # Saved once per key, by one job of those that share it.
         if: ${{ startsWith(matrix.shard, '1/') && steps.cache.outputs.cache-hit != 'true' }}
         with:
@@ -260,7 +260,7 @@ jobs:
                     --target riscv64gc-unknown-linux-gnu
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: cache
         with:
           path: |
@@ -307,7 +307,7 @@ jobs:
           head -1 /proc/stat
           time (head -c 1G /dev/zero | sha256sum)
 
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@v6
         # Saved once per key, by one job of those that share it.
         if: ${{ startsWith(matrix.shard, '1/') && steps.cache.outputs.cache-hit != 'true' }}
         with:
@@ -361,7 +361,7 @@ jobs:
           rustup component add clippy
           rustup target add ${{ matrix.target }}
 
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: cache
         with:
           path: |
@@ -445,7 +445,7 @@ jobs:
           CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS:
             -C linker-flavor=ld.lld
 
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@v6
         # Saved once per key, by the library row.
         if: ${{ !matrix.shard && steps.cache.outputs.cache-hit != 'true' }}
         with:
@@ -590,7 +590,7 @@ jobs:
 
       # The rows of an architecture build the same thing and differ
       # only in the processor they run on, so they share one key.
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: cache
         with:
           path: |
@@ -637,7 +637,7 @@ jobs:
               --all-targets --release --target "$TARGET" \
               -- -D warnings
 
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@v6
         # Saved once per key, by one job of those that share it.
         if: ${{ (matrix.cpu == 'max' || matrix.cpu == 'neoverse-v1') && steps.cache.outputs.cache-hit != 'true' }}
         with:
@@ -677,7 +677,7 @@ jobs:
           rustup default stable
           rustup target add ${{ matrix.target }}
 
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: cache
         with:
           path: |
@@ -693,7 +693,7 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
 
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@v6
         # Saved once per key, by one job of those that share it.
         if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         with:
