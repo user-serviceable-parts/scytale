@@ -61,6 +61,15 @@ jobs:
               echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
 
+      # The compiled dependencies, keyed on the lock file and the
+      # toolchain and kept between runs; the workspace crates are
+      # rebuilt every time, since they change. Jobs that build the
+      # same thing share one cache through `shared-key`, and one of
+      # them saves it, so sixteen shards do not upload sixteen copies.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-${{ matrix.arch }}
+
       - name: Report toolchain and processor
         run: |
           uname -m
@@ -154,6 +163,11 @@ jobs:
               echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: vendored-${{ matrix.arch }}
+          save-if: ${{ startsWith(matrix.shard, '1/') }}
+
       - name: Test
         run: cargo test --release -p scytale-acvp
         env:
@@ -167,10 +181,7 @@ jobs:
   # equal share by weight; the count is the one number in the list.
   # Each log says the weight it took of the whole.
   #
-  # The job sits here, ahead of the short emulated rows, because the
-  # runners start jobs in the order written and twenty run at once:
-  # the long jobs take the first wave and the short ones fill in as
-  # slots free up. The container is for its QEMU, as below.
+  # The container is for its QEMU, as below.
   vendored-emulated:
     name: test (riscv64, max, shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
@@ -202,13 +213,19 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-              ca-certificates curl gcc libc6-dev qemu-user \
+              ca-certificates curl gcc libc6-dev qemu-user zstd \
               gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
               | sh -s -- -y --profile minimal \
                     --default-toolchain stable \
                     --target riscv64gc-unknown-linux-gnu
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # zstd above is for the cache's archives.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: vendored-riscv64
+          save-if: ${{ startsWith(matrix.shard, '1/') }}
 
       - name: Test as max, shard ${{ matrix.shard }}
         # Without the session, which would want the target's TLS
@@ -222,123 +239,6 @@ jobs:
           CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER:
             qemu-riscv64 -cpu max -L /usr/riscv64-linux-gnu
           SCYTALE_SHARD: ${{ matrix.shard }}
-
-  # Targets with one kernel of everything: 32-bit x86, whose `usize`
-  # is thirty-two bits, and WebAssembly, which has no threads. Here,
-  # ahead of the short emulated rows, for the same reason as above.
-  narrow:
-    name: test (${{ matrix.name }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Per target, one row for the library's tests and the lints
-          # and, apart from it, the check against the vendored vectors
-          # in shards, which carry nothing else: a shard that also
-          # ran the library's tests repeated them. The WebAssembly
-          # run is single-threaded, so it gets the more shards.
-          - name: x86, 32-bit
-            target: i686-unknown-linux-musl
-          - name: x86, 32-bit, shard 1/2
-            target: i686-unknown-linux-musl
-            shard: 1/2
-          - name: x86, 32-bit, shard 2/2
-            target: i686-unknown-linux-musl
-            shard: 2/2
-          - name: wasm32, WASI
-            target: wasm32-wasip1
-          - name: wasm32, WASI, shard 1/3
-            target: wasm32-wasip1
-            shard: 1/3
-          - name: wasm32, WASI, shard 2/3
-            target: wasm32-wasip1
-            shard: 2/3
-          - name: wasm32, WASI, shard 3/3
-            target: wasm32-wasip1
-            shard: 3/3
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Rust
-        run: |
-          rustup update --no-self-update stable
-          rustup default stable
-          rustup component add clippy
-          rustup target add ${{ matrix.target }}
-
-      - name: Install Wasmtime
-        if: matrix.target == 'wasm32-wasip1'
-        # A pinned version: asked for the latest, the installer looks
-        # it up through GitHub's API, and when that answer is not a
-        # release it prints an error and exits zero, so the job ran
-        # on without a runtime. The check is for the same reason.
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf \
-              https://wasmtime.dev/install.sh | bash -s -- --version v50.0.1
-          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
-          test -x "$HOME/.wasmtime/bin/wasmtime"
-
-      - name: Test
-        # As the native job, for a target. The inventory goes first
-        # and alone so that its table is in the log, portable rows
-        # though they all are.
-        if: ${{ !matrix.shard }}
-        run: |
-          cargo test --release -p scytale --lib --target ${{ matrix.target }} \
-              vectors::inventory -- --nocapture
-          cargo test --release --workspace --exclude scytale-acvp \
-              --target ${{ matrix.target }} -- --skip vectors::inventory
-          cargo test --release -p scytale --lib --target ${{ matrix.target }} \
-              features::tests::alone -- --ignored --test-threads=1
-        env:
-          CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
-          CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS:
-            -D warnings -C linker-flavor=ld.lld
-          CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS: -D warnings
-          # See the shard step for why.
-          CARGO_TARGET_WASM32_WASIP1_RUNNER:
-            wasmtime --env SCYTALE_VECTORS --dir=${{ github.workspace }}
-
-      - name: Test the vendored vectors, shard ${{ matrix.shard }}
-        # This shard's share of the check; these targets have one
-        # kernel of everything.
-        if: ${{ matrix.shard }}
-        run: |
-          cargo test --release -p scytale-acvp --no-default-features \
-              --target ${{ matrix.target }}
-        env:
-          SCYTALE_SHARD: ${{ matrix.shard }}
-          # Per target, because a plain RUSTFLAGS would replace these
-          # rather than add to them and the linker flag would be lost.
-          CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
-          CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS:
-            -D warnings -C linker-flavor=ld.lld
-          CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS: -D warnings
-          # The vectors are opened by their full path, so the
-          # checkout is mapped where it really is. Mapped anywhere
-          # else they are not found, and a suite that cannot find
-          # its vectors skips and passes. SCYTALE_VECTORS is what
-          # makes that a failure, and the sandbox hands on only the
-          # variables it is told to.
-          CARGO_TARGET_WASM32_WASIP1_RUNNER:
-            wasmtime --env SCYTALE_VECTORS --env SCYTALE_SHARD
-            --dir=${{ github.workspace }}
-
-      - name: Clippy
-        # Some code is built only where there is no hardware backend,
-        # and the three targets above never show it to the lints.
-        if: ${{ !matrix.shard }}
-        run: |
-          cargo clippy --workspace --exclude scytale-acvp --all-targets \
-              --release --target ${{ matrix.target }} -- -D warnings
-          cargo clippy -p scytale-acvp --no-default-features \
-              --all-targets --release --target ${{ matrix.target }} \
-              -- -D warnings
-        env:
-          CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
-          CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS:
-            -C linker-flavor=ld.lld
 
   # Every runner here and every machine anyone develops on is a recent
   # processor, so which loop a lesser one is given is decided by code
@@ -464,13 +364,22 @@ jobs:
           esac
           apt-get update
           apt-get install -y --no-install-recommends \
-              ca-certificates curl gcc libc6-dev qemu-user $cross
+              ca-certificates curl gcc libc6-dev qemu-user zstd $cross
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
               | sh -s -- -y --profile minimal \
                     --default-toolchain stable --target "$target" \
                     --component clippy
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           echo "TARGET=$target" >> "$GITHUB_ENV"
+
+      # The rows of an architecture build the same thing and differ
+      # only in the processor they run on, so they share, and the
+      # one that also runs clippy saves.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: emulated-${{ matrix.arch }}
+          save-if: >-
+            ${{ matrix.cpu == 'max' || matrix.cpu == 'neoverse-v1' }}
 
       - name: Test as ${{ matrix.cpu }}
         # Cargo reads the linker and the runner from variables named
@@ -537,6 +446,10 @@ jobs:
           rustup default stable
           rustup target add ${{ matrix.target }}
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-${{ matrix.target }}
+
       - name: Build
         run: cargo build -p scytale --target ${{ matrix.target }}
         env:
@@ -556,6 +469,99 @@ jobs:
   # WebAssembly under a WASI runtime, which is compiled rather than
   # interpreted and has a file system for the vectors. It leaves
   # out the benchmark, having no thread clock.
+  narrow:
+    name: test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The 32-bit run is half an hour whole, so it is split like
+          # the native ones; the WebAssembly one is single-threaded
+          # but short.
+          - name: x86, 32-bit, shard 1/2
+            target: i686-unknown-linux-musl
+            shard: 1/2
+          - name: x86, 32-bit, shard 2/2
+            target: i686-unknown-linux-musl
+            shard: 2/2
+          - name: wasm32, WASI
+            target: wasm32-wasip1
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+          rustup component add clippy
+          rustup target add ${{ matrix.target }}
+
+      # The first shard of a target saves; the whole run has none.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: narrow-${{ matrix.target }}
+          save-if: ${{ !matrix.shard || startsWith(matrix.shard, '1/') }}
+
+      - name: Install Wasmtime
+        if: matrix.target == 'wasm32-wasip1'
+        # A pinned version: asked for the latest, the installer looks
+        # it up through GitHub's API, and when that answer is not a
+        # release it prints an error and exits zero, so the job ran
+        # on without a runtime. The check is for the same reason.
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf \
+              https://wasmtime.dev/install.sh | bash -s -- --version v50.0.1
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+          test -x "$HOME/.wasmtime/bin/wasmtime"
+
+      - name: Test
+        # As the native job, for a target. The inventory goes first
+        # and alone so that its table is in the log, portable rows
+        # though they all are. The check against the vendored vectors
+        # is last; these targets have one kernel of everything.
+        run: |
+          cargo test --release -p scytale --lib --target ${{ matrix.target }} \
+              vectors::inventory -- --nocapture
+          cargo test --release --workspace --exclude scytale-acvp \
+              --target ${{ matrix.target }} -- --skip vectors::inventory
+          cargo test --release -p scytale --lib --target ${{ matrix.target }} \
+              features::tests::alone -- --ignored --test-threads=1
+          cargo test --release -p scytale-acvp --no-default-features \
+              --target ${{ matrix.target }}
+        env:
+          # Empty for the whole run.
+          SCYTALE_SHARD: ${{ matrix.shard }}
+          # Per target, because a plain RUSTFLAGS would replace these
+          # rather than add to them and the linker flag would be lost.
+          CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+          CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS:
+            -D warnings -C linker-flavor=ld.lld
+          CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS: -D warnings
+          # The vectors are opened by their full path, so the
+          # checkout is mapped where it really is. Mapped anywhere
+          # else they are not found, and a suite that cannot find
+          # its vectors skips and passes. SCYTALE_VECTORS is what
+          # makes that a failure, and the sandbox hands on only the
+          # variables it is told to.
+          CARGO_TARGET_WASM32_WASIP1_RUNNER:
+            wasmtime --env SCYTALE_VECTORS
+            --dir=${{ github.workspace }}
+
+      - name: Clippy
+        # Some code is built only where there is no hardware backend,
+        # and the three targets above never show it to the lints.
+        run: |
+          cargo clippy --workspace --exclude scytale-acvp --all-targets \
+              --release --target ${{ matrix.target }} -- -D warnings
+          cargo clippy -p scytale-acvp --no-default-features \
+              --all-targets --release --target ${{ matrix.target }} \
+              -- -D warnings
+        env:
+          CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+          CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS:
+            -C linker-flavor=ld.lld
+
   # Architecture-independent checks, so once is enough.
   style:
     name: style
