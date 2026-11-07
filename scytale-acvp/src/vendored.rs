@@ -159,7 +159,7 @@ pub struct Unit {
     pub group: usize,
     pub case: Option<usize>,
     /// What the unit is expected to cost, in ordinary cases' worth;
-    /// see [`weight`]. It steers the split over shards and the order
+    /// see `weight` below. It steers the split over shards and the order
     /// within one, and nothing else, so an estimate off by some
     /// factor costs balance, never coverage.
     pub weight: u64,
