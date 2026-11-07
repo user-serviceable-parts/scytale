@@ -38,8 +38,8 @@ says which suites ran under which profile and why, and the cases
 compared per suite. The run edits the process-wide set of features,
 so it is a binary of its own, outside the harness.
 
-`SCYTALE_SHARD=i/n` runs the i-th of n equal shares, which is how CI
-spreads the run over jobs. `SCYTALE_VECTORS=required` makes a missing
+`SCYTALE_SHARD=i/n` runs the i-th of n shares, equal by expected
+cost, which is how CI spreads the run over jobs. `SCYTALE_VECTORS=required` makes a missing
 vector file a failure rather than a skip.
 
 ## Online

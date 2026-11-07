@@ -119,7 +119,7 @@ jobs:
   # The check against the vendored vectors on the native runners:
   # every suite in full under every kernel the processor can run,
   # each once; see scytale-acvp/README.md. The work is spread over
-  # jobs by SCYTALE_SHARD, each taking every n-th unit of it.
+  # jobs by SCYTALE_SHARD, each taking an equal share by weight.
   vendored:
     name: test (${{ matrix.arch }}, shard ${{ matrix.shard }})
     runs-on: ${{ matrix.runner }}
@@ -162,10 +162,10 @@ jobs:
   # The same check for RISC-V, which has no native runner: under
   # QEMU's `max` processor, which has every extension the library
   # uses, so every RISC-V kernel answers every vector. That is some
-  # 200 core-minutes a kernel set under emulation and a runner has
-  # four cores, so the run is spread over the shards listed here,
-  # each taking every n-th unit of work, a test group or one case of
-  # a long group. The count is the one number in the list.
+  # 1,200 core-minutes under emulation and a runner has four cores,
+  # so the run is spread over the shards listed here, each taking an
+  # equal share by weight; the count is the one number in the list.
+  # Each log says the weight it took of the whole.
   #
   # The job sits here, ahead of the short emulated rows, because the
   # runners start jobs in the order written and twenty run at once:
@@ -179,18 +179,22 @@ jobs:
       fail-fast: false
       matrix:
         shard:
-          - 1/12
-          - 2/12
-          - 3/12
-          - 4/12
-          - 5/12
-          - 6/12
-          - 7/12
-          - 8/12
-          - 9/12
-          - 10/12
-          - 11/12
-          - 12/12
+          - 1/16
+          - 2/16
+          - 3/16
+          - 4/16
+          - 5/16
+          - 6/16
+          - 7/16
+          - 8/16
+          - 9/16
+          - 10/16
+          - 11/16
+          - 12/16
+          - 13/16
+          - 14/16
+          - 15/16
+          - 16/16
     steps:
       - uses: actions/checkout@v7
 
@@ -442,8 +446,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: x86, 32-bit
+          # The 32-bit run is half an hour whole, so it is split like
+          # the native ones; the WebAssembly one is single-threaded
+          # but short.
+          - name: x86, 32-bit, shard 1/2
             target: i686-unknown-linux-musl
+            shard: 1/2
+          - name: x86, 32-bit, shard 2/2
+            target: i686-unknown-linux-musl
+            shard: 2/2
           - name: wasm32, WASI
             target: wasm32-wasip1
     steps:
@@ -472,7 +483,7 @@ jobs:
         # As the native job, for a target. The inventory goes first
         # and alone so that its table is in the log, portable rows
         # though they all are. The check against the vendored vectors
-        # is last, whole: these targets have one kernel of everything.
+        # is last; these targets have one kernel of everything.
         run: |
           cargo test --release -p scytale --lib --target ${{ matrix.target }} \
               vectors::inventory -- --nocapture
@@ -483,6 +494,8 @@ jobs:
           cargo test --release -p scytale-acvp --no-default-features \
               --target ${{ matrix.target }}
         env:
+          # Empty for the whole run.
+          SCYTALE_SHARD: ${{ matrix.shard }}
           # Per target, because a plain RUSTFLAGS would replace these
           # rather than add to them and the linker flag would be lost.
           CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER: rust-lld

@@ -15,9 +15,9 @@
 //! a large-data group or of SLH-DSA signing, since those cases are
 //! minutes apiece under emulation. One worker per core takes the next
 //! unit of the profile in force, heaviest first, and the profile
-//! changes only between pools. `SCYTALE_SHARD` as `i/n` takes every
-//! n-th unit, which is how CI spreads the run over as many jobs as it
-//! needs.
+//! changes only between pools. `SCYTALE_SHARD` as `i/n` takes the
+//! i-th of n shares, equal by expected cost, which is how CI spreads
+//! the run over as many jobs as it needs.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -158,13 +158,43 @@ pub struct Unit {
     pub suite: usize,
     pub group: usize,
     pub case: Option<usize>,
+    /// What the unit is expected to cost, in ordinary cases' worth;
+    /// see [`weight`]. It steers the split over shards and the order
+    /// within one, and nothing else, so an estimate off by some
+    /// factor costs balance, never coverage.
+    pub weight: u64,
 }
 
-impl Unit {
-    /// Whether this is one case cut from a long group.
-    fn heavy(&self) -> bool {
-        self.case.is_some()
+/// The expected cost of a unit, in the worth of an ordinary case.
+/// An ordinary group weighs its cases. A large-data case hashes
+/// `fullLength` bits, and one of 2^36 measured as some eight
+/// thousand ordinary cases, so a case weighs its bits over 2^23. An
+/// SLH-DSA signature is dominated by the WOTS+ public keys of the
+/// hypertree, `d` layers of 2^(h/d) leaves each of `len` chains of
+/// fifteen hashes, plus the FORS tree, `k` trees of 2^a leaves; ten
+/// thousand of those hashes measured as one ordinary case.
+fn weight(group: &Value, case: Option<&Value>, cases: usize) -> u64 {
+    let Some(case) = case else {
+        return cases as u64;
+    };
+    if let Some(bits) = case["largeMsg"]["fullLength"].as_u64() {
+        return (bits >> 23).max(1);
     }
+    let set = group["parameterSet"].as_str().unwrap_or("");
+    // FIPS 205 table 2: h, d, len, k, a, for each security level and
+    // speed; len is 2n + 3 at w = 16.
+    let (h, d, len, k, a): (u32, u64, u64, u64, u32) =
+        match set.get(set.len().saturating_sub(4)..) {
+            Some("128s") => (63, 7, 35, 14, 12),
+            Some("128f") => (66, 22, 35, 33, 6),
+            Some("192s") => (63, 7, 51, 17, 14),
+            Some("192f") => (66, 22, 51, 33, 8),
+            Some("256s") => (64, 8, 67, 22, 14),
+            Some("256f") => (68, 17, 67, 35, 9),
+            _ => return 120,
+        };
+    let hashes = d * (1 << (h / d as u32)) * len * 15 + k * (1 << a);
+    (hashes / 10_000).max(1)
 }
 
 /// Every unit of `docs`, which are the suites' vendored documents in
@@ -188,6 +218,7 @@ pub fn units(docs: &[Option<Value>]) -> Vec<Unit> {
                         suite,
                         group,
                         case: Some(case),
+                        weight: weight(g, Some(&g["tests"][case]), cases),
                     });
                 }
             } else {
@@ -195,6 +226,7 @@ pub fn units(docs: &[Option<Value>]) -> Vec<Unit> {
                     suite,
                     group,
                     case: None,
+                    weight: weight(g, None, cases),
                 });
             }
         }
@@ -223,6 +255,32 @@ pub fn answer_unit(
         return Ok(None);
     }
     compare(suite, doc, &answered).map(Some)
+}
+
+/// Splits `work` over `shards` and returns shard `index`'s part,
+/// heaviest first, with every shard's weight: the heaviest unit left
+/// goes to the lightest shard, which keeps the shards within one
+/// unit's weight of each other. Deterministic, since every shard
+/// computes the split for itself.
+fn split(
+    work: &[(usize, Unit)],
+    shards: usize,
+    index: usize,
+) -> (Vec<(usize, Unit)>, Vec<u64>) {
+    let mut order: Vec<usize> = (0..work.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(work[i].1.weight));
+    let mut loads = vec![0u64; shards];
+    let mut mine = Vec::new();
+    for i in order {
+        let lightest = (0..shards)
+            .min_by_key(|&s| loads[s])
+            .expect("at least one shard");
+        loads[lightest] += work[i].1.weight;
+        if lightest == index - 1 {
+            mine.push(work[i]);
+        }
+    }
+    (mine, loads)
 }
 
 /// `SCYTALE_SHARD` parsed: `i/n` gives shard `i` of `n`, one-based;
@@ -321,17 +379,12 @@ pub fn run() -> Result<Report, Error> {
             work.extend(all.iter().filter(|u| u.suite == s).map(|u| (p, *u)));
         }
     }
-    // The long units first, so no shard tails on one, and every n-th
-    // of the whole to this shard.
-    let (heavy, light): (Vec<_>, Vec<_>) =
-        work.iter().partition(|(_, u)| u.heavy());
-    let work: Vec<(usize, Unit)> = heavy.into_iter().chain(light).collect();
-    let mine: Vec<(usize, Unit)> = work
-        .iter()
-        .enumerate()
-        .filter(|(j, _)| j % shards == index - 1)
-        .map(|(_, w)| *w)
-        .collect();
+    let (mine, loads) = split(&work, shards, index);
+    println!(
+        "shard {index}/{shards}: weight {} of {}",
+        loads[index - 1],
+        loads.iter().sum::<u64>()
+    );
 
     // WebAssembly has no threads: spawning one aborts the run.
     let workers = if cfg!(target_family = "wasm") {
@@ -515,25 +568,70 @@ mod tests {
         let doc = json!({"testGroups": [
             {"tgId": 1, "testType": "AFT", "tests": [{"tcId": 1}, {"tcId": 2}]},
             {"tgId": 2, "testType": "MCT", "tests": [{"tcId": 3}]},
-            {"tgId": 3, "testType": "LDT", "tests": [{"tcId": 4}, {"tcId": 5}]},
+            {"tgId": 3, "testType": "LDT", "tests": [
+                {"tcId": 4, "largeMsg": {"fullLength": 1u64 << 23}},
+                {"tcId": 5, "largeMsg": {"fullLength": 1u64 << 24}}]},
         ]});
         let docs = [Some(doc), None];
         let got = units(&docs);
-        let unit = |group, case| Unit {
+        let unit = |group, case, weight| Unit {
             suite: 0,
             group,
             case,
+            weight,
         };
         assert_eq!(
             got,
             [
-                unit(0, None),
-                unit(1, None),
-                unit(2, Some(0)),
-                unit(2, Some(1))
+                unit(0, None, 2),
+                unit(1, None, 1),
+                unit(2, Some(0), 1),
+                unit(2, Some(1), 2)
             ]
         );
-        assert!(got[2].heavy() && !got[0].heavy());
+    }
+
+    #[test]
+    fn weights_follow_length_and_parameter_set() {
+        let ldt = json!({"largeMsg": {"fullLength": 1u64 << 36}});
+        assert_eq!(weight(&json!({}), Some(&ldt), 4), 1 << 13);
+        let set = |name| json!({"parameterSet": name});
+        let w = |name| weight(&set(name), Some(&json!({})), 7);
+        assert!(w("SLH-DSA-SHA2-128s") > 10 * w("SLH-DSA-SHA2-128f"));
+        assert!(w("SLH-DSA-SHAKE-192s") > w("SLH-DSA-SHAKE-128s"));
+        // 7 * 512 * 35 * 15 + 14 * 4096 hashes.
+        assert_eq!(w("SLH-DSA-SHA2-128s"), 193);
+        assert_eq!(weight(&json!({}), None, 914), 914);
+    }
+
+    #[test]
+    fn split_sends_the_heaviest_unit_to_the_lightest_shard() {
+        let work: Vec<(usize, Unit)> = [8, 7, 6, 5, 4, 3]
+            .into_iter()
+            .enumerate()
+            .map(|(group, weight)| {
+                (
+                    0,
+                    Unit {
+                        suite: 0,
+                        group,
+                        case: None,
+                        weight,
+                    },
+                )
+            })
+            .collect();
+        let (first, loads) = split(&work, 2, 1);
+        let (second, _) = split(&work, 2, 2);
+        assert_eq!(loads, [17, 16]);
+        let groups = |v: &[(usize, Unit)]| {
+            v.iter().map(|(_, u)| u.group).collect::<Vec<_>>()
+        };
+        assert_eq!(groups(&first), [0, 3, 4]);
+        assert_eq!(groups(&second), [1, 2, 5]);
+        let (all, loads) = split(&work, 1, 1);
+        assert_eq!(all.len(), 6);
+        assert_eq!(loads, [33]);
     }
 
     #[test]
