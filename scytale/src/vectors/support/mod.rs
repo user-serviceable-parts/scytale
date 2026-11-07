@@ -1,11 +1,12 @@
-//! Shared test support: vector loading and the Wycheproof and CFRG
-//! drivers.
+//! Shared test support: vector loading and the Wycheproof, CFRG and
+//! BLAKE2 drivers.
 
 #![allow(dead_code)]
 
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
+pub mod blake2;
 pub mod cfrg;
 pub mod vectors;
 pub mod wycheproof;

@@ -65,6 +65,8 @@ excluded.
 | POLYVAL (GCM-SIV) | over the GHASH multiply | same |
 | Poly1305, portable and x86-64 | limb arithmetic, final reduction chosen by mask | no branch or index on key or message |
 | SHA-1, SHA-2, SHA-3, SHAKE, cSHAKE, TupleHash | all backends | no data-dependent control flow; hashing a secret leaks only its length |
+| BLAKE2b | `hash/blake2.rs` | add-rotate-xor over `u64`, no tables, no data-dependent branches |
+| Argon2id | `kdf/argon2.rs` | **memory addresses depend on the password by design** after the first half pass, as RFC 9106 specifies: an attacker who can watch this process's cache can learn something of those addresses, which helps a guessing attack and no more; the first half pass is addressed from the public parameters alone; `verify` compares with `constant_time::equal` |
 | HMAC, HKDF, PBKDF2, TLS 1.2 PRF, SP 800-108, one-step, X9.63 | over the hashes and MACs | as the hash; `Mac::verify` compares with `constant_time::equal` |
 | KMAC | over cSHAKE | as the hash; `verify_tag`, `verify_bits` and `Mac::verify` compare with `constant_time::equal` |
 | CTR, CBC, CFB, OFB, XTS | over the cipher | as the cipher; the modes themselves have no padding |
