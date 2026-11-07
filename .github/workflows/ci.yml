@@ -217,10 +217,13 @@ jobs:
   # equal share by weight; the count is the one number in the list.
   # Each log says the weight it took of the whole.
   #
-  # The container is for its QEMU, as below.
+  # The container is for its QEMU, as below. The arm64 runners are
+  # an experiment: on the x86-64 pool two or three shards a run took
+  # three times as long as the same shards in other runs, every suite
+  # and the compile alike, which the steps around the test measure.
   vendored-emulated:
     name: test (riscv64, max, shard ${{ matrix.shard }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     container: debian:trixie
     strategy:
       fail-fast: false
@@ -266,7 +269,18 @@ jobs:
             ~/.cargo/git/db
             target
           key: >-
-            vendored-riscv64-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+            vendored-riscv64-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Measure the machine
+        # The processor, the cores, the kernel's cpu counters (steal
+        # is the eighth field) and a fixed native hash, so a slow
+        # shard can be told from a slow machine.
+        shell: bash
+        run: |
+          uname -m; nproc
+          grep -m1 -E 'model name|^CPU part' /proc/cpuinfo || true
+          head -1 /proc/stat
+          time (head -c 1G /dev/zero | sha256sum)
 
       - name: Test as max, shard ${{ matrix.shard }}
         # Without the session, which would want the target's TLS
@@ -280,6 +294,18 @@ jobs:
           CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER:
             qemu-riscv64 -cpu max -L /usr/riscv64-linux-gnu
           SCYTALE_SHARD: ${{ matrix.shard }}
+
+      - name: Measure the machine after
+        # The processor, the cores, the kernel's cpu counters (steal
+        # is the eighth field) and a fixed native hash, so a slow
+        # shard can be told from a slow machine.
+        shell: bash
+        if: ${{ always() }}
+        run: |
+          uname -m; nproc
+          grep -m1 -E 'model name|^CPU part' /proc/cpuinfo || true
+          head -1 /proc/stat
+          time (head -c 1G /dev/zero | sha256sum)
 
       - uses: actions/cache/save@v4
         # Saved once per key, by one job of those that share it.
