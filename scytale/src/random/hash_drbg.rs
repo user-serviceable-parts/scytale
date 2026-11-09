@@ -77,6 +77,23 @@ impl<H: Hash + Default, S: Entropy> HashDrbg<H, S> {
         built
     }
 
+    /// A generator seeded from material gathered elsewhere: `seed`
+    /// is the entropy, nonce and any personalization as one run, at
+    /// least [`MIN_SEED`] bytes. `source` is kept for every later
+    /// reseeding.
+    ///
+    /// For a caller that conditions its own entropy before handing
+    /// it over, and for running the standard's known-answer vectors,
+    /// which fix the seed. Anything else wants
+    /// [`try_new`](HashDrbg::try_new), which draws the seed itself.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidSeedLength`] if `seed` is too short.
+    pub fn try_new_seeded(seed: &[u8], source: S) -> Result<Self, Error> {
+        Self::instantiate(seed, source)
+    }
+
     /// Reseeds from the generator's own source: the call
     /// [the rule](super#fork-snapshots-and-clones-the-rule) asks for
     /// in a copy of the process. Made automatically once

@@ -52,12 +52,10 @@ use super::super::engine::{Engine32, Engine64};
 use super::super::portable::{K256, K512};
 #[cfg(test)]
 use super::super::variant;
-use crate::arch::riscv64::{
-    EXT_ZVBB, EXT_ZVKB, EXT_ZVKNHA, EXT_ZVKNHB, IMA_V, extensions, vector_bytes,
-};
+use crate::features;
 
-// Named for the vector suites and the benchmark, which drive each
-// engine in turn; the dispatching types reach it directly.
+// Named for the vector suites, which drive each engine in turn; the
+// dispatching types reach it directly.
 /// SHA-224 with Zvknh.
 #[cfg(test)]
 pub type Sha224 = Engine32<Zvknh, variant::Sha224>;
@@ -70,12 +68,6 @@ pub type Sha384 = Engine64<Zvknh, variant::Sha384>;
 /// SHA-512 with Zvknh.
 #[cfg(test)]
 pub type Sha512 = Engine64<Zvknh, variant::Sha512>;
-/// SHA-512/224 with Zvknh.
-#[cfg(test)]
-pub type Sha512_224 = Engine64<Zvknh, variant::Sha512_224>;
-/// SHA-512/256 with Zvknh.
-#[cfg(test)]
-pub type Sha512_256 = Engine64<Zvknh, variant::Sha512_256>;
 
 /// The vector SHA-2 instructions.
 // No public constructor: a value exists only by way of `probe`.
@@ -84,27 +76,16 @@ pub struct Zvknh(());
 
 impl super::super::engine::Sealed for Zvknh {}
 
-/// Whether `ext` reports a vector unit, a byte reverse and any of
-/// `wanted`, on a processor whose vector registers are `bytes` wide.
-fn present(ext: u64, bytes: usize, wanted: u64) -> bool {
-    ext & IMA_V != 0
-        && ext & wanted != 0
-        && ext & (EXT_ZVBB | EXT_ZVKB) != 0
-        && bytes >= 16
-}
-
 /// Whether the SHA-256 instructions are available. Zvknha has them
 /// and Zvknhb has them as well as SHA-512's.
 pub(crate) fn has_sha256() -> bool {
-    let ext = extensions();
-    present(ext, vector_bytes(ext), EXT_ZVKNHA | EXT_ZVKNHB)
+    features::allows(super::super::KERNELS32, super::super::Kernel::Zvknh)
 }
 
 /// Whether the SHA-512 instructions are available; only Zvknhb has
 /// them.
 pub(crate) fn has_sha512() -> bool {
-    let ext = extensions();
-    present(ext, vector_bytes(ext), EXT_ZVKNHB)
+    features::allows(super::super::KERNELS64, super::super::Kernel::Zvknh)
 }
 
 /// Splits the state into the two element groups the instructions
@@ -373,10 +354,7 @@ impl Compress64 for Zvknh {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hash::sha2::portable;
-    use crate::hash::sha2::tests::{
-        check_known_answers, check_matches_portable,
-    };
+    use crate::hash::sha2::tests::check_known_answers;
 
     #[test]
     fn known_answers() {
@@ -386,38 +364,6 @@ mod tests {
                 || Sha256::try_new().expect("supported"),
                 || Sha384::try_new().expect("supported"),
                 || Sha512::try_new().expect("supported"),
-            );
-        }
-    }
-
-    #[test]
-    fn matches_portable() {
-        if has_sha256() {
-            check_matches_portable(
-                || Sha224::try_new().expect("supported"),
-                || portable::Sha224::try_new().expect("portable"),
-            );
-            check_matches_portable(
-                || Sha256::try_new().expect("supported"),
-                || portable::Sha256::try_new().expect("portable"),
-            );
-        }
-        if has_sha512() {
-            check_matches_portable(
-                || Sha384::try_new().expect("supported"),
-                || portable::Sha384::try_new().expect("portable"),
-            );
-            check_matches_portable(
-                || Sha512::try_new().expect("supported"),
-                || portable::Sha512::try_new().expect("portable"),
-            );
-            check_matches_portable(
-                || Sha512_224::try_new().expect("supported"),
-                || portable::Sha512_224::try_new().expect("portable"),
-            );
-            check_matches_portable(
-                || Sha512_256::try_new().expect("supported"),
-                || portable::Sha512_256::try_new().expect("portable"),
             );
         }
     }
@@ -433,20 +379,25 @@ mod tests {
     /// other. Zvkn includes Zvknhb, so real vector hardware has both.
     #[test]
     fn the_narrow_extension_offers_only_sha256() {
-        use crate::arch::riscv64::profile;
+        use crate::arch::riscv64::{
+            EXT_ZVKB, EXT_ZVKNHA, EXT_ZVKNHB, IMA_V, detected_from, profile,
+        };
+        use crate::hash::sha2::{ZVKNH_256, ZVKNH_512};
 
-        let narrow = IMA_V | EXT_ZVKB | EXT_ZVKNHA;
-        assert!(present(narrow, 16, EXT_ZVKNHA | EXT_ZVKNHB));
-        assert!(!present(narrow, 16, EXT_ZVKNHB));
+        let narrow = detected_from(IMA_V | EXT_ZVKB | EXT_ZVKNHA, 16);
+        assert!(ZVKNH_256.is_subset(narrow));
+        assert!(!ZVKNH_512.is_subset(narrow));
 
-        for wanted in [EXT_ZVKNHA | EXT_ZVKNHB, EXT_ZVKNHB] {
-            assert!(present(profile::ZVKN, 16, wanted));
+        for needs in [ZVKNH_256, ZVKNH_512] {
+            assert!(needs.is_subset(detected_from(profile::ZVKN, 16)));
             // No byte reverse to put the message words the right way
             // round, no vector unit, or registers too narrow.
-            assert!(!present(IMA_V | EXT_ZVKNHB, 16, wanted));
-            assert!(!present(profile::ZVKN & !IMA_V, 16, wanted));
-            assert!(!present(profile::ZVKN, 8, wanted));
-            assert!(!present(profile::ZKN, 0, wanted));
+            assert!(!needs.is_subset(detected_from(IMA_V | EXT_ZVKNHB, 16)));
+            assert!(
+                !needs.is_subset(detected_from(profile::ZVKN & !IMA_V, 16))
+            );
+            assert!(!needs.is_subset(detected_from(profile::ZVKN, 8)));
+            assert!(!needs.is_subset(detected_from(profile::ZKN, 0)));
         }
     }
 

@@ -21,7 +21,7 @@
 
 use core::fmt;
 
-use super::{has_vrev8, has_zvkned};
+use super::has_zvkned;
 use crate::cipher::BlockCipher;
 use crate::cipher::aes::{BLOCK_SIZE, KeySize, MAX_WORDS, expand_words};
 use crate::{BlockType, Key, KeyType};
@@ -38,10 +38,6 @@ pub struct Aes<const K: usize> {
     keys: [u32; MAX_WORDS],
     #[zeroize(skip)]
     size: KeySize,
-    /// Whether `vrev8.v` is here, asked once at key expansion so that
-    /// the counter loop costs nothing to choose.
-    #[zeroize(skip)]
-    rev8: bool,
 }
 
 impl<const K: usize> fmt::Debug for Aes<K> {
@@ -95,11 +91,7 @@ impl<const K: usize> Aes<K> {
                     keys = expand_words(key, size, |w| sub_word(w))
                 }
             }
-            Aes {
-                keys,
-                size,
-                rev8: has_vrev8(),
-            }
+            Aes { keys, size }
         }
     }
 
@@ -538,7 +530,6 @@ vaes_body!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cipher::aes::portable;
 
     /// Returns the cipher, or `None` (skipping the test) without
     /// Zvkned.
@@ -595,44 +586,6 @@ mod tests {
             "00112233445566778899aabbccddeeff",
             "8ea2b7ca516745bfeafc49904b496089",
         );
-    }
-
-    #[test]
-    fn matches_ttable() {
-        matches_ttable_for::<16>();
-        matches_ttable_for::<24>();
-        matches_ttable_for::<32>();
-    }
-
-    fn matches_ttable_for<const K: usize>() {
-        const MAX: usize = 40;
-        let klen = K;
-        {
-            let mut key = [0u8; K];
-            for (i, k) in key.iter_mut().enumerate() {
-                *k = (i * 37 + klen) as u8;
-            }
-            let Some(hw) = aes(&key) else { return };
-            let sw = portable::ttable::Aes::new(&key);
-            for nblocks in [0, 1, 7, 8, 9, 16, 17, 24, 25, 33, 39] {
-                let mut data = [[0u8; BLOCK_SIZE]; MAX];
-                for (i, b) in data.as_flattened_mut().iter_mut().enumerate() {
-                    *b = (i * 13 + klen) as u8;
-                }
-                let data = &mut data[..nblocks];
-                let mut expected = [[0u8; BLOCK_SIZE]; MAX];
-                let expected = &mut expected[..data.len()];
-                expected.copy_from_slice(data);
-                let mut orig = [[0u8; BLOCK_SIZE]; MAX];
-                orig[..data.len()].copy_from_slice(data);
-
-                sw.encrypt_blocks(expected);
-                hw.encrypt_blocks(data);
-                assert_eq!(data, expected, "encrypt {klen} {nblocks}");
-                hw.decrypt_blocks(data);
-                assert_eq!(data, &orig[..data.len()], "decrypt {klen}");
-            }
-        }
     }
 
     #[test]

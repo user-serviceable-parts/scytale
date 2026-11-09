@@ -87,6 +87,22 @@ macro_rules! ecdsa_curve {
             der $der, public der $public_der
         );
 
+        impl crate::features::sealed::Sealed for PrivateKey {}
+
+        impl crate::features::Dispatcher for PrivateKey {
+            fn profiles() -> &'static [crate::features::Features] {
+                crate::math::ec::profiles::<$limbs>()
+            }
+        }
+
+        impl crate::features::sealed::Sealed for PublicKey {}
+
+        impl crate::features::Dispatcher for PublicKey {
+            fn profiles() -> &'static [crate::features::Features] {
+                crate::math::ec::profiles::<$limbs>()
+            }
+        }
+
         /// The length of a signature, `r || s`.
         pub const SIGNATURE_SIZE: usize = 2 * KEY_SIZE;
 

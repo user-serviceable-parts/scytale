@@ -2,11 +2,13 @@
 //!
 //! Two different jobs share the name. [`hkdf`] turns keying material
 //! that is already unguessable, such as a shared secret from a key
-//! agreement, into as many keys as a protocol needs. [`pbkdf2`]
-//! turns a password, which is guessable, into a key, and its
-//! iteration count is there to make each guess cost the attacker
-//! what it costs you. [`tls12`] is the first job as TLS 1.2 defined
-//! it, for the implementations that still speak that version.
+//! agreement, into as many keys as a protocol needs. [`argon2`] and
+//! [`pbkdf2`] turn a password, which is guessable, into a key, and
+//! their costs are there to make each guess cost the attacker what it
+//! costs you. Argon2id's cost is memory as well as time, which
+//! special hardware cannot shrink as it can PBKDF2's. [`tls12`] is
+//! the first job as TLS 1.2 defined it, for the implementations that
+//! still speak that version.
 //!
 //! ```
 //! use scytale::hash::sha2::Sha256;
@@ -30,9 +32,10 @@
 //! # }
 //! ```
 //!
-//! If the input came from a human, use `pbkdf2`; if it came from a
-//! machine, use `hkdf`. Running HKDF over a password gives a key that
-//! is exactly as guessable as the password was.
+//! If the input came from a human, use `argon2`, or `pbkdf2` where a
+//! standard or policy names it; if it came from a machine, use
+//! `hkdf`. Running HKDF over a password gives a key that is exactly
+//! as guessable as the password was.
 //!
 //! The rest do the first job in the shapes NIST and ANSI define it,
 //! for the protocols and policies that name them:
@@ -41,6 +44,7 @@
 //! shared secret, the single-step alternative to HKDF; and [`x963`]
 //! is the ANSI X9.63 KDF that ECIES uses.
 
+pub mod argon2;
 pub mod hkdf;
 pub mod one_step;
 pub mod pbkdf2;

@@ -20,11 +20,9 @@
 
 #![allow(unsafe_code)]
 
-use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
-
+use crate::features::{self, Features, x86_64::Feature as F};
 use crate::math::montgomery::x86_64::Adx;
 use crate::math::uint::Uint;
-use crate::probe::Probe;
 
 use super::{Affine, Jacobian};
 
@@ -36,28 +34,31 @@ pub(crate) const SLOTS: usize = 21;
 #[derive(Clone, Copy)]
 pub(crate) struct Avx2(());
 
+/// Which table read a point multiplication runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kernel {
+    /// The whole table swept with vector compares and blends.
+    Avx2,
+    /// Plain Rust, on any processor.
+    Portable,
+}
+
+/// The kernels, best first, each with what it needs.
+pub(crate) const KERNELS: &[(Kernel, Features)] =
+    &[(Kernel::Avx2, AVX2), (Kernel::Portable, Features::new())];
+
+/// What the list publishes: the needs, without the names.
+pub(crate) const PROFILES: [Features; KERNELS.len()] =
+    features::profiles_of(KERNELS);
+
 /// AVX2 (CPUID leaf 7, EBX bit 5) with the operating system saving
 /// the upper halves of the registers (XCR0 bits 1 and 2). Asked once.
 pub(crate) fn probe() -> Option<Avx2> {
-    AVX2.yes(ask).then_some(Avx2(()))
+    features::allows(KERNELS, Kernel::Avx2).then_some(Avx2(()))
 }
 
-/// Kept: every curve operation asks.
-static AVX2: Probe = Probe::new();
-
-fn ask() -> bool {
-    let leaf1 = __cpuid(1);
-    let wanted = (1 << 27) | (1 << 28);
-    if leaf1.ecx & wanted != wanted {
-        return false;
-    }
-    if __cpuid_count(7, 0).ebx & (1 << 5) == 0 {
-        return false;
-    }
-    // SAFETY: OSXSAVE was just confirmed, so XGETBV is available.
-    let xcr0 = unsafe { _xgetbv(0) };
-    xcr0 & 0b110 == 0b110
-}
+/// What the AVX2 row needs.
+const AVX2: Features = features::x86(&[F::Avx, F::Avx2]);
 
 impl Avx2 {
     /// The entry of `table` whose position, counted from one, is

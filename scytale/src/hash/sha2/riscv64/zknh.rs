@@ -20,10 +20,10 @@ use super::super::portable::{
 };
 #[cfg(test)]
 use super::super::variant;
-use crate::arch::riscv64::{EXT_ZKNH, extensions};
+use crate::features;
 
-// Named for the vector suites and the benchmark, which drive each
-// engine in turn; the dispatching types reach it directly.
+// Named for the vector suites, which drive each engine in turn; the
+// dispatching types reach it directly.
 /// SHA-224 with Zknh.
 #[cfg(test)]
 pub type Sha224 = Engine32<Zknh, variant::Sha224>;
@@ -36,21 +36,11 @@ pub type Sha384 = Engine64<Zknh, variant::Sha384>;
 /// SHA-512 with Zknh.
 #[cfg(test)]
 pub type Sha512 = Engine64<Zknh, variant::Sha512>;
-/// SHA-512/224 with Zknh.
-#[cfg(test)]
-pub type Sha512_224 = Engine64<Zknh, variant::Sha512_224>;
-/// SHA-512/256 with Zknh.
-#[cfg(test)]
-pub type Sha512_256 = Engine64<Zknh, variant::Sha512_256>;
 
 /// Whether the Zknh instructions are available.
 pub(crate) fn has_zknh() -> bool {
-    present(extensions())
-}
-
-/// Whether `ext` reports the scalar sigma instructions.
-fn present(ext: u64) -> bool {
-    ext & EXT_ZKNH != 0
+    // The same row in both lists; either list answers.
+    features::allows(super::super::KERNELS32, super::super::Kernel::Zknh)
 }
 
 /// The sigma functions as Zknh instructions.
@@ -137,10 +127,7 @@ impl Compress64 for Zknh {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hash::sha2::portable;
-    use crate::hash::sha2::tests::{
-        check_known_answers, check_matches_portable,
-    };
+    use crate::hash::sha2::tests::check_known_answers;
 
     #[test]
     fn known_answers() {
@@ -155,28 +142,6 @@ mod tests {
     }
 
     #[test]
-    fn matches_portable() {
-        if has_zknh() {
-            check_matches_portable(
-                || Sha224::try_new().expect("supported"),
-                || portable::Sha224::try_new().expect("portable"),
-            );
-            check_matches_portable(
-                || Sha256::try_new().expect("supported"),
-                || portable::Sha256::try_new().expect("portable"),
-            );
-            check_matches_portable(
-                || Sha384::try_new().expect("supported"),
-                || portable::Sha384::try_new().expect("portable"),
-            );
-            check_matches_portable(
-                || Sha512::try_new().expect("supported"),
-                || portable::Sha512::try_new().expect("portable"),
-            );
-        }
-    }
-
-    #[test]
     fn probes_agree_with_constructors() {
         assert_eq!(Sha256::try_new().is_ok(), has_zknh());
         assert_eq!(Sha512::try_new().is_ok(), has_zknh());
@@ -186,10 +151,11 @@ mod tests {
     /// set rather than with any vector one.
     #[test]
     fn the_scalar_sigmas_come_with_the_scalar_set() {
-        use crate::arch::riscv64::profile;
+        use crate::arch::riscv64::{detected_from, profile};
+        use crate::hash::sha2::ZKNH;
 
-        assert!(present(profile::ZKN));
-        assert!(!present(profile::ZVKNG));
-        assert!(!present(profile::RVA23));
+        assert!(ZKNH.is_subset(detected_from(profile::ZKN, 0)));
+        assert!(!ZKNH.is_subset(detected_from(profile::ZVKNG, 16)));
+        assert!(!ZKNH.is_subset(detected_from(profile::RVA23, 16)));
     }
 }

@@ -266,6 +266,24 @@ mod tests {
         }
     }
 
+    /// The loop written out is taken exactly where the features in
+    /// force meet the row it borrows, GCM's narrower one. It has no
+    /// row of its own, so nothing else holds its constructor to that;
+    /// a value built without the check would run code the processor
+    /// has not.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn the_loop_written_out_asks_for_its_instructions() {
+        use crate::aead::gcm::KERNELS;
+        use crate::features;
+        use crate::kernel::Kernel;
+        let p = Polyval::new(&hex::<16>(H), WORTH_IT);
+        assert_eq!(
+            matches!(p.inner, Inner::Native(_)),
+            features::allows(KERNELS, Kernel::Aesni)
+        );
+    }
+
     /// The subkey from RFC 8452's worked example, reused throughout
     /// so that a failure here and a failure there are comparable.
     const H: &str = "25629347589242761d31f826ba4b757b";

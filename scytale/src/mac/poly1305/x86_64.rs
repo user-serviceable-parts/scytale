@@ -42,9 +42,7 @@
 
 #![allow(unsafe_code)]
 
-use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
-
-use crate::probe::Probe;
+use crate::features::{self, Features, x86_64::Feature as F};
 use zeroize::Zeroize;
 
 /// Bytes in a block.
@@ -94,27 +92,30 @@ impl Drop for Powers {
     }
 }
 
+/// Which loop the bulk of a message runs through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kernel {
+    /// Four blocks at once in the vector registers.
+    Avx2,
+    /// Plain Rust, a block at a time, on any processor.
+    Portable,
+}
+
+/// The kernels, best first, each with what it needs.
+pub(crate) const KERNELS: &[(Kernel, Features)] =
+    &[(Kernel::Avx2, AVX2), (Kernel::Portable, Features::new())];
+
+/// What the list publishes: the needs, without the names.
+pub(crate) const PROFILES: [Features; KERNELS.len()] =
+    features::profiles_of(KERNELS);
+
 /// Whether the processor and operating system support AVX2.
 pub(super) fn supported() -> bool {
-    PROBED.yes(ask)
+    features::allows(KERNELS, Kernel::Avx2)
 }
 
-/// Asked once; see [`crate::probe`].
-static PROBED: Probe = Probe::new();
-
-fn ask() -> bool {
-    let leaf1 = __cpuid(1);
-    let wanted = (1 << 27) | (1 << 28);
-    if leaf1.ecx & wanted != wanted {
-        return false;
-    }
-    if __cpuid_count(7, 0).ebx & (1 << 5) == 0 {
-        return false;
-    }
-    // SAFETY: OSXSAVE was just confirmed, so XGETBV is available.
-    let xcr0 = unsafe { _xgetbv(0) };
-    xcr0 & 0b110 == 0b110
-}
+/// What the AVX2 row needs.
+const AVX2: Features = features::x86(&[F::Avx, F::Avx2]);
 
 /// Multiplies two values in the field, with the limbs carried far
 /// enough that another multiplication cannot overflow.

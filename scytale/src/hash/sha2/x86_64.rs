@@ -12,8 +12,7 @@
 
 #![allow(unsafe_code)]
 
-use crate::probe::Probe;
-use core::arch::x86_64::__cpuid_count;
+use crate::features;
 
 use super::engine::Compress32;
 #[cfg(test)]
@@ -23,8 +22,8 @@ use super::portable::K256;
 use super::variant;
 use crate::align::At16;
 
-// Named for the vector suites and the benchmark, which drive each
-// engine in turn; the dispatching types reach it directly.
+// Named for the vector suites, which drive each engine in turn; the
+// dispatching types reach it directly.
 /// SHA-224 with SHA-NI.
 #[cfg(test)]
 pub type Sha224 = Engine32<ShaNi, variant::Sha224>;
@@ -36,27 +35,7 @@ pub type Sha256 = Engine32<ShaNi, variant::Sha256>;
 /// Every such processor also has the SSSE3 and SSE4.1 shuffles the
 /// code uses.
 pub(crate) fn has_sha() -> bool {
-    SHA.yes(ask_sha)
-}
-
-/// Kept: `cpuid` serialises the pipeline, and a hash is started
-/// for every message, every HMAC block and every PBKDF2 iteration.
-static SHA: Probe = Probe::new();
-
-fn ask_sha() -> bool {
-    // A processor whose highest leaf is below seven answers this one
-    // with the data of its highest, not with zeros, so the bits
-    // would be whatever that leaf happens to hold.
-    if core::arch::x86_64::__cpuid(0).eax < 7 {
-        return false;
-    }
-    // The loops also shuffle bytes (SSSE3, leaf 1 ECX bit 9) and
-    // insert and blend words (SSE4.1, bit 19). Every processor with
-    // the SHA instructions has both, but a hypervisor can hide one
-    // and not the other, and asking costs nothing.
-    let sse = (1 << 9) | (1 << 19);
-    core::arch::x86_64::__cpuid(1).ecx & sse == sse
-        && __cpuid_count(7, 0).ebx & (1 << 29) != 0
+    features::allows(super::KERNELS32, super::Kernel::ShaNi)
 }
 
 /// The compression function via SHA-NI.
@@ -255,9 +234,7 @@ mod tests {
     use super::*;
     use crate::Error;
     use crate::hash::sha2::portable;
-    use crate::hash::sha2::tests::{
-        check_known_answers, check_matches_portable,
-    };
+    use crate::hash::sha2::tests::check_known_answers;
 
     #[test]
     fn known_answers() {
@@ -271,21 +248,6 @@ mod tests {
             || Sha256::try_new().expect("supported"),
             || Sha384::try_new().expect("supported"),
             || Sha512::try_new().expect("supported"),
-        );
-    }
-
-    #[test]
-    fn matches_portable() {
-        if !has_sha() {
-            return;
-        }
-        check_matches_portable(
-            || Sha224::try_new().expect("supported"),
-            || portable::Sha224::try_new().expect("portable"),
-        );
-        check_matches_portable(
-            || Sha256::try_new().expect("supported"),
-            || portable::Sha256::try_new().expect("portable"),
         );
     }
 

@@ -63,6 +63,12 @@
 //! hardware for it (only AArch64 has any) SHA-3 costs more per byte
 //! than SHA-2.
 //!
+//! [`blake2`] is BLAKE2b, from outside the NIST family: faster than
+//! either in portable code on a 64-bit processor, and like SHA-3 it
+//! cannot be length extended. Choose it when a protocol names it, or
+//! where speed matters and nothing asks for a NIST hash. Argon2 is
+//! built on it.
+//!
 //! [`sha1`] is not a choice at all. It is broken for collisions and
 //! is here only so that the protocols and formats that still name it
 //! can be spoken: HMAC-SHA-1, HKDF over it, OAEP's default mask
@@ -77,6 +83,7 @@
 //! but a construction that is only safe with one family is a trap
 //! for the next reader. Use HMAC.
 
+pub mod blake2;
 pub mod sha1;
 pub mod sha2;
 pub mod sha3;

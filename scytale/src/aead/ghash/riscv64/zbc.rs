@@ -26,20 +26,12 @@
 
 use super::super::{BLOCK, MAX_GROUP, divide_by_x, halve};
 use super::finish;
-use crate::arch::riscv64::{EXT_ZBC, EXT_ZBKC};
 
 /// How many blocks the group multiply takes at once. Eight products
 /// share one reduction, which is four of the ten multiplications a
 /// block would otherwise cost, and none of the eight depends on
 /// another, so a processor that pipelines `clmul` can overlap them.
 pub(super) const GROUP: usize = MAX_GROUP;
-
-/// Whether `ext` reports the scalar carry-less multiply. Zbc and Zbkc
-/// both provide it, and either will do; neither needs a vector unit,
-/// so the register width does not come into it.
-pub(super) fn present(ext: u64, _bytes: usize) -> bool {
-    ext & (EXT_ZBC | EXT_ZBKC) != 0
-}
 
 /// Prepares the subkey for [`multiply`].
 pub(super) fn prepare(h: &[u64; 2]) -> [u64; 2] {

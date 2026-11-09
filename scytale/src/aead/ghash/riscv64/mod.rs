@@ -28,8 +28,8 @@
 
 #![allow(unsafe_code)]
 
-use crate::arch::riscv64::{extensions, vector_bytes};
-use crate::probe::Probe;
+use super::{KERNELS, Kernel};
+use crate::features::{self, Features, riscv64::Feature as R};
 
 mod zbc;
 mod zvbc;
@@ -39,54 +39,33 @@ pub(crate) mod zvkg;
 /// leading term, written in GHASH's reversed bit order.
 const POLYNOMIAL: u64 = 0xc200_0000_0000_0000;
 
-/// Which multiply this processor has, named for the extension that
-/// provides it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Choice {
-    /// The whole field multiplication in one instruction.
-    Zvkg,
-    /// A vector carry-less multiply.
-    Zvbc,
-    /// A scalar carry-less multiply.
-    Zbc,
+/// The whole field multiplication in one instruction, on registers of
+/// a block or more.
+pub(crate) const ZVKG: Features = features::riscv(&[R::V, R::Zvkg]);
+/// The vector carry-less multiply, with the byte reverse from Zvkb
+/// (which Zvbb includes), on registers of a block or more.
+pub(super) const ZVBC: Features = features::riscv(&[R::V, R::Zvbc, R::Zvkb]);
+/// The scalar carry-less multiply, from Zbc.
+pub(super) const ZBC: Features = features::riscv(&[R::Zbc]);
+/// The same instruction, from Zbkc; the scalar cryptography profile
+/// brings this one and not Zbc.
+pub(super) const ZBKC: Features = features::riscv(&[R::Zbkc]);
+
+/// The best multiply the features in force allow, or none. The rows
+/// are the family's, in [`KERNELS`].
+fn choice() -> Option<Kernel> {
+    features::select(KERNELS)
 }
 
-/// The chosen multiply, asked for once; see [`crate::probe`].
-static CHOSEN: Probe = Probe::new();
-
-/// Every backend, best first.
-const CHOICES: [Choice; 3] = [Choice::Zvkg, Choice::Zvbc, Choice::Zbc];
-
-/// Whether `ext` reports `choice`, on a processor whose vector
-/// registers are `bytes` wide.
-fn present(choice: Choice, ext: u64, bytes: usize) -> bool {
-    match choice {
-        Choice::Zvkg => zvkg::present(ext, bytes),
-        Choice::Zvbc => zvbc::present(ext, bytes),
-        Choice::Zbc => zbc::present(ext, bytes),
-    }
-}
-
-/// The best multiply the extensions in `ext` offer.
+/// The best multiply the extensions in `ext` offer, on a processor
+/// whose vector registers are `bytes` wide.
 #[cfg(test)]
-fn best_of(ext: u64, bytes: usize) -> Option<Choice> {
-    CHOICES.into_iter().find(|&c| present(c, ext, bytes))
-}
-
-/// The chosen multiply, asked of the processor only once. The answer
-/// cannot change while the program runs, and the probe is a system
-/// call.
-///
-/// The extensions are read inside the closure rather than before it,
-/// so that the system call happens only on the first call rather than
-/// on every one. That first call may make it more than once, as it
-/// works down the list, which is a cost paid once in the life of the
-/// program.
-fn choice() -> Option<Choice> {
-    CHOSEN.first(&CHOICES, |choice| {
-        let ext = extensions();
-        present(choice, ext, vector_bytes(ext))
-    })
+fn best_of(ext: u64, bytes: usize) -> Option<Kernel> {
+    let found = crate::arch::riscv64::detected_from(ext, bytes);
+    KERNELS
+        .iter()
+        .find(|(_, needs)| needs.is_subset(found))
+        .map(|(c, _)| *c)
 }
 
 /// The processor's carry-less multiply, whichever of the three it
@@ -95,7 +74,7 @@ fn choice() -> Option<Choice> {
 /// on it are safe; which backend answers is carried in the value, so
 /// there is no arm for "none".
 #[derive(Clone, Copy)]
-pub(crate) struct Multiply(Choice);
+pub(crate) struct Multiply(Kernel);
 
 /// The multiply, where the processor has one. Asked once.
 pub(crate) fn probe() -> Option<Multiply> {
@@ -106,18 +85,18 @@ impl Multiply {
     /// How many blocks the group multiply takes at once.
     pub(crate) fn group(self) -> usize {
         match self.0 {
-            Choice::Zvkg => zvkg::GROUP,
-            Choice::Zvbc => zvbc::GROUP,
-            Choice::Zbc => zbc::GROUP,
+            Kernel::Zvkg => zvkg::GROUP,
+            Kernel::Zvbc => zvbc::GROUP,
+            Kernel::Zbc => zbc::GROUP,
         }
     }
 
     /// Prepares the subkey for [`Multiply::multiply`].
     pub(crate) fn prepare(self, h: &[u64; 2]) -> [u64; 2] {
         match self.0 {
-            Choice::Zvkg => zvkg::prepare(h),
-            Choice::Zvbc => zvbc::prepare(h),
-            Choice::Zbc => zbc::prepare(h),
+            Kernel::Zvkg => zvkg::prepare(h),
+            Kernel::Zvbc => zvbc::prepare(h),
+            Kernel::Zbc => zbc::prepare(h),
         }
     }
 
@@ -127,9 +106,9 @@ impl Multiply {
         // instructions of the backend it names.
         unsafe {
             match self.0 {
-                Choice::Zvkg => zvkg::multiply(value, h),
-                Choice::Zvbc => zvbc::multiply(value, h),
-                Choice::Zbc => zbc::multiply(value, h),
+                Kernel::Zvkg => zvkg::multiply(value, h),
+                Kernel::Zvbc => zvbc::multiply(value, h),
+                Kernel::Zbc => zbc::multiply(value, h),
             }
         }
     }
@@ -152,23 +131,12 @@ impl Multiply {
         // SAFETY: as for `multiply`, and the length was just checked.
         unsafe {
             match self.0 {
-                Choice::Zvkg => zvkg::multiply_group(value, powers, blocks),
-                Choice::Zvbc => zvbc::multiply_group(value, powers, blocks),
-                Choice::Zbc => zbc::multiply_group(value, powers, blocks),
+                Kernel::Zvkg => zvkg::multiply_group(value, powers, blocks),
+                Kernel::Zvbc => zvbc::multiply_group(value, powers, blocks),
+                Kernel::Zbc => zbc::multiply_group(value, powers, blocks),
             }
         }
     }
-}
-
-/// Whether the one-instruction multiply is the one this processor
-/// would use.
-///
-/// GCM's own loop is written around it: it is the only one of the
-/// three that fits in a register beside the cipher's round keys, so a
-/// processor with one of the others runs GCM as the portable mode over
-/// its own accelerated hash instead.
-pub(crate) fn has_vector_ghash() -> bool {
-    choice() == Some(Choice::Zvkg)
 }
 
 /// Finishes a field multiplication from its three Karatsuba pieces,
@@ -233,7 +201,7 @@ mod tests {
     /// pick.
     struct Backend {
         name: &'static str,
-        choice: Choice,
+        choice: Kernel,
         group: usize,
         prepare: fn(&[u64; 2]) -> [u64; 2],
         multiply: unsafe fn(&mut [u64; 2], &[u64; 2]),
@@ -243,7 +211,7 @@ mod tests {
     const BACKENDS: [Backend; 3] = [
         Backend {
             name: "zvkg",
-            choice: Choice::Zvkg,
+            choice: Kernel::Zvkg,
             group: zvkg::GROUP,
             prepare: zvkg::prepare,
             multiply: zvkg::multiply,
@@ -251,7 +219,7 @@ mod tests {
         },
         Backend {
             name: "zvbc",
-            choice: Choice::Zvbc,
+            choice: Kernel::Zvbc,
             group: zvbc::GROUP,
             prepare: zvbc::prepare,
             multiply: zvbc::multiply,
@@ -259,7 +227,7 @@ mod tests {
         },
         Backend {
             name: "zbc",
-            choice: Choice::Zbc,
+            choice: Kernel::Zbc,
             group: zbc::GROUP,
             prepare: zbc::prepare,
             multiply: zbc::multiply,
@@ -269,9 +237,8 @@ mod tests {
 
     /// Whether this processor has `choice`, which is what decides
     /// whether a test can run that backend's instructions at all.
-    fn here(choice: Choice) -> bool {
-        let ext = extensions();
-        present(choice, ext, vector_bytes(ext))
+    fn here(choice: Kernel) -> bool {
+        features::allows(KERNELS, choice)
     }
 
     /// The portable multiply is the reference; every backend has to
@@ -351,25 +318,25 @@ mod tests {
 
         // The vector profiles that carry a multiply, and the ones
         // that carry none.
-        assert_eq!(best_of(profile::ZVKNG, 16), Some(Choice::Zvkg));
-        assert_eq!(best_of(profile::ZVKNC, 16), Some(Choice::Zvbc));
+        assert_eq!(best_of(profile::ZVKNG, 16), Some(Kernel::Zvkg));
+        assert_eq!(best_of(profile::ZVKNC, 16), Some(Kernel::Zvbc));
         assert_eq!(best_of(profile::ZVKN, 16), None);
         assert_eq!(best_of(profile::RVA23, 16), None);
 
         // Zkn has no vector unit and Zbkc with it, which is the whole
         // reason the scalar backend exists.
-        assert_eq!(best_of(profile::ZKN, 0), Some(Choice::Zbc));
+        assert_eq!(best_of(profile::ZKN, 0), Some(Kernel::Zbc));
 
         // Zvkg wins wherever it is, whatever else is there.
         assert_eq!(
             best_of(profile::ZVKNG | profile::ZVKNC | profile::ZKN, 16),
-            Some(Choice::Zvkg)
+            Some(Kernel::Zvkg)
         );
         // The scalar multiply is taken over nothing, even beside a
         // vector unit that cannot help.
         assert_eq!(
             best_of(profile::RVA23 | profile::ZKN, 16),
-            Some(Choice::Zbc)
+            Some(Kernel::Zbc)
         );
 
         // Registers too narrow for a 128-bit element group put the
@@ -388,8 +355,8 @@ mod tests {
             Some(chosen) => {
                 assert!(here(chosen));
                 let fast = probe().expect("a multiply");
-                let at = CHOICES.iter().position(|&c| c == chosen).unwrap();
-                assert_eq!(fast.group(), BACKENDS[at].group);
+                let at = BACKENDS.iter().position(|b| b.choice == chosen);
+                assert_eq!(fast.group(), BACKENDS[at.unwrap()].group);
                 // Asking twice must give the same answer, now that
                 // the first call has cached it.
                 assert_eq!(choice(), Some(chosen));

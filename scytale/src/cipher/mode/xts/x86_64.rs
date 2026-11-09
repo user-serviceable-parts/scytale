@@ -32,11 +32,9 @@
 #![allow(unsafe_code)]
 
 use crate::cipher::BlockCipher;
-use crate::cipher::aes::x86_64::{
-    KeysEitherWay as Keys, has_aesni_avx, keys_either_way,
-};
-use crate::implementation::Implementation;
-use crate::probe::Probe;
+use crate::cipher::aes::x86_64::KeysEitherWay as Keys;
+pub(super) use crate::cipher::aes::x86_64::keys_either_way;
+use crate::kernel::Kernel;
 
 /// The block these loops work in.
 const BLOCK: usize = 16;
@@ -93,13 +91,24 @@ impl<C> Clone for Engine<C> {
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
-    /// The engine `implementation` names, or `None` where this
-    /// processor lacks its instructions or `C` is not a cipher this is
-    /// written for.
-    pub(crate) fn of(implementation: Implementation) -> Option<Self> {
-        let wide = match implementation {
-            Implementation::Vaes if has_vaes() => true,
-            Implementation::Aesni if has_aesni_avx() => false,
+    /// Which kernel this engine runs.
+    #[cfg(test)]
+    pub(crate) fn kernel(&self) -> Kernel {
+        if self.wide {
+            Kernel::Vaes
+        } else {
+            Kernel::Aesni
+        }
+    }
+
+    /// The engine `kernel` names, or `None` where it is not one of
+    /// this file's or `C` is not a cipher it is written for. That the
+    /// processor has the instructions is settled by whoever chose the
+    /// kernel, from its row in the mode's list.
+    pub(crate) fn of(kernel: Kernel) -> Option<Self> {
+        let wide = match kernel {
+            Kernel::Vaes => true,
+            Kernel::Aesni => false,
             _ => return None,
         };
         Some(Engine {
@@ -194,38 +203,6 @@ type Body = unsafe fn(*const u32, usize, *const u8, *mut u8);
 struct Bodies {
     wide: Body,
     narrow: [Body; GROUP],
-}
-
-/// Whether the processor and operating system support VAES on 256-bit
-/// registers.
-fn has_vaes() -> bool {
-    PROBED.yes(ask_vaes)
-}
-
-/// Asked once; see [`crate::probe`].
-static PROBED: Probe = Probe::new();
-
-fn ask_vaes() -> bool {
-    use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
-    // The wider loop finishes with the narrower one, and the cipher
-    // keeps a schedule these can read only where it took the AES
-    // instructions itself. A machine reporting VAES without AES-NI,
-    // which a hypervisor's mask can produce, has neither.
-    if !has_aesni_avx() {
-        return false;
-    }
-    let leaf1 = __cpuid(1);
-    let wanted = (1 << 27) | (1 << 28);
-    if leaf1.ecx & wanted != wanted {
-        return false;
-    }
-    let leaf7 = __cpuid_count(7, 0);
-    if leaf7.ecx & (1 << 9) == 0 || leaf7.ebx & (1 << 5) == 0 {
-        return false;
-    }
-    // SAFETY: OSXSAVE was just confirmed, so XGETBV is available.
-    let xcr0 = unsafe { _xgetbv(0) };
-    xcr0 & 0b110 == 0b110
 }
 
 /// Defines one body: the listed registers, loaded from the listed

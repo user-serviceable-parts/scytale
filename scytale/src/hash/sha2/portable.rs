@@ -17,8 +17,8 @@ use super::engine::{Engine32, Engine64};
 #[cfg(test)]
 use super::variant;
 
-// Named for the vector suites and the benchmark, which drive each
-// engine in turn; the dispatching types reach it directly.
+// Named for the vector suites, which drive each engine in turn; the
+// dispatching types reach it directly.
 /// SHA-224, portably.
 #[cfg(test)]
 pub type Sha224 = Engine32<Compress, variant::Sha224>;

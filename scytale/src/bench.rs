@@ -48,20 +48,26 @@
 //! together, and the run fails when any figure is worse by that much,
 //! so a check before a push has a yes or no.
 //!
-//! Every implementation gets one section, named for the instructions
-//! it runs on, and nothing is measured twice. A mode written out for
-//! those instructions is measured as itself; a mode with nothing
-//! written for them appears only where the portable construction over
-//! that cipher is what runs. The SHA-2, SHA-3 and ChaCha20
-//! implementations follow in sections of their own. What chooses
-//! inside itself and cannot be named from out here -- SHA-1, the
-//! generator, Poly1305 and the AEAD over ChaCha20 -- is under
-//! `dispatching`. The operation groups are named for the module they
-//! come from: `kdf`, `kex`, `sig`, `sig-pq`, `kem`, `pke` and `fpe`.
+//! Everything is built from the public types, and what chooses the
+//! code under them is the feature set in force, as it is for any
+//! caller. The throughput rows are measured once per feature profile
+//! the types publish (see [`crate::features`]), each set in force
+//! while its values are built and measured, since some choose their
+//! code per call and not once when built, and the section named for
+//! it. The first section is the set the processor reports, so it is
+//! what a caller on this machine gets; the same set with `isolated`
+//! follows, then each published profile, then `none`, the empty set,
+//! which is the portable code throughout. A row appears under a later
+//! profile only when that profile moves it onto code no earlier
+//! section measured, so nothing is measured twice and every
+//! combination a caller can reach is measured once. BLAKE2b, with
+//! nothing to choose, appears once. The operation groups are measured
+//! under the reported set alone and named for the module they come
+//! from: `kdf`, `kex`, `sig`, `sig-pq`, `kem`, `pke` and `fpe`.
 //!
 //! ```text
 //! scripts/bench                    # everything
-//! scripts/bench gcm aesni          # rows matching both
+//! scripts/bench gcm none           # rows matching both
 //! scripts/bench sha                # the hashes only
 //! scripts/bench sig                # signatures, both kinds
 //! scripts/bench --seconds 0.25     # a quicker sweep
@@ -109,29 +115,26 @@ use serde_json::{Value, json};
 
 use crate::Key;
 use crate::aead::{Aead, Ccm, ChaCha20Poly1305, Gcm, GcmSiv, Xpn};
+use crate::cipher::aes::{Aes128, Aes256};
 use crate::cipher::chacha20;
 use crate::cipher::mode::{Cbc, Cfb1, Cfb8, Cfb128, Ctr, Kw, Kwp, Ofb, Xts};
 use crate::cipher::mode::{Ff1, Ff3_1};
 use crate::cipher::{BlockCipher, aes};
-use crate::implementation::Implementation;
 #[allow(unused_imports)]
 use std::{
     boxed::Box, eprintln, format, print, println, string::String,
     string::ToString, vec, vec::Vec,
 };
 
-/// The portable AES implementations at a key width; their paths
-/// alone are too long.
-type Bitsliced<const K: usize> = aes::portable::bitsliced::Aes<K>;
-type Ttable<const K: usize> = aes::portable::ttable::Aes<K>;
-use crate::BlockType;
 use crate::Error;
 use crate::Random;
+use crate::features::{self, Dispatcher, Feature, Features};
+use crate::hash::blake2::{Blake2b256, Blake2b512};
 use crate::hash::sha1::Sha1;
 use crate::hash::sha3::TupleHash128;
 use crate::hash::{Hash, Xof, XofReader};
 use crate::hash::{sha2, sha3};
-use crate::kdf::{hkdf, one_step, pbkdf2, sp800_108, tls12, x963};
+use crate::kdf::{argon2, hkdf, one_step, pbkdf2, sp800_108, tls12, x963};
 use crate::kex::{ecdh, x25519};
 use crate::mac::Mac;
 use crate::mac::cmac::Cmac;
@@ -339,8 +342,8 @@ impl Options {
     }
 
     /// Whether a row belongs in this run. Every filter word must
-    /// appear somewhere in the implementation or algorithm name, so
-    /// `gcm aesni` narrows to one implementation's GCM rows. A word
+    /// appear somewhere in the section or row name, so `gcm none`
+    /// narrows to the GCM rows of the portable code. A word
     /// may offer alternatives separated by commas, so `ctr,ecb-enc`
     /// keeps rows matching either.
     ///
@@ -348,8 +351,8 @@ impl Options {
     /// anything when they were measured in the same run, since the
     /// clock and which core the thread lands on both move between
     /// runs, and a conjunction alone cannot ask for two rows.
-    fn wants(&self, implementation: &str, algorithm: &str) -> bool {
-        let name = format!("{implementation} {algorithm}");
+    fn wants(&self, section: &str, algorithm: &str) -> bool {
+        let name = format!("{section} {algorithm}");
         self.filters
             .iter()
             .all(|filter| filter.split(',').any(|word| name.contains(word)))
@@ -367,9 +370,9 @@ usage: scripts/bench [options] [filter...]
   --self-test   check the harness instead of benchmarking
   --help        this text
 
-A filter is a bare word; a row runs when its implementation and
-algorithm names together contain every filter given. Commas inside a
-word offer alternatives, so `aesni ctr,ecb-enc` keeps both of those
+A filter is a bare word; a row runs when its profile and row names
+together contain every filter given. Commas inside a word offer
+alternatives, so `none ctr,ecb-enc` keeps both of those
 rows, measured in the one run and so comparable.
 ";
 
@@ -397,8 +400,8 @@ impl Run {
     }
 }
 
-/// Runs every implementation the processor supports: measures every
-/// section the filters allow, and says whether any row ran.
+/// Measures every section the filters allow, and says whether any
+/// row ran.
 fn report(run: &mut Run) -> bool {
     println!(
         "Throughput by buffer size in bytes: cycles a byte (cpb) and \
@@ -417,145 +420,26 @@ fn report(run: &mut Run) -> bool {
         );
     }
 
-    // One section per implementation, named for the instructions it
-    // runs on. A section exists only on the architecture that has
-    // them, is skipped when the processor says no, and leaves out any
-    // row whose suite has nothing written for those instructions.
+    // One set of sections per feature profile, the set in force while
+    // their values are built and measured, and named for it. The
+    // first is the set the processor reports, which is what a caller
+    // gets; each later one measures only the rows it moves onto other
+    // code.
     let mut ran = false;
-    #[cfg(target_arch = "x86_64")]
-    {
-        use crate::cipher::aes::x86_64;
-        ran |= section::<x86_64::vaes::Aes<16>, x86_64::vaes::Aes<32>>(
-            "vaes",
-            Implementation::Vaes,
-            run,
-        );
-        ran |= section::<x86_64::aesni::Aes<16>, x86_64::aesni::Aes<32>>(
-            "aesni",
-            Implementation::Aesni,
-            run,
-        );
+    let mut seen = Vec::new();
+    for profile in profiles() {
+        let mut under = Under {
+            profile,
+            name: profile.to_string(),
+            seen: &mut seen,
+        };
+        ran |= aes_section(&mut under, run);
+        ran |= hash_section(&mut under, run);
+        ran |= chacha_section(&mut under, run);
+        ran |= sha3_section(&mut under, run);
+        ran |= blake2_section(&mut under, run);
+        ran |= other_section(&mut under, run);
     }
-    #[cfg(target_arch = "aarch64")]
-    {
-        use crate::cipher::aes::aarch64;
-        ran |= section::<aarch64::armv8::Aes<16>, aarch64::armv8::Aes<32>>(
-            "armv8",
-            Implementation::Armv8,
-            run,
-        );
-    }
-    #[cfg(target_arch = "riscv64")]
-    {
-        use crate::cipher::aes::riscv64;
-        ran |= section::<riscv64::zvkned::Aes<16>, riscv64::zvkned::Aes<32>>(
-            "zvkned",
-            Implementation::Zvkned,
-            run,
-        );
-        // The scalar cipher has no mode written against it, so its
-        // rows are the portable constructions over it.
-        ran |= section::<riscv64::zkn::Aes<16>, riscv64::zkn::Aes<32>>(
-            "zkn",
-            Implementation::Portable,
-            run,
-        );
-    }
-    ran |= section::<Bitsliced<16>, Bitsliced<32>>(
-        "bitsliced",
-        Implementation::Portable,
-        run,
-    );
-    ran |= section::<Ttable<16>, Ttable<32>>(
-        "ttable",
-        Implementation::Portable,
-        run,
-    );
-
-    // The hashes, likewise. SHA-224 and SHA-384 cost the same as
-    // SHA-256 and SHA-512 and are not measured separately.
-    #[cfg(target_arch = "x86_64")]
-    {
-        ran |= hash_section(
-            "shani",
-            run,
-            sha2::x86_64::Sha256::try_new,
-            sha2::portable::Sha512::try_new,
-        );
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        ran |= hash_section(
-            "armv8",
-            run,
-            sha2::aarch64::Sha256::try_new,
-            sha2::aarch64::Sha512::try_new,
-        );
-    }
-    #[cfg(target_arch = "riscv64")]
-    {
-        ran |= hash_section(
-            "zvknh",
-            run,
-            sha2::riscv64::zvknh::Sha256::try_new,
-            sha2::riscv64::zvknh::Sha512::try_new,
-        );
-        ran |= hash_section(
-            "zknh",
-            run,
-            sha2::riscv64::zknh::Sha256::try_new,
-            sha2::riscv64::zknh::Sha512::try_new,
-        );
-    }
-    ran |= hash_section(
-        "portable",
-        run,
-        sha2::portable::Sha256::try_new,
-        sha2::portable::Sha512::try_new,
-    );
-
-    // ChaCha20, one section per way of computing the keystream.
-    #[cfg(target_arch = "x86_64")]
-    {
-        ran |= chacha_section::<chacha20::x86_64::ChaCha20>("avx2", run);
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        ran |= chacha_section::<chacha20::aarch64::ChaCha20>("neon", run);
-    }
-    #[cfg(target_arch = "riscv64")]
-    {
-        ran |= chacha_section::<chacha20::riscv64::zvkb::ChaCha20>("zvkb", run);
-        ran |= chacha_section::<chacha20::riscv64::zbb::ChaCha20>("zbb", run);
-    }
-    ran |= chacha_section::<chacha20::portable::ChaCha20>("portable", run);
-
-    // SHA-3: one permutation under every function, so one hardware
-    // section, and only AArch64 has the instructions.
-    #[cfg(target_arch = "aarch64")]
-    {
-        ran |= sha3_section(
-            "armv8",
-            run,
-            (
-                sha3::aarch64::Sha3_256::try_new,
-                sha3::aarch64::Sha3_512::try_new,
-                sha3::aarch64::Shake128::try_new,
-                sha3::aarch64::Shake256::try_new,
-            ),
-        );
-    }
-    ran |= sha3_section(
-        "portable",
-        run,
-        (
-            sha3::portable::Sha3_256::try_new,
-            sha3::portable::Sha3_512::try_new,
-            sha3::portable::Shake128::try_new,
-            sha3::portable::Shake256::try_new,
-        ),
-    );
-    ran |= single_section(run);
 
     ran |= kdf_ops(run);
     ran |= kex_ops(run);
@@ -581,8 +465,10 @@ fn every_row_name() -> impl Iterator<Item = &'static str> {
     ALGORITHMS
         .iter()
         .chain(HASHES.iter())
+        .chain(SHA3.iter())
+        .chain(BLAKE2.iter())
         .chain(CHACHA.iter())
-        .chain(DISPATCHING.iter())
+        .chain(OTHER.iter())
         .chain(KDF_JOBS.iter())
         .chain(KEX_JOBS.iter())
         .chain(SIG_JOBS.iter())
@@ -608,107 +494,239 @@ fn explain(filters: &[String]) {
         if matched.is_empty() {
             eprintln!(
                 "  {filter:<16} no row name holds this; \
-                 an implementation, perhaps?"
+                 a feature, perhaps?"
             );
         } else {
             eprintln!("  {filter:<16} {}", matched.join(" "));
         }
     }
     eprintln!(
-        "A row runs when its implementation and algorithm names \
+        "A row runs when its profile and row names \
          together hold\nevery word given. Commas inside a word offer \
          alternatives; see --help."
     );
 }
 
-/// Measures one implementation, returning whether it ran anything.
-///
-/// An implementation the processor cannot run is left out rather than
-/// reported as nothing, and so is one every filter rejected.
-/// `name` is the AES implementation the section is headed with, and
-/// `implementation` is what the modes in it are built on: the engine
-/// written for the same instructions where there is one, and the
-/// portable construction over this cipher where there is not. A mode
-/// with nothing for either is left out of the section rather than
-/// measured twice under two names.
-fn section<A, B>(
-    name: &str,
-    implementation: Implementation,
-    run: &mut Run,
-) -> bool
-where
-    A: BlockCipher<Block = [u8; 16], Key = Key<[u8; 16]>>,
-    B: BlockCipher<Block = [u8; 16], Key = Key<[u8; 32]>>,
-{
-    let wanted: Vec<&'static str> = ALGORITHMS
+/// A dispatching type's published profiles, best first.
+type Profiles = fn() -> &'static [Features];
+
+/// Every dispatching type a throughput row is built on.
+const TYPES: &[Profiles] = &[
+    <Aes128 as Dispatcher>::profiles,
+    <Aes256 as Dispatcher>::profiles,
+    <Cbc<Aes128> as Dispatcher>::profiles,
+    <Ctr<Aes128> as Dispatcher>::profiles,
+    <Ctr<Aes256> as Dispatcher>::profiles,
+    <Xts<Aes128> as Dispatcher>::profiles,
+    <Gcm<Aes128> as Dispatcher>::profiles,
+    <Gcm<Aes256> as Dispatcher>::profiles,
+    GcmSiv::<Aes128>::profiles,
+    <Ccm<Aes128> as Dispatcher>::profiles,
+    <Xpn<Aes128> as Dispatcher>::profiles,
+    <Sha1 as Dispatcher>::profiles,
+    <sha2::Sha256 as Dispatcher>::profiles,
+    <sha2::Sha512 as Dispatcher>::profiles,
+    <sha3::Sha3_256 as Dispatcher>::profiles,
+    <chacha20::ChaCha20 as Dispatcher>::profiles,
+    <Poly1305 as Dispatcher>::profiles,
+    <ChaCha20Poly1305 as Dispatcher>::profiles,
+];
+
+const AES128: &[Profiles] = &[<Aes128 as Dispatcher>::profiles];
+const AES256: &[Profiles] = &[<Aes256 as Dispatcher>::profiles];
+const SHA256: &[Profiles] = &[<sha2::Sha256 as Dispatcher>::profiles];
+const SHA512: &[Profiles] = &[<sha2::Sha512 as Dispatcher>::profiles];
+const SHA3_256: &[Profiles] = &[<sha3::Sha3_256 as Dispatcher>::profiles];
+
+/// The dispatching types whose choices decide what code runs `row`.
+/// A row on none, BLAKE2b's, is measured once.
+fn deciders(row: &str) -> &'static [Profiles] {
+    match row {
+        "aes-128-cbc-enc" | "aes-128-cbc-dec" => &[
+            <Aes128 as Dispatcher>::profiles,
+            <Cbc<Aes128> as Dispatcher>::profiles,
+        ],
+        "aes-128-ctr" => &[
+            <Aes128 as Dispatcher>::profiles,
+            <Ctr<Aes128> as Dispatcher>::profiles,
+        ],
+        "aes-256-ctr" | "ctr-drbg" => &[
+            <Aes256 as Dispatcher>::profiles,
+            <Ctr<Aes256> as Dispatcher>::profiles,
+        ],
+        "aes-128-gmac" | "aes-128-gcm-enc" | "aes-128-gcm-dec" => &[
+            <Aes128 as Dispatcher>::profiles,
+            <Gcm<Aes128> as Dispatcher>::profiles,
+        ],
+        "aes-256-gcm-enc" => &[
+            <Aes256 as Dispatcher>::profiles,
+            <Gcm<Aes256> as Dispatcher>::profiles,
+        ],
+        "aes-128-gcm-siv-enc" => {
+            &[<Aes128 as Dispatcher>::profiles, GcmSiv::<Aes128>::profiles]
+        }
+        "aes-128-xpn-enc" => &[
+            <Aes128 as Dispatcher>::profiles,
+            <Xpn<Aes128> as Dispatcher>::profiles,
+        ],
+        "aes-128-ccm-enc" => &[
+            <Aes128 as Dispatcher>::profiles,
+            <Ccm<Aes128> as Dispatcher>::profiles,
+        ],
+        "aes-128-xts-enc" | "aes-128-xts-dec" => &[
+            <Aes128 as Dispatcher>::profiles,
+            <Xts<Aes128> as Dispatcher>::profiles,
+        ],
+        "aes-256-ecb-enc" => AES256,
+        _ if row.starts_with("aes-128-") => AES128,
+        "sha-256" | "hmac-sha-256" | "hash-drbg-sha-256"
+        | "hmac-drbg-sha-256" => SHA256,
+        "sha-512" | "hmac-sha-512" => SHA512,
+        // One permutation under every SHA-3 function, KMAC and
+        // TupleHash included.
+        "sha3-256" | "sha3-512" | "shake128" | "shake256" | "kmac128"
+        | "tuplehash128" => SHA3_256,
+        "sha-1" => &[<Sha1 as Dispatcher>::profiles],
+        "chacha20" => &[<chacha20::ChaCha20 as Dispatcher>::profiles],
+        "poly1305" => &[<Poly1305 as Dispatcher>::profiles],
+        "chacha20-poly1305-enc" | "chacha20-poly1305-dec" => {
+            &[<ChaCha20Poly1305 as Dispatcher>::profiles]
+        }
+        _ => &[],
+    }
+}
+
+/// What `row` runs under `profile`: for each type deciding it, the
+/// index of the first published profile the set meets, which is how
+/// the library chooses.
+fn choice(row: &str, profile: Features) -> Vec<usize> {
+    deciders(row)
         .iter()
-        .copied()
-        .filter(|row| run.options.wants(name, row))
-        .collect();
+        .map(|profiles| {
+            profiles()
+                .iter()
+                .position(|p| p.is_subset(profile))
+                .unwrap_or(usize::MAX)
+        })
+        .collect()
+}
+
+/// The profiles the throughput rows are measured under, in order: the
+/// set the processor reports, the same with the caches declared
+/// private, every profile the types publish, and the empty set. Those
+/// this processor cannot run are left out.
+fn profiles() -> Vec<Features> {
+    let detected = features::detected();
+    let mut out = vec![detected, detected.with(Feature::Isolated)];
+    for list in TYPES {
+        for &profile in list() {
+            if !out.contains(&profile) {
+                out.push(profile);
+            }
+        }
+    }
+    // Every list ends in the empty set; it goes last.
+    out.retain(|p| !p.is_empty());
+    out.push(Features::new());
+    out.retain(|&p| features::set(p).is_ok());
+    features::reset();
+    out
+}
+
+/// One profile's sections: the set in force while their values are
+/// built and measured, the name they are printed under, and every
+/// row measured so far with what it ran, so that no code is measured
+/// twice.
+struct Under<'a> {
+    profile: Features,
+    name: String,
+    seen: &'a mut Vec<(&'static str, Vec<usize>)>,
+}
+
+impl Under<'_> {
+    /// Of `rows`, those the filters want here that run code not
+    /// measured yet.
+    fn wanted(
+        &self,
+        options: &Options,
+        rows: &[&'static str],
+    ) -> Vec<&'static str> {
+        rows.iter()
+            .copied()
+            .filter(|row| options.wants(&self.name, row))
+            .filter(|row| {
+                !self.seen.contains(&(*row, choice(row, self.profile)))
+            })
+            .collect()
+    }
+
+    /// Builds with this profile in force, and puts the set back.
+    fn build<T>(&self, f: impl FnOnce() -> T) -> Option<T> {
+        features::set(self.profile).ok()?;
+        let built = f();
+        features::reset();
+        Some(built)
+    }
+
+    /// Measures `tasks` under this name, with this profile in force,
+    /// and records what they ran. In force here as well as in
+    /// [`Under::build`]: a CTR_DRBG keys a new AES per request, and
+    /// GMAC's GHASH chooses per call, so both would otherwise run the
+    /// detected code under every profile.
+    fn measure(&mut self, run: &mut Run, tasks: &mut [Task<'_>]) -> bool {
+        if tasks.is_empty() || features::set(self.profile).is_err() {
+            return false;
+        }
+        for (row, _) in tasks.iter() {
+            self.seen.push((row, choice(row, self.profile)));
+        }
+        throughput_table(run, &self.name, tasks);
+        features::reset();
+        true
+    }
+}
+
+/// Measures the AES rows, returning whether it ran anything.
+fn aes_section(under: &mut Under<'_>, run: &mut Run) -> bool {
+    let wanted = under.wanted(&run.options, &ALGORITHMS);
     if wanted.is_empty() {
         return false;
     }
-
-    let mut keys = match Keys::<A, B>::try_new(implementation) {
-        Ok(keys) => keys,
-        // No such instructions here.
-        Err(Error::NotSupported) => return false,
-        Err(e) => {
-            eprintln!("speed: {name}: {e}");
+    let mut keys = match under.build(Keys::<Aes128, Aes256>::try_new) {
+        Some(Ok(keys)) => keys,
+        Some(Err(e)) => {
+            eprintln!("speed: {}: {e}", under.name);
             return false;
         }
+        None => return false,
     };
     let mut tasks = keys.tasks();
     tasks.retain(|(row, _)| wanted.contains(row));
-    if tasks.is_empty() {
-        return false;
-    }
-
-    throughput_table(run, name, &mut tasks);
-    true
+    under.measure(run, &mut tasks)
 }
 
 /// The hash rows: each family, and HMAC over it.
 const HASHES: [&str; 4] =
     ["sha-256", "sha-512", "hmac-sha-256", "hmac-sha-512"];
 
-/// Measures one pair of hash implementations, one per family,
-/// returning whether it ran anything. A family the processor cannot
-/// run is left out, as with the ciphers; on x86-64 the SHA-NI
-/// section pairs its SHA-256 with the portable SHA-512, there being
-/// no instruction for the latter.
-fn hash_section<S256, S512>(
-    implementation: &str,
-    run: &mut Run,
-    start256: fn() -> Result<S256, Error>,
-    start512: fn() -> Result<S512, Error>,
-) -> bool
-where
-    S256: Hash<Output = [u8; 32]> + Clone + BlockType,
-    S512: Hash<Output = [u8; 64]> + Clone + BlockType,
-{
-    let wanted: Vec<&'static str> = HASHES
-        .iter()
-        .copied()
-        .filter(|name| run.options.wants(implementation, name))
-        .collect();
+/// Measures SHA-256 and SHA-512 and HMAC over each, returning
+/// whether it ran anything.
+fn hash_section(under: &mut Under<'_>, run: &mut Run) -> bool {
+    let wanted = under.wanted(&run.options, &HASHES);
     if wanted.is_empty() {
         return false;
     }
-    let (mut sha256, mut sha512) = match (start256(), start512()) {
-        (Ok(a), Ok(b)) => (a, b),
-        (Err(Error::NotSupported), _) | (_, Err(Error::NotSupported)) => {
-            return false;
-        }
-        (Err(e), _) | (_, Err(e)) => {
-            eprintln!("speed: {implementation}: {e}");
-            return false;
-        }
+    let Some((mut sha256, mut sha512, mut hmac256, mut hmac512)) =
+        under.build(|| {
+            let sha256 = sha2::Sha256::new();
+            let sha512 = sha2::Sha512::new();
+            let hmac256 = Hmac::with(sha256.clone(), &KEY128);
+            let hmac512 = Hmac::with(sha512.clone(), &KEY128);
+            (sha256, sha512, hmac256, hmac512)
+        })
+    else {
+        return false;
     };
-    // Keyed from a fresh hash of the same implementation, so the
-    // HMAC rows measure the backend this section names.
-    let mut hmac256 = Hmac::with(sha256.clone(), &KEY128);
-    let mut hmac512 = Hmac::with(sha512.clone(), &KEY128);
     let mut tasks: Vec<Task<'_>> = vec![
         (
             "sha-256",
@@ -744,80 +762,25 @@ where
         ),
     ];
     tasks.retain(|(name, _)| wanted.contains(name));
-
-    throughput_table(run, implementation, &mut tasks);
-    true
+    under.measure(run, &mut tasks)
 }
 
 /// The SHA-3 rows: two digests and one extendable-output function,
 /// the last squeezing 32 bytes.
 /// The ChaCha20 row. What is built on it dispatches inside itself,
-/// so those rows are in [`DISPATCHING`] instead.
+/// so those rows are in [`OTHER`] instead.
 const CHACHA: [&str; 1] = ["chacha20"];
 
-/// What the ChaCha20 rows need of an implementation: the automatic
-/// type and the per-backend types have the same methods but no
-/// shared trait, since only the bench wants one.
-trait StreamCipher: Sized {
-    fn try_new(key: &Key<[u8; 32]>) -> Result<Self, Error>;
-    fn encrypt(
-        &self,
-        nonce: &[u8; 12],
-        counter: u32,
-        data: &mut [u8],
-    ) -> Result<(), Error>;
-}
-
-impl StreamCipher for chacha20::ChaCha20 {
-    fn try_new(key: &Key<[u8; 32]>) -> Result<Self, Error> {
-        Ok(chacha20::ChaCha20::new(key))
-    }
-    fn encrypt(
-        &self,
-        nonce: &[u8; 12],
-        counter: u32,
-        data: &mut [u8],
-    ) -> Result<(), Error> {
-        chacha20::ChaCha20::encrypt(self, nonce, counter, data)
-    }
-}
-
-impl<B: chacha20::Backend> StreamCipher for chacha20::Cipher<B> {
-    fn try_new(key: &Key<[u8; 32]>) -> Result<Self, Error> {
-        chacha20::Cipher::try_new(key)
-    }
-    fn encrypt(
-        &self,
-        nonce: &[u8; 12],
-        counter: u32,
-        data: &mut [u8],
-    ) -> Result<(), Error> {
-        chacha20::Cipher::encrypt(self, nonce, counter, data)
-    }
-}
-
-/// Measures one ChaCha20 implementation, with Poly1305 and the AEAD
-/// rows when `whole` says so; an implementation the processor cannot
-/// run is left out.
-fn chacha_section<C: StreamCipher>(
-    implementation: &str,
-    run: &mut Run,
-) -> bool {
-    let wanted: Vec<&'static str> = CHACHA
-        .iter()
-        .copied()
-        .filter(|name| run.options.wants(implementation, name))
-        .collect();
+/// Measures ChaCha20, returning whether it ran anything.
+fn chacha_section(under: &mut Under<'_>, run: &mut Run) -> bool {
+    let wanted = under.wanted(&run.options, &CHACHA);
     if wanted.is_empty() {
         return false;
     }
-    let cipher = match C::try_new(&Key::from(KEY256)) {
-        Ok(cipher) => cipher,
-        Err(Error::NotSupported) => return false,
-        Err(e) => {
-            eprintln!("speed: {implementation}: {e}");
-            return false;
-        }
+    let Some(cipher) =
+        under.build(|| chacha20::ChaCha20::new(&Key::from(KEY256)))
+    else {
+        return false;
     };
     let mut tasks: Vec<Task<'_>> = vec![(
         "chacha20",
@@ -826,54 +789,58 @@ fn chacha_section<C: StreamCipher>(
         }) as Operation<'_>,
     )];
     tasks.retain(|(name, _)| wanted.contains(name));
-
-    throughput_table(run, implementation, &mut tasks);
-    true
+    under.measure(run, &mut tasks)
 }
 
 const SHA3: [&str; 4] = ["sha3-256", "sha3-512", "shake128", "shake256"];
 
-/// Measures one implementation of SHA-3, returning whether it ran
-/// anything; an implementation the processor cannot run is left out.
-#[allow(clippy::type_complexity)]
-fn sha3_section<D256, D512, X128, X256>(
-    implementation: &str,
-    run: &mut Run,
-    starts: (
-        fn() -> Result<D256, Error>,
-        fn() -> Result<D512, Error>,
-        fn() -> Result<X128, Error>,
-        fn() -> Result<X256, Error>,
-    ),
-) -> bool
-where
-    D256: Hash<Output = [u8; 32]>,
-    D512: Hash<Output = [u8; 64]>,
-    X128: Xof,
-    X256: Xof,
-{
-    let wanted: Vec<&'static str> = SHA3
-        .iter()
-        .copied()
-        .filter(|name| run.options.wants(implementation, name))
-        .collect();
+/// The BLAKE2b rows: one implementation, so measured once.
+const BLAKE2: [&str; 2] = ["blake2b-256", "blake2b-512"];
+
+/// Measures BLAKE2b, returning whether it ran anything.
+fn blake2_section(under: &mut Under<'_>, run: &mut Run) -> bool {
+    let wanted = under.wanted(&run.options, &BLAKE2);
     if wanted.is_empty() {
         return false;
     }
-    let states = (starts.0(), starts.1(), starts.2(), starts.3());
-    let (mut d256, mut d512, mut x128, mut x256) = match states {
-        (Ok(a), Ok(b), Ok(c), Ok(d)) => (a, b, c, d),
-        (Err(Error::NotSupported), _, _, _)
-        | (_, Err(Error::NotSupported), _, _)
-        | (_, _, Err(Error::NotSupported), _)
-        | (_, _, _, Err(Error::NotSupported)) => return false,
-        (Err(e), _, _, _)
-        | (_, Err(e), _, _)
-        | (_, _, Err(e), _)
-        | (_, _, _, Err(e)) => {
-            eprintln!("speed: {implementation}: {e}");
-            return false;
-        }
+    let (mut b256, mut b512) = (Blake2b256::new(), Blake2b512::new());
+    let mut tasks: Vec<Task<'_>> = vec![
+        (
+            "blake2b-256",
+            Box::new(|d: &mut [u8]| {
+                b256.reset();
+                b256.update(d);
+                black_box(b256.finalize());
+            }) as Operation<'_>,
+        ),
+        (
+            "blake2b-512",
+            Box::new(|d: &mut [u8]| {
+                b512.reset();
+                b512.update(d);
+                black_box(b512.finalize());
+            }),
+        ),
+    ];
+    tasks.retain(|(name, _)| wanted.contains(name));
+    under.measure(run, &mut tasks)
+}
+
+/// Measures SHA-3 and SHAKE, returning whether it ran anything.
+fn sha3_section(under: &mut Under<'_>, run: &mut Run) -> bool {
+    let wanted = under.wanted(&run.options, &SHA3);
+    if wanted.is_empty() {
+        return false;
+    }
+    let Some((mut d256, mut d512, mut x128, mut x256)) = under.build(|| {
+        (
+            sha3::Sha3_256::new(),
+            sha3::Sha3_512::new(),
+            sha3::Shake128::new(),
+            sha3::Shake256::new(),
+        )
+    }) else {
+        return false;
     };
     let mut tasks: Vec<Task<'_>> = vec![
         (
@@ -914,16 +881,11 @@ where
         ),
     ];
     tasks.retain(|(name, _)| wanted.contains(name));
-
-    throughput_table(run, implementation, &mut tasks);
-    true
+    under.measure(run, &mut tasks)
 }
 
-/// The rows whose implementation is settled inside them and cannot
-/// be named from out here: SHA-1 picks its own, the generator builds
-/// its own cipher or hash, and Poly1305 and the AEAD over ChaCha20 each take
-/// the best the processor has without being asked.
-const DISPATCHING: [&str; 9] = [
+/// The rows that belong to no family above.
+const OTHER: [&str; 9] = [
     "sha-1",
     "ctr-drbg",
     "hash-drbg-sha-256",
@@ -936,37 +898,34 @@ const DISPATCHING: [&str; 9] = [
 ];
 
 /// Measures them, returning whether it ran anything.
-fn single_section(run: &mut Run) -> bool {
-    let wanted: Vec<&'static str> = DISPATCHING
-        .iter()
-        .copied()
-        .filter(|name| run.options.wants("dispatching", name))
-        .collect();
+fn other_section(under: &mut Under<'_>, run: &mut Run) -> bool {
+    let wanted = under.wanted(&run.options, &OTHER);
     if wanted.is_empty() {
         return false;
     }
-    let mut sha1 = Sha1::new();
-    // Seeded rather than drawn, so a run repeats and no entropy
-    // source is needed for a measurement.
-    let Ok(mut rng) = CtrDrbg::from_seed(&[0x5au8; 64]) else {
+    // The generators are seeded rather than drawn, so a run repeats
+    // and no entropy source is needed for a measurement.
+    let Some((generators, macs)) = under.build(|| {
+        let generators = (
+            CtrDrbg::from_seed(&[0x5au8; 64]),
+            HashDrbg::<sha2::Sha256, _>::from_seed(&[0x5au8; 64]),
+            HmacDrbg::<sha2::Sha256, _>::from_seed(&[0x5au8; 64]),
+        );
+        let macs = (
+            Sha1::new(),
+            Poly1305::new(&Key::from(KEY256)),
+            ChaCha20Poly1305::new(&Key::from(KEY256)),
+            Kmac128::new(&KEY256, b""),
+            TupleHash128::new(b""),
+        );
+        (generators, macs)
+    }) else {
         return false;
     };
-    let Ok(mut hash_rng) =
-        HashDrbg::<sha2::Sha256, _>::from_seed(&[0x5au8; 64])
-    else {
+    let (Ok(mut rng), Ok(mut hash_rng), Ok(mut hmac_rng)) = generators else {
         return false;
     };
-    let Ok(mut hmac_rng) =
-        HmacDrbg::<sha2::Sha256, _>::from_seed(&[0x5au8; 64])
-    else {
-        return false;
-    };
-    // Neither of these can fail to build: the key is the right width
-    // and the automatic ChaCha20 always exists.
-    let mut mac = Poly1305::new(&Key::from(KEY256));
-    let aead = ChaCha20Poly1305::new(&Key::from(KEY256));
-    let mut kmac = Kmac128::new(&KEY256, b"");
-    let mut tuple = TupleHash128::new(b"");
+    let (mut sha1, mut mac, aead, mut kmac, mut tuple) = macs;
     let mut tuple_out = [0u8; 32];
     let mut tags = [[0u8; 16]; 2];
     let (enc_tag, dec_tag) = tags.split_at_mut(1);
@@ -1043,9 +1002,7 @@ fn single_section(run: &mut Run) -> bool {
         ),
     ];
     tasks.retain(|(name, _)| wanted.contains(name));
-
-    throughput_table(run, "dispatching", &mut tasks);
-    true
+    under.measure(run, &mut tasks)
 }
 
 // Operations whose cost is the call rather than a rate over a
@@ -1189,7 +1146,8 @@ fn per_call(seconds: f64) -> String {
     }
 }
 
-const KDF_JOBS: [&str; 9] = [
+const KDF_JOBS: [&str; 10] = [
+    "argon2id-64mib",
     "hkdf-sha-256",
     "hkdf-sha-512",
     "pbkdf2-sha-256",
@@ -1203,13 +1161,37 @@ const KDF_JOBS: [&str; 9] = [
 
 /// Key derivation: one derivation of a 32-byte key, which is what a
 /// caller asks for. HKDF's cost is two hashes of a short input;
-/// PBKDF2's is its iteration count, and nothing else. The TLS 1.2
-/// PRF is measured making a master secret, 48 bytes from two randoms.
+/// PBKDF2's is its iteration count, and nothing else. Argon2id runs at
+/// RFC 9106's second recommended setting, 64 MiB and three passes, one
+/// lane. The TLS 1.2 PRF is measured making a master secret, 48 bytes
+/// from two randoms.
 fn kdf_ops(run: &mut Run) -> bool {
     if !any_wanted("kdf", &KDF_JOBS, &run.options) {
         return false;
     }
+    let params = argon2::Params {
+        passes: 3,
+        memory_kib: 64 * 1024,
+        lanes: 1,
+    };
+    let mut work = vec![argon2::Block::ZERO; params.memory_kib as usize];
     let jobs: Vec<Job<'_>> = vec![
+        (
+            "argon2id-64mib",
+            Box::new(move || {
+                let mut out = [0u8; 32];
+                let _ = argon2::argon2id(
+                    &KEY128,
+                    &KEY128,
+                    &[],
+                    &[],
+                    params,
+                    &mut work,
+                    &mut out,
+                );
+                black_box(out);
+            }) as Once<'_>,
+        ),
         (
             "hkdf-sha-256",
             Box::new(|| {
@@ -1221,7 +1203,7 @@ fn kdf_ops(run: &mut Run) -> bool {
                     &mut out,
                 );
                 black_box(out);
-            }) as Once<'_>,
+            }),
         ),
         (
             "hkdf-sha-512",
@@ -2093,8 +2075,7 @@ fn fpe_ops(run: &mut Run) -> bool {
 
 /// The rows, in the order they are printed. Kept beside the tasks
 /// they name so that a filter can be applied before any key is
-/// expanded, which is what lets an unsupported implementation be
-/// skipped silently.
+/// expanded.
 const ALGORITHMS: [&str; 23] = [
     "aes-128-ecb-enc",
     "aes-128-ecb-dec",
@@ -2121,7 +2102,7 @@ const ALGORITHMS: [&str; 23] = [
     "aes-128-cmac",
 ];
 
-/// Everything an implementation's rows are built from, held together
+/// Everything the AES rows are built from, held together
 /// so that the borrows in [`Keys::tasks`] all have one owner.
 struct Keys<
     A: BlockCipher<Block = [u8; 16], Key = Key<[u8; 16]>>,
@@ -2129,19 +2110,19 @@ struct Keys<
 > {
     ecb128: A,
     ecb256: B,
-    cbc: Option<Cbc<A>>,
+    cbc: Cbc<A>,
     cfb1: Cfb1<A>,
     cfb8: Cfb8<A>,
     cfb128: Cfb128<A>,
     ofb: Ofb<A>,
-    ctr: Option<Ctr<A>>,
-    ctr256: Option<Ctr<B>>,
-    gcm128: Option<Gcm<A>>,
-    gcm256: Option<Gcm<B>>,
-    siv: Option<GcmSiv<A>>,
-    xpn: Option<Xpn<A>>,
-    ccm: Option<Ccm<A>>,
-    xts: Option<Xts<A>>,
+    ctr: Ctr<A>,
+    ctr256: Ctr<B>,
+    gcm128: Gcm<A>,
+    gcm256: Gcm<B>,
+    siv: GcmSiv<A>,
+    xpn: Xpn<A>,
+    ccm: Ccm<A>,
+    xts: Xts<A>,
     kw: Kw<A>,
     kwp: Kwp<A>,
     cmac: Cmac<A>,
@@ -2185,36 +2166,30 @@ where
     A: BlockCipher<Block = [u8; 16], Key = Key<[u8; 16]>>,
     B: BlockCipher<Block = [u8; 16], Key = Key<[u8; 32]>>,
 {
-    /// The keys for one implementation.
-    ///
-    /// A mode written out for particular instructions is built on
-    /// those and no others, so that a row appears under the name of
-    /// the code that ran it. Where a mode has nothing written for
-    /// them it yields `None`, and its rows are left out of the
-    /// section rather than filled in with something else.
-    fn try_new(implementation: Implementation) -> Result<Self, Error> {
+    /// The keys, each mode built with `new`, as a caller builds it,
+    /// so that it takes the kernel the features in force allow.
+    fn try_new() -> Result<Self, Error> {
         let k128 = Key::from(KEY128);
         let k256 = Key::from(KEY256);
         Ok(Keys {
             ecb128: A::new(&k128),
             ecb256: B::new(&k256),
-            cbc: Cbc::with_implementation(&k128, implementation),
+            cbc: Cbc::new(&k128),
             cfb1: Cfb1::new(&k128),
             cfb8: Cfb8::new(&k128),
             cfb128: Cfb128::new(&k128),
             ofb: Ofb::new(&k128),
-            ctr: Ctr::with_implementation(&k128, implementation),
-            ctr256: Ctr::with_implementation(&k256, implementation),
-            gcm128: Gcm::with_implementation(&k128, implementation),
-            gcm256: Gcm::with_implementation(&k256, implementation),
-            siv: GcmSiv::with_implementation(&k128, implementation),
-            xpn: Xpn::with_implementation(&k128, implementation),
-            ccm: Ccm::with_implementation(&k128, implementation),
-            xts: Xts::with_implementation(
+            ctr: Ctr::new(&k128),
+            ctr256: Ctr::new(&k256),
+            gcm128: Gcm::new(&k128),
+            gcm256: Gcm::new(&k256),
+            siv: GcmSiv::new(&k128),
+            xpn: Xpn::new(&k128),
+            ccm: Ccm::new(&k128),
+            xts: Xts::try_new(
                 &Key::from(KEY_XTS_DATA),
                 &Key::from(KEY_XTS_TWEAK),
-                implementation,
-            ),
+            )?,
             kw: Kw::new(&k128),
             kwp: Kwp::new(&k128),
             cmac: Cmac::new(&k128),
@@ -2280,7 +2255,7 @@ where
                 ecb256.encrypt(blocks_of(d));
             }),
         ));
-        if let Some(cbc) = cbc {
+        {
             tasks.push((
                 "aes-128-cbc-enc",
                 Box::new(|d: &mut [u8]| {
@@ -2321,7 +2296,7 @@ where
                 ofb.encrypt(&IV, d);
             }),
         ));
-        if let Some(ctr) = ctr {
+        {
             tasks.push((
                 "aes-128-ctr",
                 Box::new(|d: &mut [u8]| {
@@ -2329,7 +2304,7 @@ where
                 }),
             ));
         }
-        if let Some(ctr256) = ctr256 {
+        {
             tasks.push((
                 "aes-256-ctr",
                 Box::new(|d: &mut [u8]| {
@@ -2337,7 +2312,7 @@ where
                 }),
             ));
         }
-        if let Some(gcm128) = gcm128 {
+        {
             // The buffer is the additional data and the message is
             // empty, which is GHASH and nothing else.
             tasks.push((
@@ -2363,7 +2338,7 @@ where
                 }),
             ));
         }
-        if let Some(gcm256) = gcm256 {
+        {
             tasks.push((
                 "aes-256-gcm-enc",
                 Box::new(|d: &mut [u8]| {
@@ -2371,7 +2346,7 @@ where
                 }),
             ));
         }
-        if let Some(siv) = siv {
+        {
             tasks.push((
                 "aes-128-gcm-siv-enc",
                 Box::new(|d: &mut [u8]| {
@@ -2379,7 +2354,7 @@ where
                 }),
             ));
         }
-        if let Some(xpn) = xpn {
+        {
             tasks.push((
                 "aes-128-xpn-enc",
                 Box::new(|d: &mut [u8]| {
@@ -2387,7 +2362,7 @@ where
                 }),
             ));
         }
-        if let Some(ccm) = ccm {
+        {
             tasks.push((
                 "aes-128-ccm-enc",
                 Box::new(|d: &mut [u8]| {
@@ -2395,7 +2370,7 @@ where
                 }),
             ));
         }
-        if let Some(xts) = xts {
+        {
             tasks.push((
                 "aes-128-xts-enc",
                 Box::new(|d: &mut [u8]| {
@@ -3750,10 +3725,62 @@ fn self_test() -> bool {
             .is_err(),
     );
 
+    // The profile walk: the reported set first, so that the first
+    // section is what a caller gets, the empty set last, and each
+    // profile once.
+    let walk = profiles();
+    check(
+        "the reported set is measured first",
+        walk.first() == Some(&features::detected()),
+    );
+    check(
+        "the empty set is measured last",
+        walk.last() == Some(&Features::new()),
+    );
+    check(
+        "no profile is measured twice",
+        walk.iter().enumerate().all(|(i, p)| !walk[..i].contains(p)),
+    );
+    // Every throughput row runs under the reported set, and a row
+    // whose choice that set already made is not measured again.
+    let defaults = Options::parse(std::iter::empty())
+        .ok()
+        .flatten()
+        .expect("no options");
+    let rows: Vec<&'static str> = ALGORITHMS
+        .iter()
+        .chain(HASHES.iter())
+        .chain(SHA3.iter())
+        .chain(BLAKE2.iter())
+        .chain(CHACHA.iter())
+        .chain(OTHER.iter())
+        .copied()
+        .collect();
+    let mut seen = Vec::new();
+    let under = Under {
+        profile: walk[0],
+        name: walk[0].to_string(),
+        seen: &mut seen,
+    };
+    check(
+        "every row runs under the reported set",
+        under.wanted(&defaults, &rows) == rows,
+    );
+    for row in &rows {
+        under.seen.push((row, choice(row, walk[0])));
+    }
+    check(
+        "nothing runs twice under the reported set",
+        under.wanted(&defaults, &rows).is_empty(),
+    );
+    check(
+        "every row but BLAKE2b's has a type deciding it",
+        rows.iter()
+            .all(|row| row.starts_with("blake2b") != !deciders(row).is_empty()),
+    );
+
     // Every named row is built, or a filter would silently drop it.
-    let mut keys =
-        Keys::<Ttable<16>, Ttable<32>>::try_new(Implementation::Portable)
-            .expect("t-table keys");
+    let mut keys = Keys::<Aes128, Aes256>::try_new().expect("AES keys");
     let built = keys.tasks();
     check(
         "every algorithm has a task",

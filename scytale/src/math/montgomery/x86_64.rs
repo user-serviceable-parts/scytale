@@ -19,11 +19,10 @@
 
 #![allow(unsafe_code)]
 
-use core::arch::x86_64::__cpuid_count;
-
 use super::P256_PRIME;
+use crate::features;
+use crate::math::limbs::x86_64::{KERNELS, Kernel};
 use crate::math::uint::Uint;
-use crate::probe::Probe;
 
 /// The product, where the processor has the instructions. A value
 /// exists only by way of [`probe`], so holding one is the proof and
@@ -32,23 +31,10 @@ use crate::probe::Probe;
 pub(crate) struct Adx(());
 
 /// The product, where the processor reports ADX (CPUID leaf 7, EBX
-/// bit 19) and BMI2 for `mulx` (bit 8). Asked once.
+/// bit 19) and BMI2 for `mulx` (bit 8): the same row as the limb
+/// arithmetic's, since the two are one instruction set. Asked once.
 pub(crate) fn probe() -> Option<Adx> {
-    ADX.yes(ask).then_some(Adx(()))
-}
-
-/// Kept: every field product asks.
-static ADX: Probe = Probe::new();
-
-fn ask() -> bool {
-    // A processor whose highest leaf is below seven answers this one
-    // with the data of its highest, not with zeros, so the bits
-    // would be whatever that leaf happens to hold.
-    if core::arch::x86_64::__cpuid(0).eax < 7 {
-        return false;
-    }
-    let ebx = __cpuid_count(7, 0).ebx;
-    ebx & (1 << 19) != 0 && ebx & (1 << 8) != 0
+    features::allows(KERNELS, Kernel::Adx).then_some(Adx(()))
 }
 
 impl Adx {

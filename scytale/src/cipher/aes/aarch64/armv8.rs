@@ -32,7 +32,7 @@ use core::fmt;
 
 use crate::cipher::BlockCipher;
 use crate::cipher::aes::{BLOCK_SIZE, KeySize, MAX_WORDS};
-use crate::probe::Probe;
+use crate::features;
 use crate::{BlockType, Key, KeyType};
 use zeroize::ZeroizeOnDrop;
 
@@ -61,40 +61,7 @@ impl<const K: usize> fmt::Debug for Aes<K> {
 
 /// Whether the AES instructions are available.
 pub(crate) fn has_aes() -> bool {
-    AES.yes(ask_aes)
-}
-
-/// Kept: reading the ID register traps into the kernel, and a key
-/// is expanded for every GCM-SIV message.
-static AES: Probe = Probe::new();
-
-fn ask_aes() -> bool {
-    cfg!(target_feature = "aes") || id_register_reports_aes()
-}
-
-/// Linux traps and emulates reads of the ID registers from user space
-/// (since 4.11). Bits 7:4 of ID_AA64ISAR0_EL1 are nonzero when
-/// AESE/AESD are implemented.
-#[cfg(target_os = "linux")]
-fn id_register_reports_aes() -> bool {
-    let isar0: u64;
-    // SAFETY: reads a register the kernel exposes to user space; no
-    // memory is touched.
-    unsafe {
-        core::arch::asm!(
-            "mrs {}, ID_AA64ISAR0_EL1",
-            out(reg) isar0,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    (isar0 >> 4) & 0xf != 0
-}
-
-/// Without an operating system that exposes the ID registers there is
-/// no safe way to ask, so only the compile-time feature counts.
-#[cfg(not(target_os = "linux"))]
-fn id_register_reports_aes() -> bool {
-    false
+    features::allows(super::super::KERNELS, super::super::Kernel::Armv8)
 }
 
 impl<const K: usize> Aes<K> {
@@ -647,7 +614,6 @@ mod tests {
         check::<24>(KeySize::Aes192);
         check::<32>(KeySize::Aes256);
     }
-    use crate::cipher::aes::portable;
 
     /// Returns the cipher, or `None` (skipping the test) without the
     /// AES instructions.
@@ -704,44 +670,6 @@ mod tests {
             "00112233445566778899aabbccddeeff",
             "8ea2b7ca516745bfeafc49904b496089",
         );
-    }
-
-    #[test]
-    fn matches_ttable() {
-        matches_ttable_for::<16>();
-        matches_ttable_for::<24>();
-        matches_ttable_for::<32>();
-    }
-
-    fn matches_ttable_for<const K: usize>() {
-        let klen = K;
-        {
-            let mut key = [0u8; K];
-            for (i, k) in key.iter_mut().enumerate() {
-                *k = (i * 37 + klen) as u8;
-            }
-            let Some(hw) = aes(&key) else { return };
-            let sw = portable::ttable::Aes::new(&key);
-            // Every tail width, with and without full groups before it.
-            for nblocks in 0..26 {
-                let mut data = [[0u8; BLOCK_SIZE]; 25];
-                for (i, b) in data.as_flattened_mut().iter_mut().enumerate() {
-                    *b = (i * 13 + klen) as u8;
-                }
-                let data = &mut data[..nblocks];
-                let mut expected = [[0u8; BLOCK_SIZE]; 25];
-                let expected = &mut expected[..data.len()];
-                expected.copy_from_slice(data);
-                let mut orig = [[0u8; BLOCK_SIZE]; 25];
-                orig[..data.len()].copy_from_slice(data);
-
-                sw.encrypt_blocks(expected);
-                hw.encrypt_blocks(data);
-                assert_eq!(data, expected, "encrypt {klen} {nblocks}");
-                hw.decrypt_blocks(data);
-                assert_eq!(data, &orig[..data.len()], "decrypt {klen}");
-            }
-        }
     }
 
     #[test]

@@ -21,24 +21,19 @@
 
 #![allow(unsafe_code)]
 
-use crate::hash::sha2::aarch64::has_sha1;
-
 /// The four round constants, one for each twenty rounds. Read one at
 /// a time into all four lanes.
 static RCON: [u32; 4] = [0x5a827999, 0x6ed9eba1, 0x8f1bbcdc, 0xca62c1d6];
 
-/// Folds `blocks` into `state` on the SHA-1 instructions, returning
-/// whether it did: not where the processor lacks them.
-pub(crate) fn compress(state: &mut [u32; 5], blocks: &[[u8; 64]]) -> bool {
-    if !has_sha1() {
-        return false;
+/// Folds `blocks` into `state` on the SHA-1 instructions. Chosen from
+/// the row that needs them, so they are here.
+pub(crate) fn compress(state: &mut [u32; 5], blocks: &[[u8; 64]]) {
+    if blocks.is_empty() {
+        return;
     }
-    if !blocks.is_empty() {
-        // SAFETY: the instructions were just confirmed, and `blocks`
-        // is that many whole blocks, at least one.
-        unsafe { compress_blocks(state, blocks.as_ptr().cast(), blocks.len()) }
-    }
-    true
+    // SAFETY: the row this was chosen from needs the instructions,
+    // and `blocks` is that many whole blocks, at least one.
+    unsafe { compress_blocks(state, blocks.as_ptr().cast(), blocks.len()) }
 }
 
 /// One group of four rounds: the rotation that makes the next `E`,

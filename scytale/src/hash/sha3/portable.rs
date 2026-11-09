@@ -12,8 +12,8 @@ use super::engine::{LANES, Permutation};
 #[cfg(test)]
 use super::variant;
 
-// Named for the vector suites and the benchmark, which drive each
-// engine in turn; the dispatching types reach it directly.
+// Named for the vector suites, which drive each engine in turn; the
+// dispatching types reach it directly.
 /// SHA3-224, portably.
 #[cfg(test)]
 pub type Sha3_224 = Sponge<Keccak, variant::Sha3_224>;
@@ -32,12 +32,6 @@ pub type Shake128 = Sponge<Keccak, variant::Shake128>;
 /// SHAKE256, portably.
 #[cfg(test)]
 pub type Shake256 = Sponge<Keccak, variant::Shake256>;
-/// The sponge under cSHAKE128, portably.
-#[cfg(test)]
-pub type CShake128 = Sponge<Keccak, variant::CShake128>;
-/// The sponge under cSHAKE256, portably.
-#[cfg(test)]
-pub type CShake256 = Sponge<Keccak, variant::CShake256>;
 
 /// The round constants, one per round, for iota.
 pub(crate) static ROUND_CONSTANTS: [u64; 24] = [
@@ -129,14 +123,6 @@ impl Permutation for Keccak {
     }
 
     fn permute(self, state: &mut [u64; LANES]) {
-        #[cfg(target_arch = "x86_64")]
-        if super::x86_64::permute(state) {
-            return;
-        }
-        #[cfg(target_arch = "riscv64")]
-        if super::riscv64::permute(state) {
-            return;
-        }
         keccak_f1600(state)
     }
 }

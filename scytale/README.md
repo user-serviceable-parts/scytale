@@ -34,12 +34,16 @@ gcm.decrypt(&nonce, header, &mut message, &tag)?;
 assert_eq!(&message, b"attack at dawn");
 ```
 
-That is the whole setup: no builder, no context object, no global
-state to initialise, and no choice to make about which implementation
-to run. `Aes256` asks the processor what it can do the first time a
-key is expanded, and every call after that is one predictable branch.
+That is the whole setup: no builder, no context object, nothing to
+initialise, and no choice to make about which implementation to run.
+`Aes256` takes the best implementation the processor has when a key
+is expanded, and every call after that is one predictable branch.
 The same binary does that on a laptop with VAES and on a board with
-no cryptographic instructions at all.
+no cryptographic instructions at all. A program that wants a say
+edits one set, `scytale::features`: remove a feature and the
+implementation below it is chosen; grant `Isolated`, the word that
+nothing untrusted shares the processor, and the table-driven AES is
+admitted where there are no AES instructions.
 
 The API documentation is on [docs.rs](https://docs.rs/scytale), and
 `cargo doc --open` builds it locally.
@@ -67,9 +71,9 @@ Wycheproof][wycheproof] files, more than a hundred thousand vector
 cases before the Monte Carlo suites add several million chained calls
 of their own. Every implementation of a primitive is put through the
 whole vector set for it, at every key size, and the whole suite runs
-on x86-64, aarch64 and riscv64 hardware rather than on the machine
-that happens to be to hand. The Goals section below says exactly what
-that means.
+on x86-64 and aarch64 hardware, and on riscv64 under emulation, rather
+than on the machine that happens to be to hand. The Goals section
+below says exactly what that means.
 
 Work from here will focus on speed and algorithms that are still
 missing. The API is still being stabilized, and the version number is
@@ -88,13 +92,16 @@ Cryptographic Validation Protocol (ACVP), and against Project
 Wycheproof, whose cases are chosen to break implementations rather
 than to exercise them. The ACVP vectors are the files in NIST's
 ACVP-Server repository, each holding the prompts and the expected
-answers, and they are checked offline. That is not the ACVP protocol
-run against NIST's servers, and it is not a CAVP validation: scytale
-has none. The corpus is 132 files holding 103,716 cases, and every case
-this build can run is run; the Monte Carlo groups chain a thousand
-cipher calls per case, with the key re-derived at each step. Every
-implementation is put through the whole vector set for its primitive,
-at every key size, the modes and the AEADs included: each engine
+answers. The drivers that answer them live in the repository's
+`scytale-acvp` crate, which runs them offline against those files
+and online against NIST's servers through the ACVP protocol; it is
+not a CAVP validation, and scytale has none. The ACVP corpus is 87
+suites holding 84,803 cases, and every case this build can run
+is run; the Monte Carlo groups chain a thousand cipher calls per
+case, with the key re-derived at each step. Every implementation is
+put through the whole vector set for its primitive, at every key
+size, the modes and the AEADs included: the harness answers each
+suite once per feature profile the processor can run, so each kernel
 written for a particular instruction set is tested as itself rather
 than only the one this processor would pick. Every implementation is
 also compared byte for byte against the portable one across a range of
@@ -106,7 +113,7 @@ instructions, is a command away in a checkout of the
 [repository][repo]:
 
 ```sh
-cargo test --lib acvp::inventory -- --nocapture
+cargo test --lib vectors::inventory -- --nocapture
 ```
 
 **Fast.** Where a processor has instructions for a primitive, scytale
@@ -119,15 +126,16 @@ right width rather than one block at a time.
 **Portable.** Every primitive has a pure Rust implementation that
 works anywhere, with no lookup tables and no data-dependent branches,
 so it is constant time. The accelerated versions are additions to
-that, never a requirement.
+that, never a requirement. The one table-driven implementation, AES,
+is never chosen unless the program says the processor is isolated.
 
 **No setup.** The library is `no_std`, has two dependencies
 (`zeroize`, and `getrandom` where there is an operating system to
 ask), and builds with nothing but a stable Rust toolchain: no
 C compiler, no build script, no feature flags, no target-specific
 compiler options. Which implementation to run is decided at run time,
-by asking the processor what it supports, so one binary works across
-a whole architecture.
+from what the processor supports and what the program allows, so one
+binary works across a whole architecture.
 
 ## Supported algorithms
 
@@ -229,9 +237,10 @@ too.
 | SHAKE128, SHAKE256 | any length | extendable output |
 | cSHAKE128, cSHAKE256 (SP 800-185) | any length | SHAKE with a function name and customization |
 | TupleHash128, TupleHash256 (SP 800-185) | any length | a sequence of strings, each boundary counted; TupleHashXOF; whole bytes |
+| BLAKE2b-256, BLAKE2b-512 (RFC 7693) | 32, 64 bytes | no length extension; fastest in portable code |
 | SHA-1 (FIPS 180-4) | 20 bytes | broken for collisions; for HMAC, HKDF and OAEP in old protocols only |
 
-All of them but TupleHash take bit strings as well as bytes, as
+All of them but TupleHash and BLAKE2b take bit strings as well as bytes, as
 the standards define them. ParallelHash (SP 800-185) is left out:
 the standard and NIST's validation vectors disagree on how a
 message's trailing bits are blocked, and the question is open with
@@ -250,8 +259,9 @@ NIST.
 
 | Construction | Notes |
 | --- | --- |
+| Argon2id (RFC 9106) | from a password, at a cost in memory; the caller supplies the memory |
 | HKDF (RFC 5869) | over any hash; from a secret that is already random |
-| PBKDF2 (SP 800-132) | over any hash; from a password |
+| PBKDF2 (SP 800-132) | over any hash; from a password where a standard names it |
 | TLS 1.2 PRF (RFC 5246) | over any hash; for implementations of that protocol |
 | SP 800-108 counter, feedback and double-pipeline modes | over any MAC; the counter any width the standard allows, anywhere it allows |
 | KDF-KMAC (SP 800-108r1) | KMAC128 and KMAC256 |
@@ -545,14 +555,20 @@ Measured on a 13th Gen Intel Core i7-1355U, one thread pinned to a
 performance core, on mains power. Over 16 KB buffers, in bytes a
 second counted in millions and thousands of millions:
 
-| What | Implementation | Speed |
+| What | Feature profile | Speed |
 | --- | --- | --- |
-| AES-128-GCM encrypt | `vaes` | 14.0 GB/s |
-| AES-128-GCM encrypt | `aesni` | 8.6 GB/s |
-| AES-128-GCM encrypt | `bitsliced` | 272 MB/s |
-| SHA-256 | `shani` | 2.4 GB/s |
-| SHA-256 | `portable` | 349 MB/s |
-| ChaCha20-Poly1305 encrypt | `avx2` | 2.7 GB/s |
+| AES-128-GCM encrypt | everything detected | 13.8 GB/s |
+| AES-128-GCM encrypt | `x86_64/aes+ssse3+avx+pclmulqdq` | 8.6 GB/s |
+| AES-128-GCM encrypt | `x86_64/ssse3+pclmulqdq` | 272 MB/s |
+| SHA-256 | everything detected | 2.4 GB/s |
+| SHA-256 | `x86_64/aes+ssse3+avx+avx2+vaes` | 338 MB/s |
+| ChaCha20-Poly1305 encrypt | everything detected | 2.7 GB/s |
+
+The profile is the feature set in force (see `scytale::features`).
+Everything detected is what a program gets unless it narrows the
+set; the others are what it gets on a processor, or under a set,
+that lacks the rest: AES-NI without VAES, no AES instructions at all
+(the constant-time bitsliced AES), and no SHA extensions.
 
 ChaCha20-Poly1305 is the one to reach for where the processor has no
 AES instructions: there it is several times faster than any AES here,
@@ -588,11 +604,12 @@ to be tested in its own right.
 
 The standards' own vectors are built into the unit tests, so
 `cargo test` on the published crate checks every primitive against
-them. The ACVP sample vectors, Project Wycheproof and CFRG HPKE
-vectors are not shipped, to keep the crate small; the suites that read
-them run from a checkout of the [repository][repo], whose README says
-how, and in its continuous integration on every push, natively on
-x86-64, arm64 and riscv64.
+them. The Project Wycheproof, CFRG HPKE and BLAKE2 reference vectors are not shipped,
+to keep the crate small; the suites that read them run from a
+checkout of the [repository][repo], whose README says how, and in
+its continuous integration on every push, natively on x86-64, arm64
+and riscv64. The ACVP suites run there too, from the `scytale-acvp`
+crate, through this crate's public API.
 
 The public-key algorithms and the KDFs run against both: the ACVP
 sample vectors for ML-KEM, ML-DSA, SLH-DSA, RSA, KTS-IFC, ECDSA,

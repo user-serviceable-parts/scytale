@@ -6,19 +6,21 @@
 //! written to run anywhere Rust
 //! does: `no_std`, no allocator, no cargo features to get wrong. Where
 //! the processor has instructions for a primitive they are used,
-//! chosen at run time, and there is always portable code behind them.
+//! chosen at run time from what [`features`] says is in force, and
+//! there is always portable code behind them.
 //!
 //! | Module | What is in it |
 //! | --- | --- |
 //! | [`aead`] | GCM, GCM-SIV, XPN, CCM and ChaCha20-Poly1305 |
 //! | [`cipher`] | AES, ChaCha20, and the modes built on them |
-//! | [`hash`] | SHA-2, SHA-3, SHAKE, cSHAKE, TupleHash, and legacy SHA-1 |
+//! | [`hash`] | SHA-2, SHA-3, SHAKE, cSHAKE, TupleHash, BLAKE2b, legacy SHA-1 |
 //! | [`mac`] | HMAC, CMAC, KMAC and Poly1305 |
-//! | [`kdf`] | HKDF, PBKDF2, the TLS 1.2 PRF, SP 800-108, one-step and X9.63 |
+//! | [`kdf`] | Argon2id, HKDF, PBKDF2, TLS 1.2, SP 800-108, one-step, X9.63 |
 //! | [`kem`] | ML-KEM key encapsulation |
 //! | [`kex`] | X25519 and ECDH key agreement |
 //! | [`pke`] | HPKE and RSA-OAEP public-key encryption |
 //! | [`random`] | the SP 800-90A generators and the entropy that seeds them |
+//! | [`features`] | what the processor has, and what the program allows |
 //! | [`constant_time`] | comparing secrets without timing them |
 //! | [`codec`] | hex, base64 and PEM, in constant time |
 //! | [`sig`] | Ed25519, ECDSA, ML-DSA, SLH-DSA and RSA signatures |
@@ -83,8 +85,10 @@
 //! - Tags are compared in time that depends on their length and on
 //!   nothing else.
 //! - The implementation chosen at run time is never one that leaks
-//!   through the cache; table-driven code exists as a peer of the
-//!   constant-time code, and must be asked for by name.
+//!   through the cache unless the program has said, through
+//!   [`features`], that nothing untrusted shares the processor;
+//!   table-driven code exists as a peer of the constant-time code
+//!   and is chosen on that word alone.
 //! - `Debug` output never contains key material, so a state can be
 //!   logged.
 //! - A trait describing a value you hold, a hash, a MAC or a cipher,
@@ -118,14 +122,14 @@
 #![warn(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
-// The vector suites in `acvp` read files and parse JSON, so the
+// The vector suites in `vectors` read files and parse JSON, so the
 // library's own test build has the standard library; nothing else
 // does.
 #[cfg(test)]
 extern crate std;
 
 #[cfg(test)]
-mod acvp;
+mod vectors;
 
 // The benchmark times a thread by its processor clock, and wasm has
 // no such clock to read. It measures rather than checks, so the
@@ -141,16 +145,16 @@ pub mod codec;
 pub mod constant_time;
 mod der;
 mod error;
+pub mod features;
 pub mod hash;
-mod implementation;
 pub mod kdf;
 pub mod kem;
+mod kernel;
 pub mod kex;
 mod key_info;
 pub mod mac;
 mod math;
 pub mod pke;
-mod probe;
 pub mod random;
 pub mod sig;
 

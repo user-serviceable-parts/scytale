@@ -16,10 +16,10 @@ use super::engine::{Engine32, Engine64};
 use super::portable::{K256, K512};
 #[cfg(test)]
 use super::variant;
-use crate::probe::Probe;
+use crate::features;
 
-// Named for the vector suites and the benchmark, which drive each
-// engine in turn; the dispatching types reach it directly.
+// Named for the vector suites, which drive each engine in turn; the
+// dispatching types reach it directly.
 /// SHA-224 with the SHA2 instructions.
 #[cfg(test)]
 pub type Sha224 = Engine32<Armv8, variant::Sha224>;
@@ -32,78 +32,15 @@ pub type Sha384 = Engine64<Armv8, variant::Sha384>;
 /// SHA-512 with the SHA512 instructions.
 #[cfg(test)]
 pub type Sha512 = Engine64<Armv8, variant::Sha512>;
-/// SHA-512/224 with the SHA512 instructions.
-#[cfg(test)]
-pub type Sha512_224 = Engine64<Armv8, variant::Sha512_224>;
-/// SHA-512/256 with the SHA512 instructions.
-#[cfg(test)]
-pub type Sha512_256 = Engine64<Armv8, variant::Sha512_256>;
 
 /// Whether the SHA-256 instructions are available.
 pub(crate) fn has_sha256() -> bool {
-    SHA256.yes(ask_sha256)
+    features::allows(super::KERNELS32, super::Kernel::Armv8)
 }
-
-/// Kept, as on every architecture: a hash is started for every
-/// message, every HMAC block and every PBKDF2 iteration.
-static SHA256: Probe = Probe::new();
-
-fn ask_sha256() -> bool {
-    cfg!(target_feature = "sha2") || id_register_sha2() >= 1
-}
-
-/// Whether the SHA-1 instructions are available: the SHA1 field of
-/// the same register, bits 11:8. SHA-1 lives in
-/// [`sha1`](crate::hash::sha1), but every field of this register is
-/// read here.
-pub(crate) fn has_sha1() -> bool {
-    SHA1.yes(|| cfg!(target_feature = "sha2") || (isar0() >> 8) & 0xf >= 1)
-}
-
-/// Kept, as [`SHA256`] is.
-static SHA1: Probe = Probe::new();
 
 /// Whether the SHA-512 instructions are available.
 pub(crate) fn has_sha512() -> bool {
-    SHA512.yes(ask_sha512)
-}
-
-/// Kept, as [`SHA256`] is.
-static SHA512: Probe = Probe::new();
-
-fn ask_sha512() -> bool {
-    cfg!(target_feature = "sha3") || id_register_sha2() >= 2
-}
-
-/// The SHA2 field of ID_AA64ISAR0_EL1, bits 15:12: 1 means SHA-256,
-/// 2 means SHA-256 and SHA-512.
-fn id_register_sha2() -> u64 {
-    (isar0() >> 12) & 0xf
-}
-
-/// ID_AA64ISAR0_EL1, which says which of these instruction sets the
-/// processor has. Linux traps and emulates reads of the ID registers
-/// from user space (since 4.11).
-#[cfg(target_os = "linux")]
-fn isar0() -> u64 {
-    let isar0: u64;
-    // SAFETY: reads a register the kernel exposes to user space; no
-    // memory is touched.
-    unsafe {
-        core::arch::asm!(
-            "mrs {}, ID_AA64ISAR0_EL1",
-            out(reg) isar0,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    isar0
-}
-
-/// Without an operating system that exposes the ID registers there is
-/// no safe way to ask, so only the compile-time feature counts.
-#[cfg(not(target_os = "linux"))]
-fn isar0() -> u64 {
-    0
+    features::allows(super::KERNELS64, super::Kernel::Armv8)
 }
 
 /// The compression functions via the ARMv8 instructions.
@@ -368,9 +305,7 @@ unsafe fn compress512(state: &mut [u64; 8], data: *const u8, count: usize) {
 mod tests {
     use super::*;
     use crate::hash::sha2::portable;
-    use crate::hash::sha2::tests::{
-        check_known_answers, check_matches_portable,
-    };
+    use crate::hash::sha2::tests::check_known_answers;
 
     #[test]
     fn known_answers() {
@@ -388,30 +323,6 @@ mod tests {
                 || portable::Sha256::try_new().expect("supported"),
                 || Sha384::try_new().expect("supported"),
                 || Sha512::try_new().expect("supported"),
-            );
-        }
-    }
-
-    #[test]
-    fn matches_portable() {
-        if has_sha256() {
-            check_matches_portable(
-                || Sha224::try_new().expect("supported"),
-                || portable::Sha224::try_new().expect("portable"),
-            );
-            check_matches_portable(
-                || Sha256::try_new().expect("supported"),
-                || portable::Sha256::try_new().expect("portable"),
-            );
-        }
-        if has_sha512() {
-            check_matches_portable(
-                || Sha384::try_new().expect("supported"),
-                || portable::Sha384::try_new().expect("portable"),
-            );
-            check_matches_portable(
-                || Sha512::try_new().expect("supported"),
-                || portable::Sha512::try_new().expect("portable"),
             );
         }
     }

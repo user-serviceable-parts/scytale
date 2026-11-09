@@ -9,7 +9,6 @@
 #![allow(unsafe_code)]
 
 use crate::align::At16;
-use crate::hash::sha2::x86_64::has_sha;
 
 /// Reverses all sixteen bytes of a register: four big-endian words
 /// loaded from a block come out as numbers, in the order the
@@ -17,18 +16,15 @@ use crate::hash::sha2::x86_64::has_sha;
 static REVERSE: At16<[u8; 16]> =
     At16([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
 
-/// Folds `blocks` into `state` on SHA-NI, returning whether it did:
-/// not where the processor lacks the instructions.
-pub(crate) fn compress(state: &mut [u32; 5], blocks: &[[u8; 64]]) -> bool {
-    if !has_sha() {
-        return false;
+/// Folds `blocks` into `state` on SHA-NI. Chosen from the row that
+/// needs the instructions, so they are here.
+pub(crate) fn compress(state: &mut [u32; 5], blocks: &[[u8; 64]]) {
+    if blocks.is_empty() {
+        return;
     }
-    if !blocks.is_empty() {
-        // SAFETY: the instructions were just confirmed, and `blocks`
-        // is that many whole blocks, at least one.
-        unsafe { compress_blocks(state, blocks.as_ptr().cast(), blocks.len()) }
-    }
-    true
+    // SAFETY: the row this was chosen from needs the instructions,
+    // and `blocks` is that many whole blocks, at least one.
+    unsafe { compress_blocks(state, blocks.as_ptr().cast(), blocks.len()) }
 }
 
 /// Folds `count` blocks at `data` into `state`.

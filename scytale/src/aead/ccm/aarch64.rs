@@ -43,9 +43,9 @@
 #![allow(unsafe_code)]
 
 use crate::cipher::BlockCipher;
-use crate::cipher::aes::aarch64::{Keys, armv8::has_aes, keys};
+use crate::cipher::aes::aarch64::{Keys, keys};
 use crate::cipher::mode::ctr::aarch64::{BSWAP, GROUP, OFFSETS};
-use crate::implementation::Implementation;
+use crate::kernel::Kernel;
 
 /// The block the loop works in.
 const BLOCK: usize = 16;
@@ -67,14 +67,15 @@ impl<C> Clone for Engine<C> {
 }
 
 impl<C: BlockCipher> Engine<C> {
-    /// The engine `implementation` names, or `None` where the
-    /// processor lacks the instructions or `C` is not a cipher this
-    /// is written for.
+    /// The engine for this cipher, or `None` where `C` is not a cipher
+    /// this is written for. That the processor has the instructions
+    /// is settled by whoever chose the kernel, from its row in
+    /// counter mode's list.
     ///
-    /// The extension has one implementation here, so anything but
-    /// [`Implementation::Armv8`] is answered with nothing.
-    pub(crate) fn of(implementation: Implementation) -> Option<Self> {
-        if implementation != Implementation::Armv8 || !has_aes() {
+    /// The extension has one kernel here, so anything but
+    /// [`Kernel::Armv8`] is answered with nothing.
+    pub(crate) fn of(kernel: Kernel) -> Option<Self> {
+        if kernel != Kernel::Armv8 {
             return None;
         }
         Some(Engine { keys: keys::<C>()? })

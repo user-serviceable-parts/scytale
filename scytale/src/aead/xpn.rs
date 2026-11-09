@@ -65,6 +65,7 @@ use super::gcm::{Gcm, SHORT_NONCE, TAG};
 use super::ghash::BLOCK;
 use crate::Error;
 use crate::cipher::BlockCipher;
+use crate::features::{self, Dispatcher, Features};
 
 /// The length of both the salt and the frame identifier.
 const HALF: usize = SHORT_NONCE;
@@ -82,28 +83,25 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Xpn<C> {
     }
 }
 
+impl<C: BlockCipher<Block = [u8; BLOCK]>> features::sealed::Sealed for Xpn<C> {}
+
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Dispatcher for Xpn<C> {
+    fn profiles() -> &'static [Features] {
+        Xpn::<C>::profiles()
+    }
+}
+
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Xpn<C> {
     /// Takes the key the cipher runs under.
     pub fn new(key: &C::Key) -> Self {
         Xpn { gcm: Gcm::new(key) }
     }
 
-    /// The same over the implementation `implementation` names, or `None`
-    /// where this processor or this cipher has no such thing.
-    ///
-    /// For the benchmark, which names an implementation rather than
-    /// take whichever this processor would pick, and so built only
-    /// where the benchmark is. There is nothing of XPN's own to
-    /// choose: it is [`Gcm`] with the nonce assembled differently, so
-    /// the implementation is GCM's.
-    #[cfg(all(test, not(target_family = "wasm")))]
-    pub(crate) fn with_implementation(
-        key: &C::Key,
-        implementation: crate::implementation::Implementation,
-    ) -> Option<Self> {
-        Some(Xpn {
-            gcm: Gcm::with_implementation(key, implementation)?,
-        })
+    /// The feature profiles this mode tells apart, best first: GCM's,
+    /// since there is nothing of XPN's own to choose; see
+    /// [`Dispatcher`].
+    pub fn profiles() -> &'static [Features] {
+        Gcm::<C>::profiles()
     }
 
     /// Encrypts `data` in place and writes its tag.

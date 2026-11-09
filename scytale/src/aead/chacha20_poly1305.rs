@@ -52,9 +52,12 @@ use core::fmt;
 use zeroize::Zeroize;
 
 use super::Aead;
-use crate::cipher::chacha20::{AutoStream, ChaCha20, KEY_SIZE, NONCE_SIZE};
+use crate::cipher::chacha20::{
+    self, AutoStream, ChaCha20, KEY_SIZE, NONCE_SIZE,
+};
+use crate::features::{self, Dispatcher, Features};
 use crate::mac::Mac;
-use crate::mac::poly1305::Poly1305;
+use crate::mac::poly1305::{self, Poly1305};
 use crate::{Error, Key, KeyType};
 
 /// The tag length, in bytes.
@@ -64,6 +67,29 @@ const TAG: usize = 16;
 #[derive(Clone)]
 pub struct ChaCha20Poly1305 {
     cipher: ChaCha20,
+}
+
+/// What the construction publishes: the cipher's rows joined with the
+/// authenticator's, since the two are chosen apart; see
+/// [`features::combined`].
+const PROFILES: [Features;
+    features::combined_len(&chacha20::PROFILES, &poly1305::PROFILES)] =
+    features::combined(&chacha20::PROFILES, &poly1305::PROFILES);
+
+impl ChaCha20Poly1305 {
+    /// The feature profiles this construction tells apart, best
+    /// first; see [`Dispatcher`].
+    pub fn profiles() -> &'static [Features] {
+        &PROFILES
+    }
+}
+
+impl features::sealed::Sealed for ChaCha20Poly1305 {}
+
+impl Dispatcher for ChaCha20Poly1305 {
+    fn profiles() -> &'static [Features] {
+        ChaCha20Poly1305::profiles()
+    }
 }
 
 impl KeyType for ChaCha20Poly1305 {

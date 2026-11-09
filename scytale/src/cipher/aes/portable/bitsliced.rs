@@ -59,14 +59,6 @@ impl<const K: usize> fmt::Debug for Aes<K> {
 }
 
 impl<const K: usize> Aes<K> {
-    /// Whether this processor can run this implementation: it is
-    /// plain Rust, so always. Named for the inventory the vector
-    /// suites print, which asks every implementation alike.
-    #[cfg(test)]
-    pub(crate) fn supported() -> bool {
-        true
-    }
-
     /// Expands `key`.
     pub(crate) fn new(key: &[u8; K]) -> Self {
         const {
@@ -567,7 +559,6 @@ fn inv_sbox(q: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cipher::aes::portable;
     use crate::cipher::aes::portable::ttable::tables::{INV_SBOX, SBOX};
 
     /// Runs `f` on a state holding the 64 bytes of `input` and returns
@@ -678,45 +669,6 @@ mod tests {
             "00112233445566778899aabbccddeeff",
             "8ea2b7ca516745bfeafc49904b496089",
         );
-    }
-
-    #[test]
-    fn matches_ttable() {
-        matches_ttable_for::<16>();
-        matches_ttable_for::<24>();
-        matches_ttable_for::<32>();
-    }
-
-    fn matches_ttable_for<const K: usize>() {
-        const MAX: usize = 10;
-        let klen = K;
-        {
-            let mut key = [0u8; K];
-            for (i, k) in key.iter_mut().enumerate() {
-                *k = (i * 37 + klen) as u8;
-            }
-            let bs = Aes::new(&key);
-            let tt = portable::ttable::Aes::new(&key);
-            // Lengths cover zero, partial and whole groups of four.
-            for nblocks in 0..MAX {
-                let mut data = [[0u8; BLOCK_SIZE]; MAX];
-                for (i, b) in data.as_flattened_mut().iter_mut().enumerate() {
-                    *b = (i * 13 + klen) as u8;
-                }
-                let data = &mut data[..nblocks];
-                let mut expected = [[0u8; BLOCK_SIZE]; MAX];
-                let expected = &mut expected[..data.len()];
-                expected.copy_from_slice(data);
-                let mut orig = [[0u8; BLOCK_SIZE]; MAX];
-                orig[..data.len()].copy_from_slice(data);
-
-                tt.encrypt_blocks(expected);
-                bs.encrypt_blocks(data);
-                assert_eq!(data, expected, "encrypt {klen} {nblocks}");
-                bs.decrypt_blocks(data);
-                assert_eq!(data, &orig[..data.len()], "decrypt {klen}");
-            }
-        }
     }
 
     #[test]

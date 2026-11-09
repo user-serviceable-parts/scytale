@@ -21,9 +21,7 @@
 
 #![allow(unsafe_code)]
 
-use core::arch::x86_64::__cpuid_count;
-
-use crate::probe::Probe;
+use crate::features::{self, Features, x86_64::Feature as F};
 
 /// The multiply, where the processor has it. A value exists only by
 /// way of [`probe`], so holding one is holding the proof that the
@@ -31,25 +29,32 @@ use crate::probe::Probe;
 #[derive(Clone, Copy)]
 pub(super) struct Adx(());
 
+/// Which product the big-number arithmetic runs: here, and in the
+/// Montgomery and curve code that shares the row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kernel {
+    /// The written-out rows on `mulx` and the two carry chains.
+    Adx,
+    /// Plain Rust, on any processor.
+    Portable,
+}
+
+/// The kernels, best first, each with what it needs.
+pub(crate) const KERNELS: &[(Kernel, Features)] =
+    &[(Kernel::Adx, ADX), (Kernel::Portable, Features::new())];
+
+/// What the list publishes: the needs, without the names.
+pub(crate) const PROFILES: [Features; KERNELS.len()] =
+    features::profiles_of(KERNELS);
+
 /// The multiply, where the processor reports ADX (CPUID leaf 7, EBX
 /// bit 19) and BMI2 for `mulx` (bit 8). Asked once.
 pub(super) fn probe() -> Option<Adx> {
-    ADX.yes(ask).then_some(Adx(()))
+    features::allows(KERNELS, Kernel::Adx).then_some(Adx(()))
 }
 
-/// Kept: a modulus view is made for every operation.
-static ADX: Probe = Probe::new();
-
-fn ask() -> bool {
-    // A processor whose highest leaf is below seven answers this one
-    // with the data of its highest, not with zeros, so the bits
-    // would be whatever that leaf happens to hold.
-    if core::arch::x86_64::__cpuid(0).eax < 7 {
-        return false;
-    }
-    let ebx = __cpuid_count(7, 0).ebx;
-    ebx & (1 << 19) != 0 && ebx & (1 << 8) != 0
-}
+/// What the ADX row needs.
+const ADX: Features = features::x86(&[F::Adx, F::Bmi2]);
 
 impl Adx {
     /// `t = a * b / R mod n` before its final subtraction: the rows

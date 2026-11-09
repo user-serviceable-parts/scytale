@@ -289,6 +289,22 @@ pub struct PrivateKey {
     bits: usize,
 }
 
+impl crate::features::sealed::Sealed for PublicKey {}
+
+impl crate::features::Dispatcher for PublicKey {
+    fn profiles() -> &'static [crate::features::Features] {
+        crate::math::rsa::profiles()
+    }
+}
+
+impl crate::features::sealed::Sealed for PrivateKey {}
+
+impl crate::features::Dispatcher for PrivateKey {
+    fn profiles() -> &'static [crate::features::Features] {
+        crate::math::rsa::profiles()
+    }
+}
+
 impl<'a> PublicKeyRef<'a> {
     /// Lays out a verification key from its big-endian parts in
     /// `storage`, returning the words it took.

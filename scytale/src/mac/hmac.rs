@@ -140,8 +140,8 @@ impl<H: Hash + Clone + BlockType> Hmac<H> {
     ///
     /// The construction needs two hash states, and takes them by
     /// cloning this one, so a hash that is chosen rather than
-    /// constructed -- a named backend, which the benchmark and the
-    /// vector suites use -- can key a MAC without being `Default`.
+    /// constructed -- a named backend, which the vector suites use --
+    /// can key a MAC without being `Default`.
     pub(crate) fn with(hash: H, key: &[u8]) -> Self {
         // A key longer than the block is hashed down to a digest and
         // that digest padded to the block, so the digest has to fit

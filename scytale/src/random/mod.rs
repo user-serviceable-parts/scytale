@@ -339,6 +339,47 @@ impl<S: Entropy> CtrDrbg<S> {
         built
     }
 
+    /// A generator seeded from material gathered elsewhere: `seed`
+    /// is the entropy, nonce and any personalization as one run, at
+    /// least [`MIN_SEED`] bytes, condensed through the derivation
+    /// function. `source` is kept for every later reseeding.
+    ///
+    /// For a caller that conditions its own entropy before handing
+    /// it over, and for running the standard's known-answer vectors,
+    /// which fix the seed. Anything else wants
+    /// [`try_new`](CtrDrbg::try_new), which draws the seed itself.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidSeedLength`] if `seed` is too short.
+    pub fn try_new_seeded(seed: &[u8], source: S) -> Result<Self, Error> {
+        Self::instantiate(seed, &[], source, true)
+    }
+
+    /// A generator seeded without the derivation function: the
+    /// standard's construction for material that is already full
+    /// entropy and exactly a seed long, with the personalization
+    /// padded and XORed over it. Reseeding one takes exactly
+    /// [`MIN_SEED`] bytes, and additional input to one is at most
+    /// [`MIN_SEED`] bytes, refused with [`Error::InvalidLength`]
+    /// otherwise. `source` is kept for every later reseeding.
+    ///
+    /// Exists so that the vectors for that construction can be run;
+    /// [`try_new_seeded`](CtrDrbg::try_new_seeded) accepts whatever
+    /// length a caller has.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidLength`] if `personalization` is longer than
+    /// a seed.
+    pub fn try_new_full_entropy(
+        entropy: &[u8; MIN_SEED],
+        personalization: &[u8],
+        source: S,
+    ) -> Result<Self, Error> {
+        Self::instantiate(entropy, personalization, source, false)
+    }
+
     /// Reseeds from the generator's own source.
     ///
     /// Called automatically once [`RESEED_INTERVAL`] requests have

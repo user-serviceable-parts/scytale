@@ -52,21 +52,11 @@
 
 use super::super::{BLOCK, MAX_GROUP, divide_by_x};
 use super::POLYNOMIAL;
-use crate::arch::riscv64::{EXT_ZVBB, EXT_ZVBC, EXT_ZVKB, IMA_V};
 
 /// How many blocks the group multiply takes at once. Eight fills the
 /// registers at the narrowest vector length this backend accepts, and
 /// shares one reduction between all eight.
 pub(super) const GROUP: usize = MAX_GROUP;
-
-/// Whether `ext` reports the vector carry-less multiply, on a
-/// processor whose vector registers are `bytes` wide: the vector
-/// extension, Zvbc, a byte reverse from Zvbb or Zvkb, and at least
-/// 128 bits, which eight elements at `LMUL=4` need.
-pub(super) fn present(ext: u64, bytes: usize) -> bool {
-    let want = IMA_V | EXT_ZVBC;
-    ext & want == want && ext & (EXT_ZVBB | EXT_ZVKB) != 0 && bytes >= 16
-}
 
 /// Prepares the subkey for [`multiply`].
 pub(super) fn prepare(h: &[u64; 2]) -> [u64; 2] {
