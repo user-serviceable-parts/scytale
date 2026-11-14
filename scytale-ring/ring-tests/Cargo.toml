@@ -9,8 +9,9 @@ license.workspace = true
 publish = false
 
 # The tests name the crate `ring`, as any code written against ring
-# does, and this is how a manifest switches it.
-[dependencies]
+# does, and this is how a manifest switches it. Only the tests use
+# it, the library here being empty.
+[dev-dependencies]
 ring = { package = "scytale-ring", path = "..", features = ["std"] }
 untrusted = "0.9"
 

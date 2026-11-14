@@ -105,9 +105,9 @@ emulated processors, the wasm32 and bare-metal builds, clippy, the
 docs, rustls and webpki on the shim, rustls and
 BoGo on the provider, the provider against OpenSSL, and the crates
 packaged and built as they will be published. The README's ACVP case
-count is checked from the same run: the x86-64 vendored shards print
-the cases of each suite under each profile, and the profile that holds
-all of them totals it.
+count is checked from the same run: the x86-64 vendored job prints
+the cases answered under the detected profile, which is every case
+once.
 
 A dependant going out without a library release must also build
 against the library crates.io already has, which is what its users
@@ -127,22 +127,24 @@ sudo scripts/bench-quiet
 scripts/bench --save i7-1355u
 ```
 
-and a real session on NIST's demo server, every suite under every
-implementation this processor can run, from a release build. It is a
-real session and not a sample one because only a real one can pass
-the RSA decryption primitive, for the reason
-`scytale-acvp/README.md` gives:
+and a real session on NIST's demo server, every suite once, from a
+release build, under the operating environment's own profile: the
+kernels this processor is given by default, and no others. Every
+kernel has answered its vectors in CI; the session is the library
+as it runs here, judged by NIST. It is a real session and not a
+sample one because only a real one can pass the RSA decryption
+primitive, for the reason `scytale-acvp/README.md` gives:
 
 ```sh
 cargo build --release -p scytale-acvp
 ( set -a; . ~/.acvp/mwp.sh
-  target/release/scytale-acvp run --every-kernel )
+  target/release/scytale-acvp run )
 ```
 
 It passes when it exits 0: every vector set registered was passed by
-the server, and every implementation gave the same answers. A run cut
-off by the network is taken up with `scytale-acvp resume DIR`, which
-judges the same session; that is not a rerun.
+the server. A run cut off by the network is taken up with
+`scytale-acvp resume DIR`, which judges the same session; that is
+not a rerun.
 
 ## 5. Report, commit, tag, push
 
@@ -155,8 +157,7 @@ library's when it goes out, and goes in the release commit. It says:
   the result is read; it is not written back, which would take a
   second push and a second run.
 - The demo-server session: its number, the vector sets registered
-  and passed, the profiles walked, and the exit status. The row is
-  added to the table in `scytale-acvp/README.md` too.
+  and passed, and the exit status.
 - The benchmarks: the saved file, its header's commit and machine
   state, and the rows that moved against the previous saved pass by
   `scripts/bench --compare`, with the reason where one is known.
