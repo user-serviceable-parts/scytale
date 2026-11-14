@@ -2,7 +2,7 @@
 name = "rustls-scytale"
 description = "A rustls crypto provider implemented with scytale: pure Rust, no C compiler, no build script, post-quantum by default"
 # Which rustls this works with is in the README's table.
-version = "0.10.0-dev.2"
+version = "0.10.0-dev.2.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

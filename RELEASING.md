@@ -96,9 +96,9 @@ from step 1. Nothing is skipped, waived or rerun until it happens to
 pass.
 
 The checks are CI's, every job of `ci.yml`, run on the release
-branch's pull request with the versions bumped and the report of step
-5 written, so that one push carries the whole release and CI runs
-once. They pass when every job passes on that commit. `ci.yml` is the
+branch's pull request with the versions bumped and the records of
+step 5 written, so that one push carries the whole release and CI
+runs once. They pass when every job passes on that commit. `ci.yml` is the
 list: the style job, every crate's tests and the vendored vectors
 on the native, RISC-V and 32-bit jobs, the dispatch checks on the
 emulated processors, the wasm32 and bare-metal builds, clippy, the
@@ -145,21 +145,19 @@ the server. A run cut off by the network is taken up with
 `scytale-acvp resume DIR`, which judges the same session; that is
 not a rerun.
 
-## 5. Report, commit, tag, push
+## 5. Record, commit, tag, push
 
-The report is `releases/<first tag>.md`, the first tag being the
-library's when it goes out, and goes in the release commit. It says:
+The two runs of step 4 leave their records in the library crate,
+where its users can read them, and both go in the release commit:
 
-- The crates going out and their versions, and the commit the runs
-  were made on.
-- That the checks are CI's run on the release pull request, where
-  the result is read; it is not written back, which would take a
-  second push and a second run.
-- The demo-server session: its number, the vector sets registered
-  and passed, and the exit status.
-- The benchmarks: the saved file, its header's commit and machine
-  state, and the rows that moved against the previous saved pass by
-  `scripts/bench --compare`, with the reason where one is known.
+- `scytale/ACVP.md`: the demo-server session replaces its contents:
+  the date, the session number, the commit, the operating
+  environment and the vector sets that passed.
+- `scytale/benchmarks/`: the file `scripts/bench-quiet --save`
+  wrote.
+
+CI's result is read on the release pull request; it is not written
+back, which would take a second push and a second run.
 
 One commit, subject naming each crate going out and its version
 (`scytale 0.10.1, scytale-cli 0.10.2: <what the release is>`), body
@@ -190,8 +188,8 @@ once the library is visible; nothing needs unpublishing.
 ## 7. Afterwards
 
 - The tags are the release; GitHub's release pages have not been
-  used. The notes are in the commit body, and the evidence in the
-  report under `releases/`.
+  used. The notes are in the commit body, and the evidence in
+  `scytale/ACVP.md` and `scytale/benchmarks/`.
 - `docs.yml` publishes the library's documentation from `main`; check
   https://docs.rs/scytale built the new version.
 - `TODO` records what the release closed and what it opened.

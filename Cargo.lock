@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "rustls-scytale"
-version = "0.10.0-dev.2"
+version = "0.10.0-dev.2.1"
 dependencies = [
  "rustls",
  "rustls-pki-types",
@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "scytale"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "cpu-time",
  "getrandom",
@@ -675,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "scytale-cli"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "clap",
  "scytale",
@@ -684,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "scytale-ring"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "scytale",
  "untrusted",

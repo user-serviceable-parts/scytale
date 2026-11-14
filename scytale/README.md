@@ -610,6 +610,19 @@ its continuous integration on every push, natively on x86-64 and
 arm64 and under emulation for riscv64. The ACVP suites run there
 too, from the `scytale-acvp` crate, through this crate's public API.
 
+ACVP is NIST's [Automated Cryptographic Validation Protocol][acvp]:
+a NIST server issues test vectors for an algorithm, the
+implementation answers them, and the server judges the answers. The
+vectors and the server are published in NIST's
+[ACVP-Server][acvp-server] repository. Besides the offline check
+above, the library is run against NIST's demonstration server, and
+[`ACVP.md`][acvp-results], which ships with the crate, records the
+latest run: what passed, on what date and on what operating
+environment. ACVP tests only the algorithms NIST specifies, so
+ChaCha20, XChaCha20, Poly1305, the AEADs built on them, BLAKE2b,
+Argon2id and HPKE are outside it; those are checked against their
+own standards' vectors and the other suites named here.
+
 The public-key algorithms and the KDFs run against both: the ACVP sample
 vectors for ML-KEM, ML-DSA, SLH-DSA, LMS, RSA, KTS-IFC, ECDSA, EDDSA, XECDH,
 KDA and the TLS 1.2 KDF, the CFRG's HPKE vectors, and Wycheproof's
@@ -651,5 +664,7 @@ BSD 2-Clause. See [LICENSE][license].
 [provider]: https://github.com/user-serviceable-parts/scytale/tree/main/rustls-scytale
 [security]: https://github.com/user-serviceable-parts/scytale/blob/main/SECURITY.md
 [acvp]: https://pages.nist.gov/ACVP/
+[acvp-server]: https://github.com/usnistgov/ACVP-Server
+[acvp-results]: https://github.com/user-serviceable-parts/scytale/blob/main/scytale/ACVP.md
 [wycheproof]: https://github.com/C2SP/wycheproof
 [license]: https://github.com/user-serviceable-parts/scytale/blob/main/LICENSE
