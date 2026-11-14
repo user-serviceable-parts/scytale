@@ -121,14 +121,54 @@ pub(crate) mod variant {
         };
     }
 
-    variant!(/** SHA3-224. */ Sha3_224, 144, 0x06);
-    variant!(/** SHA3-256. */ Sha3_256, 136, 0x06);
-    variant!(/** SHA3-384. */ Sha3_384, 104, 0x06);
-    variant!(/** SHA3-512. */ Sha3_512, 72, 0x06);
-    variant!(/** SHAKE128. */ Shake128, 168, 0x1f);
-    variant!(/** SHAKE256. */ Shake256, 136, 0x1f);
-    variant!(/** cSHAKE128. */ CShake128, 168, 0x04);
-    variant!(/** cSHAKE256. */ CShake256, 136, 0x04);
+    variant!(
+        /** SHA3-224. */
+        Sha3_224,
+        144,
+        0x06
+    );
+    variant!(
+        /** SHA3-256. */
+        Sha3_256,
+        136,
+        0x06
+    );
+    variant!(
+        /** SHA3-384. */
+        Sha3_384,
+        104,
+        0x06
+    );
+    variant!(
+        /** SHA3-512. */
+        Sha3_512,
+        72,
+        0x06
+    );
+    variant!(
+        /** SHAKE128. */
+        Shake128,
+        168,
+        0x1f
+    );
+    variant!(
+        /** SHAKE256. */
+        Shake256,
+        136,
+        0x1f
+    );
+    variant!(
+        /** cSHAKE128. */
+        CShake128,
+        168,
+        0x04
+    );
+    variant!(
+        /** cSHAKE256. */
+        CShake256,
+        136,
+        0x04
+    );
 
     impl DigestVariant for Sha3_224 {
         type Output = [u8; 28];

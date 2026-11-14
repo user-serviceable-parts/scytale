@@ -3,7 +3,7 @@
 //! and ephemeral keys from their seeds, the encapsulation, the
 //! context's nonce base and exporter secret, a run of encryptions in
 //! order, and exports. Base mode only, and the KEMs, KDFs and AEADs
-//! the module has: X448 and the export-only AEAD are skipped.
+//! the module has: the export-only AEAD is skipped.
 
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
@@ -31,12 +31,14 @@ pub fn run() {
             Some(0x10) => with_kdf!(v, p256),
             Some(0x12) => with_kdf!(v, p521),
             Some(0x20) => with_kdf!(v, x25519),
+            Some(0x21) => with_kdf!(v, x448),
             _ => false,
         };
         suites += usize::from(ran);
     }
-    // P-256, P-521 and X25519, each with two KDFs and three AEADs.
-    assert!(suites >= 18, "only {suites} HPKE suites");
+    // P-256, P-521, X25519 and X448, each with two KDFs and three
+    // AEADs.
+    assert!(suites >= 24, "only {suites} HPKE suites");
 }
 
 /// Picks the KDF, then the AEAD, and runs the case; `false` for an

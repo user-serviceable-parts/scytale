@@ -114,7 +114,9 @@ use cpu_time::ThreadTime;
 use serde_json::{Value, json};
 
 use crate::Key;
-use crate::aead::{Aead, Ccm, ChaCha20Poly1305, Gcm, GcmSiv, Xpn};
+use crate::aead::{
+    Aead, Ccm, ChaCha20Poly1305, Gcm, GcmSiv, XChaCha20Poly1305, Xpn,
+};
 use crate::cipher::aes::{Aes128, Aes256};
 use crate::cipher::chacha20;
 use crate::cipher::mode::{Cbc, Cfb1, Cfb8, Cfb128, Ctr, Kw, Kwp, Ofb, Xts};
@@ -135,7 +137,7 @@ use crate::hash::sha3::TupleHash128;
 use crate::hash::{Hash, Xof, XofReader};
 use crate::hash::{sha2, sha3};
 use crate::kdf::{argon2, hkdf, one_step, pbkdf2, sp800_108, tls12, x963};
-use crate::kex::{ecdh, x25519};
+use crate::kex::{ecdh, x448, x25519};
 use crate::mac::Mac;
 use crate::mac::cmac::Cmac;
 use crate::mac::hmac::Hmac;
@@ -144,7 +146,7 @@ use crate::mac::poly1305::Poly1305;
 use crate::pke::hpke;
 use crate::pke::rsa as oaep;
 use crate::random::{CtrDrbg, HashDrbg, HmacDrbg};
-use crate::sig::{ecdsa, ed25519, rsa};
+use crate::sig::{ecdsa, ed448, ed25519, rsa};
 
 /// Buffer sizes reported, the ones `openssl speed` uses.
 const SIZES: [usize; 6] = [16, 64, 256, 1024, 8192, 16384];
@@ -530,6 +532,7 @@ const TYPES: &[Profiles] = &[
     <chacha20::ChaCha20 as Dispatcher>::profiles,
     <Poly1305 as Dispatcher>::profiles,
     <ChaCha20Poly1305 as Dispatcher>::profiles,
+    <XChaCha20Poly1305 as Dispatcher>::profiles,
 ];
 
 const AES128: &[Profiles] = &[<Aes128 as Dispatcher>::profiles];
@@ -591,6 +594,9 @@ fn deciders(row: &str) -> &'static [Profiles] {
         "poly1305" => &[<Poly1305 as Dispatcher>::profiles],
         "chacha20-poly1305-enc" | "chacha20-poly1305-dec" => {
             &[<ChaCha20Poly1305 as Dispatcher>::profiles]
+        }
+        "xchacha20-poly1305-enc" | "xchacha20-poly1305-dec" => {
+            &[<XChaCha20Poly1305 as Dispatcher>::profiles]
         }
         _ => &[],
     }
@@ -885,7 +891,7 @@ fn sha3_section(under: &mut Under<'_>, run: &mut Run) -> bool {
 }
 
 /// The rows that belong to no family above.
-const OTHER: [&str; 9] = [
+const OTHER: [&str; 11] = [
     "sha-1",
     "ctr-drbg",
     "hash-drbg-sha-256",
@@ -895,6 +901,8 @@ const OTHER: [&str; 9] = [
     "tuplehash128",
     "chacha20-poly1305-enc",
     "chacha20-poly1305-dec",
+    "xchacha20-poly1305-enc",
+    "xchacha20-poly1305-dec",
 ];
 
 /// Measures them, returning whether it ran anything.
@@ -915,6 +923,7 @@ fn other_section(under: &mut Under<'_>, run: &mut Run) -> bool {
             Sha1::new(),
             Poly1305::new(&Key::from(KEY256)),
             ChaCha20Poly1305::new(&Key::from(KEY256)),
+            XChaCha20Poly1305::new(&Key::from(KEY256)),
             Kmac128::new(&KEY256, b""),
             TupleHash128::new(b""),
         );
@@ -925,10 +934,12 @@ fn other_section(under: &mut Under<'_>, run: &mut Run) -> bool {
     let (Ok(mut rng), Ok(mut hash_rng), Ok(mut hmac_rng)) = generators else {
         return false;
     };
-    let (mut sha1, mut mac, aead, mut kmac, mut tuple) = macs;
+    let (mut sha1, mut mac, aead, xaead, mut kmac, mut tuple) = macs;
     let mut tuple_out = [0u8; 32];
-    let mut tags = [[0u8; 16]; 2];
-    let (enc_tag, dec_tag) = tags.split_at_mut(1);
+    let mut tags = [[0u8; 16]; 4];
+    let (enc_tag, rest) = tags.split_at_mut(1);
+    let (dec_tag, rest) = rest.split_at_mut(1);
+    let (xenc_tag, xdec_tag) = rest.split_at_mut(1);
     let mut tasks: Vec<Task<'_>> = vec![
         (
             "sha-1",
@@ -998,6 +1009,22 @@ fn other_section(under: &mut Under<'_>, run: &mut Run) -> bool {
                 };
                 let _ = state.update(d);
                 let _ = state.verify(&dec_tag[0]);
+            }),
+        ),
+        (
+            "xchacha20-poly1305-enc",
+            Box::new(|d: &mut [u8]| {
+                let _ = xaead.encrypt(&XNONCE, &[], d, &mut xenc_tag[0]);
+            }),
+        ),
+        (
+            "xchacha20-poly1305-dec",
+            Box::new(|d: &mut [u8]| {
+                let Ok(mut state) = xaead.decryptor(&XNONCE) else {
+                    return;
+                };
+                let _ = state.update(d);
+                let _ = state.verify(&xdec_tag[0]);
             }),
         ),
     ];
@@ -1299,9 +1326,11 @@ fn kdf_ops(run: &mut Run) -> bool {
     ops_section(run, "kdf", jobs)
 }
 
-const KEX_JOBS: [&str; 8] = [
+const KEX_JOBS: [&str; 10] = [
     "x25519-keygen",
     "x25519-agree",
+    "x448-keygen",
+    "x448-agree",
     "ecdh-p256-keygen",
     "ecdh-p256-agree",
     "ecdh-p384-keygen",
@@ -1325,6 +1354,8 @@ fn kex_ops(run: &mut Run) -> bool {
     };
     let secret = KEY256;
     let peer = x25519::public_key(&secret);
+    let secret448 = [0x42u8; x448::KEY_SIZE];
+    let peer448 = x448::public_key(&[0x24u8; x448::KEY_SIZE]);
     let (Ok(p256), Ok(p256_peer), Ok(p384), Ok(p384_peer)) = (
         ecdh::p256::PrivateKey::generate(&mut build),
         ecdh::p256::PrivateKey::generate(&mut build),
@@ -1353,6 +1384,18 @@ fn kex_ops(run: &mut Run) -> bool {
             "x25519-agree",
             Box::new(|| {
                 black_box(x25519::shared_secret(&secret, &peer)).ok();
+            }),
+        ),
+        (
+            "x448-keygen",
+            Box::new(|| {
+                black_box(x448::public_key(&secret448));
+            }),
+        ),
+        (
+            "x448-agree",
+            Box::new(|| {
+                black_box(x448::shared_secret(&secret448, &peer448)).ok();
             }),
         ),
         (
@@ -1395,11 +1438,15 @@ fn kex_ops(run: &mut Run) -> bool {
     ops_section(run, "kex", jobs)
 }
 
-const SIG_JOBS: [&str; 25] = [
+const SIG_JOBS: [&str; 29] = [
     "ed25519-keygen",
     "ed25519-sign",
     "ed25519-sign-hedged",
     "ed25519-verify",
+    "ed448-keygen",
+    "ed448-sign",
+    "ed448-sign-hedged",
+    "ed448-verify",
     "ecdsa-p256-keygen",
     "ecdsa-p256-sign",
     "ecdsa-p256-sign-hedged",
@@ -1447,6 +1494,15 @@ fn sig_ops(run: &mut Run) -> bool {
     let ed_key = ed25519::PrivateKey::new(&Key::from(ed_secret));
     let ed_public = ed_key.public_key().bytes();
     let ed_signature = ed_key.sign_deterministic(MESSAGE);
+    let Ok(mut hedge448) = seeded() else {
+        return false;
+    };
+    let ed448_secret = [0x42u8; ed448::KEY_SIZE];
+    let ed448_key = ed448::PrivateKey::new(&Key::from(ed448_secret));
+    let ed448_public = ed448_key.public_key().bytes();
+    let Ok(ed448_signature) = ed448_key.sign_deterministic(b"", MESSAGE) else {
+        return false;
+    };
     let (Ok(p256), Ok(p384), Ok(p521)) = (
         ecdsa::p256::PrivateKey::generate(&mut build),
         ecdsa::p384::PrivateKey::generate(&mut build),
@@ -1505,6 +1561,36 @@ fn sig_ops(run: &mut Run) -> bool {
             Box::new(|| {
                 black_box(ed25519::verify(&ed_public, MESSAGE, &ed_signature))
                     .ok();
+            }),
+        ),
+        (
+            "ed448-keygen",
+            Box::new(|| {
+                black_box(ed448::public_key(&ed448_secret));
+            }),
+        ),
+        (
+            "ed448-sign",
+            Box::new(|| {
+                black_box(ed448_key.sign_deterministic(b"", MESSAGE)).ok();
+            }),
+        ),
+        (
+            "ed448-sign-hedged",
+            Box::new(|| {
+                black_box(ed448_key.sign(&mut hedge448, b"", MESSAGE)).ok();
+            }),
+        ),
+        (
+            "ed448-verify",
+            Box::new(|| {
+                black_box(ed448::verify(
+                    &ed448_public,
+                    b"",
+                    MESSAGE,
+                    &ed448_signature,
+                ))
+                .ok();
             }),
         ),
         (
@@ -1689,7 +1775,7 @@ macro_rules! pq_sig_rows {
     };
 }
 
-const PQ_SIG_JOBS: [&str; 7] = [
+const PQ_SIG_JOBS: [&str; 9] = [
     "ml-dsa-44",
     "ml-dsa-65",
     "ml-dsa-87",
@@ -1697,15 +1783,101 @@ const PQ_SIG_JOBS: [&str; 7] = [
     "slh-dsa-sha2-128f",
     "slh-dsa-shake-128s",
     "slh-dsa-shake-128f",
+    "hss-sha256-h10-w8",
+    "hss-sha256-h5-h5-w8",
 ];
+
+/// One HSS key shape under measurement: the key, its encoding, and a
+/// signature to verify. Every signature spends a leaf, and the
+/// sampler makes more calls than a tree holds, so the signing key is
+/// put back from its encoding when it runs out: the same leaves
+/// again, which only a benchmark may do, at the cost of a copy of a
+/// few kilobytes once a tree.
+struct HssBench<const L: usize> {
+    sets: [(crate::sig::lms::Lms, crate::sig::lms::Lmots); L],
+    der: Vec<u8>,
+    signer: crate::sig::lms::hss::PrivateKey<L>,
+    public: crate::sig::lms::hss::PublicKey,
+    signature: Vec<u8>,
+}
+
+impl<const L: usize> HssBench<L> {
+    fn new<R: Random>(
+        rng: &mut R,
+        sets: [(crate::sig::lms::Lms, crate::sig::lms::Lmots); L],
+    ) -> Option<Self> {
+        use crate::sig::lms::hss::{PrivateKey, der_max};
+        let key = PrivateKey::<L>::generate(rng, &sets).ok()?;
+        let mut der = vec![0u8; der_max(L)];
+        let n = key.der_bytes(&mut der).ok()?;
+        der.truncate(n);
+        let mut signer = PrivateKey::<L>::try_from_der(&der).ok()?;
+        let mut signature = vec![0u8; signer.signature_len()];
+        signer.sign(rng, MESSAGE, &mut signature).ok()?;
+        Some(HssBench {
+            sets,
+            der,
+            signer,
+            public: key.public_key(),
+            signature,
+        })
+    }
+
+    /// The keygen, sign and verify rows, named as given.
+    fn rows<'a, R: Random>(
+        &'a mut self,
+        jobs: &mut Vec<Job<'a>>,
+        keygen_rng: &'a mut R,
+        sign_rng: &'a mut R,
+        names: [&'static str; 3],
+    ) {
+        use crate::sig::lms::hss::PrivateKey;
+        let HssBench {
+            sets,
+            der,
+            signer,
+            public,
+            signature,
+        } = self;
+        let [keygen, sign, verify] = names;
+        jobs.push((
+            keygen,
+            Box::new(|| {
+                black_box(PrivateKey::<L>::generate(keygen_rng, sets)).ok();
+            }) as Once<'_>,
+        ));
+        jobs.push((
+            sign,
+            Box::new(|| {
+                let mut out = [0u8; crate::sig::lms::hss::signature_max(2)];
+                if signer.remaining() == 0
+                    && let Ok(fresh) = PrivateKey::<L>::try_from_der(der)
+                {
+                    *signer = fresh;
+                }
+                black_box(signer.sign(sign_rng, MESSAGE, &mut out)).ok();
+            }),
+        ));
+        jobs.push((
+            verify,
+            Box::new(|| {
+                black_box(public.verify(MESSAGE, signature)).ok();
+            }),
+        ));
+    }
+}
 
 /// The post-quantum signature schemes. Signing is measured in its
 /// deterministic form, which is the same work as the hedged one
 /// without a draw from the generator in the middle of it. SLH-DSA
 /// has twelve parameter sets; the four here are the small and the
 /// fast end of the 128-bit ones over each hash, SHA-2 and SHAKE, and
-/// the rest fall between the pattern they show.
+/// the rest fall between the pattern they show. HSS is shown as the
+/// firmware-signing tree, H10 with W8, and as two H5 trees stacked,
+/// whose signing cost includes a fresh lower tree every 32
+/// signatures.
 fn pq_sig_ops(run: &mut Run) -> bool {
+    use crate::sig::lms::{Lmots, Lms};
     if !PQ_SIG_JOBS
         .iter()
         .any(|name| any_wanted("sig-pq", &[name], &run.options))
@@ -1720,6 +1892,19 @@ fn pq_sig_ops(run: &mut Run) -> bool {
     let (Ok(mut r4), Ok(mut r5), Ok(mut r6), Ok(mut r7)) =
         (seeded(), seeded(), seeded(), seeded())
     else {
+        return false;
+    };
+    let (Ok(mut r8), Ok(mut r9), Ok(mut r10), Ok(mut r11)) =
+        (seeded(), seeded(), seeded(), seeded())
+    else {
+        return false;
+    };
+    let h10 = [(Lms::Sha256M32H10, Lmots::Sha256N32W8)];
+    let Some(mut hss_h10) = HssBench::<1>::new(&mut build, h10) else {
+        return false;
+    };
+    let h5_h5 = [(Lms::Sha256M32H5, Lmots::Sha256N32W8); 2];
+    let Some(mut hss_h5_h5) = HssBench::<2>::new(&mut build, h5_h5) else {
         return false;
     };
     pq_sig_key!(
@@ -1820,6 +2005,26 @@ fn pq_sig_ops(run: &mut Run) -> bool {
         &mut r7,
         crate::sig::slh_dsa::shake_128f::PrivateKey,
         "slh-dsa-shake-128f"
+    );
+    hss_h10.rows(
+        &mut jobs,
+        &mut r8,
+        &mut r9,
+        [
+            "hss-sha256-h10-w8-keygen",
+            "hss-sha256-h10-w8-sign",
+            "hss-sha256-h10-w8-verify",
+        ],
+    );
+    hss_h5_h5.rows(
+        &mut jobs,
+        &mut r10,
+        &mut r11,
+        [
+            "hss-sha256-h5-h5-w8-keygen",
+            "hss-sha256-h5-h5-w8-sign",
+            "hss-sha256-h5-h5-w8-verify",
+        ],
     );
     ops_section(run, "sig-pq", jobs)
 }
@@ -2149,6 +2354,7 @@ const KEY256: [u8; 32] = [
 const KEY_XTS_DATA: [u8; 16] = KEY128;
 const KEY_XTS_TWEAK: [u8; 16] = [0x99; 16];
 const NONCE: [u8; 12] = [0xa5; 12];
+const XNONCE: [u8; 24] = [0xa5; 24];
 /// XPN builds its nonce from a salt and a frame number, both of
 /// them the width of a short GCM nonce.
 const SALT: [u8; 12] = [0x11; 12];

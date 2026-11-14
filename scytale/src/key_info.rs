@@ -43,8 +43,12 @@ pub enum Algorithm {
     P521,
     /// X25519.
     X25519,
+    /// X448.
+    X448,
     /// Ed25519.
     Ed25519,
+    /// Ed448.
+    Ed448,
     /// ML-KEM-512.
     MlKem512,
     /// ML-KEM-768.
@@ -81,6 +85,9 @@ pub enum Algorithm {
     SlhDsaShake256s,
     /// SLH-DSA-SHAKE-256f.
     SlhDsaShake256f,
+    /// HSS, or an LMS tree as a one-level HSS key; the parameter
+    /// sets are inside the key.
+    Hss,
 }
 
 impl Algorithm {
@@ -93,7 +100,9 @@ impl Algorithm {
             Algorithm::P384 => "P-384",
             Algorithm::P521 => "P-521",
             Algorithm::X25519 => "X25519",
+            Algorithm::X448 => "X448",
             Algorithm::Ed25519 => "Ed25519",
+            Algorithm::Ed448 => "Ed448",
             Algorithm::MlKem512 => "ML-KEM-512",
             Algorithm::MlKem768 => "ML-KEM-768",
             Algorithm::MlKem1024 => "ML-KEM-1024",
@@ -112,6 +121,7 @@ impl Algorithm {
             Algorithm::SlhDsaShake192f => "SLH-DSA-SHAKE-192f",
             Algorithm::SlhDsaShake256s => "SLH-DSA-SHAKE-256s",
             Algorithm::SlhDsaShake256f => "SLH-DSA-SHAKE-256f",
+            Algorithm::Hss => "HSS",
         }
     }
 
@@ -131,8 +141,17 @@ impl Algorithm {
         if oid == der::X25519 {
             return Ok(Algorithm::X25519);
         }
+        if oid == der::X448 {
+            return Ok(Algorithm::X448);
+        }
         if oid == der::ED25519 {
             return Ok(Algorithm::Ed25519);
+        }
+        if oid == der::ED448 {
+            return Ok(Algorithm::Ed448);
+        }
+        if oid == der::HSS_LMS_HASHSIG {
+            return Ok(Algorithm::Hss);
         }
         // The NIST post-quantum algorithms sit under one arc each,
         // 2.16.840.1.101.3.4.4 for ML-KEM and .3 for the signatures,
@@ -218,8 +237,10 @@ pub struct KeyInfo {
 }
 
 /// Room to decode any PEM block here: the largest key the library
-/// writes, an expanded ML-DSA-87 private key, is under this.
-const SCRATCH: usize = 8192;
+/// writes, an eight-level HSS private key of the tallest trees with
+/// its traversal state, is under this.
+const SCRATCH: usize =
+    crate::sig::lms::hss::der_max(crate::sig::lms::hss::LEVELS_MAX);
 
 impl KeyInfo {
     /// What a DER key is: a PKCS#8 `PrivateKeyInfo` (RFC 5958), a
@@ -393,6 +414,26 @@ mod tests {
         assert_eq!(info(&der), (Algorithm::X25519, false));
         let pem = crate::kex::x25519::public_key_pem(&public);
         assert_eq!(info_pem(&pem), (Algorithm::X25519, false));
+
+        use crate::sig::ed448;
+        let key = ed448::PrivateKey::new(&crate::Key::from([7u8; 57]));
+        assert_eq!(info(&key.der_bytes()), (Algorithm::Ed448, true));
+        assert_eq!(info_pem(&key.pem_bytes()), (Algorithm::Ed448, true));
+        let public = key.public_key();
+        assert_eq!(info(&public.der_bytes()), (Algorithm::Ed448, false));
+        assert_eq!(info_pem(&public.pem_bytes()), (Algorithm::Ed448, false));
+
+        use crate::kex::x448;
+        let secret448 = [7u8; x448::KEY_SIZE];
+        let key = x448::PrivateKey::new(&crate::Key::from(secret448));
+        assert_eq!(info(&key.der_bytes()), (Algorithm::X448, true));
+        assert_eq!(
+            info_pem(&x448::secret_pem(&secret448)),
+            (Algorithm::X448, true)
+        );
+        let public = key.public_key();
+        assert_eq!(info(&public.der_bytes()), (Algorithm::X448, false));
+        assert_eq!(info_pem(&public.pem_bytes()), (Algorithm::X448, false));
 
         let der = crate::sig::ed25519::secret_der(&secret);
         assert_eq!(info(&der), (Algorithm::Ed25519, true));

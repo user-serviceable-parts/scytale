@@ -7,7 +7,7 @@ use clap::{Args, Subcommand};
 use scytale::aead::{ChaCha20Poly1305, Gcm};
 use scytale::cipher::aes::{Aes128, Aes256};
 use scytale::hash::sha2::{Sha256, Sha384, Sha512};
-use scytale::kex::{ecdh, x25519};
+use scytale::kex::{ecdh, x448, x25519};
 use scytale::pke::hpke::{self, Cipher, Context, Kdf, TAG_SIZE};
 use scytale::pke::rsa;
 use scytale::random::CtrDrbg;
@@ -168,7 +168,7 @@ pub fn run(op: PkeOp) -> Result<()> {
 /// An HPKE suite, from the part of its name after `hpke-`: the KEM, as
 /// the key type is named, then the KDF's hash, then the AEAD.
 fn hpke_parts(suite: &str) -> Option<(&str, &str, &str)> {
-    let kem = ["x25519", "ecdh-p256", "ecdh-p384", "ecdh-p521"]
+    let kem = ["x25519", "x448", "ecdh-p256", "ecdh-p384", "ecdh-p521"]
         .into_iter()
         .find(|k| suite.starts_with(&format!("{k}-")))?;
     let rest = &suite[kem.len() + 1..];
@@ -180,6 +180,7 @@ fn hpke_parts(suite: &str) -> Option<(&str, &str, &str)> {
 fn kem_key(kem: &str) -> Option<Algorithm> {
     Some(match kem {
         "x25519" => Algorithm::X25519,
+        "x448" => Algorithm::X448,
         "ecdh-p256" => Algorithm::P256,
         "ecdh-p384" => Algorithm::P384,
         "ecdh-p521" => Algorithm::P521,
@@ -244,6 +245,12 @@ fn sender<H: Kdf, A: Cipher>(
             let (enc, context) = public.sender(rng, info)?;
             (enc.to_vec(), context)
         }
+        Algorithm::X448 => {
+            let public = x448::PublicKey::try_from_pem(pem)?;
+            let public = hpke::x448::PublicKey::new(&public.bytes());
+            let (enc, context) = public.sender(rng, info)?;
+            (enc.to_vec(), context)
+        }
         Algorithm::P256 => {
             let public = ecdh::p256::PublicKey::try_from_pem(pem)?;
             let public = hpke::p256::PublicKey::try_new(&public.sec1_bytes())?;
@@ -269,6 +276,7 @@ fn sender<H: Kdf, A: Cipher>(
 fn enc_len(algorithm: Algorithm) -> usize {
     match algorithm {
         Algorithm::X25519 => hpke::x25519::ENCAPSULATED_SIZE,
+        Algorithm::X448 => hpke::x448::ENCAPSULATED_SIZE,
         Algorithm::P256 => hpke::p256::ENCAPSULATED_SIZE,
         Algorithm::P384 => hpke::p384::ENCAPSULATED_SIZE,
         _ => hpke::p521::ENCAPSULATED_SIZE,
@@ -290,6 +298,14 @@ fn recipient<H: Kdf, A: Cipher>(
             let private = x25519::PrivateKey::try_from_pem(pem)?;
             let secret = Key::from(private.secret_bytes());
             let private = hpke::x25519::PrivateKey::new(&secret);
+            enc.try_into()
+                .map_err(|_| bad)
+                .and_then(|enc| private.recipient(enc, info))
+        }
+        Algorithm::X448 => {
+            let private = x448::PrivateKey::try_from_pem(pem)?;
+            let secret = Key::from(private.secret_bytes());
+            let private = hpke::x448::PrivateKey::new(&secret);
             enc.try_into()
                 .map_err(|_| bad)
                 .and_then(|enc| private.recipient(enc, info))

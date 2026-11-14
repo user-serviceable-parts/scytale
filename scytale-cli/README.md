@@ -18,15 +18,15 @@ and back.
 
 | Command | Does | Algorithms |
 | --- | --- | --- |
-| `scytale hash` | a digest of each input, `sha256sum` style, or of a tuple of strings | SHA-1, SHA-2, SHA-3, SHAKE, cSHAKE, TupleHash |
+| `scytale hash` | a digest of each input, `sha256sum` style, or of a tuple of strings | SHA-1, SHA-2, SHA-3, BLAKE2b, SHAKE, cSHAKE, TupleHash |
 | `scytale mac tag` / `verify` | a tag over the input, or a check of one | HMAC, CMAC, KMAC, Poly1305 |
-| `scytale aead encrypt` / `decrypt` | authenticated encryption, tag after the ciphertext | AES-GCM, AES-GCM-SIV, AES-CCM, AES-XPN, ChaCha20-Poly1305 |
-| `scytale cipher encrypt` / `decrypt` | the unauthenticated modes | AES-ECB, -CBC, -CTR, -CFB, -OFB, -XTS, ChaCha20, FF1, FF3-1 |
+| `scytale aead encrypt` / `decrypt` | authenticated encryption, tag after the ciphertext | AES-GCM, AES-GCM-SIV, AES-CCM, AES-XPN, ChaCha20-Poly1305, XChaCha20-Poly1305 |
+| `scytale cipher encrypt` / `decrypt` | the unauthenticated modes | AES-ECB, -CBC, -CTR, -CFB, -OFB, -XTS, ChaCha20, XChaCha20, FF1, FF3-1 |
 | `scytale cipher wrap` / `unwrap` | key wrapping | AES-KW, AES-KWP |
-| `scytale kdf hkdf` / `pbkdf2` / `tls12` / `sp800-108` / `one-step` / `x963` | keys from keying material, from a password, from a key-derivation key, from a shared secret, or as TLS 1.2 derives them | HKDF, PBKDF2, TLS 1.2 PRF, SP 800-108 KBKDF and KDF-KMAC, SP 800-56C one-step, X9.63 |
-| `scytale key generate` / `public` / `show` | key files, as PEM | Ed25519, X25519, P-256, P-384, P-521, RSA, ML-KEM, ML-DSA, SLH-DSA |
-| `scytale sig sign` / `verify` | signatures | Ed25519, ECDSA, RSA-PSS, RSA PKCS#1 v1.5, ML-DSA, SLH-DSA |
-| `scytale kex agree` | a shared secret | X25519, ECDH |
+| `scytale kdf hkdf` / `pbkdf2` / `argon2id` / `tls12` / `sp800-108` / `one-step` / `x963` | keys from keying material, from a password, from a key-derivation key, from a shared secret, or as TLS 1.2 derives them | HKDF, PBKDF2, Argon2id, TLS 1.2 PRF, SP 800-108 KBKDF and KDF-KMAC, SP 800-56C one-step, X9.63 |
+| `scytale key generate` / `public` / `show` | key files, as PEM | Ed25519, Ed448, X25519, X448, P-256, P-384, P-521, RSA, ML-KEM, ML-DSA, SLH-DSA, HSS |
+| `scytale sig sign` / `verify` | signatures | Ed25519, Ed448, ECDSA, RSA-PSS, RSA PKCS#1 v1.5, ML-DSA, SLH-DSA, HSS |
+| `scytale kex agree` | a shared secret | X25519, X448, ECDH |
 | `scytale kem encapsulate` / `decapsulate` | a shared secret carried in a ciphertext | ML-KEM |
 | `scytale pke encrypt` / `decrypt` | a message under a public key: short for RSA-OAEP, any length for HPKE | RSA-OAEP, HPKE |
 | `scytale random` | bytes from the system-seeded generator | CTR_DRBG |
@@ -135,16 +135,22 @@ file a secret is written to with `-o`.
   allows. Decryption reads the whole input and writes nothing until
   the tag has checked; a message that fails leaves standard output
   empty.
-- The stream modes, and GCM and ChaCha20-Poly1305 encryption, run a
-  chunk at a time, so a pipe of any length goes through in fixed
+- The stream modes, and GCM, ChaCha20-Poly1305 and XChaCha20-Poly1305
+  encryption, run a chunk at a time, so a pipe of any length goes through in fixed
   memory. The block modes take `--padding pkcs7` or `--padding
   none`, and say so if neither is given.
 - ECDSA signatures are DER, as `openssl dgst` writes them, or
-  `r || s` with `--raw-ecdsa`. Ed25519, ML-DSA and SLH-DSA
+  `r || s` with `--raw-ecdsa`. Ed25519, Ed448, ML-DSA and SLH-DSA
   signatures are the fixed-width bytes their standards define.
 - A signature scheme is named in full, `ecdsa-sha256`,
   `rsa-pss-sha256`, `rsa-pkcs1-sha512`, and the key file must hold a
   key for it; one that does not is refused with what it holds.
+- An HSS key is stateful: `sig sign hss` rewrites the key file with
+  the leaf spent before it prints the signature, and `key show` says
+  how many signatures are left. The key is named by its shape,
+  `hss-sha256-h10-w8` for one tree, `hss-shake256-h5-h10-w4` for a
+  tree stacked on another; never copy one, and never sign with it
+  from two places.
 - Exit status is 0 on success, 1 when a tag, signature or padding
   did not verify, 2 when the request could not be carried out as
   asked -- an unknown name, a value in the wrong form, a key of the

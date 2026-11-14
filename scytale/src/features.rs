@@ -268,7 +268,8 @@ architecture!(
     /// only where the operating system has enabled the wider register
     /// state (XCR0 bits 1 and 2), since the instructions fault
     /// otherwise.
-    x86_64, "x86_64",
+    x86_64,
+    "x86_64",
     [
         /// AES-NI (CPUID leaf 1, ECX bit 25).
         Aes = "aes",
@@ -303,7 +304,8 @@ architecture!(
     /// The AArch64 features the library's implementations need, each
     /// a field of `ID_AA64ISAR0_EL1`. A feature named at build time
     /// with `-C target-feature` counts as present.
-    aarch64, "aarch64",
+    aarch64,
+    "aarch64",
     [
         /// The AES instructions (AES field, 1 or more).
         Aes = "aes",
@@ -326,7 +328,8 @@ architecture!(
     /// with `-C target-feature` counts as present. `v` is detected
     /// only where the vector registers are at least 128 bits wide,
     /// which every vector loop here needs.
-    riscv64, "riscv64",
+    riscv64,
+    "riscv64",
     [
         /// The vector extension, with registers of 128 bits or more.
         V = "v",

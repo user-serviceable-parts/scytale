@@ -92,11 +92,12 @@ Cryptographic Validation Protocol (ACVP), and against Project
 Wycheproof, whose cases are chosen to break implementations rather
 than to exercise them. The ACVP vectors are the files in NIST's
 ACVP-Server repository, each holding the prompts and the expected
-answers. The drivers that answer them live in the repository's
+answers, and for LMS a saved session of NIST's demo server beside
+them. The drivers that answer them live in the repository's
 `scytale-acvp` crate, which runs them offline against those files
 and online against NIST's servers through the ACVP protocol; it is
-not a CAVP validation, and scytale has none. The ACVP corpus is 87
-suites holding 84,803 cases, and every case this build can run
+not a CAVP validation, and scytale has none. The ACVP corpus is 93
+suites holding 85,434 cases, and every case this build can run
 is run; the Monte Carlo groups chain a thousand cipher calls per
 case, with the key re-derived at each step. Every implementation is
 put through the whole vector set for its primitive, at every key
@@ -144,15 +145,15 @@ the machinery behind it:
 
 | Module | Job | Algorithms |
 | --- | --- | --- |
-| `aead` | authenticated encryption | GCM, GCM-SIV, XPN, CCM, ChaCha20-Poly1305 |
-| `cipher` | encryption | AES, ChaCha20, and the modes built on them |
+| `aead` | authenticated encryption | GCM, GCM-SIV, XPN, CCM, ChaCha20-Poly1305, XChaCha20-Poly1305 |
+| `cipher` | encryption | AES, ChaCha20, XChaCha20, and the modes built on them |
 | `hash` | digests | SHA-2, SHA-3, SHAKE, cSHAKE, TupleHash; SHA-1 for what still names it |
 | `mac` | message authentication | HMAC, CMAC, KMAC, Poly1305 |
 | `kdf` | key derivation | HKDF, PBKDF2, TLS 1.2 PRF, SP 800-108, SP 800-56C one-step, ANSI X9.63 |
 | `kem` | key encapsulation | ML-KEM-512, -768 and -1024 |
-| `kex` | key agreement | X25519, ECDH over P-256, P-384 and P-521 |
+| `kex` | key agreement | X25519, X448, ECDH over P-256, P-384 and P-521 |
 | `pke` | public-key encryption | HPKE, RSA-OAEP |
-| `sig` | signatures | Ed25519, ECDSA over P-256, P-384 and P-521, ML-DSA, SLH-DSA, RSA-PSS, RSA PKCS#1 v1.5 |
+| `sig` | signatures | Ed25519, Ed448, ECDSA over P-256, P-384 and P-521, ML-DSA, SLH-DSA, LMS/HSS, RSA-PSS, RSA PKCS#1 v1.5 |
 | `random` | random numbers | CTR_DRBG, Hash_DRBG and HMAC_DRBG, and what seeds them |
 | `constant_time` | comparing secrets | equality whose timing says nothing |
 | `codec` | bytes as text | hex, base64 and PEM, in constant time |
@@ -163,6 +164,7 @@ the machinery behind it:
 | --- | --- | --- |
 | AES (FIPS 197) | 128, 192, 256 | the block cipher itself |
 | ChaCha20 (RFC 8439) | 256 | a stream cipher; no tables, no AES needed |
+| XChaCha20 (draft-irtf-cfrg-xchacha) | 256 | ChaCha20 with a 192-bit nonce, through HChaCha20 |
 
 ### Authenticated encryption
 
@@ -177,9 +179,10 @@ dictates otherwise, start here.
 | XPN | GCM under a MACsec extended packet number |
 | CCM | counter mode with CBC-MAC (SP 800-38C); Bluetooth, 802.15.4, CCMP |
 | ChaCha20-Poly1305 (RFC 8439) | GCM's equal; faster without AES hardware |
+| XChaCha20-Poly1305 (draft-irtf-cfrg-xchacha) | the same with a 192-bit nonce, wide enough to draw at random |
 
 The first four are modes of operation of a block cipher and are
-generic over it; the fifth is a stream cipher and a MAC designed
+generic over it; the last two are a stream cipher and a MAC designed
 together, with no block cipher underneath. They share a module because
 what a caller wants is authenticated encryption, not a particular way
 of building it, and they share a trait for the same reason.
@@ -276,15 +279,17 @@ encryption keys are distinct types: a key does one job.
 | Algorithm | Module | Notes |
 | --- | --- | --- |
 | ML-KEM (FIPS 203), all three sets | `kem` | post-quantum; implicit rejection; seed and expanded keys |
-| X25519 (RFC 7748) | `kex` | shared secret needs HKDF; refuses low-order keys |
+| X25519, X448 (RFC 7748) | `kex` | shared secret needs HKDF; refuses low-order keys |
 | ECDH (SP 800-56A) over P-256, P-384, P-521 | `kex` | every public key checked on the curve; compressed points read |
-| HPKE (RFC 9180), base mode | `pke` | DHKEM over X25519, P-256, P-384, P-521; HKDF-SHA256/384/512; AES-GCM, ChaCha20-Poly1305 |
+| HPKE (RFC 9180), base mode | `pke` | DHKEM over X25519, X448, P-256, P-384, P-521; HKDF-SHA256/384/512; AES-GCM, ChaCha20-Poly1305 |
 | RSA-OAEP (RFC 8017) | `pke` | constant-time unpadding; no v1.5 decryption, ever |
 | Ed25519, Ed25519ctx, Ed25519ph (RFC 8032) | `sig` | hedged against faults, or deterministic; refuses malleable signatures; context strings |
+| Ed448, Ed448ph (RFC 8032) | `sig` | hedged against faults, or deterministic; refuses malleable signatures; context strings |
 | ECDSA (FIPS 186-5) over P-256, P-384, P-521 | `sig` | RFC 6979 nonces, hedged against faults or deterministic; r \|\| s and DER signature forms |
 | RSA-PSS, RSA PKCS#1 v1.5 (RFC 8017) | `sig` | any width; CRT signing and key generation |
 | ML-DSA (FIPS 204), all three sets | `sig` | post-quantum; hedged or deterministic; context strings |
 | SLH-DSA (FIPS 205), all twelve sets | `sig` | post-quantum, hash-based; hedged or deterministic; context strings |
+| LMS and HSS (RFC 8554, SP 800-208), all 20 tree and 16 one-time sets | `sig` | stateful hash-based, for firmware signing; the key carries its tree traversal state and advances with each signature; up to eight levels; RFC 9708 key encoding |
 | RSA primitives (RFC 8017) | `sig`, `pke` | raw, unpadded; for building schemes and for testing |
 
 Every key reads and writes the formats other software stores it in:
@@ -484,7 +489,8 @@ gcm.encrypt(&nonce, associated_data, &mut buffer, &mut tag)?;
 gcm.decrypt(&nonce, associated_data, &mut buffer, &tag)?;
 ```
 
-GCM, GCM-SIV, CCM and ChaCha20-Poly1305 share an `Aead` trait, so code
+GCM, GCM-SIV, CCM, ChaCha20-Poly1305 and XChaCha20-Poly1305 share an
+`Aead` trait, so code
 that does not care which one it was handed -- a protocol that
 negotiated it, a format that records it -- can hold any of them behind
 one type. XPN stays out of it: its nonce is two separate halves, a
@@ -551,49 +557,22 @@ dropped, as it always was, and the generator wipes its state.
 
 ## Speed
 
-Measured on a 13th Gen Intel Core i7-1355U, one thread pinned to a
-performance core, on mains power. Over 16 KB buffers, in bytes a
-second counted in millions and thousands of millions:
-
-| What | Feature profile | Speed |
-| --- | --- | --- |
-| AES-128-GCM encrypt | everything detected | 13.8 GB/s |
-| AES-128-GCM encrypt | `x86_64/aes+ssse3+avx+pclmulqdq` | 8.6 GB/s |
-| AES-128-GCM encrypt | `x86_64/ssse3+pclmulqdq` | 272 MB/s |
-| SHA-256 | everything detected | 2.4 GB/s |
-| SHA-256 | `x86_64/aes+ssse3+avx+avx2+vaes` | 338 MB/s |
-| ChaCha20-Poly1305 encrypt | everything detected | 2.7 GB/s |
-
-The profile is the feature set in force (see `scytale::features`).
-Everything detected is what a program gets unless it narrows the
-set; the others are what it gets on a processor, or under a set,
-that lacks the rest: AES-NI without VAES, no AES instructions at all
-(the constant-time bitsliced AES), and no SHA extensions.
-
 ChaCha20-Poly1305 is the one to reach for where the processor has no
 AES instructions: there it is several times faster than any AES here,
 which is what it is for.
 
-Every other construction, every implementation of each, and the key
-agreement, signature and post-quantum operations are measured too.
-Complete runs ship with the crate, in `benchmarks/`, one file per
-machine, each recording the date and the commit it measured:
-[i7-1355u][bench] is this one. The benchmark ships with the library
-too, so these are numbers you can reproduce, from a checkout of the
-[repository][repo]:
+Every construction, every implementation of each, and the key
+agreement, signature and post-quantum operations can be measured.
+The benchmark ships with the library, and runs from a checkout of
+the [repository][repo]:
 
 ```sh
 taskset -c 0 scripts/bench
 ```
 
 The pin matters on a hybrid processor: unpinned, a row records which
-core the scheduler picked rather than how fast the code is. A full
-pass has only been saved for this x86-64 machine; the ARM and RISC-V
-implementations are measured a few rows at a time on the native CI
-runners, by starting the `Bench` workflow by hand. On a laptop
-running on battery, expect about half of each figure.
-
-[bench]: https://github.com/user-serviceable-parts/scytale/blob/main/scytale/benchmarks/i7-1355u.md
+core the scheduler picked rather than how fast the code is. On a
+laptop running on battery, expect about half the speed.
 
 ## How it is tested
 
@@ -611,16 +590,16 @@ its continuous integration on every push, natively on x86-64, arm64
 and riscv64. The ACVP suites run there too, from the `scytale-acvp`
 crate, through this crate's public API.
 
-The public-key algorithms and the KDFs run against both: the ACVP
-sample vectors for ML-KEM, ML-DSA, SLH-DSA, RSA, KTS-IFC, ECDSA,
-EDDSA, XECDH, KDA and the TLS 1.2 KDF, the CFRG's HPKE vectors, and
-Wycheproof's ML-KEM, ML-DSA, ECDH, ECDSA, X25519, Ed25519, RSA
-signature and RSA-OAEP files, whose deliberately twisted cases are the
-point. The deterministic ECDSA suite checks signatures byte for byte,
-since RFC 6979 fixes the nonce. RSA is the one algorithm whose raw
-primitives NIST publishes vectors for, and those run too: they are the
-only external check on a value the crate produces under a private
-exponent rather than merely verifies.
+The public-key algorithms and the KDFs run against both: the ACVP sample
+vectors for ML-KEM, ML-DSA, SLH-DSA, LMS, RSA, KTS-IFC, ECDSA, EDDSA, XECDH,
+KDA and the TLS 1.2 KDF, the CFRG's HPKE vectors, and Wycheproof's
+ML-KEM, ML-DSA, ECDH, ECDSA, X25519, X448, Ed25519, Ed448, RSA signature
+and RSA-OAEP files, whose deliberately twisted cases are the point. The
+deterministic ECDSA suite checks signatures byte for byte, since RFC
+6979 fixes the nonce. RSA is the one algorithm whose raw primitives NIST
+publishes vectors for, and those run too: they are the only external
+check on a value the crate produces under a private exponent rather than
+merely verifies.
 
 The library is also the cryptography under three other crates in the
 repository, and their tests are a check on it too: rustls and

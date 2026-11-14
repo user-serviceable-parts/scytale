@@ -485,8 +485,14 @@ macro_rules! automatic {
 automatic!(
     /// SHA-224 or SHA-256 using the best implementation the features
     /// in force allow; see [`Sha256`].
-    Auto32, Inner32, Engine32, engine::Compress32, Variant32, KERNELS32,
-    PROFILES32, 64,
+    Auto32,
+    Inner32,
+    Engine32,
+    engine::Compress32,
+    Variant32,
+    KERNELS32,
+    PROFILES32,
+    64,
     [
         ("x86_64", ShaNi, x86_64::ShaNi),
         ("aarch64", Armv8, aarch64::Armv8),
@@ -498,8 +504,14 @@ automatic!(
 automatic!(
     /// SHA-384 or SHA-512 using the best implementation the features
     /// in force allow; see [`Sha512`].
-    Auto64, Inner64, Engine64, engine::Compress64, Variant64, KERNELS64,
-    PROFILES64, 128,
+    Auto64,
+    Inner64,
+    Engine64,
+    engine::Compress64,
+    Variant64,
+    KERNELS64,
+    PROFILES64,
+    128,
     [
         ("aarch64", Armv8, aarch64::Armv8),
         ("riscv64", Zvknh, riscv64::Zvknh),

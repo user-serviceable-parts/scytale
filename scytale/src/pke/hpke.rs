@@ -8,8 +8,8 @@
 //! of Encrypted Client Hello, MLS and Oblivious HTTP.
 //!
 //! A suite is three choices. The KEM is the module: [`x25519`],
-//! [`p256`], [`p384`] or [`p521`], each a DHKEM over that group with
-//! the hash RFC 9180 pairs with it. The KDF and the AEAD are type
+//! [`x448`], [`p256`], [`p384`] or [`p521`], each a DHKEM over that
+//! group with the hash RFC 9180 pairs with it. The KDF and the AEAD are type
 //! parameters on the calls that set up a context: any of
 //! [`Sha256`], [`Sha384`] and [`Sha512`], and any of
 //! `Gcm<Aes128>`, `Gcm<Aes256>` and [`ChaCha20Poly1305`].
@@ -357,167 +357,190 @@ impl<H: Kdf, A: Cipher> Context<H, A> {
     }
 }
 
-/// DHKEM over X25519, with HKDF-SHA256 (`kem_id` 0x0020).
-pub mod x25519 {
-    use super::{
-        Cipher, Context, Kdf, extract_and_expand, labeled_expand,
-        labeled_extract,
-    };
-    use crate::hash::sha2::Sha256;
-    use crate::kex::x25519 as dh;
-    use crate::{Error, Key, Random};
-    use zeroize::Zeroize;
-
-    const KEM_ID: u16 = 0x0020;
-
-    /// The length of a private key, `Nsk`.
-    pub const KEY_SIZE: usize = 32;
-
-    /// The length of a public key, `Npk`.
-    pub const PUBLIC_KEY_SIZE: usize = 32;
-
-    /// The length of an encapsulation, `Nenc`.
-    pub const ENCAPSULATED_SIZE: usize = 32;
-
-    /// The length of the shared secret, `Nsecret`.
-    const SECRET_SIZE: usize = 32;
-
-    /// A recipient's private key.
-    pub struct PrivateKey {
-        key: dh::PrivateKey,
-        public: PublicKey,
-    }
-
-    /// A recipient's public key.
-    #[derive(Clone, Copy)]
-    pub struct PublicKey {
-        key: dh::PublicKey,
-    }
-
-    impl PrivateKey {
-        fn from_dh(key: dh::PrivateKey) -> Self {
-            let public = PublicKey {
-                key: *key.public_key(),
+/// DHKEM over one of the RFC 7748 curves, whose keys and
+/// encapsulations are the u-coordinate bytes as they stand.
+macro_rules! xdh_kem {
+    ($(#[$doc:meta])* $module:ident, $kem_id:literal, $hash:ident) => {
+        $(#[$doc])*
+        pub mod $module {
+            use super::{
+                Cipher, Context, Kdf, extract_and_expand, labeled_expand,
+                labeled_extract,
             };
-            PrivateKey { key, public }
-        }
+            use crate::hash::sha2::$hash;
+            use crate::kex::$module as dh;
+            use crate::{Error, Key, Random};
+            use zeroize::Zeroize;
 
-        /// A fresh key.
-        pub fn generate<R: Random>(rng: &mut R) -> Result<Self, Error> {
-            Ok(Self::from_dh(dh::PrivateKey::generate(rng)?))
-        }
+            const KEM_ID: u16 = $kem_id;
 
-        /// The key `DeriveKeyPair` makes from `ikm` (RFC 9180 section
-        /// 7.1.3), which must hold at least [`KEY_SIZE`] bytes of
-        /// entropy; shorter is [`Error::InvalidSeedLength`].
-        pub fn from_seed(ikm: &[u8]) -> Result<Self, Error> {
-            if ikm.len() < KEY_SIZE {
-                return Err(Error::InvalidSeedLength(ikm.len()));
+            /// The length of a private key, `Nsk`.
+            pub const KEY_SIZE: usize = dh::KEY_SIZE;
+
+            /// The length of a public key, `Npk`.
+            pub const PUBLIC_KEY_SIZE: usize = dh::KEY_SIZE;
+
+            /// The length of an encapsulation, `Nenc`.
+            pub const ENCAPSULATED_SIZE: usize = dh::KEY_SIZE;
+
+            /// The length of the shared secret, `Nsecret`: the KEM hash's
+            /// digest.
+            const SECRET_SIZE: usize =
+                size_of::<<$hash as crate::hash::Hash>::Output>();
+
+            /// A recipient's private key.
+            pub struct PrivateKey {
+                key: dh::PrivateKey,
+                public: PublicKey,
             }
-            let suite = super::kem_suite(KEM_ID);
-            let mut prk =
-                labeled_extract::<Sha256>(&suite, b"", b"dkp_prk", ikm);
-            let mut sk = Key::<[u8; KEY_SIZE]>::from([0u8; KEY_SIZE]);
-            let expanded = labeled_expand::<Sha256>(
-                &suite,
-                prk.as_ref(),
-                b"sk",
-                &[],
-                sk.as_mut(),
-            );
-            prk.zeroize();
-            expanded?;
-            Ok(Self::from_dh(dh::PrivateKey::new(&sk)))
-        }
 
-        /// A key from its serialized form, the 32 bytes of RFC 7748.
-        pub fn new(secret: &Key<[u8; KEY_SIZE]>) -> Self {
-            Self::from_dh(dh::PrivateKey::new(secret))
-        }
+            /// A recipient's public key.
+            #[derive(Clone, Copy)]
+            pub struct PublicKey {
+                key: dh::PublicKey,
+            }
 
-        /// The serialized key. A secret, to be wiped.
-        pub fn secret_bytes(&self) -> [u8; KEY_SIZE] {
-            self.key.secret_bytes()
-        }
+            impl PrivateKey {
+                fn from_dh(key: dh::PrivateKey) -> Self {
+                    let public = PublicKey {
+                        key: *key.public_key(),
+                    };
+                    PrivateKey { key, public }
+                }
 
-        /// The public half.
-        pub fn public_key(&self) -> &PublicKey {
-            &self.public
-        }
+                /// A fresh key.
+                pub fn generate<R: Random>(rng: &mut R) -> Result<Self, Error> {
+                    Ok(Self::from_dh(dh::PrivateKey::generate(rng)?))
+                }
 
-        /// The recipient's context for an encapsulation from a sender
-        /// who used `info`. An encapsulation that gives the all-zero
-        /// secret, from a low-order point, is
-        /// [`Error::InvalidPublicKey`].
-        pub fn recipient<H: Kdf, A: Cipher>(
-            &self,
-            enc: &[u8; ENCAPSULATED_SIZE],
-            info: &[u8],
-        ) -> Result<Context<H, A>, Error> {
-            let mut dh = self.key.shared_secret(&dh::PublicKey::new(enc))?;
-            let mut shared = [0u8; SECRET_SIZE];
-            let result = extract_and_expand::<Sha256>(
-                KEM_ID,
-                &dh,
-                enc,
-                &self.public.bytes(),
-                &mut shared,
-            )
-            .and_then(|()| Context::new(KEM_ID, &shared, info));
-            dh.zeroize();
-            shared.zeroize();
-            result
-        }
-    }
+                /// The key `DeriveKeyPair` makes from `ikm` (RFC 9180 section
+                /// 7.1.3), which must hold at least [`KEY_SIZE`] bytes of
+                /// entropy; shorter is [`Error::InvalidSeedLength`].
+                pub fn from_seed(ikm: &[u8]) -> Result<Self, Error> {
+                    if ikm.len() < KEY_SIZE {
+                        return Err(Error::InvalidSeedLength(ikm.len()));
+                    }
+                    let suite = super::kem_suite(KEM_ID);
+                    let mut prk =
+                        labeled_extract::<$hash>(&suite, b"", b"dkp_prk", ikm);
+                    let mut sk = Key::<[u8; KEY_SIZE]>::from([0u8; KEY_SIZE]);
+                    let expanded = labeled_expand::<$hash>(
+                        &suite,
+                        prk.as_ref(),
+                        b"sk",
+                        &[],
+                        sk.as_mut(),
+                    );
+                    prk.zeroize();
+                    expanded?;
+                    Ok(Self::from_dh(dh::PrivateKey::new(&sk)))
+                }
 
-    impl PublicKey {
-        /// A key from its 32 bytes.
-        pub fn new(bytes: &[u8; PUBLIC_KEY_SIZE]) -> Self {
-            PublicKey {
-                key: dh::PublicKey::new(bytes),
+                /// A key from its serialized form, the bytes of RFC 7748.
+                pub fn new(secret: &Key<[u8; KEY_SIZE]>) -> Self {
+                    Self::from_dh(dh::PrivateKey::new(secret))
+                }
+
+                /// The serialized key. A secret, to be wiped.
+                pub fn secret_bytes(&self) -> [u8; KEY_SIZE] {
+                    self.key.secret_bytes()
+                }
+
+                /// The public half.
+                pub fn public_key(&self) -> &PublicKey {
+                    &self.public
+                }
+
+                /// The recipient's context for an encapsulation from a sender
+                /// who used `info`. An encapsulation that gives the all-zero
+                /// secret, from a low-order point, is
+                /// [`Error::InvalidPublicKey`].
+                pub fn recipient<H: Kdf, A: Cipher>(
+                    &self,
+                    enc: &[u8; ENCAPSULATED_SIZE],
+                    info: &[u8],
+                ) -> Result<Context<H, A>, Error> {
+                    let peer = dh::PublicKey::new(enc);
+                    let mut dh = self.key.shared_secret(&peer)?;
+                    let mut shared = [0u8; SECRET_SIZE];
+                    let result = extract_and_expand::<$hash>(
+                        KEM_ID,
+                        &dh,
+                        enc,
+                        &self.public.bytes(),
+                        &mut shared,
+                    )
+                    .and_then(|()| Context::new(KEM_ID, &shared, info));
+                    dh.zeroize();
+                    shared.zeroize();
+                    result
+                }
+            }
+
+            impl PublicKey {
+                /// A key from its bytes, the u-coordinate.
+                pub fn new(bytes: &[u8; PUBLIC_KEY_SIZE]) -> Self {
+                    PublicKey {
+                        key: dh::PublicKey::new(bytes),
+                    }
+                }
+
+                /// The key's bytes.
+                pub fn bytes(&self) -> [u8; PUBLIC_KEY_SIZE] {
+                    self.key.bytes()
+                }
+
+                /// A fresh encapsulation to this key, and the sender's
+                /// context for `info`. A low-order key, whose shared secret
+                /// would be zero, is [`Error::InvalidPublicKey`].
+                pub fn sender<H: Kdf, A: Cipher, R: Random>(
+                    &self,
+                    rng: &mut R,
+                    info: &[u8],
+                ) -> Result<([u8; ENCAPSULATED_SIZE], Context<H, A>), Error> {
+                    self.sender_with(&PrivateKey::generate(rng)?, info)
+                }
+
+                /// As [`sender`](Self::sender), with the ephemeral key given:
+                /// what the RFC's vectors fix.
+                pub(crate) fn sender_with<H: Kdf, A: Cipher>(
+                    &self,
+                    ephemeral: &PrivateKey,
+                    info: &[u8],
+                ) -> Result<([u8; ENCAPSULATED_SIZE], Context<H, A>), Error> {
+                    let enc = ephemeral.public.bytes();
+                    let mut dh = ephemeral.key.shared_secret(&self.key)?;
+                    let mut shared = [0u8; SECRET_SIZE];
+                    let result = extract_and_expand::<$hash>(
+                        KEM_ID,
+                        &dh,
+                        &enc,
+                        &self.bytes(),
+                        &mut shared,
+                    )
+                    .and_then(|()| Context::new(KEM_ID, &shared, info));
+                    dh.zeroize();
+                    shared.zeroize();
+                    Ok((enc, result?))
+                }
             }
         }
-
-        /// The key's 32 bytes.
-        pub fn bytes(&self) -> [u8; PUBLIC_KEY_SIZE] {
-            self.key.bytes()
-        }
-
-        /// A fresh encapsulation to this key, and the sender's
-        /// context for `info`. A low-order key, whose shared secret
-        /// would be zero, is [`Error::InvalidPublicKey`].
-        pub fn sender<H: Kdf, A: Cipher, R: Random>(
-            &self,
-            rng: &mut R,
-            info: &[u8],
-        ) -> Result<([u8; ENCAPSULATED_SIZE], Context<H, A>), Error> {
-            self.sender_with(&PrivateKey::generate(rng)?, info)
-        }
-
-        /// As [`sender`](Self::sender), with the ephemeral key given:
-        /// what the RFC's vectors fix.
-        pub(crate) fn sender_with<H: Kdf, A: Cipher>(
-            &self,
-            ephemeral: &PrivateKey,
-            info: &[u8],
-        ) -> Result<([u8; ENCAPSULATED_SIZE], Context<H, A>), Error> {
-            let enc = ephemeral.public.bytes();
-            let mut dh = ephemeral.key.shared_secret(&self.key)?;
-            let mut shared = [0u8; SECRET_SIZE];
-            let result = extract_and_expand::<Sha256>(
-                KEM_ID,
-                &dh,
-                &enc,
-                &self.bytes(),
-                &mut shared,
-            )
-            .and_then(|()| Context::new(KEM_ID, &shared, info));
-            dh.zeroize();
-            shared.zeroize();
-            Ok((enc, result?))
-        }
-    }
+    };
 }
+
+xdh_kem!(
+    /// DHKEM over X25519, with HKDF-SHA256 (`kem_id` 0x0020).
+    x25519,
+    0x0020,
+    Sha256
+);
+
+xdh_kem!(
+    /// DHKEM over X448, with HKDF-SHA512 (`kem_id` 0x0021).
+    x448,
+    0x0021,
+    Sha512
+);
 
 /// DHKEM over a NIST curve. Keys are scalars of the curve's width,
 /// public keys and encapsulations uncompressed points: compressed
@@ -721,16 +744,25 @@ macro_rules! nist_kem {
 
 nist_kem!(
     /// DHKEM over P-256, with HKDF-SHA256 (`kem_id` 0x0010).
-    p256, 0x0010, Sha256, 0xff
+    p256,
+    0x0010,
+    Sha256,
+    0xff
 );
 nist_kem!(
     /// DHKEM over P-384, with HKDF-SHA384 (`kem_id` 0x0011).
-    p384, 0x0011, Sha384, 0xff
+    p384,
+    0x0011,
+    Sha384,
+    0xff
 );
 nist_kem!(
     /// DHKEM over P-521, with HKDF-SHA512 (`kem_id` 0x0012). A
     /// candidate key's top byte keeps one bit: the order is 521 bits.
-    p521, 0x0012, Sha512, 0x01
+    p521,
+    0x0012,
+    Sha512,
+    0x01
 );
 
 #[cfg(test)]
@@ -772,6 +804,7 @@ mod tests {
             };
         }
         kem!(x25519);
+        kem!(x448);
         kem!(p256);
         kem!(p384);
         kem!(p521);
@@ -826,17 +859,26 @@ mod tests {
             Some(Error::InvalidPublicKey)
         );
         assert!(key.recipient::<Sha256, Gcm<Aes128>>(&point, b"").is_err());
-        // An X25519 encapsulation of the low-order point zero, whose
-        // shared secret is zero.
+        // An X25519 or X448 encapsulation of the low-order point zero,
+        // whose shared secret is zero.
         let key = x25519::PrivateKey::generate(&mut rng).unwrap();
         assert_eq!(
             key.recipient::<Sha256, Gcm<Aes128>>(&[0; 32], b"").err(),
+            Some(Error::InvalidPublicKey)
+        );
+        let key = x448::PrivateKey::generate(&mut rng).unwrap();
+        assert_eq!(
+            key.recipient::<Sha512, Gcm<Aes256>>(&[0; 56], b"").err(),
             Some(Error::InvalidPublicKey)
         );
         // Seeds shorter than a key.
         assert_eq!(
             x25519::PrivateKey::from_seed(&[1; 31]).err(),
             Some(Error::InvalidSeedLength(31))
+        );
+        assert_eq!(
+            x448::PrivateKey::from_seed(&[1; 55]).err(),
+            Some(Error::InvalidSeedLength(55))
         );
         assert_eq!(
             p521::PrivateKey::from_seed(&[1; 65]).err(),

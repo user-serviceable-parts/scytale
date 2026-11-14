@@ -51,24 +51,59 @@ fn quarter_round(s: &mut [Word; 16], a: usize, b: usize, c: usize, d: usize) {
     s[b] = xor_rotate(s[b], s[c], 7);
 }
 
+/// Twenty rounds on the state: ten column rounds, each followed by
+/// a diagonal round.
+#[inline(always)]
+fn rounds(s: &mut [Word; 16]) {
+    for _ in 0..10 {
+        quarter_round(s, 0, 4, 8, 12);
+        quarter_round(s, 1, 5, 9, 13);
+        quarter_round(s, 2, 6, 10, 14);
+        quarter_round(s, 3, 7, 11, 15);
+        quarter_round(s, 0, 5, 10, 15);
+        quarter_round(s, 1, 6, 11, 12);
+        quarter_round(s, 2, 7, 8, 13);
+        quarter_round(s, 3, 4, 9, 14);
+    }
+}
+
 /// Twenty rounds on the state, then the input added back.
 #[inline(always)]
 fn block(state: &[Word; 16]) -> [Word; 16] {
     let mut s = *state;
-    for _ in 0..10 {
-        quarter_round(&mut s, 0, 4, 8, 12);
-        quarter_round(&mut s, 1, 5, 9, 13);
-        quarter_round(&mut s, 2, 6, 10, 14);
-        quarter_round(&mut s, 3, 7, 11, 15);
-        quarter_round(&mut s, 0, 5, 10, 15);
-        quarter_round(&mut s, 1, 6, 11, 12);
-        quarter_round(&mut s, 2, 7, 8, 13);
-        quarter_round(&mut s, 3, 4, 9, 14);
-    }
+    rounds(&mut s);
     for (s, input) in s.iter_mut().zip(state) {
         *s = add(*s, *input);
     }
     s
+}
+
+/// HChaCha20: the rounds over the key and a 128-bit nonce in place of
+/// the counter and nonce, without the input added back, and the first
+/// and last rows kept. Not adding the input back is what makes the
+/// result a key: the rows returned are not keystream, and nothing of
+/// the input is readable from them.
+///
+/// One of these a message, so the lane form is run with every lane
+/// the same rather than kept in step with a second set of rounds.
+pub(crate) fn hchacha20(key: &[u32; 8], nonce: &[u32; 4]) -> [u32; 8] {
+    let mut state = [[0u32; LANES]; 16];
+    for (i, &c) in CONSTANTS.iter().enumerate() {
+        state[i] = [c; LANES];
+    }
+    for (i, &k) in key.iter().enumerate() {
+        state[4 + i] = [k; LANES];
+    }
+    for (i, &n) in nonce.iter().enumerate() {
+        state[12 + i] = [n; LANES];
+    }
+    rounds(&mut state);
+    let mut out = [0u32; 8];
+    for (o, s) in out.iter_mut().zip(state[..4].iter().chain(&state[12..])) {
+        *o = s[0];
+    }
+    state.zeroize();
+    out
 }
 
 /// Xors keystream from `counter` into `data`, a whole number of

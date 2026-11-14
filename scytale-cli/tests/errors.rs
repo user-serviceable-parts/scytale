@@ -35,6 +35,22 @@ fn unknown_names_get_suggestions() {
     assert!(e.contains("did you mean ecdsa-sha1"), "{e}");
     let e = usage(&["key", "generate", "rsa"], b"");
     assert!(e.contains("rsa-2048"), "{e}");
+    let e = usage(&["key", "generate", "hss"], b"");
+    assert!(e.contains("hss-sha256-h5-w8"), "{e}");
+    for bad in [
+        "hss-sha256-h7-w8",
+        "hss-sha256-h5-w3",
+        "hss-md5-h5-w8",
+        "hss-sha256-w8",
+        "hss-sha256-h5-h5-h5-h5-h5-h5-h5-h5-h5-w8",
+    ] {
+        let e = usage(&["key", "generate", bad], b"");
+        let want = format!(
+            "scytale key generate {bad}: {bad}: an HSS key is named \
+             hss-HASH-hH[-hH...]-wW,"
+        );
+        assert!(e.starts_with(&want), "{e}");
+    }
 }
 
 #[test]
@@ -163,6 +179,14 @@ fn wrong_options_name_the_right_ones() {
         e.ends_with("chacha20 takes --nonce (12 bytes), not --iv"),
         "{e}"
     );
+    let e = usage(
+        &["cipher", "encrypt", "xchacha20", "-k", KEY32, "--iv", IV],
+        b"",
+    );
+    assert!(
+        e.ends_with("xchacha20 takes --nonce (24 bytes), not --iv"),
+        "{e}"
+    );
     let e = usage(&["cipher", "encrypt", "aes-128-kw", "-k", KEY16], b"");
     assert!(
         e.ends_with("aes-128-kw wraps keys; scytale cipher wrap does that"),
@@ -249,6 +273,42 @@ fn tuplehash_and_kdf_options_name_their_owners() {
     assert!(e.ends_with("takes no --function-name; that is cshake's"));
     let e = usage(&["hash", "sha256", "--customization", "str:c"], b"");
     assert!(e.ends_with("that is for cshake and tuplehash"), "{e}");
+
+    // Salt, passes, memory, lanes and length; clap refuses an option
+    // given twice, so each case spells out all five.
+    let argon = |[salt, t, m, p, l]: [&str; 5]| {
+        usage(
+            &[
+                "kdf",
+                "argon2id",
+                "--password",
+                "str:pw",
+                "--salt",
+                salt,
+                "--passes",
+                t,
+                "--memory",
+                m,
+                "--lanes",
+                p,
+                "-l",
+                l,
+            ],
+            b"",
+        )
+    };
+    let e = argon(["str:short", "1", "8", "1", "16"]);
+    assert!(e.ends_with("--salt is 5 bytes; argon2id takes at least 8"));
+    let e = argon(["str:saltsalt", "0", "8", "1", "16"]);
+    assert!(e.contains("--passes 0 would derive nothing"), "{e}");
+    let e = argon(["str:saltsalt", "1", "8", "1", "3"]);
+    assert!(e.ends_with("argon2id gives at least 4 bytes"), "{e}");
+    let e = argon(["str:saltsalt", "1", "8", "0", "16"]);
+    assert!(e.ends_with("--lanes 0: argon2id takes 1 to 16777215"));
+    let e = argon(["str:saltsalt", "1", "8", "2", "16"]);
+    assert!(e.contains("at least 8 KiB a lane, 16 for 2 lanes"), "{e}");
+    let e = usage(&["kdf", "argon2id", "--password", "str:pw"], b"");
+    assert!(e.contains("--salt"), "{e}");
 
     let k = [
         "kdf",
@@ -393,6 +453,15 @@ fn key_files_are_described() {
     );
     assert!(
         e.contains("holds an Ed25519 key; ml-kem-768 needs an ML-KEM-768 key"),
+        "{e}"
+    );
+    // The two Montgomery curves' keys are not interchangeable.
+    let x = d.join("x25519.pem");
+    let x = x.to_str().unwrap();
+    ok(&["key", "generate", "x25519", "-o", x], b"");
+    let e = usage(&["kex", "agree", "x448", "-k", x, "-p", x], b"");
+    assert!(
+        e.contains("holds an X25519 key; x448 needs an X448 key"),
         "{e}"
     );
     let junk = d.join("junk");

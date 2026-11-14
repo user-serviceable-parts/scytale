@@ -1,0 +1,56 @@
+[package]
+name = "scytale-acvp"
+description = "ACVP drivers for scytale, offline and against NIST"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "scytale-acvp"
+path = "src/main.rs"
+doc = false
+
+# The check against the vendored vectors, which `cargo test` runs. A
+# binary of its own, without the harness: it edits the process-wide
+# set of features, so nothing may run beside it, and its report is
+# for reading.
+[[test]]
+name = "vendored"
+harness = false
+
+[features]
+default = ["session"]
+# The session against a server, which links the system TLS library;
+# the targets that cross-compile or run under emulation leave it off.
+session = ["dep:ureq"]
+
+[dependencies]
+scytale = { path = "../scytale" }
+serde_json = "1"
+# The parser, with the feature set scytale-cli uses.
+clap = { version = "4", default-features = false, features = [
+    "std",
+    "derive",
+    "help",
+    "usage",
+    "error-context",
+    "suggestions",
+    "env",
+] }
+
+# The HTTP client, over the system TLS library. NIST's servers speak
+# TLS 1.2 only and ask for the client certificate by renegotiating
+# after the request is sent, which rustls does not do, by design; so
+# no pure-Rust stack can log in, and this is OpenSSL on Linux. Should
+# the servers move to TLS 1.3, switch to "rustls-no-provider" with
+# rustls-scytale as the provider, so the transport runs on the
+# workspace's own cryptography.
+ureq = { version = "3", optional = true, default-features = false, features = [
+    "native-tls",
+    "json",
+] }

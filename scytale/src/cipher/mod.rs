@@ -2,7 +2,8 @@
 //!
 //! A block cipher, [`aes`], and the modes of operation that turn it
 //! into something a message can be encrypted with, under [`mode`];
-//! and a stream cipher, [`chacha20`]. The block cipher modes are
+//! and a stream cipher, [`chacha20`], with [`xchacha20`] giving it a
+//! nonce wide enough to draw at random. The block cipher modes are
 //! written against the [`BlockCipher`] trait, so each works with any
 //! cipher. The block and the key are types, so a cipher of unknown
 //! make can still be an object:
@@ -55,6 +56,7 @@ pub mod chacha20;
 pub mod mode;
 pub mod nonce;
 pub mod padding;
+pub mod xchacha20;
 
 pub use nonce::Nonces;
 

@@ -67,32 +67,56 @@ macro_rules! suite {
 suite!(
     /// TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256.
     TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-    SHA256, PRF_SHA256, ECDSA_SCHEMES, AES_128_GCM, 1 << 24
+    SHA256,
+    PRF_SHA256,
+    ECDSA_SCHEMES,
+    AES_128_GCM,
+    1 << 24
 );
 suite!(
     /// TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384.
     TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-    SHA384, PRF_SHA384, ECDSA_SCHEMES, AES_256_GCM, 1 << 24
+    SHA384,
+    PRF_SHA384,
+    ECDSA_SCHEMES,
+    AES_256_GCM,
+    1 << 24
 );
 suite!(
     /// TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256.
     TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-    SHA256, PRF_SHA256, ECDSA_SCHEMES, CHACHA20_POLY1305, u64::MAX
+    SHA256,
+    PRF_SHA256,
+    ECDSA_SCHEMES,
+    CHACHA20_POLY1305,
+    u64::MAX
 );
 suite!(
     /// TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256.
     TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-    SHA256, PRF_SHA256, RSA_SCHEMES, AES_128_GCM, 1 << 24
+    SHA256,
+    PRF_SHA256,
+    RSA_SCHEMES,
+    AES_128_GCM,
+    1 << 24
 );
 suite!(
     /// TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384.
     TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-    SHA384, PRF_SHA384, RSA_SCHEMES, AES_256_GCM, 1 << 24
+    SHA384,
+    PRF_SHA384,
+    RSA_SCHEMES,
+    AES_256_GCM,
+    1 << 24
 );
 suite!(
     /// TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256.
     TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-    SHA256, PRF_SHA256, RSA_SCHEMES, CHACHA20_POLY1305, u64::MAX
+    SHA256,
+    PRF_SHA256,
+    RSA_SCHEMES,
+    CHACHA20_POLY1305,
+    u64::MAX
 );
 
 // RFC 7251 defines AES-CCM for ECDHE_ECDSA only, every one with the
@@ -105,7 +129,11 @@ suite!(
     /// but not the defaults: nothing on the open web negotiates it;
     /// it is for the constrained-device profiles that ask for AES-CCM.
     TLS_ECDHE_ECDSA_WITH_AES_128_CCM,
-    SHA256, PRF_SHA256, ECDSA_SCHEMES, AES_128_CCM, 1 << 23
+    SHA256,
+    PRF_SHA256,
+    ECDSA_SCHEMES,
+    AES_128_CCM,
+    1 << 23
 );
 suite!(
     /// TLS_ECDHE_ECDSA_WITH_AES_256_CCM.
@@ -113,7 +141,11 @@ suite!(
     /// In [`ALL_TLS12_CIPHER_SUITES`](crate::ALL_TLS12_CIPHER_SUITES)
     /// but not the defaults, as the 128-bit form.
     TLS_ECDHE_ECDSA_WITH_AES_256_CCM,
-    SHA256, PRF_SHA256, ECDSA_SCHEMES, AES_256_CCM, 1 << 23
+    SHA256,
+    PRF_SHA256,
+    ECDSA_SCHEMES,
+    AES_256_CCM,
+    1 << 23
 );
 suite!(
     /// TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8: AES-128-CCM with an 8-byte
@@ -128,7 +160,11 @@ suite!(
     /// [`ALL_TLS12_CIPHER_SUITES`](crate::ALL_TLS12_CIPHER_SUITES): a
     /// provider offers or accepts it only where a program names it.
     TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8,
-    SHA256, PRF_SHA256, ECDSA_SCHEMES, AES_128_CCM_8, 1 << 23
+    SHA256,
+    PRF_SHA256,
+    ECDSA_SCHEMES,
+    AES_128_CCM_8,
+    1 << 23
 );
 suite!(
     /// TLS_ECDHE_ECDSA_WITH_AES_256_CCM_8: AES-256-CCM with an 8-byte
@@ -139,7 +175,11 @@ suite!(
     /// nor in
     /// [`ALL_TLS12_CIPHER_SUITES`](crate::ALL_TLS12_CIPHER_SUITES).
     TLS_ECDHE_ECDSA_WITH_AES_256_CCM_8,
-    SHA256, PRF_SHA256, ECDSA_SCHEMES, AES_256_CCM_8, 1 << 23
+    SHA256,
+    PRF_SHA256,
+    ECDSA_SCHEMES,
+    AES_256_CCM_8,
+    1 << 23
 );
 
 static AES_128_GCM: SaltedAead = SaltedAead(Algorithm::Aes128Gcm);

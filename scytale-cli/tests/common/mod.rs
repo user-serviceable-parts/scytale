@@ -14,6 +14,8 @@ pub const KEY32: &str =
     "hex:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 pub const IV: &str = "hex:0f0e0d0c0b0a09080706050403020100";
 pub const NONCE: &str = "hex:000000000000000000000001";
+pub const NONCE24: &str =
+    "hex:000000000000000000000001000000000000000000000002";
 
 /// A directory of this test's own, under the target directory.
 pub fn dir(name: &str) -> PathBuf {

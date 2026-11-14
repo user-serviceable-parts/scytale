@@ -267,10 +267,10 @@ pub fn public_key_pem(public: &[u8; KEY_SIZE]) -> [u8; PUBLIC_KEY_PEM_SIZE] {
 
 /// The length of a key pair's DER encoding, a version 1
 /// `PrivateKeyInfo` carrying the public key beside the secret.
-pub const PAIR_DER_SIZE: usize = der::CURVE_PAIR_DER;
+pub const PAIR_DER_SIZE: usize = der::curve_pair_der_len(KEY_SIZE);
 
 /// The length of a key pair's PEM encoding, a `PRIVATE KEY` block.
-pub const PAIR_PEM_SIZE: usize = der::CURVE_PAIR_PEM;
+pub const PAIR_PEM_SIZE: usize = der::curve_pair_pem_len(KEY_SIZE);
 
 /// One side's secret key, and the public key that goes with it.
 ///

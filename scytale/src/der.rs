@@ -56,8 +56,20 @@ pub(crate) const RSASSA_PSS: &[u8] =
 /// The contents of the OID `id-X25519`, 1.3.101.110.
 pub(crate) const X25519: [u8; 3] = [0x2b, 0x65, 0x6e];
 
+/// The contents of the OID `id-X448`, 1.3.101.111.
+pub(crate) const X448: [u8; 3] = [0x2b, 0x65, 0x6f];
+
 /// The contents of the OID `id-Ed25519`, 1.3.101.112.
 pub(crate) const ED25519: [u8; 3] = [0x2b, 0x65, 0x70];
+
+/// The contents of the OID `id-Ed448`, 1.3.101.113.
+pub(crate) const ED448: [u8; 3] = [0x2b, 0x65, 0x71];
+
+/// id-alg-hss-lms-hashsig, 1.2.840.113549.1.9.16.3.17 (RFC 9708):
+/// HSS and LMS keys, with no parameters.
+pub(crate) const HSS_LMS_HASHSIG: [u8; 11] = [
+    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x10, 0x03, 0x11,
+];
 
 /// The bytes a length of `n` takes: one below 128, otherwise one
 /// for the count of bytes and then the bytes themselves.
@@ -566,14 +578,50 @@ pub(crate) fn read_seed_or_expanded(
     Ok(forms)
 }
 
-/// The width of an RFC 8410 curve key, secret or public.
-const CURVE_KEY: usize = 32;
+// The RFC 8410 curve keys are 32 bytes for X25519 and Ed25519, 56
+// for X448 and 57 for Ed448. Every encoding below is fixed by the
+// key's width, so each is generic over it, and over the length of the
+// array it returns: a length computed from a generic cannot be named
+// on stable Rust, so each caller names its own and an inline const
+// checks the two agree when the function is instantiated.
 
-/// The length of a curve key's PrivateKeyInfo.
-pub(crate) const CURVE_SECRET_DER: usize = 48;
+/// The length of a curve key's version 0 PrivateKeyInfo, around a
+/// key of `n` bytes.
+pub(crate) const fn curve_secret_der_len(n: usize) -> usize {
+    pkcs8_len(3, tlv_len(n))
+}
 
 /// The length of a curve key's SubjectPublicKeyInfo.
-pub(crate) const CURVE_PUBLIC_DER: usize = 44;
+pub(crate) const fn curve_public_der_len(n: usize) -> usize {
+    spki_len(3, n)
+}
+
+/// The length of a curve key pair's version 1 PrivateKeyInfo, which
+/// carries the public key beside the seed.
+pub(crate) const fn curve_pair_der_len(n: usize) -> usize {
+    tlv_len(
+        tlv_len(1) + tlv_len(tlv_len(3)) + tlv_len(tlv_len(n)) + tlv_len(1 + n),
+    )
+}
+
+/// The lengths of the three in PEM blocks.
+pub(crate) const fn curve_secret_pem_len(n: usize) -> usize {
+    pem::encoded_len(PRIVATE_KEY, curve_secret_der_len(n))
+}
+
+pub(crate) const fn curve_public_pem_len(n: usize) -> usize {
+    pem::encoded_len(PUBLIC_KEY, curve_public_der_len(n))
+}
+
+pub(crate) const fn curve_pair_pem_len(n: usize) -> usize {
+    pem::encoded_len(PRIVATE_KEY, curve_pair_der_len(n))
+}
+
+/// The widest curve key, Ed448's.
+const CURVE_KEY_MAX: usize = 57;
+
+/// Room for any curve key's encoding on its way into or out of PEM.
+const CURVE_DER_MAX: usize = curve_pair_der_len(CURVE_KEY_MAX);
 
 /// A curve secret from its PrivateKeyInfo, with the public key the
 /// structure carried if it was version 1, for the caller to check
@@ -582,10 +630,10 @@ pub(crate) const CURVE_PUBLIC_DER: usize = 44;
 /// RFC 8410 wraps the seed in an OCTET STRING of its own,
 /// `CurvePrivateKey`, inside the one PKCS#8 provides, and that is
 /// required here: a bare seed is a different, wrong, encoding.
-pub(crate) fn curve_secret_from_der(
+pub(crate) fn curve_secret_from_der<const N: usize>(
     oid: &[u8; 3],
     der: &[u8],
-) -> Result<CurveSecret, Error> {
+) -> Result<CurveSecret<N>, Error> {
     let info = read_pkcs8(der)?;
     if info.algorithm.oid != oid || !info.algorithm.absent_params() {
         return Err(Error::WrongAlgorithm);
@@ -607,62 +655,81 @@ pub(crate) fn curve_secret_from_der(
 
 /// What a curve PrivateKeyInfo held.
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-pub(crate) struct CurveSecret {
-    pub(crate) secret: [u8; CURVE_KEY],
+pub(crate) struct CurveSecret<const N: usize> {
+    pub(crate) secret: [u8; N],
     /// The public key it carried, which only a version 1 structure
     /// can.
-    pub(crate) public: Option<[u8; CURVE_KEY]>,
+    pub(crate) public: Option<[u8; N]>,
     /// Whether it was version 1.
     pub(crate) v1: bool,
 }
 
-/// A curve secret's version 0 PrivateKeyInfo, which is fixed down
-/// to the byte: the framing, then the seed.
-pub(crate) fn curve_secret_der(
+/// Writes a curve secret's version 0 PrivateKeyInfo into `out`,
+/// which is exactly its length.
+fn write_curve_secret(oid: &[u8; 3], secret: &[u8], out: &mut [u8]) {
+    let written = write_pkcs8(out, oid, false, |w| w.octet_string(secret));
+    debug_assert_eq!(written, Ok(out.len()));
+}
+
+/// Writes a curve key pair's version 1 PrivateKeyInfo, RFC 5958's
+/// `OneAsymmetricKey`, into `out`, which is exactly its length.
+fn write_curve_pair(
     oid: &[u8; 3],
-    secret: &[u8; CURVE_KEY],
-) -> [u8; CURVE_SECRET_DER] {
-    let mut out = [0u8; CURVE_SECRET_DER];
-    out[..16].copy_from_slice(&[
-        0x30, 46, 0x02, 1, 0, 0x30, 5, 0x06, 3, oid[0], oid[1], oid[2], 0x04,
-        34, 0x04, 32,
-    ]);
-    out[16..].copy_from_slice(secret);
+    secret: &[u8],
+    public: &[u8],
+    out: &mut [u8],
+) {
+    let written = encode(out, |w| {
+        w.sequence(|w| {
+            w.integer(&[1]);
+            w.sequence(|w| algorithm_identifier(w, oid, false));
+            w.octet_string_of(|w| w.octet_string(secret));
+            // [1] IMPLICIT BIT STRING, with no unused bits.
+            w.wrapped(context_primitive(1), &[0], |w| w.raw(public));
+        })
+    });
+    debug_assert_eq!(written, Ok(out.len()));
+}
+
+/// Writes a curve public key's SubjectPublicKeyInfo into `out`,
+/// which is exactly its length.
+fn write_curve_public(oid: &[u8; 3], public: &[u8], out: &mut [u8]) {
+    let written = write_spki(out, oid, false, |w| w.raw(public));
+    debug_assert_eq!(written, Ok(out.len()));
+}
+
+/// A curve secret's version 0 PrivateKeyInfo.
+pub(crate) fn curve_secret_der<const N: usize, const M: usize>(
+    oid: &[u8; 3],
+    secret: &[u8; N],
+) -> [u8; M] {
+    const { assert!(M == curve_secret_der_len(N)) };
+    let mut out = [0u8; M];
+    write_curve_secret(oid, secret, &mut out);
     out
 }
 
-/// The length of a curve secret's version 1 PrivateKeyInfo, which
-/// carries the public key beside the seed.
-pub(crate) const CURVE_PAIR_DER: usize = 83;
-
-/// A curve secret and its public key as a version 1 PrivateKeyInfo,
-/// RFC 5958's `OneAsymmetricKey`, fixed down to the byte.
+/// A curve secret and its public key as a version 1 PrivateKeyInfo.
 ///
 /// The version 0 form above is what OpenSSL writes and is enough on
 /// its own. This one carries the public key as well, which some
 /// readers require and which lets a reader check the pair agrees.
-pub(crate) fn curve_pair_der(
+pub(crate) fn curve_pair_der<const N: usize, const M: usize>(
     oid: &[u8; 3],
-    secret: &[u8; CURVE_KEY],
-    public: &[u8; CURVE_KEY],
-) -> [u8; CURVE_PAIR_DER] {
-    let mut out = [0u8; CURVE_PAIR_DER];
-    out[..16].copy_from_slice(&[
-        0x30, 81, 0x02, 1, 1, 0x30, 5, 0x06, 3, oid[0], oid[1], oid[2], 0x04,
-        34, 0x04, 32,
-    ]);
-    out[16..48].copy_from_slice(secret);
-    // [1] IMPLICIT BIT STRING, with no unused bits.
-    out[48..51].copy_from_slice(&[0x81, 33, 0]);
-    out[51..].copy_from_slice(public);
+    secret: &[u8; N],
+    public: &[u8; N],
+) -> [u8; M] {
+    const { assert!(M == curve_pair_der_len(N)) };
+    let mut out = [0u8; M];
+    write_curve_pair(oid, secret, public, &mut out);
     out
 }
 
 /// A curve public key from its SubjectPublicKeyInfo.
-pub(crate) fn curve_public_from_der(
+pub(crate) fn curve_public_from_der<const N: usize>(
     oid: &[u8; 3],
     der: &[u8],
-) -> Result<[u8; CURVE_KEY], Error> {
+) -> Result<[u8; N], Error> {
     let (algorithm, key) = read_spki(der)?;
     if algorithm.oid != oid || !algorithm.absent_params() {
         return Err(Error::WrongAlgorithm);
@@ -670,40 +737,31 @@ pub(crate) fn curve_public_from_der(
     key.try_into().map_err(|_| Error::InvalidEncoding)
 }
 
-/// A curve public key's SubjectPublicKeyInfo, fixed down to the
-/// byte.
-pub(crate) fn curve_public_der(
+/// A curve public key's SubjectPublicKeyInfo.
+pub(crate) fn curve_public_der<const N: usize, const M: usize>(
     oid: &[u8; 3],
-    public: &[u8; CURVE_KEY],
-) -> [u8; CURVE_PUBLIC_DER] {
-    let mut out = [0u8; CURVE_PUBLIC_DER];
-    out[..12].copy_from_slice(&[
-        0x30, 42, 0x30, 5, 0x06, 3, oid[0], oid[1], oid[2], 0x03, 33, 0,
-    ]);
-    out[12..].copy_from_slice(public);
+    public: &[u8; N],
+) -> [u8; M] {
+    const { assert!(M == curve_public_der_len(N)) };
+    let mut out = [0u8; M];
+    write_curve_public(oid, public, &mut out);
     out
 }
-
-/// The length of a curve secret's PEM block.
-pub(crate) const CURVE_SECRET_PEM: usize = 119;
-
-/// The length of a curve public key's PEM block.
-pub(crate) const CURVE_PUBLIC_PEM: usize = 113;
 
 const PRIVATE_KEY: &str = "PRIVATE KEY";
 const PUBLIC_KEY: &str = "PUBLIC KEY";
 
-/// Room to decode a curve PrivateKeyInfo into: the version 0 form
-/// is 48 bytes and the version 1 form 83, but the attributes a
-/// version 1 structure may carry have no bound, so this allows a
-/// generous one. A block past it is refused as malformed.
+/// Room to decode a curve PrivateKeyInfo into: the version 1 form
+/// is at most [`CURVE_DER_MAX`] bytes, but the attributes a version
+/// 1 structure may carry have no bound, so this allows a generous
+/// one. A block past it is refused as malformed.
 const CURVE_SECRET_SCRATCH: usize = 512;
 
 /// [`curve_secret_from_der`] through a `PRIVATE KEY` PEM block.
-pub(crate) fn curve_secret_from_pem(
+pub(crate) fn curve_secret_from_pem<const N: usize>(
     oid: &[u8; 3],
     pem: &[u8],
-) -> Result<CurveSecret, Error> {
+) -> Result<CurveSecret<N>, Error> {
     let mut der = [0u8; CURVE_SECRET_SCRATCH];
     let result = pem::decode_one_of(&[PRIVATE_KEY], pem, &mut der)
         .and_then(|(_, n)| curve_secret_from_der(oid, &der[..n]));
@@ -711,55 +769,63 @@ pub(crate) fn curve_secret_from_pem(
     result
 }
 
-/// [`curve_secret_der`] as a `PRIVATE KEY` PEM block.
-pub(crate) fn curve_secret_pem(
-    oid: &[u8; 3],
-    secret: &[u8; CURVE_KEY],
-) -> [u8; CURVE_SECRET_PEM] {
-    let mut der = curve_secret_der(oid, secret);
-    let mut out = [0u8; CURVE_SECRET_PEM];
-    let n = pem::encode_exact(PRIVATE_KEY, &der, &mut out);
-    debug_assert_eq!(n, CURVE_SECRET_PEM);
+/// `der`, which is a secret, as a `PRIVATE KEY` PEM block of `P`
+/// bytes; the scratch copy is wiped.
+fn secret_block<const P: usize>(der: &mut [u8]) -> [u8; P] {
+    let mut out = [0u8; P];
+    let n = pem::encode_exact(PRIVATE_KEY, der, &mut out);
+    debug_assert_eq!(n, P);
     der.zeroize();
     out
 }
 
-/// The length of a curve key pair's PEM block.
-pub(crate) const CURVE_PAIR_PEM: usize = 168;
+/// [`curve_secret_der`] as a `PRIVATE KEY` PEM block.
+pub(crate) fn curve_secret_pem<const N: usize, const P: usize>(
+    oid: &[u8; 3],
+    secret: &[u8; N],
+) -> [u8; P] {
+    const { assert!(P == curve_secret_pem_len(N)) };
+    let mut der = [0u8; CURVE_DER_MAX];
+    let der = &mut der[..curve_secret_der_len(N)];
+    write_curve_secret(oid, secret, der);
+    secret_block(der)
+}
 
 /// [`curve_pair_der`] in a `PRIVATE KEY` PEM block.
-pub(crate) fn curve_pair_pem(
+pub(crate) fn curve_pair_pem<const N: usize, const P: usize>(
     oid: &[u8; 3],
-    secret: &[u8; CURVE_KEY],
-    public: &[u8; CURVE_KEY],
-) -> [u8; CURVE_PAIR_PEM] {
-    let mut der = curve_pair_der(oid, secret, public);
-    let mut out = [0u8; CURVE_PAIR_PEM];
-    let n = pem::encode_exact(PRIVATE_KEY, &der, &mut out);
-    debug_assert_eq!(n, CURVE_PAIR_PEM);
-    der.zeroize();
-    out
+    secret: &[u8; N],
+    public: &[u8; N],
+) -> [u8; P] {
+    const { assert!(P == curve_pair_pem_len(N)) };
+    let mut der = [0u8; CURVE_DER_MAX];
+    let der = &mut der[..curve_pair_der_len(N)];
+    write_curve_pair(oid, secret, public, der);
+    secret_block(der)
 }
 
 /// [`curve_public_from_der`] through a `PUBLIC KEY` PEM block.
-pub(crate) fn curve_public_from_pem(
+pub(crate) fn curve_public_from_pem<const N: usize>(
     oid: &[u8; 3],
     pem: &[u8],
-) -> Result<[u8; CURVE_KEY], Error> {
-    let mut der = [0u8; CURVE_PUBLIC_DER];
+) -> Result<[u8; N], Error> {
+    let mut der = [0u8; CURVE_DER_MAX];
     let (_, n) = pem::decode_one_of(&[PUBLIC_KEY], pem, &mut der)?;
     curve_public_from_der(oid, &der[..n])
 }
 
 /// [`curve_public_der`] as a `PUBLIC KEY` PEM block.
-pub(crate) fn curve_public_pem(
+pub(crate) fn curve_public_pem<const N: usize, const P: usize>(
     oid: &[u8; 3],
-    public: &[u8; CURVE_KEY],
-) -> [u8; CURVE_PUBLIC_PEM] {
-    let der = curve_public_der(oid, public);
-    let mut out = [0u8; CURVE_PUBLIC_PEM];
-    let n = pem::encode_exact(PUBLIC_KEY, &der, &mut out);
-    debug_assert_eq!(n, CURVE_PUBLIC_PEM);
+    public: &[u8; N],
+) -> [u8; P] {
+    const { assert!(P == curve_public_pem_len(N)) };
+    let mut der = [0u8; CURVE_DER_MAX];
+    let der = &mut der[..curve_public_der_len(N)];
+    write_curve_public(oid, public, der);
+    let mut out = [0u8; P];
+    let n = pem::encode_exact(PUBLIC_KEY, der, &mut out);
+    debug_assert_eq!(n, P);
     out
 }
 
@@ -893,43 +959,92 @@ mod tests {
         &ZEROS[..len]
     }
 
-    /// The fixed curve encodings are what the general writer makes.
+    /// The curve encodings are the RFC 8410 shapes, byte for byte,
+    /// at both widths: the 32-byte ones against the fixed layouts the
+    /// module once wrote by hand, and the lengths at 56 bytes, where
+    /// the key pair's length first needs the long form.
     #[test]
-    fn curve_shapes_match_the_writer() {
+    fn curve_shapes() {
         let secret = [0x11u8; 32];
         let public = [0x22u8; 32];
         for oid in [ED25519, X25519] {
-            let mut out = [0u8; 64];
-            let n = write_pkcs8(&mut out, &oid, false, |w| {
-                w.octet_string_of(|w| w.raw(&secret))
-            })
-            .unwrap();
-            assert_eq!(out[..n], curve_secret_der(&oid, &secret));
-            let n =
-                write_spki(&mut out, &oid, false, |w| w.raw(&public)).unwrap();
-            assert_eq!(out[..n], curve_public_der(&oid, &public));
+            let der: [u8; 48] = curve_secret_der(&oid, &secret);
+            assert_eq!(
+                der[..16],
+                [
+                    0x30, 46, 0x02, 1, 0, 0x30, 5, 0x06, 3, oid[0], oid[1],
+                    oid[2], 0x04, 34, 0x04, 32
+                ]
+            );
+            assert_eq!(der[16..], secret);
+            let der: [u8; 83] = curve_pair_der(&oid, &secret, &public);
+            assert_eq!(
+                der[..16],
+                [
+                    0x30, 81, 0x02, 1, 1, 0x30, 5, 0x06, 3, oid[0], oid[1],
+                    oid[2], 0x04, 34, 0x04, 32
+                ]
+            );
+            assert_eq!(der[16..48], secret);
+            assert_eq!(der[48..51], [0x81, 33, 0]);
+            assert_eq!(der[51..], public);
+            let der: [u8; 44] = curve_public_der(&oid, &public);
+            assert_eq!(
+                der[..12],
+                [
+                    0x30, 42, 0x30, 5, 0x06, 3, oid[0], oid[1], oid[2], 0x03,
+                    33, 0
+                ]
+            );
+            assert_eq!(der[12..], public);
 
-            let back =
-                curve_secret_from_der(&oid, &curve_secret_der(&oid, &secret))
-                    .unwrap();
+            let back: CurveSecret<32> = curve_secret_from_der(
+                &oid,
+                &curve_secret_der::<32, 48>(&oid, &secret),
+            )
+            .unwrap();
             assert_eq!(back.secret, secret);
             assert_eq!(back.public, None);
             assert!(!back.v1);
+            let back: CurveSecret<32> = curve_secret_from_der(
+                &oid,
+                &curve_pair_der::<32, 83>(&oid, &secret, &public),
+            )
+            .unwrap();
+            assert_eq!(back.public, Some(public));
+            assert!(back.v1);
             assert_eq!(
-                curve_public_from_der(&oid, &curve_public_der(&oid, &public)),
+                curve_public_from_der(
+                    &oid,
+                    &curve_public_der::<32, 44>(&oid, &public)
+                ),
                 Ok(public)
             );
         }
+        assert_eq!(curve_secret_der_len(56), 72);
+        assert_eq!(curve_public_der_len(56), 68);
+        assert_eq!(curve_pair_der_len(56), 132);
+        let secret = [0x33u8; 56];
+        let public = [0x44u8; 56];
+        let der: [u8; 132] = curve_pair_der(&X448, &secret, &public);
+        assert_eq!(der[..4], [0x30, 0x81, 129, 0x02]);
+        let back: CurveSecret<56> = curve_secret_from_der(&X448, &der).unwrap();
+        assert_eq!((back.secret, back.public), (secret, Some(public)));
+        // A key of the wrong width under the right identifier.
+        assert_eq!(
+            curve_secret_from_der::<32>(&X448, &der).err(),
+            Some(Error::InvalidEncoding)
+        );
     }
 
     #[test]
     fn curve_refusals() {
         let secret = [0x11u8; 32];
-        let good = curve_secret_der(&ED25519, &secret);
+        let good: [u8; 48] = curve_secret_der(&ED25519, &secret);
         // The other curve's OID; a bare seed without CurvePrivateKey;
         // a 31-byte seed; and NULL parameters, which RFC 8410 forbids.
         assert_eq!(
-            curve_secret_from_der(&X25519, &good),
+            curve_secret_from_der::<32>(&X25519, &good),
             Err(Error::WrongAlgorithm)
         );
         let mut bare = [0u8; 46];
@@ -938,7 +1053,7 @@ mod tests {
         ]);
         bare[14..].copy_from_slice(&secret);
         assert_eq!(
-            curve_secret_from_der(&ED25519, &bare),
+            curve_secret_from_der::<32>(&ED25519, &bare),
             Err(Error::InvalidEncoding)
         );
         let mut short = [0u8; 47];
@@ -947,7 +1062,7 @@ mod tests {
         short[13] = 33;
         short[15] = 31;
         assert_eq!(
-            curve_secret_from_der(&ED25519, &short),
+            curve_secret_from_der::<32>(&ED25519, &short),
             Err(Error::InvalidEncoding)
         );
         let mut with_null = [0u8; 50];
@@ -957,7 +1072,7 @@ mod tests {
         ]);
         with_null[18..].copy_from_slice(&secret);
         assert_eq!(
-            curve_secret_from_der(&ED25519, &with_null),
+            curve_secret_from_der::<32>(&ED25519, &with_null),
             Err(Error::WrongAlgorithm)
         );
     }
@@ -982,7 +1097,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            curve_secret_from_der(&ED25519, &out[..n]),
+            curve_secret_from_der::<32>(&ED25519, &out[..n]),
             Ok(CurveSecret {
                 secret,
                 public: Some(public),
@@ -992,31 +1107,26 @@ mod tests {
         // The same with version 0 has a field it may not have.
         out[4] = 0;
         assert_eq!(
-            curve_secret_from_der(&ED25519, &out[..n]),
+            curve_secret_from_der::<32>(&ED25519, &out[..n]),
             Err(Error::InvalidEncoding)
         );
         // Version 2 does not exist.
         out[4] = 2;
         assert_eq!(
-            curve_secret_from_der(&ED25519, &out[..n]),
+            curve_secret_from_der::<32>(&ED25519, &out[..n]),
             Err(Error::UnsupportedVersion)
         );
     }
 
     #[test]
     fn curve_pem_sizes_and_round_trips() {
-        assert_eq!(
-            pem::encoded_len(PRIVATE_KEY, CURVE_SECRET_DER),
-            CURVE_SECRET_PEM
-        );
-        assert_eq!(
-            pem::encoded_len(PUBLIC_KEY, CURVE_PUBLIC_DER),
-            CURVE_PUBLIC_PEM
-        );
+        assert_eq!(curve_secret_pem_len(32), 119);
+        assert_eq!(curve_public_pem_len(32), 113);
+        assert_eq!(curve_pair_pem_len(32), 168);
         let secret = [0x33u8; 32];
         let public = [0x44u8; 32];
         for oid in [ED25519, X25519] {
-            let pem = curve_secret_pem(&oid, &secret);
+            let pem: [u8; 119] = curve_secret_pem(&oid, &secret);
             assert!(pem.starts_with(b"-----BEGIN PRIVATE KEY-----\n"));
             assert_eq!(
                 curve_secret_from_pem(&oid, &pem),
@@ -1026,12 +1136,15 @@ mod tests {
                     v1: false
                 })
             );
-            let pem = curve_public_pem(&oid, &public);
+            let pem: [u8; 113] = curve_public_pem(&oid, &public);
             assert!(pem.starts_with(b"-----BEGIN PUBLIC KEY-----\n"));
             assert_eq!(curve_public_from_pem(&oid, &pem), Ok(public));
             // The labels are not interchangeable.
             assert_eq!(
-                curve_public_from_pem(&oid, &curve_secret_pem(&oid, &secret)),
+                curve_public_from_pem::<32>(
+                    &oid,
+                    &curve_secret_pem::<32, 119>(&oid, &secret)
+                ),
                 Err(Error::InvalidEncoding)
             );
         }

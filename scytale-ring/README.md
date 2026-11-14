@@ -22,14 +22,13 @@ different implementation:
   chosen at run time, so this crate builds wherever `rustc` does:
   `no_std`, with no allocator, on a bare board or in wasm.
 - **Speed.** scytale's hot loops are hand-written assembly, tuned
-  per processor: AES-128-GCM runs at 14 GB/s with VAES and SHA-256
-  at 2.4 GB/s with SHA-NI on a laptop core, with figures for every
-  algorithm and implementation published in [its README][speed].
-- **Testing.** scytale is checked against the NIST ACVP vectors and
-  Project Wycheproof, more than 88,000 cases, on every implementation
-  of every primitive, on x86-64, ARM64 and RISC-V hardware and on
-  eleven emulated processors. This crate then runs ring's own test
-  suite and the test suites of rustls and rustls-webpki on top.
+  per processor.
+- **Testing.** scytale is checked against the NIST ACVP sample
+  vectors, run offline, and Project Wycheproof, more than 88,000
+  cases, on every implementation of every primitive, on x86-64, ARM64
+  and RISC-V hardware and on eleven emulated processors. This crate
+  then runs ring's own test suite and the test suites of rustls and
+  rustls-webpki on top.
 - **A second implementation.** Two independent implementations of one
   API let you compare them, test against each other, or keep one as
   a fallback. Switching between ring and this crate is one line of
@@ -117,4 +116,3 @@ is under ring's licence, which is beside it.
 [ring-tests]: https://github.com/user-serviceable-parts/scytale/tree/main/scytale-ring/ring-tests
 [downstream]: https://github.com/user-serviceable-parts/scytale/blob/main/scripts/test-ring-downstream
 [provider]: https://github.com/user-serviceable-parts/scytale/tree/main/rustls-scytale
-[speed]: https://github.com/user-serviceable-parts/scytale/tree/main/scytale#speed

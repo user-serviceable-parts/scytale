@@ -17,6 +17,7 @@ use scytale::cipher::mode::{
     Alphabet, Cbc, Cfb1, Cfb8, Cfb128, Ctr, Ff1, Ff3_1, Kw, Kwp, Ofb, Xts,
 };
 use scytale::cipher::padding::pkcs7;
+use scytale::cipher::xchacha20::XChaCha20;
 use scytale::{ByteArray, Error, Key};
 use zeroize::Zeroize;
 
@@ -82,7 +83,7 @@ pub enum Padding {
 #[derive(Args)]
 #[command(after_help = crate::help::VALUES)]
 pub struct CipherArgs {
-    /// The cipher and mode: aes-256-ctr, chacha20, ff1-aes-128, ...
+    /// The cipher and mode: aes-256-ctr, xchacha20, ff1-aes-128, ...
     pub algorithm: String,
     /// The key (hex:, file:, fd:, env:)
     #[arg(short, long)]
@@ -90,10 +91,10 @@ pub struct CipherArgs {
     /// The IV, first counter block or XTS tweak: one 16-byte block
     #[arg(long)]
     iv: Option<String>,
-    /// The nonce, for chacha20 (12 bytes)
+    /// The nonce, for chacha20 (12 bytes) and xchacha20 (24)
     #[arg(short, long)]
     nonce: Option<String>,
-    /// The first block counter, for chacha20
+    /// The first block counter, for chacha20 and xchacha20
     #[arg(long, default_value_t = 0)]
     counter: u32,
     /// Required for ecb, cbc and cfb128: pkcs7 or none
@@ -153,7 +154,7 @@ fn transform(args: &CipherArgs, encrypt: bool) -> Result<()> {
         }
         return with_aes!(bits, C => aes::<C>(entry, mode, args, encrypt));
     }
-    if name == "chacha20" {
+    if name == "chacha20" || name == "xchacha20" {
         return chacha20(entry, args);
     }
     let ff3 = name.starts_with("ff3-1-");
@@ -166,8 +167,8 @@ fn transform(args: &CipherArgs, encrypt: bool) -> Result<()> {
 fn only(args: &CipherArgs, name: &str, takes: &[&str]) -> Result<()> {
     let given: [(&str, bool, &str); 7] = [
         ("--iv", args.iv.is_some(), "the block modes"),
-        ("--nonce", args.nonce.is_some(), "chacha20"),
-        ("--counter", args.counter != 0, "chacha20"),
+        ("--nonce", args.nonce.is_some(), "chacha20 and xchacha20"),
+        ("--counter", args.counter != 0, "chacha20 and xchacha20"),
         ("--padding", args.padding.is_some(), "ecb, cbc and cfb128"),
         ("--tweak-key", args.tweak_key.is_some(), "xts"),
         ("--alphabet", args.alphabet.is_some(), "ff1 and ff3-1"),
@@ -401,24 +402,31 @@ fn blocks(
     io::write(out, &rest, false)
 }
 
-/// ChaCha20, where encryption and decryption are the one operation.
+/// ChaCha20 and XChaCha20, where encryption and decryption are the
+/// one operation.
 fn chacha20(entry: &Entry, args: &CipherArgs) -> Result<()> {
     let name = entry.name;
+    let bytes = entry.nonce.describe();
     if args.iv.is_some() {
-        return Err(usage!("chacha20 takes --nonce (12 bytes), not --iv"));
+        return Err(usage!("{name} takes --nonce ({bytes}), not --iv"));
     }
     only(args, name, &["--nonce", "--counter"])?;
     let key = Key::from(value::array::<32>(&args.key, "--key", name)?);
     let Some(nonce) = args.nonce.as_deref() else {
         return Err(usage!(
-            "--nonce is required: 12 bytes, never reused under a key"
+            "--nonce is required: {bytes}, never reused under a key"
         ));
     };
+    let mut input = io::input(args.file.as_deref())?;
+    let mut out = io::output(args.out.as_deref(), false)?;
+    if name == "xchacha20" {
+        let nonce = value::array::<24>(nonce, "--nonce", name)?;
+        let mut stream = XChaCha20::new(&key).stream(&nonce, args.counter);
+        return io::stream(&mut *input, &mut *out, |c| Ok(stream.update(c)?));
+    }
     let nonce = value::array::<12>(nonce, "--nonce", name)?;
     let cipher = ChaCha20::new(&key);
     let mut stream = cipher.stream(&nonce, args.counter);
-    let mut input = io::input(args.file.as_deref())?;
-    let mut out = io::output(args.out.as_deref(), false)?;
     io::stream(&mut *input, &mut *out, |c| Ok(stream.update(c)?))
 }
 
@@ -594,7 +602,7 @@ mod tests {
     #[test]
     fn table_matches_types() {
         for entry in names::CIPHER.iter() {
-            let n = if entry.name == "chacha20" {
+            let n = if entry.name.ends_with("chacha20") {
                 32
             } else {
                 let bits = entry

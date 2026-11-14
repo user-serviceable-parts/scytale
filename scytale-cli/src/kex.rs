@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
 use scytale::Algorithm;
-use scytale::kex::{ecdh, x25519};
+use scytale::kex::{ecdh, x448, x25519};
 use zeroize::Zeroizing;
 
 use crate::fail::{Result, usage};
@@ -29,7 +29,7 @@ impl KexOp {
 #[derive(Args)]
 #[command(after_help = crate::help::VALUES)]
 pub struct AgreeArgs {
-    /// The agreement: x25519, ecdh-p256, ecdh-p384, ecdh-p521
+    /// The agreement: x25519, x448, ecdh-p256, ecdh-p384, ecdh-p521
     pub algorithm: String,
     /// The private key file (PEM)
     #[arg(short, long)]
@@ -50,6 +50,7 @@ pub fn run(op: KexOp) -> Result<()> {
     let name = names::KEX.find(&args.algorithm)?.name;
     let algorithm = match name {
         "x25519" => Algorithm::X25519,
+        "x448" => Algorithm::X448,
         "ecdh-p256" => Algorithm::P256,
         "ecdh-p384" => Algorithm::P384,
         "ecdh-p521" => Algorithm::P521,
@@ -57,17 +58,26 @@ pub fn run(op: KexOp) -> Result<()> {
     };
     let private = key::read_private(&args.key, &[algorithm], name)?;
     let public = key::read_public(&args.peer, &[algorithm], name)?;
+    let low_order = || {
+        usage!(
+            "{}: this public key gives a shared secret anyone can \
+             compute; refuse the peer",
+            args.peer.display()
+        )
+    };
     let secret: Zeroizing<Vec<u8>> = match algorithm {
         Algorithm::X25519 => {
             let private = x25519::PrivateKey::try_from_pem(&private)?;
             let public = x25519::PublicKey::try_from_pem(&public)?;
-            let secret = private.shared_secret(&public).map_err(|_| {
-                usage!(
-                    "{}: this public key gives a shared secret anyone can \
-                     compute; refuse the peer",
-                    args.peer.display()
-                )
-            })?;
+            let secret =
+                private.shared_secret(&public).map_err(|_| low_order())?;
+            Zeroizing::new(secret.to_vec())
+        }
+        Algorithm::X448 => {
+            let private = x448::PrivateKey::try_from_pem(&private)?;
+            let public = x448::PublicKey::try_from_pem(&public)?;
+            let secret =
+                private.shared_secret(&public).map_err(|_| low_order())?;
             Zeroizing::new(secret.to_vec())
         }
         Algorithm::P256 => {

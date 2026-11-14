@@ -165,114 +165,162 @@ macro_rules! algorithm {
 
 algorithm!(
     /// ECDSA on P-256 with SHA-256.
-    ECDSA_P256_SHA256, alg_id::ECDSA_P256, alg_id::ECDSA_SHA256,
+    ECDSA_P256_SHA256,
+    alg_id::ECDSA_P256,
+    alg_id::ECDSA_SHA256,
     ecdsa_p256::<Sha256>
 );
 algorithm!(
     /// ECDSA on P-256 with SHA-384.
-    ECDSA_P256_SHA384, alg_id::ECDSA_P256, alg_id::ECDSA_SHA384,
+    ECDSA_P256_SHA384,
+    alg_id::ECDSA_P256,
+    alg_id::ECDSA_SHA384,
     ecdsa_p256::<Sha384>
 );
 algorithm!(
     /// ECDSA on P-256 with SHA-512.
-    ECDSA_P256_SHA512, alg_id::ECDSA_P256, alg_id::ECDSA_SHA512,
+    ECDSA_P256_SHA512,
+    alg_id::ECDSA_P256,
+    alg_id::ECDSA_SHA512,
     ecdsa_p256::<Sha512>
 );
 algorithm!(
     /// ECDSA on P-384 with SHA-256.
-    ECDSA_P384_SHA256, alg_id::ECDSA_P384, alg_id::ECDSA_SHA256,
+    ECDSA_P384_SHA256,
+    alg_id::ECDSA_P384,
+    alg_id::ECDSA_SHA256,
     ecdsa_p384::<Sha256>
 );
 algorithm!(
     /// ECDSA on P-384 with SHA-384.
-    ECDSA_P384_SHA384, alg_id::ECDSA_P384, alg_id::ECDSA_SHA384,
+    ECDSA_P384_SHA384,
+    alg_id::ECDSA_P384,
+    alg_id::ECDSA_SHA384,
     ecdsa_p384::<Sha384>
 );
 algorithm!(
     /// ECDSA on P-384 with SHA-512.
-    ECDSA_P384_SHA512, alg_id::ECDSA_P384, alg_id::ECDSA_SHA512,
+    ECDSA_P384_SHA512,
+    alg_id::ECDSA_P384,
+    alg_id::ECDSA_SHA512,
     ecdsa_p384::<Sha512>
 );
 algorithm!(
     /// ECDSA on P-521 with SHA-256.
-    ECDSA_P521_SHA256, alg_id::ECDSA_P521, alg_id::ECDSA_SHA256,
+    ECDSA_P521_SHA256,
+    alg_id::ECDSA_P521,
+    alg_id::ECDSA_SHA256,
     ecdsa_p521::<Sha256>
 );
 algorithm!(
     /// ECDSA on P-521 with SHA-384.
-    ECDSA_P521_SHA384, alg_id::ECDSA_P521, alg_id::ECDSA_SHA384,
+    ECDSA_P521_SHA384,
+    alg_id::ECDSA_P521,
+    alg_id::ECDSA_SHA384,
     ecdsa_p521::<Sha384>
 );
 algorithm!(
     /// ECDSA on P-521 with SHA-512.
-    ECDSA_P521_SHA512, alg_id::ECDSA_P521, alg_id::ECDSA_SHA512,
+    ECDSA_P521_SHA512,
+    alg_id::ECDSA_P521,
+    alg_id::ECDSA_SHA512,
     ecdsa_p521::<Sha512>
 );
 algorithm!(
     /// Ed25519.
-    ED25519, alg_id::ED25519, alg_id::ED25519, ed25519
+    ED25519,
+    alg_id::ED25519,
+    alg_id::ED25519,
+    ed25519
 );
 algorithm!(
     /// RSA PKCS#1 v1.5 with SHA-256, 2048 to 8192 bits.
-    RSA_PKCS1_2048_8192_SHA256, alg_id::RSA_ENCRYPTION,
-    alg_id::RSA_PKCS1_SHA256, rsa_pkcs1::<Sha256>
+    RSA_PKCS1_2048_8192_SHA256,
+    alg_id::RSA_ENCRYPTION,
+    alg_id::RSA_PKCS1_SHA256,
+    rsa_pkcs1::<Sha256>
 );
 algorithm!(
     /// RSA PKCS#1 v1.5 with SHA-384, 2048 to 8192 bits.
-    RSA_PKCS1_2048_8192_SHA384, alg_id::RSA_ENCRYPTION,
-    alg_id::RSA_PKCS1_SHA384, rsa_pkcs1::<Sha384>
+    RSA_PKCS1_2048_8192_SHA384,
+    alg_id::RSA_ENCRYPTION,
+    alg_id::RSA_PKCS1_SHA384,
+    rsa_pkcs1::<Sha384>
 );
 algorithm!(
     /// RSA PKCS#1 v1.5 with SHA-512, 2048 to 8192 bits.
-    RSA_PKCS1_2048_8192_SHA512, alg_id::RSA_ENCRYPTION,
-    alg_id::RSA_PKCS1_SHA512, rsa_pkcs1::<Sha512>
+    RSA_PKCS1_2048_8192_SHA512,
+    alg_id::RSA_ENCRYPTION,
+    alg_id::RSA_PKCS1_SHA512,
+    rsa_pkcs1::<Sha512>
 );
 algorithm!(
     /// As [`RSA_PKCS1_2048_8192_SHA256`], the signature's parameters
     /// absent.
-    RSA_PKCS1_2048_8192_SHA256_ABSENT_PARAMS, alg_id::RSA_ENCRYPTION,
-    RSA_PKCS1_SHA256_ABSENT_PARAMS, rsa_pkcs1::<Sha256>
+    RSA_PKCS1_2048_8192_SHA256_ABSENT_PARAMS,
+    alg_id::RSA_ENCRYPTION,
+    RSA_PKCS1_SHA256_ABSENT_PARAMS,
+    rsa_pkcs1::<Sha256>
 );
 algorithm!(
     /// As [`RSA_PKCS1_2048_8192_SHA384`], the signature's parameters
     /// absent.
-    RSA_PKCS1_2048_8192_SHA384_ABSENT_PARAMS, alg_id::RSA_ENCRYPTION,
-    RSA_PKCS1_SHA384_ABSENT_PARAMS, rsa_pkcs1::<Sha384>
+    RSA_PKCS1_2048_8192_SHA384_ABSENT_PARAMS,
+    alg_id::RSA_ENCRYPTION,
+    RSA_PKCS1_SHA384_ABSENT_PARAMS,
+    rsa_pkcs1::<Sha384>
 );
 algorithm!(
     /// As [`RSA_PKCS1_2048_8192_SHA512`], the signature's parameters
     /// absent.
-    RSA_PKCS1_2048_8192_SHA512_ABSENT_PARAMS, alg_id::RSA_ENCRYPTION,
-    RSA_PKCS1_SHA512_ABSENT_PARAMS, rsa_pkcs1::<Sha512>
+    RSA_PKCS1_2048_8192_SHA512_ABSENT_PARAMS,
+    alg_id::RSA_ENCRYPTION,
+    RSA_PKCS1_SHA512_ABSENT_PARAMS,
+    rsa_pkcs1::<Sha512>
 );
 algorithm!(
     /// RSA-PSS with SHA-256 on an `rsaEncryption` key, 2048 to 8192
     /// bits.
-    RSA_PSS_2048_8192_SHA256_LEGACY_KEY, alg_id::RSA_ENCRYPTION,
-    alg_id::RSA_PSS_SHA256, rsa_pss::<Sha256>
+    RSA_PSS_2048_8192_SHA256_LEGACY_KEY,
+    alg_id::RSA_ENCRYPTION,
+    alg_id::RSA_PSS_SHA256,
+    rsa_pss::<Sha256>
 );
 algorithm!(
     /// RSA-PSS with SHA-384 on an `rsaEncryption` key.
-    RSA_PSS_2048_8192_SHA384_LEGACY_KEY, alg_id::RSA_ENCRYPTION,
-    alg_id::RSA_PSS_SHA384, rsa_pss::<Sha384>
+    RSA_PSS_2048_8192_SHA384_LEGACY_KEY,
+    alg_id::RSA_ENCRYPTION,
+    alg_id::RSA_PSS_SHA384,
+    rsa_pss::<Sha384>
 );
 algorithm!(
     /// RSA-PSS with SHA-512 on an `rsaEncryption` key.
-    RSA_PSS_2048_8192_SHA512_LEGACY_KEY, alg_id::RSA_ENCRYPTION,
-    alg_id::RSA_PSS_SHA512, rsa_pss::<Sha512>
+    RSA_PSS_2048_8192_SHA512_LEGACY_KEY,
+    alg_id::RSA_ENCRYPTION,
+    alg_id::RSA_PSS_SHA512,
+    rsa_pss::<Sha512>
 );
 
 algorithm!(
     /// ML-DSA-44.
-    ML_DSA_44, alg_id::ML_DSA_44, alg_id::ML_DSA_44, ml_dsa_44
+    ML_DSA_44,
+    alg_id::ML_DSA_44,
+    alg_id::ML_DSA_44,
+    ml_dsa_44
 );
 algorithm!(
     /// ML-DSA-65.
-    ML_DSA_65, alg_id::ML_DSA_65, alg_id::ML_DSA_65, ml_dsa_65
+    ML_DSA_65,
+    alg_id::ML_DSA_65,
+    alg_id::ML_DSA_65,
+    ml_dsa_65
 );
 algorithm!(
     /// ML-DSA-87.
-    ML_DSA_87, alg_id::ML_DSA_87, alg_id::ML_DSA_87, ml_dsa_87
+    ML_DSA_87,
+    alg_id::ML_DSA_87,
+    alg_id::ML_DSA_87,
+    ml_dsa_87
 );
 
 /// Every verification algorithm here, for certificate chains.

@@ -15,7 +15,7 @@
 //!
 //! Four of these are modes of operation of a block cipher and name
 //! their cipher as a type parameter: `Gcm::<Aes128>::new(&key)`. The
-//! fifth is not built that way at all, which is the reason this
+//! other two are not built that way at all, which is the reason this
 //! module groups by what a construction does rather than by how it is
 //! made. [`Aead`] is that contract written down, and the one-shot
 //! calls live on it: a caller imports the trait and then does not care
@@ -27,6 +27,7 @@
 //! | --- | --- |
 //! | Encrypt and authenticate a message | [`Gcm`], with [`Nonces`] |
 //! | The same, without AES instructions | [`ChaCha20Poly1305`] |
+//! | The same, with nonces drawn at random | [`XChaCha20Poly1305`] |
 //! | The same, when a nonce might repeat | [`GcmSiv`] |
 //! | MACsec frames | [`Xpn`] |
 //! | Bluetooth LE, 802.15.4, CCMP, or a TLS CCM suite | [`Ccm`] |
@@ -38,19 +39,22 @@
 //! message. [`ChaCha20Poly1305`] is as strong as [`Gcm`] and, on a
 //! processor without AES instructions, several times faster while
 //! leaking nothing through the cache; with them, [`Gcm`] is the
-//! faster. [`Xpn`] is [`Gcm`] with the nonce assembled from a secret
+//! faster. [`XChaCha20Poly1305`] is [`ChaCha20Poly1305`] with a
+//! 192-bit nonce, wide enough to draw at random, at the price of one
+//! block a message. [`Xpn`] is [`Gcm`] with the nonce assembled from a secret
 //! salt and a frame number, as MACsec does it. [`Ccm`] is counter
 //! mode with a CBC-MAC, slower than [`Gcm`] because the MAC chains,
 //! and there for the protocols that fixed on it.
 //!
 //! # Nonces
 //!
-//! All five need a nonce that has never been used before under the
-//! same key. For [`Gcm`], [`Xpn`] and [`ChaCha20Poly1305`] a repeat
-//! is fatal rather than merely revealing: it gives up the hash key,
-//! and with it the ability to forge tags. For [`Ccm`] it leaks the
-//! two messages into each other. Count nonces with
-//! [`Nonces`] rather than drawing them.
+//! All six need a nonce that has never been used before under the
+//! same key. For [`Gcm`], [`Xpn`], [`ChaCha20Poly1305`] and
+//! [`XChaCha20Poly1305`] a repeat is fatal rather than merely
+//! revealing: it gives up the hash key, and with it the ability to
+//! forge tags. For [`Ccm`] it leaks the two messages into each
+//! other. Count nonces with [`Nonces`] rather than drawing them;
+//! only [`XChaCha20Poly1305`]'s are wide enough to draw.
 //!
 //! # Example
 //!
@@ -85,12 +89,14 @@ pub mod gcm;
 pub mod gcm_siv;
 pub(crate) mod ghash;
 pub(crate) mod polyval;
+pub mod xchacha20_poly1305;
 pub mod xpn;
 
 pub use ccm::Ccm;
 pub use chacha20_poly1305::ChaCha20Poly1305;
 pub use gcm::Gcm;
 pub use gcm_siv::{GcmSiv, SivKey};
+pub use xchacha20_poly1305::XChaCha20Poly1305;
 pub use xpn::Xpn;
 
 use crate::traits::ByteArray;
@@ -98,10 +104,10 @@ use crate::{Error, KeyType};
 
 /// Authenticated encryption under one key.
 ///
-/// [`Gcm`], [`GcmSiv`], [`Ccm`] and [`ChaCha20Poly1305`] implement
-/// this, so a
-/// caller that does not care which one it got -- a protocol that
-/// negotiated it, or a format that records it -- can hold any of them.
+/// [`Gcm`], [`GcmSiv`], [`Ccm`], [`ChaCha20Poly1305`] and
+/// [`XChaCha20Poly1305`] implement this, so a caller that does not
+/// care which one it got -- a protocol that negotiated it, or a
+/// format that records it -- can hold any of them.
 /// The nonce, the key and the tag are types, so the trait is usable as
 /// an object once they are named:
 /// `&dyn Aead<Key = Key<[u8; 16]>, Nonce = [u8; 12], Tag = [u8; 16]>`
@@ -119,10 +125,12 @@ use crate::{Error, KeyType};
 /// concrete types that can stream say so themselves, and they do not
 /// all agree on whether that is possible.
 pub trait Aead: KeyType {
-    /// The nonce; `[u8; 12]` for all of these.
+    /// The nonce; `[u8; 12]` for all of these but
+    /// [`XChaCha20Poly1305`], whose is `[u8; 24]`.
     ///
     /// It must never repeat under one key. Count nonces with
-    /// [`Nonces`](crate::cipher::Nonces) rather than drawing them.
+    /// [`Nonces`](crate::cipher::Nonces) rather than drawing them,
+    /// unless they are 24 bytes wide.
     type Nonce: ByteArray;
 
     /// The tag; `[u8; 16]` for all of these.

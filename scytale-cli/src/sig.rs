@@ -1,22 +1,24 @@
 //! `scytale sig`: signing a message and checking a signature.
 //!
 //! The scheme is named on the call and the key file must hold a key
-//! for it: `ed25519`; `ecdsa-HASH` on a P-256, P-384 or P-521 key;
+//! for it: `ed25519` or `ed448`; `ecdsa-HASH` on a P-256, P-384 or
+//! P-521 key;
 //! `rsa-pss-HASH` on an RSA or RSA-PSS key; `rsa-pkcs1-HASH` on an
-//! RSA key; the ML-DSA and SLH-DSA sets by their own names.
+//! RSA key; the ML-DSA and SLH-DSA sets by their own names; `hss` on
+//! an HSS key, whose file every signature rewrites.
 
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
 use scytale::Algorithm;
 use scytale::random::CtrDrbg;
-use scytale::sig::{ecdsa, ed25519, rsa};
+use scytale::sig::{ecdsa, ed448, ed25519, rsa};
 
 use crate::fail::{Result, usage, verify};
 use crate::hash::with_hash;
 use crate::io::Format;
 use crate::key::{self, with_pq_sig};
-use crate::{io, names, value};
+use crate::{hss, io, names, value};
 
 #[derive(Subcommand)]
 pub enum SigOp {
@@ -44,7 +46,7 @@ pub struct SignArgs {
     /// The private key file (PEM)
     #[arg(short, long)]
     key: PathBuf,
-    /// The context string, for ed25519, ml-dsa and slh-dsa
+    /// The context string, for ed25519, ed448, ml-dsa and slh-dsa
     #[arg(long)]
     context: Option<String>,
     /// Write an ECDSA signature as r || s rather than DER
@@ -71,7 +73,7 @@ pub struct VerifyArgs {
     /// The signature (hex:, file:, fd:, env:)
     #[arg(short, long)]
     signature: String,
-    /// The context string, for ed25519, ml-dsa and slh-dsa
+    /// The context string, for ed25519, ed448, ml-dsa and slh-dsa
     #[arg(long)]
     context: Option<String>,
     /// Read an ECDSA signature as r || s rather than DER
@@ -84,10 +86,12 @@ pub struct VerifyArgs {
 /// What a scheme name resolves to.
 enum Scheme {
     Ed25519,
+    Ed448,
     Ecdsa(&'static str),
     RsaPss(&'static str),
     RsaPkcs1(&'static str),
     PostQuantum(Algorithm),
+    Hss,
 }
 
 impl Scheme {
@@ -96,6 +100,8 @@ impl Scheme {
         let name = entry.name;
         let scheme = if name == "ed25519" {
             Scheme::Ed25519
+        } else if name == "ed448" {
+            Scheme::Ed448
         } else if let Some(h) = name.strip_prefix("ecdsa-") {
             Scheme::Ecdsa(h)
         } else if let Some(h) = name.strip_prefix("rsa-pss-") {
@@ -104,6 +110,8 @@ impl Scheme {
             Scheme::RsaPkcs1(h)
         } else if let Some(a) = key::pq_by_name(name) {
             Scheme::PostQuantum(a)
+        } else if name == "hss" {
+            Scheme::Hss
         } else {
             return Err(usage!("no signature scheme named \"{name}\""));
         };
@@ -114,18 +122,23 @@ impl Scheme {
     fn keys(&self) -> Vec<Algorithm> {
         match self {
             Scheme::Ed25519 => vec![Algorithm::Ed25519],
+            Scheme::Ed448 => vec![Algorithm::Ed448],
             Scheme::Ecdsa(_) => {
                 vec![Algorithm::P256, Algorithm::P384, Algorithm::P521]
             }
             Scheme::RsaPss(_) => vec![Algorithm::Rsa, Algorithm::RsaPss],
             Scheme::RsaPkcs1(_) => vec![Algorithm::Rsa],
             Scheme::PostQuantum(a) => vec![*a],
+            Scheme::Hss => vec![Algorithm::Hss],
         }
     }
 
     /// Whether `--context` is meaningful.
     fn takes_context(&self) -> bool {
-        matches!(self, Scheme::Ed25519 | Scheme::PostQuantum(_))
+        matches!(
+            self,
+            Scheme::Ed25519 | Scheme::Ed448 | Scheme::PostQuantum(_)
+        )
     }
 
     fn takes_raw_ecdsa(&self) -> bool {
@@ -148,8 +161,8 @@ fn options(
 ) -> Result<()> {
     if context && !scheme.takes_context() {
         return Err(usage!(
-            "{name} takes no --context; that is for ed25519, ml-dsa and \
-             slh-dsa"
+            "{name} takes no --context; that is for ed25519, ed448, ml-dsa \
+             and slh-dsa"
         ));
     }
     if raw_ecdsa && !scheme.takes_raw_ecdsa() {
@@ -165,6 +178,13 @@ fn sign(args: SignArgs) -> Result<()> {
     let info = scytale::KeyInfo::try_from_pem(&pem)?;
     let message = io::read_all(args.file.as_deref())?;
     let context = value::text(args.context.as_deref(), "--context")?;
+    // HSS reads its key again itself, since it must write it back.
+    if let Scheme::Hss = scheme {
+        drop(pem);
+        let signature = hss::sign(&args.key, &message)?;
+        let mut out = io::output(args.out.as_deref(), false)?;
+        return io::write(&mut *out, &signature, args.format.as_hex(false));
+    }
     // One generator for every scheme that draws: RSA-PSS's salt, and
     // the hedging of Ed25519, ECDSA, ML-DSA and SLH-DSA, each the
     // deterministic nonce with fresh randomness mixed in. RSA PKCS#1
@@ -177,6 +197,16 @@ fn sign(args: SignArgs) -> Result<()> {
                 Some(_) => key.sign_ctx(&mut rng, &context, &message)?.to_vec(),
                 None => key.sign(&mut rng, &message)?.to_vec(),
             }
+        }
+        // Ed448 hashes a context into every signature, the empty one
+        // without --context.
+        Scheme::Ed448 => {
+            let key = ed448::PrivateKey::try_from_pem(&pem)?;
+            key.sign(&mut rng, &context, &message)
+                .map_err(|_| {
+                    usage!("--context is {} bytes; at most 255", context.len())
+                })?
+                .to_vec()
         }
         Scheme::Ecdsa(hash) => match info.algorithm {
             Algorithm::P256 => {
@@ -241,6 +271,7 @@ fn sign(args: SignArgs) -> Result<()> {
                 ))?
                 .to_vec()
         }, _ => return Err(usage!("{a} is not a signature scheme"))),
+        Scheme::Hss => unreachable!("signed and written above"),
     };
     let mut out = io::output(args.out.as_deref(), false)?;
     io::write(&mut *out, &signature, args.format.as_hex(false))
@@ -273,6 +304,12 @@ fn verify(args: VerifyArgs) -> Result<()> {
                 Some(_) => key.verify_ctx(&context, &message, sig),
                 None => key.verify(&message, sig),
             }
+        }
+        Scheme::Ed448 => {
+            let key = ed448::PublicKey::try_from_pem(&pem)?;
+            let sig = fixed(ed448::SIGNATURE_SIZE)?;
+            let sig = sig.try_into().map_err(|_| invalid())?;
+            key.verify(&context, &message, sig)
         }
         Scheme::Ecdsa(hash) => {
             let der = |e: scytale::Error| match e {
@@ -339,6 +376,7 @@ fn verify(args: VerifyArgs) -> Result<()> {
             let sig = sig.try_into().map_err(|_| invalid())?;
             key.verify(&context, &message, sig)
         }, _ => return Err(usage!("{a} is not a signature scheme"))),
+        Scheme::Hss => hss::verify(&pem, &message, &signature),
     };
     result.map_err(|_| invalid())
 }

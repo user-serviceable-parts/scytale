@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand, ValueEnum};
 use scytale::cipher::aes::{Aes128, Aes192, Aes256};
 use scytale::kdf::sp800_108::Counter;
-use scytale::kdf::{hkdf, one_step, pbkdf2, sp800_108, tls12, x963};
+use scytale::kdf::{argon2, hkdf, one_step, pbkdf2, sp800_108, tls12, x963};
 use scytale::mac::Mac;
 use scytale::mac::cmac::Cmac;
 use scytale::mac::hmac::Hmac;
@@ -24,6 +24,8 @@ pub enum KdfOp {
     Hkdf(HkdfArgs),
     /// Turn a password into a key, slowly (RFC 8018)
     Pbkdf2(Pbkdf2Args),
+    /// Turn a password into a key, slowly and in memory (RFC 9106)
+    Argon2id(Argon2idArgs),
     /// The TLS 1.2 PRF: a secret, a label and a seed (RFC 5246)
     Tls12(Tls12Args),
     /// Keys from a key-derivation key under a MAC (SP 800-108)
@@ -41,6 +43,7 @@ impl KdfOp {
         match self {
             KdfOp::Hkdf(a) => format!("hkdf {}", a.hash),
             KdfOp::Pbkdf2(a) => format!("pbkdf2 {}", a.hash),
+            KdfOp::Argon2id(_) => "argon2id".into(),
             KdfOp::Tls12(a) => format!("tls12 {}", a.hash),
             KdfOp::Sp800_108(a) => format!("sp800-108 {}", a.mac),
             KdfOp::OneStep(a) => format!("one-step {}", a.algorithm),
@@ -89,6 +92,46 @@ pub struct Pbkdf2Args {
     #[arg(short, long)]
     iterations: u32,
     /// Bytes of output
+    #[arg(short, long)]
+    length: usize,
+    /// Hex by default
+    #[command(flatten)]
+    format: Format,
+    /// Write to this file, created readable by the owner alone
+    #[arg(short, long)]
+    out: Option<PathBuf>,
+}
+
+// The costs are required, as PBKDF2's iterations are: a default
+// would be a cost the script never states, and a tag derived under
+// it could not be checked once the default moved.
+#[derive(Args)]
+#[command(after_help = crate::help::VALUES)]
+pub struct Argon2idArgs {
+    /// The password (str:, file:, fd:, env:, hex:)
+    #[arg(long)]
+    password: String,
+    /// The salt (str: allowed), at least 8 bytes
+    #[arg(long)]
+    salt: String,
+    /// Passes over the memory; RFC 9106 suggests 3 with 64 MiB
+    #[arg(long)]
+    passes: u32,
+    /// Memory in KiB; 65536 is RFC 9106's second recommendation
+    #[arg(long)]
+    memory: u32,
+    /// Lanes; 1 unless matching a tag made with more
+    #[arg(long)]
+    lanes: u32,
+    /// A secret key held apart from the stored tags (hex:, file:,
+    /// fd:, env:); none without it
+    #[arg(long)]
+    secret: Option<String>,
+    /// Associated data bound into the tag (str: allowed); none
+    /// without it
+    #[arg(long)]
+    data: Option<String>,
+    /// Bytes of output, at least 4
     #[arg(short, long)]
     length: usize,
     /// Hex by default
@@ -273,6 +316,11 @@ pub fn run(op: KdfOp) -> Result<()> {
                     &mut key,
                 )?)
             })?;
+            let mut out = io::output(args.out.as_deref(), true)?;
+            io::write(&mut *out, &key, args.format.as_hex(true))
+        }
+        KdfOp::Argon2id(args) => {
+            let key = argon2id(&args)?;
             let mut out = io::output(args.out.as_deref(), true)?;
             io::write(&mut *out, &key, args.format.as_hex(true))
         }
@@ -504,6 +552,71 @@ fn modes<M: Mac>(
             sp800_108::double_pipeline(prf, counter, fixed, out)
         }
     }
+}
+
+/// `scytale kdf argon2id`. The library takes its memory from the
+/// caller, so the allocation is made here, and made fallibly:
+/// `--memory` is a number off the command line, and asking for more than the
+/// machine has should be a message, not an abort.
+fn argon2id(args: &Argon2idArgs) -> Result<Zeroizing<Vec<u8>>> {
+    if args.passes == 0 {
+        return Err(usage!(
+            "--passes 0 would derive nothing; every guess should cost \
+             an attacker what it costs you"
+        ));
+    }
+    // The library refuses all of these too, but with a bare length;
+    // here each one names its option and what would do.
+    if args.length < 4 {
+        return Err(usage!(
+            "--length {}: argon2id gives at least 4 bytes",
+            args.length
+        ));
+    }
+    if !(1..=0x00ff_ffff).contains(&args.lanes) {
+        return Err(usage!(
+            "--lanes {}: argon2id takes 1 to 16777215",
+            args.lanes
+        ));
+    }
+    if u64::from(args.memory) < 8 * u64::from(args.lanes) {
+        return Err(usage!(
+            "--memory {}: argon2id takes at least 8 KiB a lane, {} \
+             for {} lanes",
+            args.memory,
+            8 * u64::from(args.lanes),
+            args.lanes
+        ));
+    }
+    let password = value::parse(&args.password, "--password", true)?;
+    let salt = value::parse(&args.salt, "--salt", true)?;
+    if salt.len() < 8 {
+        return Err(usage!(
+            "--salt is {} bytes; argon2id takes at least 8",
+            salt.len()
+        ));
+    }
+    let secret = match &args.secret {
+        Some(s) => value::parse(s, "--secret", false)?,
+        None => Zeroizing::new(Vec::new()),
+    };
+    let data = value::text(args.data.as_deref(), "--data")?;
+    let blocks = args.memory as usize;
+    let mut work = Vec::new();
+    work.try_reserve_exact(blocks).map_err(|_| {
+        usage!("--memory {}: this machine cannot give that much", blocks)
+    })?;
+    work.resize(blocks, argon2::Block::ZERO);
+    let params = argon2::Params {
+        passes: args.passes,
+        memory_kib: args.memory,
+        lanes: args.lanes,
+    };
+    let mut tag = Zeroizing::new(vec![0u8; args.length]);
+    argon2::argon2id(
+        &password, &salt, &secret, &data, params, &mut work, &mut tag,
+    )?;
+    Ok(tag)
 }
 
 /// `scytale kdf one-step`: SP 800-56C's one-step KDF over a hash,

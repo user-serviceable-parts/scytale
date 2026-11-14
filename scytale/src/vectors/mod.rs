@@ -71,7 +71,20 @@ mod chacha20_poly1305 {
     }
 }
 
-/// Key agreement: X25519 and ECDH, through Project Wycheproof's
+/// XChaCha20-Poly1305 (draft-irtf-cfrg-xchacha), through Project
+/// Wycheproof's cases: there is no ACVP suite for it either. The
+/// keystream kernels are ChaCha20's and are covered above; what this
+/// adds is the HChaCha20 block, which is one portable function.
+mod xchacha20_poly1305 {
+    use super::*;
+
+    #[test]
+    fn wycheproof() {
+        support::wycheproof::xchacha20_poly1305::run();
+    }
+}
+
+/// Key agreement: X25519, X448 and ECDH, through Project Wycheproof's
 /// edge cases. ACVP's XECDH suites run from `scytale-acvp`.
 mod kex {
     use super::*;
@@ -84,6 +97,11 @@ mod kex {
     #[test]
     fn wycheproof_x25519() {
         support::wycheproof::x25519::run();
+    }
+
+    #[test]
+    fn wycheproof_x448() {
+        support::wycheproof::x448::run();
     }
 }
 
@@ -120,7 +138,7 @@ mod blake2 {
     }
 }
 
-/// Signatures: ECDSA, Ed25519, ML-DSA and RSA, through Project
+/// Signatures: ECDSA, Ed25519, Ed448, ML-DSA and RSA, through Project
 /// Wycheproof.
 mod sig {
     use super::*;
@@ -133,6 +151,11 @@ mod sig {
     #[test]
     fn wycheproof_ed25519() {
         support::wycheproof::ed25519::run();
+    }
+
+    #[test]
+    fn wycheproof_ed448() {
+        support::wycheproof::ed448::run();
     }
 
     #[test]

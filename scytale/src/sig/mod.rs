@@ -1,13 +1,17 @@
 //! Signatures: made with a secret key, checked with a public one.
 //!
 //! A signature binds a message to the holder of a key. [`ed25519`]
-//! is the scheme to pick unless a protocol names another; [`ecdsa`]
-//! over P-256, P-384 and P-521 and [`rsa`] with PSS and PKCS#1 v1.5
+//! is the scheme to pick unless a protocol names another; [`ed448`]
+//! is the same construction over a larger curve, and [`ecdsa`] over
+//! P-256, P-384 and P-521 and [`rsa`] with PSS and PKCS#1 v1.5
 //! padding cover the protocols and certificates that ask for them by
-//! name;
-//! [`ml_dsa`] is the post-quantum choice, with keys and signatures
-//! of a few kilobytes, and [`slh_dsa`] the conservative one, resting
-//! on hashes alone at the price of signatures ten times larger.
+//! name; [`ml_dsa`] is the post-quantum choice, with keys and
+//! signatures of a few kilobytes, and [`slh_dsa`] the conservative
+//! one, resting on hashes alone at the price of signatures ten times
+//! larger. [`lms`] is the stateful hash-based scheme, LMS and HSS,
+//! for the firmware signing that CNSA 2.0 and SP 800-208 require it
+//! for: its private key changes with every signature and must be
+//! stored back before the signature is released.
 //!
 //! ```
 //! use scytale::random::CtrDrbg;
@@ -32,6 +36,8 @@
 
 pub mod ecdsa;
 pub mod ed25519;
+pub mod ed448;
+pub mod lms;
 pub mod ml_dsa;
 pub mod rsa;
 pub mod slh_dsa;

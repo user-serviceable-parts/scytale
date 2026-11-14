@@ -191,10 +191,18 @@ static XOFS: [Entry; 6] = [
     ),
 ];
 
+/// BLAKE2b, apart from [`HASHES`]: the schemes built over a hash
+/// are specified over SHA-1, SHA-2 and SHA-3, and BLAKE2b has keyed
+/// and salted forms of its own instead.
+pub static BLAKE2: [Entry; 2] = [
+    e("blake2b-256", No, No, No, Exact(32), "RFC 7693"),
+    e("blake2b-512", No, No, No, Exact(64), "RFC 7693"),
+];
+
 pub static HASH: Family = Family {
     name: "hash",
     what: "hash",
-    entries: &[&PLAIN_HASHES, &XOFS],
+    entries: &[&PLAIN_HASHES, &BLAKE2, &XOFS],
 };
 
 static HMAC: [Entry; 11] =
@@ -236,7 +244,7 @@ pub static MAC: Family = Family {
     entries: &[&HMAC, &OTHER_MACS],
 };
 
-static AEADS: [Entry; 12] = [
+static AEADS: [Entry; 13] = [
     e(
         "aes-128-gcm",
         Exact(16),
@@ -305,6 +313,14 @@ static AEADS: [Entry; 12] = [
         "nonce is salt || frame",
     ),
     e("chacha20-poly1305", Exact(32), Exact(12), Exact(16), No, ""),
+    e(
+        "xchacha20-poly1305",
+        Exact(32),
+        Exact(24),
+        Exact(16),
+        No,
+        "nonce wide enough to draw at random",
+    ),
 ];
 
 pub static AEAD: Family = Family {
@@ -339,14 +355,24 @@ static XTS: [Entry; 3] =
 static KW: [Entry; 3] =
     aes_mode!("kw", No, "cipher wrap; whole 8-byte blocks, two or more");
 static KWP: [Entry; 3] = aes_mode!("kwp", No, "cipher wrap; any length");
-static CHACHA20: [Entry; 1] = [e(
-    "chacha20",
-    Exact(32),
-    Exact(12),
-    No,
-    No,
-    "--nonce; --counter",
-)];
+static CHACHA20: [Entry; 2] = [
+    e(
+        "chacha20",
+        Exact(32),
+        Exact(12),
+        No,
+        No,
+        "--nonce; --counter",
+    ),
+    e(
+        "xchacha20",
+        Exact(32),
+        Exact(24),
+        No,
+        No,
+        "--nonce, wide enough to draw at random; --counter",
+    ),
+];
 static FF1: [Entry; 3] = [
     e(
         "ff1-aes-128",
@@ -422,9 +448,11 @@ pub static KDF: Family = Family {
     entries: &[&KDF_HASHES],
 };
 
-static KEYS: [Entry; 29] = [
+static KEYS: [Entry; 32] = [
     e("ed25519", No, No, No, No, "signatures"),
+    e("ed448", No, No, No, No, "signatures"),
     e("x25519", No, No, No, No, "key agreement"),
+    e("x448", No, No, No, No, "key agreement"),
     e(
         "ecdsa-p256",
         No,
@@ -501,6 +529,14 @@ static KEYS: [Entry; 29] = [
     e("slh-dsa-shake-192f", No, No, No, No, "signatures"),
     e("slh-dsa-shake-256s", No, No, No, No, "signatures"),
     e("slh-dsa-shake-256f", No, No, No, No, "signatures"),
+    e(
+        "hss-sha256-h5-w8",
+        No,
+        No,
+        No,
+        No,
+        "hss-HASH-hH[-hH...]-wW for any heights and width; stateful",
+    ),
 ];
 
 pub static KEY: Family = Family {
@@ -509,21 +545,24 @@ pub static KEY: Family = Family {
     entries: &[&KEYS],
 };
 
-static ED25519: [Entry; 1] = [e(
-    "ed25519",
-    No,
-    No,
-    No,
-    Exact(64),
-    "an Ed25519 key; --context",
-)];
+static EDDSA: [Entry; 2] = [
+    e(
+        "ed25519",
+        No,
+        No,
+        No,
+        Exact(64),
+        "an Ed25519 key; --context",
+    ),
+    e("ed448", No, No, No, Exact(114), "an Ed448 key; --context"),
+];
 static ECDSA: [Entry; 11] =
     over_hashes!("ecdsa-", No, any, "a P-256, P-384 or P-521 key; DER out");
 static RSA_PSS: [Entry; 11] =
     over_hashes!("rsa-pss-", No, any, "an RSA or RSA-PSS key");
 static RSA_PKCS1: [Entry; 11] =
     over_hashes!("rsa-pkcs1-", No, any, "an RSA key");
-static PQ_SIGS: [Entry; 15] = [
+static PQ_SIGS: [Entry; 16] = [
     e("ml-dsa-44", No, No, No, Exact(2420), "--context"),
     e("ml-dsa-65", No, No, No, Exact(3309), "--context"),
     e("ml-dsa-87", No, No, No, Exact(4627), "--context"),
@@ -539,16 +578,25 @@ static PQ_SIGS: [Entry; 15] = [
     e("slh-dsa-shake-192f", No, No, No, Exact(35664), "--context"),
     e("slh-dsa-shake-256s", No, No, No, Exact(29792), "--context"),
     e("slh-dsa-shake-256f", No, No, No, Exact(49856), "--context"),
+    e(
+        "hss",
+        No,
+        No,
+        No,
+        Any,
+        "an HSS key, rewritten by every signature; the key fixes the length",
+    ),
 ];
 
 pub static SIG: Family = Family {
     name: "sig",
     what: "signature scheme",
-    entries: &[&ED25519, &ECDSA, &RSA_PSS, &RSA_PKCS1, &PQ_SIGS],
+    entries: &[&EDDSA, &ECDSA, &RSA_PSS, &RSA_PKCS1, &PQ_SIGS],
 };
 
-static KEXS: [Entry; 4] = [
+static KEXS: [Entry; 5] = [
     e("x25519", No, No, No, Exact(32), "X25519 keys"),
+    e("x448", No, No, No, Exact(56), "X448 keys"),
     e("ecdh-p256", No, No, No, Exact(32), "P-256 keys"),
     e("ecdh-p384", No, No, No, Exact(48), "P-384 keys"),
     e("ecdh-p521", No, No, No, Exact(66), "P-521 keys"),
@@ -657,6 +705,8 @@ macro_rules! hpke {
 
 static HPKE_X25519: [Entry; 9] =
     hpke!("x25519", "an x25519 key; 32-byte enc first; --info, --aad");
+static HPKE_X448: [Entry; 9] =
+    hpke!("x448", "an x448 key; 56-byte enc first; --info, --aad");
 static HPKE_P256: [Entry; 9] = hpke!(
     "ecdh-p256",
     "an ecdh-p256 key; 65-byte enc first; --info, --aad"
@@ -673,7 +723,14 @@ static HPKE_P521: [Entry; 9] = hpke!(
 pub static PKE: Family = Family {
     name: "pke",
     what: "encryption scheme",
-    entries: &[&OAEP, &HPKE_X25519, &HPKE_P256, &HPKE_P384, &HPKE_P521],
+    entries: &[
+        &OAEP,
+        &HPKE_X25519,
+        &HPKE_X448,
+        &HPKE_P256,
+        &HPKE_P384,
+        &HPKE_P521,
+    ],
 };
 
 /// Every family, in the order `list` prints them.
@@ -743,7 +800,7 @@ impl Family {
     }
 }
 
-fn normalise(name: &str) -> String {
+pub fn normalise(name: &str) -> String {
     name.trim().to_ascii_lowercase().replace('_', "-")
 }
 
@@ -792,8 +849,8 @@ mod tests {
                 assert!(fresh, "{}: {} twice", family.name, entry.name);
             }
         }
-        assert_eq!(SIG.iter().count(), 49);
-        assert_eq!(CIPHER.iter().count(), 37);
+        assert_eq!(SIG.iter().count(), 51);
+        assert_eq!(CIPHER.iter().count(), 38);
     }
 
     #[test]

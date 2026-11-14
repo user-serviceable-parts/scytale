@@ -73,7 +73,8 @@ pub(crate) use with_hash;
 #[derive(Args)]
 #[command(after_help = crate::help::VALUES)]
 pub struct HashArgs {
-    /// The hash: sha256, sha3-512, shake128, ... (scytale list hash)
+    /// The hash: sha256, sha3-512, blake2b-512, shake128, ...
+    /// (scytale list hash)
     pub algorithm: String,
     /// Bytes of output, for shake, cshake and tuplehash
     #[arg(short, long)]
@@ -227,14 +228,22 @@ fn digest(
         }
         return Ok(out);
     }
-    with_hash!(name, H => {
-        let mut hash = H::default();
-        io::for_each_chunk(&mut *input, |chunk| {
-            hash.update(chunk);
-            Ok(())
-        })?;
-        Ok(hash.finalize().as_ref().to_vec())
-    })
+    macro_rules! whole {
+        ($H:ty) => {{
+            let mut hash = <$H>::default();
+            io::for_each_chunk(&mut *input, |chunk| {
+                hash.update(chunk);
+                Ok(())
+            })?;
+            Ok(hash.finalize().as_ref().to_vec())
+        }};
+    }
+    use scytale::hash::blake2::{Blake2b256, Blake2b512};
+    match name {
+        "blake2b-256" => whole!(Blake2b256),
+        "blake2b-512" => whole!(Blake2b512),
+        _ => with_hash!(name, H => whole!(H)),
+    }
 }
 
 #[cfg(test)]
@@ -250,6 +259,19 @@ mod tests {
             ))
             .unwrap();
             assert_eq!(Some(n), names::digest_len(name), "{name}");
+        }
+    }
+
+    /// BLAKE2b's table lengths are its types'.
+    #[test]
+    fn blake2_table_matches_types() {
+        use scytale::hash::blake2::{Blake2b256, Blake2b512};
+        let lens = [
+            Blake2b256::default().finalize().len(),
+            Blake2b512::default().finalize().len(),
+        ];
+        for (entry, n) in names::BLAKE2.iter().zip(lens) {
+            assert_eq!(entry.output, Len::Exact(n), "{}", entry.name);
         }
     }
 }

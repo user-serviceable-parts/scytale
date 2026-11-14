@@ -53,7 +53,7 @@ use zeroize::Zeroize;
 
 use super::Aead;
 use crate::cipher::chacha20::{
-    self, AutoStream, ChaCha20, KEY_SIZE, NONCE_SIZE,
+    self, AutoStream, ChaCha20, KEY_SIZE, NONCE_SIZE, OwnedAutoStream,
 };
 use crate::features::{self, Dispatcher, Features};
 use crate::mac::Mac;
@@ -61,7 +61,7 @@ use crate::mac::poly1305::{self, Poly1305};
 use crate::{Error, Key, KeyType};
 
 /// The tag length, in bytes.
-const TAG: usize = 16;
+pub(super) const TAG: usize = 16;
 
 /// ChaCha20-Poly1305 under one key.
 #[derive(Clone)]
@@ -179,43 +179,83 @@ impl fmt::Debug for ChaCha20Poly1305 {
     }
 }
 
+/// A ChaCha20 keystream in progress, borrowed from the cipher or
+/// owning one of its own: the one thing the two AEADs differ in.
+pub(super) trait Keystream {
+    fn update(&mut self, data: &mut [u8]) -> Result<(), Error>;
+}
+
+impl Keystream for AutoStream<'_> {
+    fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
+        AutoStream::update(self, data)
+    }
+}
+
+impl Keystream for OwnedAutoStream {
+    fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
+        OwnedAutoStream::update(self, data)
+    }
+}
+
 /// What encryption and decryption share: the keystream from block
 /// one, the MAC keyed from block zero, and the lengths for the end.
-struct Core<'a> {
-    stream: AutoStream<'a>,
+pub(super) struct Core<S> {
+    stream: S,
     mac: Poly1305,
     aad_bytes: u64,
-    message_bytes: u64,
+    pub(super) message_bytes: u64,
     /// Whether any of the message has been seen, after which no more
     /// additional data may be.
     started: bool,
 }
 
-impl<'a> Core<'a> {
+/// The Poly1305 for one message: keyed from the first half of block
+/// zero.
+fn mac(cipher: &ChaCha20, nonce: &[u8; NONCE_SIZE]) -> Result<Poly1305, Error> {
+    let mut block = cipher.keystream_block(nonce, 0);
+    // The block is a whole one, so the split cannot fail.
+    let (key, _) = block
+        .split_first_chunk::<32>()
+        .ok_or(Error::InvalidKeyLength(block.len()))?;
+    let mut key = Key::from(*key);
+    let mac = Poly1305::new(&key);
+    key.zeroize();
+    block.zeroize();
+    Ok(mac)
+}
+
+impl<'a> Core<AutoStream<'a>> {
     fn new(
         cipher: &'a ChaCha20,
         nonce: &[u8; NONCE_SIZE],
     ) -> Result<Self, Error> {
-        let mut block = cipher.keystream_block(nonce, 0);
-        // The first half of the first keystream block is the one-time
-        // key; the block is a whole one, so the split cannot fail.
-        let (key, _) = block
-            .split_first_chunk::<32>()
-            .ok_or(Error::InvalidKeyLength(block.len()))?;
-        let mut key = Key::from(*key);
-        let mac = Poly1305::new(&key);
-        key.zeroize();
-        block.zeroize();
-        Ok(Core {
-            stream: cipher.stream(nonce, 1),
+        Ok(Core::over(cipher.stream(nonce, 1), mac(cipher, nonce)?))
+    }
+}
+
+impl Core<OwnedAutoStream> {
+    /// Takes the cipher, which serves this message alone.
+    pub(super) fn owned(
+        cipher: ChaCha20,
+        nonce: &[u8; NONCE_SIZE],
+    ) -> Result<Self, Error> {
+        let mac = mac(&cipher, nonce)?;
+        Ok(Core::over(cipher.into_stream(nonce, 1), mac))
+    }
+}
+
+impl<S: Keystream> Core<S> {
+    fn over(stream: S, mac: Poly1305) -> Self {
+        Core {
+            stream,
             mac,
             aad_bytes: 0,
             message_bytes: 0,
             started: false,
-        })
+        }
     }
 
-    fn aad(&mut self, data: &[u8]) -> Result<(), Error> {
+    pub(super) fn aad(&mut self, data: &[u8]) -> Result<(), Error> {
         if self.started {
             return Err(Error::OutOfOrder);
         }
@@ -251,7 +291,24 @@ impl<'a> Core<'a> {
             self.message_bytes.saturating_add(ciphertext.len() as u64);
     }
 
-    fn tag(mut self) -> [u8; TAG] {
+    /// Encrypts the next piece in place and authenticates the
+    /// ciphertext.
+    pub(super) fn encrypt(&mut self, data: &mut [u8]) -> Result<(), Error> {
+        self.start();
+        self.stream.update(data)?;
+        self.absorb(data);
+        Ok(())
+    }
+
+    /// Authenticates the next piece of ciphertext and decrypts it in
+    /// place.
+    pub(super) fn decrypt(&mut self, data: &mut [u8]) -> Result<(), Error> {
+        self.start();
+        self.absorb(data);
+        self.stream.update(data)
+    }
+
+    pub(super) fn tag(mut self) -> [u8; TAG] {
         self.start();
         self.pad(self.message_bytes);
         let mut lengths = [0u8; TAG];
@@ -260,6 +317,16 @@ impl<'a> Core<'a> {
         self.mac.update(&lengths);
         self.mac.finalize()
     }
+
+    /// Checks `tag` against the message, in constant time.
+    pub(super) fn verify(self, tag: &[u8; TAG]) -> Result<(), Error> {
+        let expected = self.tag();
+        if crate::constant_time::equal(&expected, tag) {
+            Ok(())
+        } else {
+            Err(Error::AuthenticationFailed)
+        }
+    }
 }
 
 /// Encryption of a message that arrives in pieces.
@@ -267,7 +334,7 @@ impl<'a> Core<'a> {
 /// Additional data first, then the message, then the tag; the
 /// ciphertext is in place as each piece is given.
 pub struct Encryptor<'a> {
-    core: Core<'a>,
+    core: Core<AutoStream<'a>>,
 }
 
 impl Encryptor<'_> {
@@ -280,10 +347,7 @@ impl Encryptor<'_> {
 
     /// Encrypts the next piece of the message in place.
     pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
-        self.core.start();
-        self.core.stream.update(data)?;
-        self.core.absorb(data);
-        Ok(())
+        self.core.encrypt(data)
     }
 
     /// Finishes, returning the tag.
@@ -300,7 +364,7 @@ impl Encryptor<'_> {
 /// then, or use the one-shot
 /// [`decrypt`](ChaCha20Poly1305::decrypt), which does that itself.
 pub struct Decryptor<'a> {
-    core: Core<'a>,
+    core: Core<AutoStream<'a>>,
 }
 
 impl Decryptor<'_> {
@@ -313,19 +377,12 @@ impl Decryptor<'_> {
     /// Decrypts the next piece of the message in place. The result
     /// is not authenticated until [`verify`](Self::verify) passes.
     pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
-        self.core.start();
-        self.core.absorb(data);
-        self.core.stream.update(data)
+        self.core.decrypt(data)
     }
 
     /// Checks `tag` against the message, in constant time.
     pub fn verify(self, tag: &[u8; TAG]) -> Result<(), Error> {
-        let expected = self.core.tag();
-        if crate::constant_time::equal(&expected, tag) {
-            Ok(())
-        } else {
-            Err(Error::AuthenticationFailed)
-        }
+        self.core.verify(tag)
     }
 }
 

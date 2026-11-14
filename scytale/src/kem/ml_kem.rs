@@ -1177,10 +1177,10 @@ mod tests {
                 .collect();
             let bit = |n: usize| u16::from((bytes[n / 8] >> (n % 8)) & 1);
             let got = Poly::sample_cbd(eta, &bytes);
-            for i in 0..N {
+            for (i, &c) in got.0.iter().enumerate() {
                 let x: u16 = (0..eta).map(|j| bit(2 * i * eta + j)).sum();
                 let y: u16 = (0..eta).map(|j| bit(2 * i * eta + eta + j)).sum();
-                assert_eq!(got.0[i], sub(x, y), "eta {eta} coefficient {i}");
+                assert_eq!(c, sub(x, y), "eta {eta} coefficient {i}");
             }
         }
     }

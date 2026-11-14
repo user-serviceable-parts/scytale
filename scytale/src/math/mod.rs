@@ -3,7 +3,8 @@
 //! [`natural`] is a bounded non-negative integer, which the
 //! format-preserving modes use to move between a string of symbols
 //! and the number it stands for. [`fe25519`] is the field under
-//! Curve25519, shared by X25519 and Ed25519. [`uint`] is an unsigned
+//! Curve25519, shared by X25519 and Ed25519, and [`fe448`] the field
+//! under Curve448. [`uint`] is an unsigned
 //! integer of any fixed width, and [`montgomery`] the multiplication
 //! and exponentiation modulo an odd number built on it, which is the
 //! arithmetic under the prime curves. [`limbs`] is the same
@@ -14,6 +15,7 @@
 
 pub(crate) mod ec;
 pub(crate) mod fe25519;
+pub(crate) mod fe448;
 pub(crate) mod limbs;
 pub(crate) mod montgomery;
 pub(crate) mod natural;

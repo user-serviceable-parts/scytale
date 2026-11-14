@@ -99,7 +99,7 @@ Prints the algorithm names each command takes, one per line, for a script to che
 A digest of each file, or of standard input, as hex followed by two spaces and the file's name, in the layout of **sha256sum**(1); standard input is named **-**. With **--raw** the digest alone, for one file at most. TupleHash digests the **--element** values instead, as one tuple, and writes the digest alone.
 
 *algorithm*  
-One of **sha1**, **sha224**, **sha256**, **sha384**, **sha512**, **sha512-224**, **sha512-256**, **sha3-224**, **sha3-256**, **sha3-384**, **sha3-512**, an extendable-output function, **shake128**, **shake256**, **cshake128** or **cshake256**, or a hash of a tuple of strings (SP 800-185), **tuplehash128** or **tuplehash256**.
+One of **sha1**, **sha224**, **sha256**, **sha384**, **sha512**, **sha512-224**, **sha512-256**, **sha3-224**, **sha3-256**, **sha3-384**, **sha3-512**, **blake2b-256** or **blake2b-512** (RFC 7693), an extendable-output function, **shake128**, **shake256**, **cshake128** or **cshake256**, or a hash of a tuple of strings (SP 800-185), **tuplehash128** or **tuplehash256**.
 
 **-l, --length** *bytes*  
 The output length, required for an extendable-output function and for TupleHash, and refused otherwise. TupleHash absorbs the length, so a shorter output is not a prefix of a longer one.
@@ -136,22 +136,22 @@ The KMAC customization string.
 
 **scytale aead** {**encrypt**\|**decrypt**} *algorithm* **-k** *key* **-n** *nonce* \[*--aad value*\] \[*--tag-length bytes*\] \[*-o file*\] \[*file*\]
 
-Authenticated encryption. Encryption writes the ciphertext and then the tag; decryption reads ciphertext and tag as one input, checks the tag, and writes the plaintext only if it checked. A message that fails leaves standard output empty and exits with status 1. Encryption with GCM and ChaCha20-Poly1305 streams; decryption reads the whole input first, since plaintext handed out before the tag is checked is plaintext an attacker chose.
+Authenticated encryption. Encryption writes the ciphertext and then the tag; decryption reads ciphertext and tag as one input, checks the tag, and writes the plaintext only if it checked. A message that fails leaves standard output empty and exits with status 1. Encryption with GCM, ChaCha20-Poly1305 and XChaCha20-Poly1305 streams; decryption reads the whole input first, since plaintext handed out before the tag is checked is plaintext an attacker chose.
 
 *algorithm*  
-One of **aes-128-gcm**, **aes-192-gcm**, **aes-256-gcm**, **aes-128-gcm-siv**, **aes-256-gcm-siv**, **aes-128-ccm**, **aes-192-ccm**, **aes-256-ccm**, **aes-128-xpn**, **aes-192-xpn**, **aes-256-xpn**, **chacha20-poly1305**.
+One of **aes-128-gcm**, **aes-192-gcm**, **aes-256-gcm**, **aes-128-gcm-siv**, **aes-256-gcm-siv**, **aes-128-ccm**, **aes-192-ccm**, **aes-256-ccm**, **aes-128-xpn**, **aes-192-xpn**, **aes-256-xpn**, **chacha20-poly1305**, **xchacha20-poly1305**.
 
 **-k, --key** *value*  
-The key, of the width the name says: 16, 24 or 32 bytes for AES, 32 for ChaCha20-Poly1305.
+The key, of the width the name says: 16, 24 or 32 bytes for AES, 32 for ChaCha20-Poly1305 and XChaCha20-Poly1305.
 
 **-n, --nonce** *value*  
-The nonce. Twelve bytes, except that GCM takes any length, CCM takes 7 to 13, and XPN takes 24: the 12-byte salt followed by the 12-byte frame. A nonce must never repeat under one key.
+The nonce. Twelve bytes, except that GCM takes any length, CCM takes 7 to 13, XPN takes 24: the 12-byte salt followed by the 12-byte frame, and XChaCha20-Poly1305 takes 24 that may be drawn at random. A nonce must never repeat under one key.
 
 **--aad** *value*  
 Additional data, authenticated but not encrypted; the same value must be given to decrypt. Empty without it.
 
 **--tag-length** *bytes*  
-The tag length, 16 by default. GCM and XPN take 4 to 16, CCM an even number from 4 to 16; GCM-SIV and ChaCha20-Poly1305 take 16 only.
+The tag length, 16 by default. GCM and XPN take 4 to 16, CCM an even number from 4 to 16; GCM-SIV, ChaCha20-Poly1305 and XChaCha20-Poly1305 take 16 only.
 
 ## cipher encrypt, cipher decrypt
 
@@ -160,7 +160,7 @@ The tag length, 16 by default. GCM and XPN take 4 to 16, CCM an even number from
 The unauthenticated modes. Nothing here checks that a message is what was encrypted; a script that needs to know that wants **aead**. These are for a protocol that brings its own MAC, a disk, or a format to preserve. An option the algorithm does not take is refused, and the message says which algorithm it is for.
 
 *algorithm*  
-**aes-***width***-***mode* for a *width* of 128, 192 or 256 and a *mode* of **ecb**, **cbc**, **ctr**, **cfb1**, **cfb8**, **cfb128**, **ofb** or **xts**; **chacha20**; **ff1-aes-***width* or **ff3-1-aes-***width* for the format-preserving modes. **kw** and **kwp** are under **cipher wrap**.
+**aes-***width***-***mode* for a *width* of 128, 192 or 256 and a *mode* of **ecb**, **cbc**, **ctr**, **cfb1**, **cfb8**, **cfb128**, **ofb** or **xts**; **chacha20** or **xchacha20**; **ff1-aes-***width* or **ff3-1-aes-***width* for the format-preserving modes. **kw** and **kwp** are under **cipher wrap**.
 
 **-k, --key** *value*  
 The key, of the cipher's width.
@@ -169,7 +169,7 @@ The key, of the cipher's width.
 One 16-byte block: the IV for CBC, CFB and OFB, the first counter block for CTR, the tweak for XTS. Required by those modes and refused by the others.
 
 **-n, --nonce** *value***, --counter** *n*  
-The 12-byte nonce and the first block counter (0 without it) for ChaCha20, which encrypts and decrypts with the one operation.
+The nonce and the first block counter (0 without it) for ChaCha20 and XChaCha20, which encrypt and decrypt with the one operation. ChaCha20 takes a 12-byte nonce, which must be counted; XChaCha20 takes 24 bytes, which may be drawn at random.
 
 **--padding** *pkcs7***\|***none*  
 Required for ECB, CBC and CFB128, which take whole blocks, and refused by the rest. **pkcs7** adds PKCS#7 padding on encryption and removes it on decryption, and is what **openssl enc** and CMS use; **none** refuses an input that is not whole blocks. Padding that does not check on decryption exits with status 1 and prints nothing; a script must not report that difference to anyone who can submit ciphertexts.
@@ -199,6 +199,12 @@ HKDF (RFC 5869) over *hash*, any of the plain hashes above: keys from keying mat
 **scytale kdf pbkdf2** *hash* **--password** *value* **--salt** *value* **-i** *iterations* **-l** *bytes* \[**--hex**\|**--raw**\] \[*-o file*\]
 
 PBKDF2 (RFC 8018) over *hash*: a key from a password, which is guessable, at a cost per guess set by the iteration count. The password and salt may be given as **str:**. Hex without a flag.
+
+## kdf argon2id
+
+**scytale kdf argon2id** **--password** *value* **--salt** *value* **--passes** *passes* **--memory** *KiB* **--lanes** *lanes* \[**--secret** *value*\] \[**--data** *value*\] **-l** *bytes* \[**--hex**\|**--raw**\] \[*-o file*\]
+
+Argon2id (RFC 9106): a key from a password, at a cost per guess in both time and memory. The costs have no defaults, since a tag can be checked only under the costs it was made with. RFC 9106 recommends 2 GiB and one pass where that can be afforded, and otherwise **--memory 65536 --passes 3**, 64 MiB and three passes. The lanes are computed one after another, so use **--lanes 1** unless the tag must match one made with more. The salt is at least 8 bytes and the output at least 4. **--secret** is a key held apart from the stored tags, and **--data** binds the tag to a context; each is empty without it. The password, salt and data may be given as **str:**. Hex without a flag.
 
 ## kdf tls12
 
@@ -243,7 +249,7 @@ The ANSI X9.63 KDF, the one SEC 1 gives ECIES, over *hash*: each block is *hash*
 
 **scytale key generate** *algorithm* \[*-o file*\]
 
-A new private key, as a PEM **PRIVATE KEY** block (PKCS#8), to standard output or to *file*, created readable by its owner alone. The algorithm is one of **ed25519**, **x25519**, **ecdsa-p256**, **ecdsa-p384**, **ecdsa-p521**, **ecdh-p256**, **ecdh-p384**, **ecdh-p521**, **rsa-***bits* for any *bits* from 1024 to 8192, **ml-kem-512**, **ml-kem-768**, **ml-kem-1024**, **ml-dsa-44**, **ml-dsa-65**, **ml-dsa-87**, or **slh-dsa-***hash***-***size***s** and **slh-dsa-***hash***-***size***f** for a *hash* of **sha2** or **shake** and a *size* of 128, 192 or 256. Keys on P-256, P-384 and P-521 serve both ECDSA and ECDH; an RSA key serves both signatures and encryption.
+A new private key, as a PEM **PRIVATE KEY** block (PKCS#8), to standard output or to *file*, created readable by its owner alone. The algorithm is one of **ed25519**, **ed448**, **x25519**, **x448**, **ecdsa-p256**, **ecdsa-p384**, **ecdsa-p521**, **ecdh-p256**, **ecdh-p384**, **ecdh-p521**, **rsa-***bits* for any *bits* from 1024 to 8192, **ml-kem-512**, **ml-kem-768**, **ml-kem-1024**, **ml-dsa-44**, **ml-dsa-65**, **ml-dsa-87**, or **slh-dsa-***hash***-***size***s** and **slh-dsa-***hash***-***size***f** for a *hash* of **sha2** or **shake** and a *size* of 128, 192 or 256, or **hss-***hash***-h***H***\[-h***H***...\]-w***W* for an HSS key (RFC 8554, SP 800-208) of one to eight LMS trees, a *hash* of **sha256**, **sha256-192**, **shake256** or **shake256-192**, one tree height *H* of 5, 10, 15, 20 or 25 per level from the top down, and a Winternitz width *W* of 1, 2, 4 or 8: **hss-sha256-h10-w8** is the common firmware-signing shape, 1024 signatures from one tree, and **hss-sha256-h5-h10-w8** 32768 from a tree of 32 over trees of 1024. A tree of height *H* costs 2^H hashes of its one-time keys before the key exists; H15 takes seconds, H20 minutes, H25 hours, and the command says so on standard error. Keys on P-256, P-384 and P-521 serve both ECDSA and ECDH; an RSA key serves both signatures and encryption.
 
 ## key public
 
@@ -255,7 +261,7 @@ The public half of the private key in *file*, or standard input, as a PEM **PUBL
 
 **scytale key show** \[*file*\]
 
-Prints what a key file holds: its algorithm, which half it is, and for RSA the modulus length.
+Prints what a key file holds: its algorithm, which half it is, for RSA the modulus length, and for HSS the trees and how many signatures the private key has left.
 
 Every command that takes a key file reads PEM: the **PRIVATE KEY** and **PUBLIC KEY** blocks that **openssl**(1) and everything else write, and the bare **RSA PRIVATE KEY**, **RSA PUBLIC KEY** and **EC PRIVATE KEY** forms as well. A command names the scheme it runs and checks the file holds a key for it; a file that holds another kind of key, or the wrong half, is refused with a message saying what it holds.
 
@@ -265,6 +271,8 @@ Every command that takes a key file reads PEM: the **PRIVATE KEY** and **PUBLIC 
 
 Signs the input with the private key in *private*, writing the signature as raw bytes without a flag. Ed25519, ECDSA, ML-DSA and SLH-DSA signatures are hedged: the nonce their standards derive from the key and the message, with fresh random bytes mixed in, so signing the same input twice gives two signatures that both verify. RSA PKCS#1 v1.5 alone gives the same bytes every time.
 
+**hss** spends a leaf of the key: the file named by **-k** is rewritten with the next leaf (through a temporary file beside it, renamed into place) before the signature is written, so a signature never leaves without the key having moved on, and a key with no leaves left is refused. Keep one copy of an HSS key and sign with it in one place: two signatures from the same leaf let anyone forge.
+
 ## sig verify
 
 **scytale sig verify** *scheme* **-p** *public* **-s** *signature* \[*--context value*\] \[**--raw-ecdsa**\] \[*file*\]
@@ -272,19 +280,19 @@ Signs the input with the private key in *private*, writing the signature as raw 
 Checks *signature* (a value, as **VALUES**) over the input under the public key in *public*. Nothing is printed; the exit status is 0 if it verified and 1 if not. A private key file is refused here; **key public** makes the public one.
 
 *scheme*  
-**ed25519** on an Ed25519 key; **ecdsa-***hash* on a P-256, P-384 or P-521 key, the curve being the key's; **rsa-pss-***hash* on an RSA or RSA-PSS key, salted with a hash's worth of random bytes; **rsa-pkcs1-***hash* on an RSA key, deterministic; **ml-dsa-44**, **ml-dsa-65**, **ml-dsa-87** and the twelve **slh-dsa** sets on their own keys. *hash* is any of the plain hashes above.
+**ed25519** on an Ed25519 key; **ed448** on an Ed448 key; **ecdsa-***hash* on a P-256, P-384 or P-521 key, the curve being the key's; **rsa-pss-***hash* on an RSA or RSA-PSS key, salted with a hash's worth of random bytes; **rsa-pkcs1-***hash* on an RSA key, deterministic; **ml-dsa-44**, **ml-dsa-65**, **ml-dsa-87** and the twelve **slh-dsa** sets on their own keys; **hss** on an HSS key of any shape, the key naming its trees. *hash* is any of the plain hashes above.
 
 **--context** *value*  
-The context string for Ed25519 (which then signs in the Ed25519ctx form), ML-DSA and SLH-DSA; up to 255 bytes. Empty without it, which for Ed25519 is the plain form. Refused by the other schemes.
+The context string for Ed25519 (which then signs in the Ed25519ctx form), Ed448, ML-DSA and SLH-DSA; up to 255 bytes. Empty without it, which for Ed25519 is the plain form. Refused by the other schemes, HSS included.
 
 **--raw-ecdsa**  
-An ECDSA signature as the fixed-width *r* followed by *s*, rather than the DER SEQUENCE that **openssl dgst** writes. Ed25519, ML-DSA and SLH-DSA signatures are always the fixed-width bytes their standards define, and RSA signatures the modulus length.
+An ECDSA signature as the fixed-width *r* followed by *s*, rather than the DER SEQUENCE that **openssl dgst** writes. Ed25519, ML-DSA and SLH-DSA signatures are always the fixed-width bytes their standards define, RSA signatures the modulus length, and an HSS signature the length its key's trees fix.
 
 ## kex agree
 
 **scytale kex agree** *algorithm* **-k** *private* **-p** *peer* \[**--hex**\|**--raw**\] \[*-o file*\]
 
-The shared secret between the private key in *private* and the peer's public key in *peer*, under **x25519**, **ecdh-p256**, **ecdh-p384** or **ecdh-p521**; both keys must be for it. Hex without a flag. A shared secret is keying material, not a key; derive keys from it with **kdf hkdf** or **kdf one-step**.
+The shared secret between the private key in *private* and the peer's public key in *peer*, under **x25519**, **x448**, **ecdh-p256**, **ecdh-p384** or **ecdh-p521**; both keys must be for it. Hex without a flag. A shared secret is keying material, not a key; derive keys from it with **kdf hkdf** or **kdf one-step**.
 
 ## kem encapsulate
 
@@ -304,7 +312,7 @@ The shared secret a ciphertext carries; hex without a flag. A ciphertext that wa
 
 RSA-OAEP under **rsa-oaep-***hash* for any of the plain hashes: a short message, at most the modulus length less twice the hash length less two bytes, under an RSA public key. The label is empty without **--label**, and must match to decrypt.
 
-HPKE (RFC 9180, base mode) under **hpke-***kem***-***kdf***-***aead:* a message of any length under an **x25519**, **ecdh-p256**, **ecdh-p384** or **ecdh-p521** key, the *kem* being the key's type; the *kdf* one of **sha256**, **sha384** and **sha512**; and the *aead* one of **aes-128-gcm**, **aes-256-gcm** and **chacha20-poly1305**. The output is the encapsulated key, then the ciphertext, then a 16-byte tag; the encapsulated key is 32 bytes under **x25519**, 65 under **ecdh-p256**, 97 under **ecdh-p384** and 133 under **ecdh-p521**. **--info** binds the message to a context, such as an application's name and version, and **--aad** is authenticated alongside it; both are empty without the option and must match to decrypt. Set **--info** wherever one key serves more than one purpose. One message is sealed per call.
+HPKE (RFC 9180, base mode) under **hpke-***kem***-***kdf***-***aead:* a message of any length under an **x25519**, **x448**, **ecdh-p256**, **ecdh-p384** or **ecdh-p521** key, the *kem* being the key's type; the *kdf* one of **sha256**, **sha384** and **sha512**; and the *aead* one of **aes-128-gcm**, **aes-256-gcm** and **chacha20-poly1305**. The output is the encapsulated key, then the ciphertext, then a 16-byte tag; the encapsulated key is 32 bytes under **x25519**, 56 under **x448**, 65 under **ecdh-p256**, 97 under **ecdh-p384** and 133 under **ecdh-p521**. **--info** binds the message to a context, such as an application's name and version, and **--aad** is authenticated alongside it; both are empty without the option and must match to decrypt. Set **--info** wherever one key serves more than one purpose. One message is sealed per call.
 
 A ciphertext that does not decrypt, under either scheme, exits with status 1 and says nothing more.
 

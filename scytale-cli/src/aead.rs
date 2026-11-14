@@ -1,7 +1,8 @@
 //! `scytale aead`: authenticated encryption, the tag after the
 //! ciphertext.
 //!
-//! Encryption with GCM or ChaCha20-Poly1305 streams: the ciphertext
+//! Encryption with GCM, ChaCha20-Poly1305 or XChaCha20-Poly1305
+//! streams: the ciphertext
 //! goes out as it is made and the tag follows it. Decryption never
 //! streams. The whole ciphertext is read, the tag checked, and only
 //! then is any plaintext written, since a decryptor that hands out
@@ -11,7 +12,9 @@
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
-use scytale::aead::{Aead, Ccm, ChaCha20Poly1305, Gcm, GcmSiv, SivKey, Xpn};
+use scytale::aead::{
+    Aead, Ccm, ChaCha20Poly1305, Gcm, GcmSiv, SivKey, XChaCha20Poly1305, Xpn,
+};
 use scytale::cipher::BlockCipher;
 use scytale::cipher::aes::{Aes128, Aes192, Aes256};
 use zeroize::Zeroize;
@@ -47,7 +50,7 @@ pub struct AeadArgs {
     /// The key (hex:, file:, fd:, env:)
     #[arg(short, long)]
     key: String,
-    /// The nonce: 12 bytes, or 7 to 13 for ccm, 24 for xpn
+    /// The nonce: 12 bytes, or 7 to 13 for ccm, 24 for xpn and xchacha20
     #[arg(short, long)]
     nonce: String,
     /// Additional data, authenticated but not encrypted (str: allowed)
@@ -79,6 +82,9 @@ pub fn run(op: AeadOp) -> Result<()> {
     }
     if name == "chacha20-poly1305" {
         return chacha20_poly1305(entry, &args, encrypt);
+    }
+    if name == "xchacha20-poly1305" {
+        return xchacha20_poly1305(entry, &args, encrypt);
     }
     let Some((bits, mode)) =
         name.strip_prefix("aes-").and_then(|r| r.split_once('-'))
@@ -166,6 +172,37 @@ fn chacha20_poly1305(
     let nonce = value::array::<12>(&args.nonce, "--nonce", entry.name)?;
     let aad = value::text(args.aad.as_deref(), "--aad")?;
     let aead = ChaCha20Poly1305::new(&key);
+    let mut out = io::output(args.out.as_deref(), false)?;
+    if encrypt {
+        let mut input = io::input(args.file.as_deref())?;
+        let mut e = aead.encryptor(&nonce)?;
+        e.aad(&aad)?;
+        io::stream(&mut *input, &mut *out, |c| Ok(e.update(c)?))?;
+        io::write(&mut *out, &e.finalize(), false)
+    } else {
+        let (mut data, tag) = read_sealed(entry, args)?;
+        let tag: [u8; 16] =
+            tag.as_slice().try_into().map_err(|_| not_authentic())?;
+        let mut d = aead.decryptor(&nonce)?;
+        d.aad(&aad)?;
+        d.update(&mut data)?;
+        if d.verify(&tag).is_err() {
+            data.zeroize();
+            return Err(not_authentic());
+        }
+        io::write(&mut *out, &data, false)
+    }
+}
+
+fn xchacha20_poly1305(
+    entry: &Entry,
+    args: &AeadArgs,
+    encrypt: bool,
+) -> Result<()> {
+    let key = value::key::<XChaCha20Poly1305>(&args.key, "--key", entry.name)?;
+    let nonce = value::array::<24>(&args.nonce, "--nonce", entry.name)?;
+    let aad = value::text(args.aad.as_deref(), "--aad")?;
+    let aead = XChaCha20Poly1305::new(&key);
     let mut out = io::output(args.out.as_deref(), false)?;
     if encrypt {
         let mut input = io::input(args.file.as_deref())?;
@@ -284,7 +321,7 @@ mod tests {
     #[test]
     fn table_matches_types() {
         for entry in names::AEAD.iter() {
-            let n = if entry.name == "chacha20-poly1305" {
+            let n = if entry.name.ends_with("chacha20-poly1305") {
                 32
             } else {
                 let bits = &entry.name[4..7];

@@ -324,13 +324,23 @@ macro_rules! engine {
 engine!(
     /// A SHA-224 or SHA-256 computation in progress, over the
     /// compression function `C`.
-    Engine32, Compress32, Variant32, u32, 64, u64
+    Engine32,
+    Compress32,
+    Variant32,
+    u32,
+    64,
+    u64
 );
 
 engine!(
     /// A SHA-384 or SHA-512 computation in progress, over the
     /// compression function `C`.
-    Engine64, Compress64, Variant64, u64, 128, u128
+    Engine64,
+    Compress64,
+    Variant64,
+    u64,
+    128,
+    u128
 );
 
 #[cfg(test)]

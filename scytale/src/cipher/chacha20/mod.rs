@@ -27,8 +27,10 @@
 //!
 //! - **Never reuse a nonce with the same key.** Two messages under
 //!   the same key and nonce are xored with the same keystream, and
-//!   the xor of the two messages falls straight out. Count nonces,
-//!   or draw them from a source that cannot repeat.
+//!   the xor of the two messages falls straight out. Count nonces:
+//!   96 bits are too few to draw at random. Where they must be
+//!   drawn, [`xchacha20`](crate::cipher::xchacha20) widens the nonce
+//!   to 192 bits through [`hchacha20`].
 //! - **This authenticates nothing.** Anyone can flip bits of the
 //!   ciphertext and flip the same bits of the message. Use
 //!   [`ChaCha20Poly1305`](crate::aead::ChaCha20Poly1305),
@@ -83,6 +85,9 @@ pub const NONCE_SIZE: usize = 12;
 
 /// Bytes of keystream per block.
 pub const BLOCK_SIZE: usize = 64;
+
+/// The nonce length of [`hchacha20`], in bytes.
+pub const HNONCE_SIZE: usize = 16;
 
 /// The first four words of every state: "expand 32-byte k".
 pub(crate) const CONSTANTS: [u32; 4] =
@@ -144,12 +149,40 @@ impl<B: Backend> KeyType for Cipher<B> {
 }
 
 /// The nonce as words.
-fn nonce_words(nonce: &[u8; NONCE_SIZE]) -> [u32; 3] {
-    let mut words = [0u32; 3];
+fn nonce_words<const N: usize>(nonce: &[u8]) -> [u32; N] {
+    let mut words = [0u32; N];
     for (w, bytes) in words.iter_mut().zip(nonce.chunks_exact(4)) {
         *w = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     }
     words
+}
+
+/// HChaCha20 (draft-irtf-cfrg-xchacha): a key from a key and a
+/// 128-bit nonce.
+///
+/// The ChaCha20 rounds run over the key with the nonce in the place
+/// of the counter and the nonce, and the first and last rows of the
+/// result are the new key; the input is not added back, so the rows
+/// are not keystream and give nothing of the input away. It is the
+/// first half of [`XChaCha20`](crate::cipher::xchacha20::XChaCha20),
+/// which takes the second half of a 192-bit nonce through plain
+/// ChaCha20 under the key this returns; on its own it is a
+/// one-block, constant-time way to derive a subkey per nonce.
+///
+/// Portable code on every processor: one block a message is not
+/// worth a hardware kernel.
+pub fn hchacha20(
+    key: &Key<[u8; KEY_SIZE]>,
+    nonce: &[u8; HNONCE_SIZE],
+) -> Key<[u8; KEY_SIZE]> {
+    let words = Words::new(key.array());
+    let mut out = portable::hchacha20(&words.0, &nonce_words(nonce));
+    let mut key = Key::zeroed();
+    for (bytes, w) in key.as_mut().chunks_exact_mut(4).zip(out) {
+        bytes.copy_from_slice(&w.to_le_bytes());
+    }
+    out.zeroize();
+    key
 }
 
 /// ChaCha20 over the keystream generator `B`. The type for callers
@@ -214,10 +247,21 @@ impl<B: Backend> Cipher<B> {
     ) -> Stream<'_, B> {
         Stream {
             cipher: self,
-            nonce: nonce_words(nonce),
-            counter: u64::from(counter),
-            keystream: [0; BLOCK_SIZE],
-            used: BLOCK_SIZE,
+            position: Position::new(nonce, counter),
+        }
+    }
+
+    /// Starts a message that arrives in pieces, taking the cipher
+    /// with it: for a key that serves this one message, as under
+    /// [`XChaCha20`](crate::cipher::xchacha20::XChaCha20).
+    pub fn into_stream(
+        self,
+        nonce: &[u8; NONCE_SIZE],
+        counter: u32,
+    ) -> OwnedStream<B> {
+        OwnedStream {
+            position: Position::new(nonce, counter),
+            cipher: self,
         }
     }
 
@@ -253,25 +297,35 @@ impl<B: Backend> fmt::Debug for Cipher<B> {
     }
 }
 
-/// A message in progress: the keystream position, and any of the
-/// current block not yet used.
-pub struct Stream<'a, B: Backend> {
-    cipher: &'a Cipher<B>,
+/// Where a message is up to: the nonce, the block the next fresh
+/// keystream comes from, and any of the current block not yet used.
+struct Position {
     nonce: [u32; 3],
-    /// The block the next fresh keystream comes from. Wider than the
-    /// counter so that using the last block is recorded rather than
-    /// wrapped round.
+    /// Wider than the counter so that using the last block is
+    /// recorded rather than wrapped round.
     counter: u64,
     keystream: [u8; BLOCK_SIZE],
     used: usize,
 }
 
-impl<B: Backend> Stream<'_, B> {
-    /// Encrypts or decrypts the next piece of the message in place.
-    ///
-    /// Returns [`Error::MessageTooLong`] if the piece would take the
-    /// block counter past 2^32, leaving `data` untouched.
-    pub fn update(&mut self, mut data: &mut [u8]) -> Result<(), Error> {
+impl Position {
+    fn new(nonce: &[u8; NONCE_SIZE], counter: u32) -> Self {
+        Position {
+            nonce: nonce_words(nonce),
+            counter: u64::from(counter),
+            keystream: [0; BLOCK_SIZE],
+            used: BLOCK_SIZE,
+        }
+    }
+
+    /// Encrypts or decrypts the next piece of the message in place
+    /// under `cipher`, or [`Error::MessageTooLong`] if the piece would
+    /// take the block counter past 2^32, leaving `data` untouched.
+    fn update<B: Backend>(
+        &mut self,
+        cipher: &Cipher<B>,
+        mut data: &mut [u8],
+    ) -> Result<(), Error> {
         let fresh = data.len().saturating_sub(BLOCK_SIZE - self.used);
         let blocks = fresh.div_ceil(BLOCK_SIZE) as u64;
         if self.counter + blocks > 1 << 32 {
@@ -293,8 +347,8 @@ impl<B: Backend> Stream<'_, B> {
         let whole = data.len() - data.len() % BLOCK_SIZE;
         let (now, rest) = data.split_at_mut(whole);
         if !now.is_empty() {
-            self.cipher.backend.xor(
-                &self.cipher.key.0,
+            cipher.backend.xor(
+                &cipher.key.0,
                 &self.nonce,
                 self.counter as u32,
                 now,
@@ -305,8 +359,8 @@ impl<B: Backend> Stream<'_, B> {
         // A last partial block, keeping the rest of its keystream.
         if !rest.is_empty() {
             self.keystream = [0; BLOCK_SIZE];
-            self.cipher.backend.xor(
-                &self.cipher.key.0,
+            cipher.backend.xor(
+                &cipher.key.0,
                 &self.nonce,
                 self.counter as u32,
                 &mut self.keystream,
@@ -321,7 +375,7 @@ impl<B: Backend> Stream<'_, B> {
     }
 }
 
-impl<B: Backend> Drop for Stream<'_, B> {
+impl Drop for Position {
     /// The keystream is as secret as the key.
     fn drop(&mut self) {
         self.keystream.zeroize();
@@ -331,14 +385,65 @@ impl<B: Backend> Drop for Stream<'_, B> {
     }
 }
 
-impl<B: Backend> ZeroizeOnDrop for Stream<'_, B> {}
+impl ZeroizeOnDrop for Position {}
 
-impl<B: Backend> fmt::Debug for Stream<'_, B> {
+impl fmt::Debug for Position {
     /// Deliberately omits the keystream.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Stream")
             .field("counter", &self.counter)
             .finish_non_exhaustive()
+    }
+}
+
+/// A message in progress under a borrowed cipher.
+pub struct Stream<'a, B: Backend> {
+    cipher: &'a Cipher<B>,
+    position: Position,
+}
+
+impl<B: Backend> Stream<'_, B> {
+    /// Encrypts or decrypts the next piece of the message in place.
+    ///
+    /// Returns [`Error::MessageTooLong`] if the piece would take the
+    /// block counter past 2^32, leaving `data` untouched.
+    pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
+        self.position.update(self.cipher, data)
+    }
+}
+
+// Both parts wipe themselves; this only says so.
+impl<B: Backend> ZeroizeOnDrop for Stream<'_, B> {}
+
+impl<B: Backend> fmt::Debug for Stream<'_, B> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.position.fmt(f)
+    }
+}
+
+/// A message in progress under a cipher of its own; see
+/// [`Cipher::into_stream`].
+pub struct OwnedStream<B: Backend> {
+    cipher: Cipher<B>,
+    position: Position,
+}
+
+impl<B: Backend> OwnedStream<B> {
+    /// Encrypts or decrypts the next piece of the message in place.
+    ///
+    /// Returns [`Error::MessageTooLong`] if the piece would take the
+    /// block counter past 2^32, leaving `data` untouched.
+    pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
+        self.position.update(&self.cipher, data)
+    }
+}
+
+// Both parts wipe themselves; this only says so.
+impl<B: Backend> ZeroizeOnDrop for OwnedStream<B> {}
+
+impl<B: Backend> fmt::Debug for OwnedStream<B> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.position.fmt(f)
     }
 }
 
@@ -445,7 +550,7 @@ enum Inner {
     Portable(Cipher<portable::Portable>),
 }
 
-/// A message in progress under [`ChaCha20`].
+/// A message in progress under a borrowed [`ChaCha20`].
 pub struct AutoStream<'a>(InnerStream<'a>);
 
 enum InnerStream<'a> {
@@ -458,6 +563,22 @@ enum InnerStream<'a> {
     #[cfg(target_arch = "riscv64")]
     Zbb(Stream<'a, riscv64::Zbb>),
     Portable(Stream<'a, portable::Portable>),
+}
+
+/// A message in progress under a [`ChaCha20`] of its own; see
+/// [`ChaCha20::into_stream`].
+pub struct OwnedAutoStream(InnerOwned);
+
+enum InnerOwned {
+    #[cfg(target_arch = "x86_64")]
+    Avx2(OwnedStream<x86_64::Avx2>),
+    #[cfg(target_arch = "aarch64")]
+    Neon(OwnedStream<aarch64::Neon>),
+    #[cfg(target_arch = "riscv64")]
+    Zvkb(OwnedStream<riscv64::Zvkb>),
+    #[cfg(target_arch = "riscv64")]
+    Zbb(OwnedStream<riscv64::Zbb>),
+    Portable(OwnedStream<portable::Portable>),
 }
 
 impl ChaCha20 {
@@ -604,6 +725,29 @@ impl ChaCha20 {
         })
     }
 
+    /// Starts a message that arrives in pieces, taking the cipher
+    /// with it: for a key that serves this one message, as under
+    /// [`XChaCha20`](crate::cipher::xchacha20::XChaCha20).
+    pub fn into_stream(
+        self,
+        nonce: &[u8; NONCE_SIZE],
+        counter: u32,
+    ) -> OwnedAutoStream {
+        OwnedAutoStream(match self.0 {
+            #[cfg(target_arch = "x86_64")]
+            Inner::Avx2(c) => InnerOwned::Avx2(c.into_stream(nonce, counter)),
+            #[cfg(target_arch = "aarch64")]
+            Inner::Neon(c) => InnerOwned::Neon(c.into_stream(nonce, counter)),
+            #[cfg(target_arch = "riscv64")]
+            Inner::Zvkb(c) => InnerOwned::Zvkb(c.into_stream(nonce, counter)),
+            #[cfg(target_arch = "riscv64")]
+            Inner::Zbb(c) => InnerOwned::Zbb(c.into_stream(nonce, counter)),
+            Inner::Portable(c) => {
+                InnerOwned::Portable(c.into_stream(nonce, counter))
+            }
+        })
+    }
+
     /// One block of keystream, as the AEAD takes its Poly1305 key.
     pub(crate) fn keystream_block(
         &self,
@@ -618,6 +762,13 @@ impl AutoStream<'_> {
     /// Encrypts or decrypts the next piece of the message in place.
     pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
         dispatch!(&mut self.0, InnerStream, s => s.update(data))
+    }
+}
+
+impl OwnedAutoStream {
+    /// Encrypts or decrypts the next piece of the message in place.
+    pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
+        dispatch!(&mut self.0, InnerOwned, s => s.update(data))
     }
 }
 
@@ -638,6 +789,12 @@ impl fmt::Debug for ChaCha20 {
 impl fmt::Debug for AutoStream<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         dispatch!(&self.0, InnerStream, s => s.fmt(f))
+    }
+}
+
+impl fmt::Debug for OwnedAutoStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        dispatch!(&self.0, InnerOwned, s => s.fmt(f))
     }
 }
 
@@ -781,6 +938,53 @@ pub(crate) mod tests {
                 stream.update(piece).unwrap();
             }
             assert_eq!(pieces[..], whole[..], "chunk {chunk}");
+
+            // And the stream that owns its cipher is the same stream.
+            let mut owned = data;
+            let mut stream = cipher.clone().into_stream(&NONCE, 5);
+            for piece in owned.chunks_mut(chunk) {
+                stream.update(piece).unwrap();
+            }
+            assert_eq!(owned[..], whole[..], "owned, chunk {chunk}");
+        }
+    }
+
+    /// draft-irtf-cfrg-xchacha-03 section 2.2.1.
+    #[test]
+    fn hchacha20_known_answer() {
+        let nonce = hex::<16>("000000090000004a0000000031415927");
+        let subkey = hchacha20(&Key::from(KEY), &nonce);
+        assert_eq!(
+            *subkey.array(),
+            hex::<32>(
+                "82413b4227b27bfed30e42508a877d73\
+                 a0f9e4d58a74a853c12ec41326d3ecdc"
+            )
+        );
+    }
+
+    /// The subkey is the first and last rows of the rounds without
+    /// the input added back, so it cannot be read off any keystream
+    /// block under the same key.
+    #[test]
+    fn hchacha20_is_not_keystream() {
+        let key = Key::from(KEY);
+        let nonce = hex::<16>("000000090000004a0000000031415927");
+        let subkey = hchacha20(&key, &nonce);
+        let cipher = ChaCha20::new(&key);
+        let block = cipher.keystream_block(&[0u8; 12], 0);
+        assert_ne!(&subkey.array()[..], &block[..32]);
+        assert_ne!(&subkey.array()[..], &block[32..]);
+        // Any change to the nonce changes every word of the result.
+        let mut other = nonce;
+        other[15] ^= 1;
+        let changed = hchacha20(&key, &other);
+        for (a, b) in subkey
+            .array()
+            .chunks_exact(4)
+            .zip(changed.array().chunks_exact(4))
+        {
+            assert_ne!(a, b);
         }
     }
 
@@ -812,6 +1016,7 @@ pub(crate) mod tests {
         fn wipes<T: ZeroizeOnDrop>() {}
         wipes::<Cipher<portable::Portable>>();
         wipes::<Stream<'static, portable::Portable>>();
+        wipes::<OwnedStream<portable::Portable>>();
         #[cfg(target_arch = "x86_64")]
         wipes::<Cipher<x86_64::Avx2>>();
         #[cfg(target_arch = "aarch64")]

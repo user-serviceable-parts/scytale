@@ -25,6 +25,18 @@ fn hash_matches_the_vectors() {
     assert_eq!(out, "7f9c2ba4e88f827d616045507605853e  -");
     let out = ok(&["hash", "sha256", "--raw"], b"abc");
     assert_eq!(out.len(), 32);
+    // RFC 7693 appendix A, and the empty string under BLAKE2b-256.
+    let out = text(ok(&["hash", "blake2b-512"], b"abc"));
+    assert_eq!(
+        out,
+        "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d1\
+         7d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923  -"
+    );
+    let out = text(ok(&["hash", "blake2b-256"], b""));
+    assert_eq!(
+        out,
+        "0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8  -"
+    );
     // Names are forgiving of case and underscores.
     let out = text(ok(&["hash", "SHA3_256"], b""));
     assert!(out.starts_with("a7ffc6f8"));
@@ -39,11 +51,17 @@ fn aead_round_trips_and_detects_tampering() {
         "aes-128-gcm-siv",
         "aes-128-ccm",
         "chacha20-poly1305",
+        "xchacha20-poly1305",
     ] {
-        let key = if alg == "chacha20-poly1305" {
+        let key = if alg.ends_with("chacha20-poly1305") {
             KEY32
         } else {
             KEY16
+        };
+        let nonce = if alg == "xchacha20-poly1305" {
+            NONCE24
+        } else {
+            NONCE
         };
         let message = b"the quick brown fox".repeat(1000);
         let enc = [
@@ -53,7 +71,7 @@ fn aead_round_trips_and_detects_tampering() {
             "-k",
             key,
             "-n",
-            NONCE,
+            nonce,
             "--aad",
             "str:header",
         ];
@@ -66,7 +84,7 @@ fn aead_round_trips_and_detects_tampering() {
             "-k",
             key,
             "-n",
-            NONCE,
+            nonce,
             "--aad",
             "str:header",
         ];
@@ -84,7 +102,7 @@ fn aead_round_trips_and_detects_tampering() {
             "-k",
             key,
             "-n",
-            NONCE,
+            nonce,
             "--aad",
             "str:other",
         ];
@@ -284,6 +302,25 @@ fn xts_kw_chacha20_and_fpe() {
     );
     assert!(hex(&out).starts_with("6e2e359a2568f98041ba0728dd0d6981"));
 
+    // XChaCha20: draft-irtf-cfrg-xchacha-03 A.3.2.1, counter 0.
+    let key = "hex:808182838485868788898a8b8c8d8e8f909192939495969798999a9b\
+               9c9d9e9f";
+    let nonce = "hex:404142434445464748494a4b4c4d4e4f5051525354555658";
+    let out = ok(
+        &[
+            "cipher",
+            "encrypt",
+            "xchacha20",
+            "-k",
+            key,
+            "--nonce",
+            nonce,
+        ],
+        b"The dhole (pronounced \"dole\") is also known as the Asiatic \
+          wild dog",
+    );
+    assert!(hex(&out).starts_with("4559abba4e48c16102e8bb2c05e6947f"));
+
     // FF1 over digits, one line at a time.
     let enc = ["cipher", "encrypt", "ff1-aes-128", "-k", KEY16];
     let dec = ["cipher", "decrypt", "ff1-aes-128", "-k", KEY16];
@@ -397,6 +434,34 @@ fn mac_and_kdf() {
         b"",
     ));
     assert_eq!(out, "ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957");
+    // RFC 9106 section 5.3: four lanes, with a secret and data.
+    let out = text(ok(
+        &[
+            "kdf",
+            "argon2id",
+            "--password",
+            &format!("hex:{}", "01".repeat(32)),
+            "--salt",
+            &format!("hex:{}", "02".repeat(16)),
+            "--secret",
+            &format!("hex:{}", "03".repeat(8)),
+            "--data",
+            &format!("hex:{}", "04".repeat(12)),
+            "--passes",
+            "3",
+            "--memory",
+            "32",
+            "--lanes",
+            "4",
+            "-l",
+            "32",
+        ],
+        b"",
+    ));
+    assert_eq!(
+        out,
+        "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659"
+    );
     // The IETF TLS 1.2 PRF vector for SHA-256, with the seed in two
     // parts.
     let out = text(ok(
@@ -703,6 +768,101 @@ fn tuplehash_and_the_secret_kdfs() {
     assert_ne!(defaulted, empty);
 }
 
+/// An HSS key is spent a leaf at a time: the file advances with every
+/// signature, a signature never leaves without it, and the key refuses
+/// once the trees are empty.
+#[test]
+fn hss_keys_advance_on_disk() {
+    let d = dir("hss");
+    let private = d.join("key.pem");
+    let public = d.join("key.pub");
+    let (private, public) =
+        (private.to_str().unwrap(), public.to_str().unwrap());
+    ok(
+        &[
+            "key",
+            "generate",
+            "hss-shake256-192-h5-h5-w1",
+            "-o",
+            private,
+        ],
+        b"",
+    );
+    ok(&["key", "public", private, "-o", public], b"");
+    let shown = text(ok(&["key", "show", private], b""));
+    assert_eq!(
+        shown.trim(),
+        "HSS private key, 2 levels: LMS_SHAKE_M24_H5 with LMOTS_SHAKE_N24_W1, \
+         then LMS_SHAKE_M24_H5 with LMOTS_SHAKE_N24_W1; 1024 signatures left"
+    );
+    let shown = text(ok(&["key", "show", public], b""));
+    assert_eq!(
+        shown.trim(),
+        "HSS public key, 2 levels: LMS_SHAKE_M24_H5 with LMOTS_SHAKE_N24_W1 \
+         on top"
+    );
+    let before = fs::read(private).unwrap();
+    let first = ok(&["sig", "sign", "hss", "-k", private], b"one");
+    let after = fs::read(private).unwrap();
+    assert_ne!(before, after, "the key file did not advance");
+    assert!(!d.join("key.pem.tmp").exists());
+    let second = ok(&["sig", "sign", "hss", "-k", private], b"two");
+    // The leaf index of the lower tree is the last LMS signature's q,
+    // after the top signature and the lower public key.
+    let top_len = 8 + 24 * 201 + 4 + 5 * 24;
+    let q = |sig: &[u8]| sig[4 + top_len + 48 + 3];
+    assert_eq!(q(&first), 0);
+    assert_eq!(q(&second), 1);
+    for (message, sig) in [(&b"one"[..], &first), (b"two", &second)] {
+        let hex_sig = format!("hex:{}", hex(sig));
+        ok(
+            &["sig", "verify", "hss", "-p", public, "-s", &hex_sig],
+            message,
+        );
+        fails(
+            &["sig", "verify", "hss", "-p", public, "-s", &hex_sig],
+            b"x",
+            1,
+        );
+    }
+    let shown = text(ok(&["key", "show", private], b""));
+    assert!(shown.trim().ends_with("1022 signatures left"), "{shown}");
+    let e = fails(
+        &["sig", "sign", "hss", "-k", private, "--context", "str:c"],
+        b"m",
+        2,
+    );
+    assert!(e.contains("hss takes no --context"), "{e}");
+    // A single tree with no leaves left refuses, and leaves the file
+    // as it is.
+    let one = d.join("one.pem");
+    let one = one.to_str().unwrap();
+    ok(&["key", "generate", "hss-sha256-h5-w1", "-o", one], b"");
+    for _ in 0..32 {
+        ok(&["sig", "sign", "hss", "-k", one], b"m");
+    }
+    let shown = text(ok(&["key", "show", one], b""));
+    assert!(shown.trim().ends_with(" 0 signatures left"), "{shown}");
+    let spent = fs::read(one).unwrap();
+    let e = fails(&["sig", "sign", "hss", "-k", one], b"m", 2);
+    assert!(e.contains("no signatures left"), "{e}");
+    assert_eq!(fs::read(one).unwrap(), spent);
+    // Other keys are refused by what they hold, both ways.
+    let ed = d.join("ed.pem");
+    let ed = ed.to_str().unwrap();
+    ok(&["key", "generate", "ed25519", "-o", ed], b"");
+    let e = fails(&["sig", "sign", "hss", "-k", ed], b"m", 2);
+    assert!(
+        e.contains("holds an Ed25519 key; hss needs an HSS key"),
+        "{e}"
+    );
+    let e = fails(&["sig", "sign", "ed25519", "-k", private], b"m", 2);
+    assert!(
+        e.contains("holds an HSS key; ed25519 needs an Ed25519 key"),
+        "{e}"
+    );
+}
+
 #[test]
 fn random_is_random() {
     let a = text(ok(&["random", "32"], b""));
@@ -718,12 +878,14 @@ fn every_key_algorithm_signs_agrees_or_encapsulates() {
     let message = b"a message to sign";
     for (alg, scheme) in [
         ("ed25519", "ed25519"),
+        ("ed448", "ed448"),
         ("ecdsa-p256", "ecdsa-sha256"),
         ("ecdsa-p384", "ecdsa-sha384"),
         ("ecdsa-p521", "ecdsa-sha512"),
         ("rsa-1024", "rsa-pss-sha256"),
         ("ml-dsa-44", "ml-dsa-44"),
         ("slh-dsa-shake-128f", "slh-dsa-shake-128f"),
+        ("hss-sha256-h5-w2", "hss"),
     ] {
         let private = d.join(format!("{alg}.pem"));
         let public = d.join(format!("{alg}.pub"));
@@ -780,29 +942,23 @@ fn every_key_algorithm_signs_agrees_or_encapsulates() {
         }
     }
     // Context strings on the algorithms that take them.
-    let private = d.join("ed25519.pem").to_str().unwrap().to_owned();
-    let public = d.join("ed25519.pub").to_str().unwrap().to_owned();
-    let sig = ok(
-        &[
-            "sig",
-            "sign",
-            "ed25519",
-            "-k",
-            &private,
-            "--context",
-            "str:ctx",
-        ],
-        message,
-    );
-    let sig_hex = format!("hex:{}", hex(&sig));
-    let mut verify = vec!["sig", "verify", "ed25519", "-p", &public];
-    verify.extend(["-s", &sig_hex]);
-    fails(&verify, message, 1);
-    verify.extend(["--context", "str:ctx"]);
-    ok(&verify, message);
+    for alg in ["ed25519", "ed448"] {
+        let private = d.join(format!("{alg}.pem"));
+        let public = d.join(format!("{alg}.pub"));
+        let (private, public) =
+            (private.to_str().unwrap(), public.to_str().unwrap());
+        let sign = ["sig", "sign", alg, "-k", private, "--context", "str:ctx"];
+        let sig = ok(&sign, message);
+        let sig_hex = format!("hex:{}", hex(&sig));
+        let mut verify = vec!["sig", "verify", alg, "-p", public];
+        verify.extend(["-s", &sig_hex]);
+        fails(&verify, message, 1);
+        verify.extend(["--context", "str:ctx"]);
+        ok(&verify, message);
+    }
 
     // Key agreement: both sides reach the same secret.
-    for alg in ["x25519", "ecdh-p256", "ecdh-p384", "ecdh-p521"] {
+    for alg in ["x25519", "x448", "ecdh-p256", "ecdh-p384", "ecdh-p521"] {
         let a = d.join(format!("{alg}-a.pem"));
         let b = d.join(format!("{alg}-b.pem"));
         let (a, b) = (a.to_str().unwrap(), b.to_str().unwrap());
@@ -816,6 +972,7 @@ fn every_key_algorithm_signs_agrees_or_encapsulates() {
         let ba = ok(&["kex", "agree", alg, "-k", b, "-p", &a_pub], b"");
         assert_eq!(ab, ba, "{alg}");
         let len = match alg {
+            "x448" => 112,
             "ecdh-p384" => 96,
             "ecdh-p521" => 132,
             _ => 64,
@@ -861,6 +1018,7 @@ fn hpke_round_trips_every_suite() {
     let message = b"a message of no particular length";
     for (kem, enc_len) in [
         ("x25519", 32),
+        ("x448", 56),
         ("ecdh-p256", 65),
         ("ecdh-p384", 97),
         ("ecdh-p521", 133),
@@ -1155,6 +1313,7 @@ fn the_manual_covers_the_help() {
             || name.starts_with("ecdsa-")
             || name.starts_with("rsa-")
             || name.starts_with("slh-dsa-")
+            || name.starts_with("hss-")
             || name.starts_with("hpke-");
         if !patterned && !manual.contains(name) {
             missing.push(name.to_owned());

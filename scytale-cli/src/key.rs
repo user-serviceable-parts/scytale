@@ -14,7 +14,7 @@ use scytale::{Algorithm, Error, KeyInfo};
 use zeroize::Zeroizing;
 
 use crate::fail::{Result, usage};
-use crate::{io, names};
+use crate::{hss, io, names};
 
 /// Room for any PEM the library writes.
 const PEM_ROOM: usize = 16 * 1024;
@@ -287,7 +287,9 @@ fn fits(
 fn article(algorithm: Algorithm) -> &'static str {
     match algorithm {
         Algorithm::Ed25519
+        | Algorithm::Ed448
         | Algorithm::X25519
+        | Algorithm::X448
         | Algorithm::Rsa
         | Algorithm::RsaPss
         | Algorithm::MlKem512
@@ -295,7 +297,8 @@ fn article(algorithm: Algorithm) -> &'static str {
         | Algorithm::MlKem1024
         | Algorithm::MlDsa44
         | Algorithm::MlDsa65
-        | Algorithm::MlDsa87 => "n",
+        | Algorithm::MlDsa87
+        | Algorithm::Hss => "n",
         _ => "",
     }
 }
@@ -334,6 +337,7 @@ pub fn run(op: KeyOp) -> Result<()> {
                     let key = scytale::sig::rsa::PublicKey::try_from_pem(&pem)?;
                     format!(", {} bits", key.bits())
                 }
+                (Algorithm::Hss, private) => hss::detail(&pem, private)?,
                 _ => String::new(),
             };
             println!("{} {half} key{detail}", info.algorithm);
@@ -353,7 +357,11 @@ fn generate(name: &str) -> Result<Zeroizing<Vec<u8>>> {
             return Ok(pem);
         }};
     }
-    // rsa-N takes any N, so the table is consulted for the rest.
+    // hss-... and rsa-N are patterns, so the table is consulted for
+    // the rest.
+    if hss::is_key_name(name) {
+        return hss::generate(name);
+    }
     if let Some(bits) = name.strip_prefix("rsa-") {
         let bits: usize = bits.parse().map_err(|_| {
             usage!("rsa-{bits}: N in rsa-N is a bit count, 1024 to 8192")
@@ -373,8 +381,16 @@ fn generate(name: &str) -> Result<Zeroizing<Vec<u8>>> {
             let key = scytale::sig::ed25519::PrivateKey::generate(&mut rng)?;
             Ok(Zeroizing::new(key.pem_bytes().to_vec()))
         }
+        "ed448" => {
+            let key = scytale::sig::ed448::PrivateKey::generate(&mut rng)?;
+            Ok(Zeroizing::new(key.pem_bytes().to_vec()))
+        }
         "x25519" => {
             let key = scytale::kex::x25519::PrivateKey::generate(&mut rng)?;
+            Ok(Zeroizing::new(key.pem_bytes().to_vec()))
+        }
+        "x448" => {
+            let key = scytale::kex::x448::PrivateKey::generate(&mut rng)?;
             Ok(Zeroizing::new(key.pem_bytes().to_vec()))
         }
         "ecdsa-p256" | "ecdh-p256" => {
@@ -420,8 +436,16 @@ fn public(algorithm: Algorithm, pem: &[u8]) -> Result<Vec<u8>> {
             let key = scytale::sig::ed25519::PrivateKey::try_from_pem(pem)?;
             Ok(key.public_key().pem_bytes().to_vec())
         }
+        Algorithm::Ed448 => {
+            let key = scytale::sig::ed448::PrivateKey::try_from_pem(pem)?;
+            Ok(key.public_key().pem_bytes().to_vec())
+        }
         Algorithm::X25519 => {
             let key = scytale::kex::x25519::PrivateKey::try_from_pem(pem)?;
+            Ok(key.public_key().pem_bytes().to_vec())
+        }
+        Algorithm::X448 => {
+            let key = scytale::kex::x448::PrivateKey::try_from_pem(pem)?;
             Ok(key.public_key().pem_bytes().to_vec())
         }
         Algorithm::P256 => {
@@ -440,6 +464,7 @@ fn public(algorithm: Algorithm, pem: &[u8]) -> Result<Vec<u8>> {
             let key = scytale::sig::rsa::PrivateKey::try_from_pem(pem)?;
             into_pem!(key.public_key())
         }
+        Algorithm::Hss => hss::public(pem),
         other => with_kem!(other, m => {
             into_pem!(m::PrivateKey::try_from_pem(pem)?.public_key())
         }, _ => with_pq_sig!(other, m => {

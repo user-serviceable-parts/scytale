@@ -211,6 +211,10 @@ One of
 .BR sha3\-256 ,
 .BR sha3\-384 ,
 .BR sha3\-512 ,
+.B blake2b\-256
+or
+.B blake2b\-512
+(RFC 7693),
 an extendable-output function,
 .BR shake128 ,
 .BR shake256 ,
@@ -318,9 +322,9 @@ Authenticated encryption. Encryption writes the ciphertext and then the
 tag; decryption reads ciphertext and tag as one input, checks the tag,
 and writes the plaintext only if it checked. A message that fails
 leaves standard output empty and exits with status 1. Encryption with
-GCM and ChaCha20-Poly1305 streams; decryption reads the whole input
-first, since plaintext handed out before the tag is checked is
-plaintext an attacker chose.
+GCM, ChaCha20-Poly1305 and XChaCha20-Poly1305 streams; decryption
+reads the whole input first, since plaintext handed out before the
+tag is checked is plaintext an attacker chose.
 .TP
 .I algorithm
 One of
@@ -335,16 +339,18 @@ One of
 .BR aes\-128\-xpn ,
 .BR aes\-192\-xpn ,
 .BR aes\-256\-xpn ,
-.BR chacha20\-poly1305 .
+.BR chacha20\-poly1305 ,
+.BR xchacha20\-poly1305 .
 .TP
 .BI \-k,\ \-\-key\  value
 The key, of the width the name says: 16, 24 or 32 bytes for AES, 32
-for ChaCha20-Poly1305.
+for ChaCha20-Poly1305 and XChaCha20-Poly1305.
 .TP
 .BI \-n,\ \-\-nonce\  value
 The nonce. Twelve bytes, except that GCM takes any length, CCM takes 7
-to 13, and XPN takes 24: the 12-byte salt followed by the 12-byte
-frame. A nonce must never repeat under one key.
+to 13, XPN takes 24: the 12-byte salt followed by the 12-byte frame,
+and XChaCha20-Poly1305 takes 24 that may be drawn at random. A nonce
+must never repeat under one key.
 .TP
 .BI \-\-aad\  value
 Additional data, authenticated but not encrypted; the same value must
@@ -352,7 +358,8 @@ be given to decrypt. Empty without it.
 .TP
 .BI \-\-tag\-length\  bytes
 The tag length, 16 by default. GCM and XPN take 4 to 16, CCM an even
-number from 4 to 16; GCM-SIV and ChaCha20-Poly1305 take 16 only.
+number from 4 to 16; GCM-SIV, ChaCha20-Poly1305 and XChaCha20-Poly1305
+take 16 only.
 .SS cipher encrypt, cipher decrypt
 .B scytale cipher
 .RB { encrypt | decrypt }
@@ -391,7 +398,9 @@ of
 .B ofb
 or
 .BR xts ;
-.BR chacha20 ;
+.B chacha20
+or
+.BR xchacha20 ;
 .BI ff1\-aes\- width
 or
 .BI ff3\-1\-aes\- width
@@ -411,8 +420,10 @@ block for CTR, the tweak for XTS. Required by those modes and refused
 by the others.
 .TP
 .BI \-n,\ \-\-nonce\  value ,\ \-\-counter\  n
-The 12-byte nonce and the first block counter (0 without it) for
-ChaCha20, which encrypts and decrypts with the one operation.
+The nonce and the first block counter (0 without it) for ChaCha20 and
+XChaCha20, which encrypt and decrypt with the one operation. ChaCha20
+takes a 12-byte nonce, which must be counted; XChaCha20 takes 24
+bytes, which may be drawn at random.
 .TP
 .BI \-\-padding\  pkcs7 | none
 Required for ECB, CBC and CFB128, which take whole blocks, and
@@ -490,6 +501,38 @@ PBKDF2 (RFC 8018) over
 .IR hash :
 a key from a password, which is guessable, at a cost per guess set by
 the iteration count. The password and salt may be given as
+.BR str: .
+Hex without a flag.
+.SS kdf argon2id
+.B scytale kdf argon2id
+.BI \-\-password\  value
+.BI \-\-salt\  value
+.BI \-\-passes\  passes
+.BI \-\-memory\  KiB
+.BI \-\-lanes\  lanes
+.RB [ \-\-secret
+.IR value ]
+.RB [ \-\-data
+.IR value ]
+.BI \-l\  bytes
+.RB [ \-\-hex | \-\-raw ]
+.RI [ "\-o file" ]
+.PP
+Argon2id (RFC 9106): a key from a password, at a cost per guess in
+both time and memory. The costs have no defaults, since a tag can be
+checked only under the costs it was made with. RFC 9106 recommends
+2 GiB and one pass where that can be afforded, and otherwise
+.BR "\-\-memory 65536 \-\-passes 3" ,
+64 MiB and three passes. The lanes are computed one after another, so
+use
+.B \-\-lanes 1
+unless the tag must match one made with more. The salt is at least 8
+bytes and the output at least 4.
+.B \-\-secret
+is a key held apart from the stored tags, and
+.B \-\-data
+binds the tag to a context; each is empty without it. The password,
+salt and data may be given as
 .BR str: .
 Hex without a flag.
 .SS kdf tls12
@@ -670,7 +713,9 @@ block (PKCS#8), to standard output or to
 .IR file ,
 created readable by its owner alone. The algorithm is one of
 .BR ed25519 ,
+.BR ed448 ,
 .BR x25519 ,
+.BR x448 ,
 .BR ecdsa\-p256 ,
 .BR ecdsa\-p384 ,
 .BR ecdsa\-p521 ,
@@ -699,7 +744,31 @@ or
 .B shake
 and a
 .I size
-of 128, 192 or 256. Keys on P-256, P-384 and P-521 serve both ECDSA
+of 128, 192 or 256, or
+.BI hss\- hash \-h H [\-h H ...]\-w W
+for an HSS key (RFC 8554, SP 800-208) of one to eight LMS trees, a
+.I hash
+of
+.BR sha256 ,
+.BR sha256\-192 ,
+.B shake256
+or
+.BR shake256\-192 ,
+one tree height
+.I H
+of 5, 10, 15, 20 or 25 per level from the top down, and a Winternitz
+width
+.I W
+of 1, 2, 4 or 8:
+.B hss\-sha256\-h10\-w8
+is the common firmware-signing shape, 1024 signatures from one tree,
+and
+.B hss\-sha256\-h5\-h10\-w8
+32768 from a tree of 32 over trees of 1024. A tree of height
+.I H
+costs 2^H hashes of its one-time keys before the key exists; H15 takes
+seconds, H20 minutes, H25 hours, and the command says so on standard
+error. Keys on P-256, P-384 and P-521 serve both ECDSA
 and ECDH;
 an RSA key serves both signatures and encryption.
 .SS key public
@@ -716,8 +785,9 @@ block.
 .B scytale key show
 .RI [ file ]
 .PP
-Prints what a key file holds: its algorithm, which half it is, and
-for RSA the modulus length.
+Prints what a key file holds: its algorithm, which half it is, for
+RSA the modulus length, and for HSS the trees and how many signatures
+the private key has left.
 .PP
 Every command that takes a key file reads PEM: the
 .B PRIVATE KEY
@@ -750,6 +820,15 @@ ML-DSA and SLH-DSA signatures are hedged: the nonce their standards
 derive from the key and the message, with fresh random bytes mixed
 in, so signing the same input twice gives two signatures that both
 verify. RSA PKCS#1 v1.5 alone gives the same bytes every time.
+.PP
+.B hss
+spends a leaf of the key: the file named by
+.B \-k
+is rewritten with the next leaf (through a temporary file beside it,
+renamed into place) before the signature is written, so a signature
+never leaves without the key having moved on, and a key with no
+leaves left is refused. Keep one copy of an HSS key and sign with it
+in one place: two signatures from the same leaf let anyone forge.
 .SS sig verify
 .B scytale sig verify
 .I scheme
@@ -773,6 +852,8 @@ makes the public one.
 .I scheme
 .B ed25519
 on an Ed25519 key;
+.B ed448
+on an Ed448 key;
 .BI ecdsa\- hash
 on a P-256, P-384 or P-521 key, the curve being the key's;
 .BI rsa\-pss\- hash
@@ -784,14 +865,17 @@ on an RSA key, deterministic;
 .B ml\-dsa\-87
 and the twelve
 .B slh\-dsa
-sets on their own keys.
+sets on their own keys;
+.B hss
+on an HSS key of any shape, the key naming its trees.
 .I hash
 is any of the plain hashes above.
 .TP
 .BI \-\-context\  value
 The context string for Ed25519 (which then signs in the Ed25519ctx
-form), ML-DSA and SLH-DSA; up to 255 bytes. Empty without it, which
-for Ed25519 is the plain form. Refused by the other schemes.
+form), Ed448, ML-DSA and SLH-DSA; up to 255 bytes. Empty without
+it, which for Ed25519 is the plain form. Refused by the other
+schemes, HSS included.
 .TP
 .B \-\-raw\-ecdsa
 An ECDSA signature as the fixed-width
@@ -801,8 +885,8 @@ followed by
 rather than the DER SEQUENCE that
 .B openssl dgst
 writes. Ed25519, ML-DSA and SLH-DSA signatures are always the
-fixed-width bytes their standards define, and RSA signatures the
-modulus length.
+fixed-width bytes their standards define, RSA signatures the
+modulus length, and an HSS signature the length its key's trees fix.
 .SS kex agree
 .B scytale kex agree
 .I algorithm
@@ -817,6 +901,7 @@ and the peer's public key in
 .IR peer ,
 under
 .BR x25519 ,
+.BR x448 ,
 .BR ecdh\-p256 ,
 .B ecdh\-p384
 or
@@ -882,6 +967,7 @@ HPKE (RFC 9180, base mode) under
 .BI hpke\- kem \- kdf \- aead\fR:\fP
 a message of any length under an
 .BR x25519 ,
+.BR x448 ,
 .BR ecdh\-p256 ,
 .B ecdh\-p384
 or
@@ -905,6 +991,8 @@ and
 The output is the encapsulated key, then the ciphertext, then a
 16-byte tag; the encapsulated key is 32 bytes under
 .BR x25519 ,
+56 under
+.BR x448 ,
 65 under
 .BR ecdh\-p256 ,
 97 under

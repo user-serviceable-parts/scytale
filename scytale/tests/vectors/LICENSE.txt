@@ -1,0 +1,4 @@
+The vectors in the wycheproof directory are from Project Wycheproof,
+https://github.com/C2SP/wycheproof, directory testvectors_v1. They
+are unmodified and are licensed under the Apache License, Version
+2.0; a copy is at http://www.apache.org/licenses/LICENSE-2.0.

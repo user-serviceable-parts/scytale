@@ -74,7 +74,7 @@ pub fn output(path: Option<&Path>, secret: bool) -> Result<Box<dyn Write>> {
     })
 }
 
-fn create(path: &Path, secret: bool) -> Result<File> {
+pub fn create(path: &Path, secret: bool) -> Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]

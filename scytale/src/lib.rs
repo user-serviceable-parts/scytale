@@ -11,19 +11,19 @@
 //!
 //! | Module | What is in it |
 //! | --- | --- |
-//! | [`aead`] | GCM, GCM-SIV, XPN, CCM and ChaCha20-Poly1305 |
-//! | [`cipher`] | AES, ChaCha20, and the modes built on them |
+//! | [`aead`] | GCM, GCM-SIV, XPN, CCM, (X)ChaCha20-Poly1305 |
+//! | [`cipher`] | AES, ChaCha20, XChaCha20, and the modes built on them |
 //! | [`hash`] | SHA-2, SHA-3, SHAKE, cSHAKE, TupleHash, BLAKE2b, legacy SHA-1 |
 //! | [`mac`] | HMAC, CMAC, KMAC and Poly1305 |
 //! | [`kdf`] | Argon2id, HKDF, PBKDF2, TLS 1.2, SP 800-108, one-step, X9.63 |
 //! | [`kem`] | ML-KEM key encapsulation |
-//! | [`kex`] | X25519 and ECDH key agreement |
+//! | [`kex`] | X25519, X448 and ECDH key agreement |
 //! | [`pke`] | HPKE and RSA-OAEP public-key encryption |
 //! | [`random`] | the SP 800-90A generators and the entropy that seeds them |
 //! | [`features`] | what the processor has, and what the program allows |
 //! | [`constant_time`] | comparing secrets without timing them |
 //! | [`codec`] | hex, base64 and PEM, in constant time |
-//! | [`sig`] | Ed25519, ECDSA, ML-DSA, SLH-DSA and RSA signatures |
+//! | [`sig`] | Ed25519, Ed448, ECDSA, ML-DSA, SLH-DSA, HSS and RSA signatures |
 //! | [`KeyInfo`] | which algorithm an encoded key is for |
 //! | [`Error`] | the one type every fallible call returns |
 //!

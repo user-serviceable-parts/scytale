@@ -139,9 +139,11 @@ mod tests {
         for len in [0, 1, 7, 16, 255, 256, 257, 4096] {
             let mut buf = [0u8; 4096];
             rng.fill(&mut buf[..len]).expect("fill");
-            // One byte in 256 is zero by chance, so ask whether any
-            // byte moved rather than all of them.
-            assert!(len == 0 || buf[..len].iter().any(|&b| b != 0), "{len}");
+            // One random byte is zero once in 256 draws, which a test
+            // must never bet against. Sixteen all zero is one draw in
+            // 2^128, and that is what the check rests on; the short
+            // lengths check the bounds alone.
+            assert!(len < 16 || buf[..len].iter().any(|&b| b != 0), "{len}");
             assert!(buf[len..].iter().all(|&b| b == 0), "{len}");
         }
     }

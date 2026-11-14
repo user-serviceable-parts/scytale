@@ -156,15 +156,18 @@ macro_rules! nist_kem {
 
 nist_kem!(
     /// DHKEM(P-256, HKDF-SHA256).
-    P256, p256
+    P256,
+    p256
 );
 nist_kem!(
     /// DHKEM(P-384, HKDF-SHA384).
-    P384, p384
+    P384,
+    p384
 );
 nist_kem!(
     /// DHKEM(P-521, HKDF-SHA512).
-    P521, p521
+    P521,
+    p521
 );
 
 impl<K, H, A> Hpke for Suite<K, H, A>
