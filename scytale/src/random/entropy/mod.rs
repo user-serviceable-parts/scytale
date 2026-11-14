@@ -1,0 +1,362 @@
+//! Where seed material comes from.
+//!
+//! Each of these is a source of raw material, not a source of random
+//! bytes: what they hand back is conditioned by the generator above
+//! them before any of it reaches a caller. That is why they
+//! implement [`Entropy`] and not
+//! [`Random`](crate::Random), and why they are named from here
+//! rather than from the module above.
+//!
+//! | Source | What it asks |
+//! | --- | --- |
+//! | [`System`] | whoever on this machine is best placed to know |
+//! | yours | whatever you implement [`Entropy`] over |
+//!
+//! [`System`] is one name with one shape on every target, so code
+//! written over it builds for all of them. With an operating system
+//! it asks that. With none it reads the processor's own generator,
+//! health tested, and that is the only place the processor is asked:
+//! an operating system already mixes that generator in with
+//! everything else it has, and asking past it gains nothing.
+//!
+//! A board with a generator of its own implements
+//! [`Entropy`] over it and is served as well
+//! as a machine with an instruction for it. That is also how entropy
+//! gathered some other way goes in: there is deliberately no way to
+//! hand the generator a seed and nothing else, since a generator
+//! with no source cannot reseed itself, after a `fork` or when it
+//! runs out.
+//!
+//! # Example
+//!
+//! ```
+//! use scytale::{Error, Random};
+//! use scytale::random::{CtrDrbg, Entropy, entropy};
+//!
+//! # fn main() -> Result<(), scytale::Error> {
+//! // The usual case: let the system feed the generator.
+//! let mut rng = CtrDrbg::from_system()?;
+//! let mut key = [0u8; 32];
+//! rng.fill(&mut key)?;
+//!
+//! // The same, with the source named.
+//! let mut named = CtrDrbg::try_new(entropy::System::try_new()?)?;
+//! named.fill(&mut key)?;
+//!
+//! // Hardware of your own: a noise source on a bus, read however
+//! // the board reads it. The generator conditions what it gets and
+//! // comes back for more when it needs to, so the source need not
+//! // be full entropy, only honest about failing.
+//! struct Board;
+//! impl Entropy for Board {
+//!     fn fill(&mut self, out: &mut [u8]) -> Result<(), Error> {
+//!         for byte in out.iter_mut() {
+//!             *byte = read_noise_register();
+//!         }
+//!         Ok(())
+//!     }
+//! }
+//! let mut own = CtrDrbg::try_new(Board)?;
+//! own.fill(&mut key)?;
+//! # fn read_noise_register() -> u8 { 0x5a }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Why the operating systems are not written out here
+//!
+//! They used to be: a system call made by number on Linux, a named C
+//! function on the BSDs and Apple's systems, another on Windows.
+//! Every one of those is a fact about somebody else's kernel that has
+//! to be kept true, and the list was never complete. Linux was
+//! supported on three architectures and quietly unsupported on the
+//! rest.
+//!
+//! The `getrandom` crate is where that work is already being done,
+//! for far more platforms than were ever listed here, so [`System`]
+//! asks it. On Linux with no C library it still makes the system call
+//! directly, so a static binary is no worse off.
+//!
+//! The processor's instructions are still written out here, because
+//! what is wanted from them is not what that crate offers: raw
+//! samples to seed a generator with, watched for signs the hardware
+//! has failed.
+
+// The processor's generator is what `System` is where there is no
+// operating system, and is built nowhere else but the tests, which
+// keep its sampling and its health testing run on real processors.
+#[cfg(any(target_os = "none", test))]
+mod bare;
+
+use crate::Error;
+use crate::random::Entropy;
+#[cfg(any(target_os = "none", test))]
+use crate::random::health::{Health, STARTUP};
+
+#[cfg(any(target_os = "none", test))]
+use bare::Sampler;
+
+/// The processor's own generator, watched as it is used.
+///
+/// Construction runs the startup test SP 800-90B asks for, so a
+/// processor whose generator is dead or stuck yields no `Processor`
+/// at all rather than one that hands out its output. Every sample
+/// drawn afterwards is examined too.
+///
+/// `rdseed` or `rdrand` on x86-64, `rndr` on AArch64 and the `seed`
+/// register on RISC-V. Not a name of its own in the interface: it is
+/// what [`System`] is where there is no operating system, so that a
+/// caller writes one thing for every target.
+#[cfg(any(target_os = "none", test))]
+#[derive(Clone, Debug)]
+struct Processor {
+    sampler: Sampler,
+    health: Health,
+}
+
+#[cfg(any(target_os = "none", test))]
+impl Processor {
+    /// Finds the processor's generator and satisfies itself that it
+    /// is working.
+    ///
+    /// Draws and examines a thousand samples, which takes well under
+    /// a millisecond and happens once for the life of the object.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotSupported`] where the processor has no such
+    /// instruction, and [`Error::EntropyUnavailable`] where it has
+    /// one that is not working.
+    pub fn try_new() -> Result<Self, Error> {
+        let sampler = Sampler::try_new()?;
+        let mut health = Health::new();
+        // Four samples to a word, and the startup test is counted in
+        // samples.
+        for _ in 0..STARTUP / 4 {
+            health.word(sampler.draw()?)?;
+        }
+        Ok(Processor { sampler, health })
+    }
+}
+
+#[cfg(any(target_os = "none", test))]
+impl Entropy for Processor {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), Error> {
+        for piece in out.chunks_mut(8) {
+            let word = self.sampler.draw()?;
+            self.health.word(word)?;
+            piece.copy_from_slice(&word.to_ne_bytes()[..piece.len()]);
+        }
+        Ok(())
+    }
+}
+
+/// Whoever on this machine is best placed to know.
+///
+/// The operating system where there is one: it is seeded from far
+/// more than a library can reach, it is told when a virtual machine
+/// has been cloned, and it already mixes in the processor's generator
+/// along with everything else. Where there is no operating system,
+/// the processor itself: `rdseed` or `rdrand` on x86-64, `rndr` on
+/// AArch64 and the `seed` register on RISC-V, health tested in the
+/// manner of SP 800-90B at construction and on every sample after.
+///
+/// The name and its shape are the same on every target, so nothing
+/// written over it has to say where it runs.
+#[derive(Clone, Debug)]
+pub struct System(Inner);
+
+impl System {
+    /// Finds this machine's source.
+    ///
+    /// # Errors
+    ///
+    /// Where there is an operating system, this does not fail. Where
+    /// there is none, [`Error::NotSupported`] if the processor has no
+    /// generator and [`Error::EntropyUnavailable`] if it has one
+    /// that is not working.
+    pub fn try_new() -> Result<Self, Error> {
+        Inner::try_new().map(System)
+    }
+}
+
+impl Entropy for System {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), Error> {
+        self.0.fill(out)
+    }
+}
+
+/// With an operating system, it is the thing to ask. On wasm the same
+/// call reaches the surrounding JavaScript instead. The condition here
+/// is also what gates the dependency in `Cargo.toml`, so the two have
+/// to agree.
+#[cfg(not(target_os = "none"))]
+#[derive(Clone, Debug)]
+struct Inner;
+
+#[cfg(not(target_os = "none"))]
+impl Inner {
+    fn try_new() -> Result<Self, Error> {
+        Ok(Inner)
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+impl Entropy for Inner {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), Error> {
+        // A call made very early in boot waits until the kernel's
+        // generator is ready. That is deliberate: the alternative is
+        // bytes that are not yet unpredictable.
+        getrandom::fill(out).map_err(|e| {
+            // The number the system gave, where it gave one.
+            Error::EntropyUnavailable(e.raw_os_error().unwrap_or(0))
+        })
+    }
+}
+
+/// With none, there is nobody to ask but the processor, which already
+/// answers to both of the names used above.
+#[cfg(target_os = "none")]
+type Inner = Processor;
+
+/// No source of its own: the generators the vector suites and the
+/// unit tests are built on hold this.
+///
+/// A generator on this works exactly as any other until it has drawn
+/// as much as one seeding allows, and then stops with
+/// [`Error::ReseedRequired`] until it is given fresh material. It
+/// never quietly carries on, and it never invents anything. It also
+/// cannot recover from a `fork` on its own, which is one of the
+/// reasons it is not offered to callers.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct External;
+
+#[cfg(test)]
+impl Entropy for External {
+    fn fill(&mut self, _out: &mut [u8]) -> Result<(), Error> {
+        Err(Error::ReseedRequired)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Whether this build has an operating system to ask.
+    const HOSTED: bool = cfg!(not(target_os = "none"));
+
+    /// Guard bytes either side of the target catch a length or
+    /// pointer slip. Sizes straddle 256, where some systems stop
+    /// promising to answer in full.
+    #[test]
+    fn the_system_writes_the_whole_buffer_and_no_more() {
+        if !HOSTED {
+            return;
+        }
+        let mut system = System::try_new().expect("system");
+        const PAD: usize = 32;
+        let mut buf = [0xaau8; PAD + 4096 + PAD];
+        for len in [0, 1, 7, 16, 31, 255, 256, 257, 1000, 4096] {
+            buf.fill(0xaa);
+            system.fill(&mut buf[PAD..PAD + len]).expect("fill");
+            assert!(
+                buf[..PAD].iter().all(|&b| b == 0xaa),
+                "{len}: wrote before the start"
+            );
+            assert!(
+                buf[PAD + len..].iter().all(|&b| b == 0xaa),
+                "{len}: wrote past the end"
+            );
+            // Random bytes can equal the padding: one byte does so
+            // once in 256 draws, which a test must never bet
+            // against. Sixteen bytes all doing so is one draw in
+            // 2^128, the odds of a key collision, and that is what
+            // the assertion rests on; the short lengths above check
+            // the bounds alone.
+            assert!(
+                len < 16 || buf[PAD..PAD + len].iter().any(|&b| b != 0xaa),
+                "{len}: wrote nothing"
+            );
+        }
+    }
+
+    /// Two equal draws would mean the system is not being asked.
+    #[test]
+    fn successive_system_draws_differ() {
+        if !HOSTED {
+            return;
+        }
+        let mut system = System::try_new().expect("system");
+        let mut first = [0u8; 32];
+        let mut second = [0u8; 32];
+        system.fill(&mut first).expect("first");
+        system.fill(&mut second).expect("second");
+        assert_ne!(first, second);
+    }
+
+    /// Catches output that is technically written but obviously not
+    /// random. The band is about nine standard deviations wide, so a
+    /// true source will not fall outside it in the life of this
+    /// library.
+    #[test]
+    fn system_bits_are_not_wildly_skewed() {
+        if !HOSTED {
+            return;
+        }
+        let mut system = System::try_new().expect("system");
+        let mut buf = [0u8; 4096];
+        system.fill(&mut buf).expect("fill");
+        let set: u32 = buf.iter().map(|b| b.count_ones()).sum();
+        assert!((15600..17200).contains(&set), "{set} bits set of 32768");
+    }
+
+    /// A source that has nothing to give must say so, every time,
+    /// rather than returning a buffer it did not fill.
+    #[test]
+    fn external_refuses_rather_than_inventing() {
+        let mut buf = [0xaau8; 16];
+        assert_eq!(External.fill(&mut buf).err(), Some(Error::ReseedRequired));
+        assert_eq!(buf, [0xaau8; 16], "left the buffer alone");
+    }
+
+    /// Asking must be safe on every target. A register an ordinary
+    /// program may not read has to be refused rather than tried:
+    /// RISC-V's raises an illegal instruction instead of declining,
+    /// which would end the process rather than return. This test
+    /// calls it on every architecture on purpose.
+    #[test]
+    fn asking_the_processor_never_traps() {
+        match Processor::try_new() {
+            Ok(mut processor) => {
+                let mut buf = [0u8; 8];
+                processor.fill(&mut buf).expect("fill");
+            }
+            Err(e) => assert!(
+                matches!(e, Error::NotSupported | Error::EntropyUnavailable(_)),
+                "{e:?}"
+            ),
+        }
+    }
+
+    /// The processor, where the machine running the tests has one and
+    /// can be asked from an ordinary program.
+    #[test]
+    fn the_processor_fills_a_buffer() {
+        if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
+            return;
+        }
+        let Ok(mut processor) = Processor::try_new() else {
+            // No such instruction on this particular processor.
+            return;
+        };
+        let mut first = [0u8; 64];
+        let mut second = [0u8; 64];
+        processor.fill(&mut first).expect("first");
+        processor.fill(&mut second).expect("second");
+        assert_ne!(first, second);
+        // Odd lengths must stay inside the buffer.
+        let mut odd = [0u8; 5];
+        processor.fill(&mut odd).expect("odd");
+    }
+}

@@ -1,0 +1,215 @@
+//! Modes of operation, generic over any [`BlockCipher`].
+//!
+//! A block cipher on its own only transforms one block. A mode says
+//! how to carry that over a message: how blocks chain, how a nonce
+//! enters, and how the bytes that do not fill a block are dealt with.
+//!
+//! None of these authenticates anything. Authenticated encryption is
+//! built differently and lives in [`aead`](crate::aead); reach for it
+//! first, and come here for the cases it does not cover -- a protocol
+//! that brings its own MAC, a disk with no room for a tag, a format
+//! that must be preserved.
+//!
+//! A mode is built from the key its cipher runs under, and names
+//! that cipher as its type parameter: `Ctr::<Aes128>::new(&key)`.
+//! Handing it a key rather than a built cipher is what lets it
+//! decide, once, how to do the work: for a cipher and a processor it
+//! has a hand-written implementation of the pair for, that; for
+//! anything else, the construction over the cipher's own
+//! `encrypt`.
+//!
+//! # Which mode
+//!
+//! | Need | Mode |
+//! | --- | --- |
+//! | Encrypt and authenticate a message | [`aead`](crate::aead), not here |
+//! | A disk or other sector-addressed store | [`Xts`] |
+//! | Wrap a key | [`Kw`], or [`Kwp`] for any length |
+//! | Encrypt within a format, such as a card number | [`Ff1`], [`Ff3_1`] |
+//! | Plain stream, for a protocol | [`Ctr`], [`Cbc`], [`Ofb`], [`Cfb128`] |
+//! | Byte or bit at a time, for a legacy protocol | [`Cfb8`], [`Cfb1`] |
+//!
+//! [`Cbc`] and [`Cfb128`] take whole blocks;
+//! [`padding`](crate::cipher::padding) brings a message up to one.
+//! The format-preserving modes take symbols; [`Alphabet`] turns text
+//! into them.
+//!
+//! [`Xts`] is for storage, where there is no room for a tag and the
+//! threat is a stolen disk. [`Kw`] and [`Kwp`] are deterministic,
+//! which is right for keys and wrong for anything else. The
+//! format-preserving modes are not constant time and their history is
+//! uneven; use them only where the format is the point.
+//!
+//! The plain modes, [`Ctr`], [`Cbc`], [`Ofb`] and [`Cfb128`],
+//! must be paired with a MAC over the ciphertext, checked before
+//! decrypting, and getting that pairing right is the work that
+//! [`aead`](crate::aead) has already done. [`Cfb8`] and [`Cfb1`] are
+//! those again at a fraction of the speed, for protocols that fixed
+//! their segment size long ago.
+//!
+//! [`BlockCipher`]: crate::cipher::BlockCipher
+
+pub mod alphabet;
+pub mod cbc;
+pub mod cfb1;
+pub mod cfb128;
+pub mod cfb8;
+pub mod ctr;
+pub mod ff1;
+pub mod ff3_1;
+pub mod kw;
+pub mod kwp;
+pub mod ofb;
+pub mod xts;
+
+pub use alphabet::Alphabet;
+pub use cbc::Cbc;
+pub use cfb1::Cfb1;
+pub use cfb8::Cfb8;
+pub use cfb128::Cfb128;
+pub use ctr::Ctr;
+pub use ff1::Ff1;
+pub use ff3_1::Ff3_1;
+pub use kw::Kw;
+pub use kwp::Kwp;
+pub use ofb::Ofb;
+pub use xts::Xts;
+
+use crate::cipher::BlockCipher;
+
+/// Blocks handed to the cipher in one bulk call.
+///
+/// The implementations interleave eight blocks, so anything from
+/// eight up keeps them busy; the gain from a larger group is in
+/// calling into the assembly less often. Measured on this machine,
+/// going from eight to sixteen was worth about a sixth of counter
+/// mode's throughput and a fifth of cipher block chaining's
+/// decryption, and going further gained little more. Each block of
+/// group costs a block of stack in the modes that keep a scratch
+/// buffer.
+pub(crate) const LANES: usize = 16;
+
+/// XORs `src` into `dst`, over as many bytes as both have.
+#[inline]
+pub(crate) fn xor(dst: &mut [u8], src: &[u8]) {
+    for (d, s) in dst.iter_mut().zip(src) {
+        *d ^= s;
+    }
+}
+
+/// Which four bytes of a block hold a counter, and which way round.
+///
+/// GCM counts in the last four, most significant first; GCM-SIV, as
+/// RFC 8452 defines it, counts in the first four, least significant
+/// first. Read the matching way, both are the low thirty-two bits of
+/// the block, which is why one loop serves them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ByteOrder {
+    /// The last four bytes, most significant first.
+    Big,
+    /// The first four bytes, least significant first.
+    Little,
+}
+
+/// Adds `count` to the counter field `order` names, wrapping inside
+/// those four bytes rather than carrying out.
+#[inline]
+pub(crate) fn add_counter(block: &mut [u8], order: ByteOrder, count: u32) {
+    debug_assert!(block.len() >= 4);
+    match order {
+        ByteOrder::Big => {
+            let start = block.len() - 4;
+            let f = &mut block[start..];
+            let n = u32::from_be_bytes([f[0], f[1], f[2], f[3]]);
+            f.copy_from_slice(&n.wrapping_add(count).to_be_bytes());
+        }
+        ByteOrder::Little => {
+            let f = &mut block[..4];
+            let n = u32::from_le_bytes([f[0], f[1], f[2], f[3]]);
+            f.copy_from_slice(&n.wrapping_add(count).to_le_bytes());
+        }
+    }
+}
+
+/// Counter mode's inner loop over a cipher's bulk encrypt: encrypts
+/// the run of blocks made from `counter` by adding 0, 1, 2 and so on
+/// to the field `order` names, and XORs each result into `data`,
+/// leaving `counter` on the block after the last.
+///
+/// This is what a mode uses where there is no assembly written for the
+/// pair of it and the cipher: the counters go into a buffer, the
+/// cipher encrypts them in bulk, and the results are XORed over the
+/// data. A mode with its own assembly keeps the counters in registers
+/// and encrypts them where they lie, which saves the buffer and a pass
+/// over it; that is the difference between the two, and the only one.
+///
+/// `data` must be a whole number of blocks, and the four-byte field
+/// must not carry out of itself over the run; a caller counting in the
+/// whole block splits its run at that boundary.
+pub(crate) fn counter_blocks<C: BlockCipher>(
+    cipher: &C,
+    counter: &mut C::Block,
+    order: ByteOrder,
+    data: &mut [u8],
+) {
+    let size = counter.as_ref().len();
+    debug_assert_eq!(data.len() % size, 0);
+    // `*counter` rather than `zero_block`, which an object has no way
+    // to call; the values are overwritten below.
+    let mut keystream = [*counter; LANES];
+    for group in data.chunks_mut(size * LANES) {
+        let keystream = &mut keystream[..group.len() / size];
+        for block in keystream.iter_mut() {
+            *block = *counter;
+            add_counter(counter.as_mut(), order, 1);
+        }
+        cipher.encrypt(keystream);
+        for (chunk, key) in group.chunks_mut(size).zip(&*keystream) {
+            xor(chunk, key.as_ref());
+        }
+    }
+}
+
+/// Shifts `register` left by one byte, bringing `byte` in at the end.
+///
+/// This is the feedback step of CFB8: the segment just produced joins
+/// the register and the oldest byte falls off.
+#[inline]
+pub(crate) fn shift_in_byte(register: &mut [u8], byte: u8) {
+    let last = register.len() - 1;
+    register.copy_within(1.., 0);
+    register[last] = byte;
+}
+
+/// Shifts `register` left by one bit, bringing `bit` in at the end.
+///
+/// The feedback step of CFB1. Bits are numbered from the most
+/// significant end, as the standard does, so the register shifts
+/// towards its most significant bit.
+#[inline]
+pub(crate) fn shift_in_bit(register: &mut [u8], bit: u8) {
+    let mut carry = bit & 1;
+    for byte in register.iter_mut().rev() {
+        let next = *byte >> 7;
+        *byte = (*byte << 1) | carry;
+        carry = next;
+    }
+}
+
+/// Reads bit `i` of `data`, counting from the most significant bit of
+/// the first byte, as the standard numbers them.
+#[inline]
+pub(crate) fn bit(data: &[u8], i: usize) -> u8 {
+    (data[i / 8] >> (7 - i % 8)) & 1
+}
+
+/// Writes bit `i` of `data`; see [`bit`].
+#[inline]
+pub(crate) fn set_bit(data: &mut [u8], i: usize, value: u8) {
+    let mask = 1 << (7 - i % 8);
+    if value & 1 == 1 {
+        data[i / 8] |= mask;
+    } else {
+        data[i / 8] &= !mask;
+    }
+}

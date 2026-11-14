@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "scytale",
+    "scytale-cli",
+    "scytale-acvp",
+    "scytale-ring",
+    "scytale-ring/ring-tests",
+    "rustls-scytale",
+]
+
+[workspace.package]
+edition = "2024"
+# `as_chunks_mut`, which turns a byte slice into cipher blocks without
+# unsafe, landed in 1.88.
+rust-version = "1.88"
+license = "BSD-2-Clause"
+
+# The test suites do a great deal of cipher work: the ACVP Monte
+# Carlo suites are 600,000 chained cipher calls each. Optimising the
+# test build cuts their run time roughly seventeenfold for a little
+# extra compile time, which matters most on the slower machines in
+# CI. Debug assertions stay on, so the checks in the assembly
+# wrappers still fire.
+[profile.test]
+opt-level = 2
+# Nothing reads a debugger here: a failure names its file and line
+# from the panic itself. Generating and linking full debug info for
+# binaries this size is pure cost. Ask for it when it is wanted:
+# RUSTFLAGS="-C debuginfo=2" cargo test.
+debug = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

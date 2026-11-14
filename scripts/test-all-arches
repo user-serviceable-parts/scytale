@@ -1,0 +1,113 @@
+#!/bin/sh
+# Runs every crate's tests for each architecture. The host runs
+# natively and runs everything, the check against the vendored
+# vectors included; the others run with `cross`, which builds in a
+# container holding the cross linker, the target's libc and qemu, and
+# leave that check out, as said below. For development only; CI tests
+# on real hardware.
+#
+# Requirements: `cargo install cross`, `rustup target add <target>`
+# for each foreign target, and Docker or Podman.
+#
+# Usage: scripts/test-all-arches [target ...]
+#   With no arguments, runs the targets listed in TARGETS.
+
+set -eu
+
+TARGETS="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+riscv64gc-unknown-linux-gnu"
+
+# qemu's default RISC-V CPU has no crypto extensions; `max` has them
+# all (VLEN 128). Setting QEMU_CPU here overrides the sweep below and
+# runs that one configuration instead, e.g.
+# QEMU_CPU=rv64,v=on,vlen=256,zk=on,zvkned=on,zvbb=on.
+QEMU_SWEEP=${QEMU_CPU:+no}
+: "${QEMU_CPU:=max}"
+export QEMU_CPU
+
+# Which RISC-V backend a processor is given is decided from the
+# extension bit set, and the unit tests settle that by handing the
+# deciding functions the bit sets of real profiles, so a second
+# emulated processor would add nothing there. The vector length is the
+# exception: it is a property of the silicon rather than of a bit set,
+# the vector code sizes itself to whatever it finds, and `max` is 128
+# bits. So the fast tests run again at the other widths.
+RISCV_CONFIGS="
+max,vlen=256
+max,vlen=512
+"
+
+# What `max` has, of the extensions any backend needs. The standard
+# library cannot say on RISC-V, so without this the inventory test
+# could only print what the probes found; with it the test holds them
+# to it. A QEMU_CPU given by hand is a different processor, so it
+# gets no list.
+RISCV_FEATURES="v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb \
+zvbb zvbc zvkb zvkg"
+
+# This runs from a checkout, so the vectors are there, and a suite
+# that cannot find them is to fail rather than skip.
+export SCYTALE_VECTORS=required
+
+cd "$(dirname "$0")/.."
+
+host=$(rustc -vV | sed -n 's/^host: //p')
+
+if ! command -v docker >/dev/null 2>&1 && command -v podman >/dev/null 2>&1
+then
+    export CROSS_CONTAINER_ENGINE=podman
+fi
+
+run_target() {
+    target=$1
+    echo "==> $target"
+    if [ "$target" = "$host" ]; then
+        cargo test --release --workspace
+        cargo test --release -p scytale --lib features::tests::alone -- \
+            --ignored --test-threads=1
+        return
+    fi
+    if ! command -v cross >/dev/null 2>&1; then
+        echo "missing cross: cargo install cross" >&2
+        exit 1
+    fi
+    if ! rustup target list --installed | grep -qx "$target"; then
+        echo "missing rust-std: rustup target add $target" >&2
+        exit 1
+    fi
+    # The check against the vendored vectors is left out under
+    # emulation: it is hours through qemu on one machine, and CI
+    # does it, spread over jobs. To take one share of it here:
+    #   SCYTALE_SHARD=i/n cross test -p scytale-acvp \
+    #       --no-default-features --target "$target"
+    if [ "$target" = riscv64gc-unknown-linux-gnu ] \
+        && [ -z "$QEMU_SWEEP" ]; then
+        export SCYTALE_CPU_FEATURES="$RISCV_FEATURES"
+    fi
+    # Under the emulator's `max`, every kernel of the architecture
+    # must run; the inventory fails on one that cannot, as CI does.
+    if [ "$QEMU_CPU" = max ]; then
+        export SCYTALE_EXPECT_ALL=1
+    fi
+    cross test --workspace --exclude scytale-acvp --target "$target"
+    cross test -p scytale --lib --target "$target" \
+        features::tests::alone -- --ignored --test-threads=1
+    if [ "$target" = riscv64gc-unknown-linux-gnu ] \
+        && [ -z "$QEMU_SWEEP" ]; then
+        for cpu in $RISCV_CONFIGS; do
+            echo "==> $target QEMU_CPU=$cpu"
+            QEMU_CPU=$cpu cross test --workspace --exclude scytale-acvp \
+                --target "$target"
+        done
+        unset SCYTALE_CPU_FEATURES
+    fi
+    unset SCYTALE_EXPECT_ALL
+}
+
+if [ $# -gt 0 ]; then
+    TARGETS=$*
+fi
+for target in $TARGETS; do
+    run_target "$target"
+done
+echo "all targets passed"

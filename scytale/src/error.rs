@@ -1,0 +1,346 @@
+//! What can go wrong.
+//!
+//! Every fallible call in the library returns this one type. The
+//! variants say what was wrong with the request, and never anything
+//! about the secret it was made with.
+//!
+//! The type is `non_exhaustive`, so a `match` needs an arm for
+//! whatever a later version adds:
+//!
+//! ```
+//! use scytale::{Error, Key};
+//!
+//! match Key::<[u8; 32]>::try_from(&[0u8; 7][..]) {
+//!     Ok(_) => unreachable!(),
+//!     Err(Error::InvalidKeyLength(n)) => assert_eq!(n, 7),
+//!     Err(other) => panic!("{other}"),
+//! }
+//! ```
+//!
+//! # Which variant, from where
+//!
+//! Several variants carry a length, and which one says what was
+//! wrong with it. [`Error::InvalidLength`] is malformed input: data
+//! that is not a size the call can take, such as a wrapped key that
+//! is not a multiple of eight bytes, or more HKDF output than the
+//! construction defines. [`Error::OutputTooSmall`] is the caller's
+//! buffer, and carries the size it needs to be.
+//! [`Error::NotBlockAligned`], [`Error::InvalidNonceLength`],
+//! [`Error::InvalidTagLength`] and [`Error::InvalidKeyLength`] name
+//! the offending argument; where a key is a type, as it is for AES
+//! and every MAC, the last is left only for what the type cannot
+//! say, such as XTS being handed the same key twice.
+//! [`Error::InvalidSeedLength`] and [`Error::RequestTooLarge`] come
+//! only from the random number generator, [`Error::InvalidBitCount`]
+//! only from ending a hash part way through a byte.
+//! [`Error::InvalidPublicKey`], [`Error::InvalidPrivateKey`] and
+//! [`Error::InvalidSignature`] come only from the public-key
+//! algorithms, and say deliberately little.
+//! [`Error::InvalidEncoding`] comes from reading a key in DER or
+//! PEM, or text through [`codec`](crate::codec), and says as
+//! little: the bytes are not the structure the call reads.
+//! [`Error::InvalidPadding`] comes only from removing padding, and
+//! says least of all, for the reason its own documentation gives.
+
+use core::fmt;
+
+/// Anything a scytale call can refuse to do.
+///
+/// One type for the whole library, so a caller using more than one
+/// part of it has a single thing to match on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Error {
+    /// The key length is not one the cipher accepts.
+    InvalidKeyLength(usize),
+    /// The data length is not a whole number of blocks.
+    NotBlockAligned(usize),
+    /// The nonce or initialisation vector is not the length the mode
+    /// requires.
+    InvalidNonceLength(usize),
+    /// The data length does not match what the call requires.
+    InvalidLength(usize),
+    /// The output buffer is too small. The number is the length it
+    /// needs to be.
+    OutputTooSmall(usize),
+    /// The scratch or storage slice handed to an RSA key is too
+    /// short. The number is the length in words it needs to be.
+    ScratchTooSmall(usize),
+    /// The count of trailing bits is not 1 to 7.
+    InvalidBitCount(u32),
+    /// The seed is shorter than the generator requires.
+    InvalidSeedLength(usize),
+    /// More bytes were asked for at once than the generator will give.
+    RequestTooLarge(usize),
+    /// A call came in an order the mode does not allow, such as
+    /// additional data after the message has begun.
+    OutOfOrder,
+    /// [`features::set`](crate::features::set) was handed a feature
+    /// of this architecture that the processor does not have. The set
+    /// in force is unchanged.
+    UnsupportedFeature(crate::features::Feature),
+    /// The authentication tag is not a length the mode allows.
+    InvalidTagLength(usize),
+    /// The message did not authenticate: it is not what was
+    /// encrypted, under this key, nonce and additional data.
+    ///
+    /// Deliberately says no more than that. Which part failed, or how
+    /// nearly a guess succeeded, would help an attacker.
+    AuthenticationFailed,
+    /// The message is longer than the mode can safely handle.
+    MessageTooLong,
+    /// The radix is outside the range the mode allows.
+    InvalidRadix(u32),
+    /// A symbol is not a value the radix allows.
+    InvalidSymbol(u32),
+    /// The set of possible messages is too small to encrypt safely.
+    /// A short string in a small alphabet can simply be searched.
+    DomainTooSmall,
+    /// The iteration count is zero, which would derive nothing.
+    InvalidIterations,
+    /// The public key cannot be used: it does not name a point on
+    /// the curve, or it would make a shared secret that anyone can
+    /// compute.
+    InvalidPublicKey,
+    /// The private key is malformed: an exponent that is zero or
+    /// out of range.
+    InvalidPrivateKey,
+    /// Key generation gave up: the random source kept producing
+    /// candidates that no key can be built from.
+    KeyGenerationFailed,
+    /// The ciphertext did not decrypt under this key, hash and
+    /// label.
+    ///
+    /// Deliberately one error for every cause; saying which check
+    /// failed would decrypt messages for an attacker, one query at
+    /// a time.
+    DecryptionFailed,
+    /// The signature is not valid for this message under this public
+    /// key.
+    ///
+    /// Deliberately says no more than that; which check failed would
+    /// help an attacker.
+    InvalidSignature,
+    /// The bytes are not the DER or PEM structure the call reads,
+    /// or the text is not the hex or base64 it is read as:
+    /// malformed, truncated, followed by trailing data, or wrongly
+    /// labelled.
+    InvalidEncoding,
+    /// The last block does not end in padding of the scheme being
+    /// removed.
+    ///
+    /// Deliberately says no more than that, and should be shown to
+    /// no one who did not hold the key. Whether a decryption's
+    /// padding was valid, learned one ciphertext at a time, is the
+    /// padding oracle, which decrypts messages without the key; the
+    /// defence is a MAC over the ciphertext, checked before
+    /// decrypting, so that a forged ciphertext never reaches this
+    /// check at all.
+    InvalidPadding,
+    /// The structure is well formed but names another algorithm, or
+    /// another curve or parameter set of this one, than the call
+    /// reads keys for.
+    WrongAlgorithm,
+    /// The structure carries both halves of a key pair and they do
+    /// not belong together: the public half is not the private
+    /// half's own. Neither half is returned.
+    InconsistentKey,
+    /// The structure's version is one this library does not read:
+    /// a multi-prime RSA key, or a PKCS#8 version newer than the
+    /// two defined.
+    UnsupportedVersion,
+    /// The processor lacks the instructions this implementation needs.
+    NotSupported,
+    /// The system would not supply random bytes. The number is the
+    /// error the kernel gave, or zero where there is no such call to
+    /// make at all.
+    EntropyUnavailable(i32),
+    /// A nonce sequence has issued every value it holds. Carrying on
+    /// would repeat one, so it stops instead.
+    SequenceExhausted,
+    /// A generator has drawn as much as it may from one seeding, and
+    /// has no source of its own to reseed from. Supply fresh entropy
+    /// before asking again.
+    ReseedRequired,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::InvalidKeyLength(n) => {
+                write!(f, "invalid key length: {n} bytes")
+            }
+            Error::NotBlockAligned(n) => {
+                write!(f, "data length {n} is not a whole number of blocks")
+            }
+            Error::InvalidNonceLength(n) => {
+                write!(f, "invalid nonce or IV length: {n} bytes")
+            }
+            Error::InvalidLength(n) => {
+                write!(f, "invalid data length: {n}")
+            }
+            Error::OutputTooSmall(n) => {
+                write!(f, "output buffer too small: {n} bytes needed")
+            }
+            Error::ScratchTooSmall(n) => {
+                write!(f, "scratch slice too small: {n} words needed")
+            }
+            Error::InvalidBitCount(n) => {
+                write!(f, "invalid trailing bit count: {n}")
+            }
+            Error::InvalidSeedLength(n) => {
+                write!(f, "seed too short: {n} bytes")
+            }
+            Error::RequestTooLarge(n) => {
+                write!(f, "request too large: {n} bytes")
+            }
+            Error::OutOfOrder => write!(f, "call out of order"),
+            Error::InvalidTagLength(n) => {
+                write!(f, "invalid authentication tag length: {n} bytes")
+            }
+            Error::AuthenticationFailed => {
+                write!(f, "message failed authentication")
+            }
+            Error::MessageTooLong => {
+                write!(f, "message too long for this mode")
+            }
+            Error::InvalidRadix(r) => write!(f, "invalid radix: {r}"),
+            Error::InvalidSymbol(s) => write!(f, "invalid symbol: {s}"),
+            Error::DomainTooSmall => {
+                write!(f, "too few possible messages to encrypt safely")
+            }
+            Error::InvalidIterations => write!(f, "zero iterations"),
+            Error::InvalidPublicKey => {
+                write!(f, "invalid public key")
+            }
+            Error::InvalidPrivateKey => {
+                write!(f, "invalid private key")
+            }
+            Error::KeyGenerationFailed => {
+                write!(f, "key generation failed")
+            }
+            Error::DecryptionFailed => {
+                write!(f, "decryption failed")
+            }
+            Error::InvalidSignature => {
+                write!(f, "invalid signature")
+            }
+            Error::InvalidEncoding => {
+                write!(f, "invalid encoding")
+            }
+            Error::InvalidPadding => {
+                write!(f, "invalid padding")
+            }
+            Error::WrongAlgorithm => {
+                write!(f, "key is for another algorithm")
+            }
+            Error::InconsistentKey => {
+                write!(f, "public and private halves disagree")
+            }
+            Error::UnsupportedVersion => {
+                write!(f, "unsupported structure version")
+            }
+            Error::UnsupportedFeature(feature) => {
+                write!(f, "the processor does not have {feature}")
+            }
+            Error::NotSupported => {
+                write!(f, "not supported by this processor")
+            }
+            Error::EntropyUnavailable(n) => {
+                write!(f, "cannot read randomness from the system: error {n}")
+            }
+            Error::SequenceExhausted => {
+                write!(f, "nonce sequence exhausted")
+            }
+            Error::ReseedRequired => {
+                write!(f, "generator needs fresh entropy")
+            }
+        }
+    }
+}
+
+impl core::error::Error for Error {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render(e: Error, buf: &mut [u8; 64]) -> &str {
+        let mut w = Writer(buf, 0);
+        core::fmt::write(&mut w, format_args!("{e}")).unwrap();
+        let len = w.1;
+        core::str::from_utf8(&buf[..len]).unwrap()
+    }
+
+    #[test]
+    fn error_display() {
+        let mut buf = [0u8; 64];
+        assert_eq!(
+            render(Error::InvalidKeyLength(7), &mut buf),
+            "invalid key length: 7 bytes"
+        );
+        assert_eq!(
+            render(Error::NotBlockAligned(17), &mut buf),
+            "data length 17 is not a whole number of blocks"
+        );
+        assert_eq!(
+            render(Error::InvalidNonceLength(12), &mut buf),
+            "invalid nonce or IV length: 12 bytes"
+        );
+        assert_eq!(
+            render(Error::InvalidLength(7), &mut buf),
+            "invalid data length: 7"
+        );
+        assert_eq!(
+            render(Error::InvalidPublicKey, &mut buf),
+            "invalid public key"
+        );
+        assert_eq!(
+            render(Error::InvalidSignature, &mut buf),
+            "invalid signature"
+        );
+        assert_eq!(
+            render(Error::KeyGenerationFailed, &mut buf),
+            "key generation failed"
+        );
+        assert_eq!(
+            render(Error::DecryptionFailed, &mut buf),
+            "decryption failed"
+        );
+        assert_eq!(
+            render(Error::InvalidEncoding, &mut buf),
+            "invalid encoding"
+        );
+        assert_eq!(render(Error::InvalidPadding, &mut buf), "invalid padding");
+        assert_eq!(
+            render(Error::NotSupported, &mut buf),
+            "not supported by this processor"
+        );
+        assert_eq!(
+            render(Error::EntropyUnavailable(38), &mut buf),
+            "cannot read randomness from the system: error 38"
+        );
+        assert_eq!(
+            render(Error::SequenceExhausted, &mut buf),
+            "nonce sequence exhausted"
+        );
+        assert_eq!(
+            render(Error::ReseedRequired, &mut buf),
+            "generator needs fresh entropy"
+        );
+    }
+
+    struct Writer<'a>(&'a mut [u8], usize);
+
+    impl fmt::Write for Writer<'_> {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            let end = self.1 + s.len();
+            self.0
+                .get_mut(self.1..end)
+                .ok_or(fmt::Error)?
+                .copy_from_slice(s.as_bytes());
+            self.1 = end;
+            Ok(())
+        }
+    }
+}

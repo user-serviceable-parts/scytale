@@ -1,0 +1,854 @@
+//! Counter mode (NIST SP 800-38A).
+//!
+//! The cipher encrypts a counter block to make a keystream block, and
+//! the counter is increased by one for the next. Nothing feeds back,
+//! so every block of keystream can be computed independently: counter
+//! mode is the only mode here that runs the cipher's bulk path in
+//! both directions, which makes it by far the fastest.
+//!
+//! As with output feedback, the keystream depends only on the key and
+//! the counter, so encryption and decryption are one operation and a
+//! message may be any length.
+//!
+//! # The counter
+//!
+//! The initial counter block is one full block, and each step adds
+//! one to it as a big-endian integer over the whole block. Callers
+//! whose protocol fixes a narrower counter field, such as the 32-bit
+//! field of RFC 3686, simply supply the right initial block; the
+//! difference only shows once that field would wrap, which those
+//! protocols forbid anyway.
+//!
+//! # Using it safely
+//!
+//! - **Never reuse a counter value with the same key.** The keystream
+//!   repeats, and combining the two ciphertexts leaves the two
+//!   plaintexts combined with each other. This includes overlapping
+//!   ranges: a long message consumes many counter values, and the
+//!   next message must start beyond them. This is a counter, not
+//!   something to draw with [`random`](crate::random): the sequence
+//!   is the caller's to keep, because only the caller knows how many
+//!   blocks the last message spent.
+//! - Counter mode provides no authentication, and flipping a
+//!   ciphertext bit flips exactly that plaintext bit. Prefer an
+//!   authenticated mode; GCM is counter mode with authentication
+//!   added.
+//!
+//! # Example
+//!
+//! ```
+//! use scytale::Key;
+//! use scytale::cipher::aes::Aes128;
+//! use scytale::cipher::mode::Ctr;
+//!
+//! let ctr = Ctr::<Aes128>::new(&Key::from([0u8; 16]));
+//! let counter = [0u8; 16];
+//!
+//! let mut data = [0u8; 21];
+//! ctr.encrypt(&counter, &mut data);
+//! ctr.decrypt(&counter, &mut data);
+//! assert_eq!(data, [0u8; 21]);
+//! ```
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod aarch64;
+#[cfg(target_arch = "riscv64")]
+mod riscv64;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
+
+#[cfg(target_arch = "aarch64")]
+use self::aarch64 as native;
+#[cfg(target_arch = "riscv64")]
+use self::riscv64 as native;
+#[cfg(target_arch = "x86_64")]
+use self::x86_64 as native;
+
+use core::fmt;
+use core::marker::PhantomData;
+
+use super::{ByteOrder, counter_blocks, xor};
+use crate::ByteArray;
+use crate::KeyType;
+use crate::cipher::{BlockCipher, OneBlock};
+use crate::features::{self, Dispatcher, Features};
+use crate::kernel::{self, Kernel};
+
+/// What does the work, settled when the mode is built, because it is
+/// the processor that decides and the processor does not change.
+///
+/// Where this cipher runs on the AES instructions, the native engine
+/// is counter mode written out for them, start to finish. Anywhere
+/// else it is the construction over the cipher's own bulk encrypt,
+/// which is as fast as that processor allows.
+enum Engine<C: BlockCipher> {
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    ))]
+    Native(native::Engine<C>),
+    /// The construction over the cipher's own bulk encrypt, which
+    /// needs nothing of its own: the cipher comes in with the data.
+    /// `PhantomData` because on an architecture with no loop
+    /// written out for it this is the only variant, and `C` would
+    /// then be a parameter the type never mentions, which does not
+    /// compile. It costs nothing at run time.
+    Generic(PhantomData<C>),
+}
+
+/// By hand rather than derived: an engine holds no cipher, only a
+/// pointer to the loop written for one, so it clones whatever `C` is.
+impl<C: BlockCipher> Clone for Engine<C> {
+    fn clone(&self) -> Self {
+        match self {
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
+            Engine::Native(engine) => Engine::Native(engine.clone()),
+            Engine::Generic(_) => Engine::Generic(PhantomData),
+        }
+    }
+}
+
+/// Every kernel, best first, with what each needs.
+///
+/// A caller never names one: the mode takes the first row the
+/// features in force meet. The tests and the vector suites do name
+/// them, so that every kernel is validated and not only the one this
+/// machine would pick.
+pub(crate) const KERNELS: &[(Kernel, Features)] = &[
+    #[cfg(target_arch = "x86_64")]
+    (Kernel::Vaes, crate::cipher::aes::x86_64::VAES256),
+    #[cfg(target_arch = "x86_64")]
+    (Kernel::Aesni, crate::cipher::aes::x86_64::AESNI_AVX),
+    #[cfg(target_arch = "aarch64")]
+    (Kernel::Armv8, crate::cipher::aes::ARMV8),
+    // The counters are reversed with `vrev8`, which either of two
+    // extensions brings.
+    #[cfg(target_arch = "riscv64")]
+    (
+        Kernel::Zvkned,
+        crate::cipher::aes::ZVKNED.union(crate::cipher::aes::VREV8),
+    ),
+    (Kernel::Portable, Features::new()),
+];
+
+/// What the list publishes: the needs, without the names.
+const PROFILES: [Features; KERNELS.len()] = features::profiles_of(KERNELS);
+
+/// Whether the kernels written for the AES instructions can read
+/// `C`'s key schedule. Nothing can on an architecture without them,
+/// and the list then has the portable row alone anyway, so `C` goes
+/// unread there.
+#[cfg_attr(
+    not(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    )),
+    allow(clippy::extra_unused_type_parameters)
+)]
+fn readable<C: BlockCipher>() -> bool {
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    ))]
+    {
+        native::keys::<C>().is_some()
+    }
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    )))]
+    {
+        true
+    }
+}
+
+/// The kernels `C` can run with; see [`kernel::rows_for`].
+pub(crate) fn kernels<C: BlockCipher>() -> &'static [(Kernel, Features)] {
+    kernel::rows_for(KERNELS, readable::<C>())
+}
+
+/// Their profiles, cut the same way.
+pub(crate) fn profiles<C: BlockCipher>() -> &'static [Features] {
+    kernel::rows_for(&PROFILES, readable::<C>())
+}
+
+impl<C: BlockCipher> Engine<C> {
+    /// The engine of the first kernel the features in force allow for
+    /// this cipher.
+    fn new() -> Self {
+        // The list ends in the portable row, which needs nothing, so
+        // there is always one; the fallback is for the type checker.
+        features::select(kernels::<C>())
+            .and_then(Self::with)
+            .unwrap_or(Engine::Generic(PhantomData))
+    }
+
+    /// The engine `kernel` names, or `None` where it is not written
+    /// for this cipher. That the processor has its instructions is
+    /// the caller's to have settled from the kernel's row, by the set
+    /// in force or by what was detected.
+    fn with(kernel: Kernel) -> Option<Self> {
+        match kernel {
+            Kernel::Portable => Some(Engine::Generic(PhantomData)),
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
+            hardware => native::Engine::of(hardware).map(Engine::Native),
+        }
+    }
+
+    /// Which kernel this engine runs.
+    #[cfg(test)]
+    fn kernel(&self) -> Kernel {
+        match self {
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
+            Engine::Native(engine) => engine.kernel(),
+            Engine::Generic(_) => Kernel::Portable,
+        }
+    }
+
+    /// Encrypts the counter blocks made from `counter` and XORs them
+    /// over `data`, which is a whole number of blocks, leaving
+    /// `counter` on the block after the last.
+    fn blocks(&self, cipher: &C, counter: &mut C::Block, data: &mut [u8]) {
+        match self {
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
+            Engine::Native(engine) => {
+                // The engine exists only for a cipher whose block is
+                // this width, so the conversion cannot fail; the
+                // compiler does not carry that across the pointer it
+                // was chosen through.
+                match <&mut [u8; 16]>::try_from(counter.as_mut()) {
+                    Ok(counter) => {
+                        engine.xor_counter_blocks(cipher, counter, data)
+                    }
+                    // Falling through quietly would skip the XOR
+                    // and leave `data` as plaintext.
+                    Err(_) => unreachable!("block is not a block"),
+                }
+            }
+            Engine::Generic(_) => {
+                counter_blocks(cipher, counter, ByteOrder::Big, data)
+            }
+        }
+    }
+}
+
+/// The key is the cipher's own, so generic code can draw one
+/// without naming the cipher.
+impl<C: BlockCipher> KeyType for Ctr<C> {
+    type Key = C::Key;
+
+    fn zero_key() -> Self::Key {
+        C::zero_key()
+    }
+}
+
+impl<C: BlockCipher> features::sealed::Sealed for Ctr<C> {}
+
+impl<C: BlockCipher> Dispatcher for Ctr<C>
+where
+    C::Block: ByteArray,
+{
+    fn profiles() -> &'static [Features] {
+        Ctr::<C>::profiles()
+    }
+}
+
+/// Counter mode over a block cipher.
+#[derive(Clone)]
+pub struct Ctr<C: BlockCipher> {
+    cipher: C,
+    /// What does the work, settled when the mode is built.
+    engine: Engine<C>,
+}
+
+impl<C: BlockCipher> Ctr<C>
+where
+    C::Block: ByteArray,
+{
+    /// Takes the key the cipher runs under.
+    pub fn new(key: &C::Key) -> Self {
+        // The counter is the last four bytes of the block, so a
+        // cipher of the caller's own with a narrower block has no
+        // counter to run. Said when the mode is built for it, rather
+        // than found out by an index past the front of the block.
+        const { assert!(size_of::<C::Block>() >= 4) };
+        Ctr {
+            cipher: C::new(key),
+            engine: Engine::new(),
+        }
+    }
+
+    /// The feature profiles this mode tells apart, best first; see
+    /// [`Dispatcher`]. For a cipher whose key schedule the AES
+    /// instructions cannot read, the portable one alone.
+    pub fn profiles() -> &'static [Features] {
+        profiles::<C>()
+    }
+
+    /// The mode over the kernel named, or `None` where the set in
+    /// force does not meet its needs or it is not written for this
+    /// cipher.
+    ///
+    /// For the tests and the vector suites, which run every kernel
+    /// rather than only the one [`new`](Self::new) would take. The
+    /// virtual features are granted, so the table-driven cipher is to
+    /// be had without editing the set; see [`features::available`].
+    #[cfg(test)]
+    pub(crate) fn with_kernel(key: &C::Key, kernel: Kernel) -> Option<Self> {
+        features::available(kernels::<C>(), kernel).then_some(())?;
+        Some(Ctr {
+            cipher: C::new(key),
+            engine: Engine::with(kernel)?,
+        })
+    }
+
+    /// Which kernel this mode was built with.
+    #[cfg(test)]
+    pub(crate) fn kernel(&self) -> Kernel {
+        self.engine.kernel()
+    }
+
+    /// Encrypts `data` in place, starting from `counter`. Any length
+    /// of message is allowed.
+    pub fn encrypt(&self, counter: &C::Block, data: &mut [u8]) {
+        self.stream(counter).update(data);
+    }
+
+    /// Decrypts `data` in place, starting from `counter`.
+    ///
+    /// This is the same operation as [`encrypt`](Self::encrypt): the
+    /// keystream does not depend on the message. Both names exist so
+    /// that calling code reads the way it means.
+    pub fn decrypt(&self, counter: &C::Block, data: &mut [u8]) {
+        self.stream(counter).update(data);
+    }
+
+    /// The cipher under the mode's key, for a construction that needs
+    /// single blocks beside the keystream, such as CCM's CBC-MAC,
+    /// without scheduling the key a second time.
+    pub(crate) fn cipher(&self) -> &C {
+        &self.cipher
+    }
+
+    /// Applies the keystream to `data`, which must be whole blocks,
+    /// starting from `counter` and leaving it at the block after the
+    /// last. For a caller whose counter is secret, such as the random
+    /// generator: the counter stays in memory the caller owns and
+    /// wipes, where a [`Stream`] would keep a copy of its own.
+    pub(crate) fn apply_blocks(&self, counter: &mut C::Block, data: &mut [u8]) {
+        run_blocks(&self.cipher, &self.engine, counter, data);
+    }
+
+    /// Starts a message that arrives in pieces.
+    pub fn stream(&self, counter: &C::Block) -> Stream<'_, C> {
+        Stream {
+            cipher: &self.cipher,
+            engine: self.engine.clone(),
+            counter: *counter,
+            keystream: C::zero_block(),
+            used: size_of::<C::Block>(),
+        }
+    }
+}
+
+/// Adds one to a big-endian counter, wrapping round at the top.
+///
+/// A sixteen-byte counter is one 128-bit addition. The byte loop
+/// below is correct for any width, but the compiler cannot see the
+/// width through a slice and unrolls the carry into a branch for
+/// every byte, so the common case says its size out loud.
+#[inline]
+pub(crate) fn increment<B: ByteArray>(counter: &mut B) {
+    if let Ok(block) = <&mut [u8; 16]>::try_from(counter.as_mut()) {
+        *block = u128::from_be_bytes(*block).wrapping_add(1).to_be_bytes();
+        return;
+    }
+    for byte in counter.as_mut().iter_mut().rev() {
+        let (sum, carried) = byte.overflowing_add(1);
+        *byte = sum;
+        if !carried {
+            break;
+        }
+    }
+}
+
+/// The last four bytes of a block, as one big-endian number.
+#[inline]
+fn low32(block: &[u8]) -> u32 {
+    let n = block.len();
+    u32::from_be_bytes([block[n - 4], block[n - 3], block[n - 2], block[n - 1]])
+}
+
+/// Adds one to everything above the last four bytes.
+///
+/// The cipher's counter run wraps inside those four bytes and drops
+/// the carry, because that is what GCM wants; counting in the whole
+/// block, this puts it back.
+#[inline]
+fn carry_out_of_low32<B: ByteArray>(counter: &mut B) {
+    let bytes = counter.as_mut();
+    let high = bytes.len() - 4;
+    for byte in bytes[..high].iter_mut().rev() {
+        let (sum, carried) = byte.overflowing_add(1);
+        *byte = sum;
+        if !carried {
+            break;
+        }
+    }
+}
+
+/// Applies the keystream to whole blocks, handed to the cipher in one
+/// run so that it can keep the counters in registers, and leaves
+/// `counter` at the block after the last. The engine counts in the
+/// last four bytes only, so a run stops where they would carry into
+/// the rest of the block; that is once every 2^32 blocks, or 64
+/// gigabytes.
+fn run_blocks<C: BlockCipher>(
+    cipher: &C,
+    engine: &Engine<C>,
+    counter: &mut C::Block,
+    data: &mut [u8],
+) where
+    C::Block: ByteArray,
+{
+    let size = size_of::<C::Block>();
+    debug_assert!(data.len().is_multiple_of(size));
+    let mut done = 0;
+    while done < data.len() {
+        // How far the low four bytes can go before they carry, in
+        // bytes. Counted in `u64` rather than `usize`: the block
+        // count alone reaches 2^32, which is one past what a 32-bit
+        // `usize` holds, and wrapping there would leave `take` at
+        // zero and this loop turning for ever.
+        let blocks = u64::from(u32::MAX - low32(counter.as_ref())) + 1;
+        let room = blocks.saturating_mul(size as u64);
+        let left = (data.len() - done) as u64;
+        // At least one block, since the loop ran: `left` is nonzero
+        // and `room` is at least one block's worth.
+        let take = left.min(room) as usize;
+        engine.blocks(cipher, counter, &mut data[done..done + take]);
+        if take as u64 == room {
+            carry_out_of_low32(counter);
+        }
+        done += take;
+    }
+}
+
+/// Applies the keystream to one message, a piece at a time.
+///
+/// Pieces may be any length, and a piece may end part way through a
+/// keystream block: the rest of that block is kept for the next one.
+/// There is nothing to finish.
+pub struct Stream<'a, C: BlockCipher> {
+    cipher: &'a C,
+    /// What does the work, chosen when the mode was built.
+    engine: Engine<C>,
+    counter: C::Block,
+    /// The keystream block a previous piece ended inside.
+    keystream: C::Block,
+    /// Bytes of that block already used. Starts full, so the first
+    /// byte generates a block.
+    used: usize,
+}
+
+impl<C: BlockCipher> Stream<'_, C>
+where
+    C::Block: ByteArray,
+{
+    /// Applies the keystream to the next piece of the message.
+    pub fn update(&mut self, mut data: &mut [u8]) {
+        let size = size_of::<C::Block>();
+
+        // Finish the block a previous piece stopped inside.
+        if self.used < size {
+            let take = data.len().min(size - self.used);
+            let (now, rest) = data.split_at_mut(take);
+            xor(now, &self.keystream.as_ref()[self.used..self.used + take]);
+            self.used += take;
+            data = rest;
+        }
+
+        // Whole blocks, handed to the cipher in one run so that it
+        // can keep the counters in registers. It counts in the last
+        // four bytes only, so a run stops where they would carry
+        // into the rest of the block; that is once every 2^32
+        // blocks, or 64 gigabytes.
+        let (whole, tail) = <C::Block as ByteArray>::split_mut(data);
+        run_blocks(
+            self.cipher,
+            &self.engine,
+            &mut self.counter,
+            <C::Block as ByteArray>::flatten_mut(whole),
+        );
+
+        // A final piece of a block, whose remainder is kept.
+        if !tail.is_empty() {
+            self.keystream = self.counter;
+            increment(&mut self.counter);
+            self.cipher.encrypt_one(&mut self.keystream);
+            xor(tail, self.keystream.as_ref());
+            self.used = tail.len();
+        }
+    }
+}
+
+// Debug output omits the state: it is all derived from the key.
+impl<C: BlockCipher> fmt::Debug for Ctr<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Ctr").finish_non_exhaustive()
+    }
+}
+
+impl<C: BlockCipher> fmt::Debug for Stream<'_, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Stream").finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Key;
+    use crate::cipher::aes::{Aes, Aes128, portable};
+
+    /// Enough to cover several bulk groups and a partial tail.
+    const MAX: usize = 20 * 16 + 5;
+
+    /// The profiles end in the one that needs nothing and each is
+    /// reachable; a cipher whose schedule the instructions cannot
+    /// read, the portable cipher here, is offered that one alone.
+    #[test]
+    fn profiles_follow_the_cipher() {
+        assert!(features::rows_are_reachable(KERNELS));
+        let all = Ctr::<Aes128>::profiles();
+        assert_eq!(all.len(), KERNELS.len());
+        assert!(all[all.len() - 1].is_empty());
+        let portable = Ctr::<portable::bitsliced::Aes<16>>::profiles();
+        assert_eq!(portable, &[Features::new()]);
+        assert_eq!(<Ctr<Aes128> as Dispatcher>::profiles(), all);
+    }
+
+    fn unhex<const N: usize>(s: &str) -> [u8; N] {
+        let mut out = [0u8; N];
+        for (i, pair) in s.as_bytes().chunks_exact(2).enumerate() {
+            out[i] =
+                u8::from_str_radix(core::str::from_utf8(pair).unwrap(), 16)
+                    .unwrap();
+        }
+        out
+    }
+
+    fn ctr<const K: usize>(key: &[u8; K]) -> Ctr<Aes<K>> {
+        Ctr::new(&Key::from(*key))
+    }
+
+    /// Every length across the bulk group, the tail widths under it
+    /// and the odd block at the end.
+    ///
+    /// Round-tripping would not catch a wrong keystream, since the
+    /// same wrong keystream undoes itself, so this checks against one
+    /// built a block at a time.
+    #[test]
+    fn keystream_matches_a_block_at_a_time() {
+        // Two bulk groups, an odd number of pairs, and a part block.
+        const N: usize = 2 * 16 * 16 + 5 * 16 + 7;
+        let key = [0x5au8; 16];
+        let start = [0x77u8; 16];
+        let aes = Aes::<16>::new(&key);
+
+        let mut want = [0u8; N];
+        let mut counter = start;
+        for chunk in want.chunks_mut(16) {
+            let mut block = counter;
+            aes.encrypt_one(&mut block);
+            chunk.copy_from_slice(&block[..chunk.len()]);
+            increment(&mut counter);
+        }
+
+        for n in 0..=N {
+            let mut got = [0u8; N];
+            ctr(&key).encrypt(&start, &mut got[..n]);
+            assert_eq!(got[..n], want[..n], "{n} bytes");
+        }
+    }
+
+    /// Every kernel this processor has must agree with the keystream
+    /// taken a block at a time, at every length around the group
+    /// boundaries of both widths.
+    #[test]
+    fn the_engines_agree() {
+        // Past the wider group more than once, with an odd tail.
+        const N: usize = 3 * 16 * 16 + 5 * 16 + 7;
+        let key = [0x5au8; 16];
+        let start = [0x77u8; 16];
+        let aes = Aes::<16>::new(&key);
+
+        let mut want = [0u8; N];
+        let mut counter = start;
+        for chunk in want.chunks_mut(16) {
+            let mut block = counter;
+            aes.encrypt_one(&mut block);
+            chunk.copy_from_slice(&block[..chunk.len()]);
+            increment(&mut counter);
+        }
+
+        let key = Key::from(key);
+        let mut engines = 0;
+        for &(kernel, _) in KERNELS {
+            let Some(ctr) = Ctr::<Aes128>::with_kernel(&key, kernel) else {
+                continue;
+            };
+            engines += 1;
+            for n in 0..=N {
+                let mut got = [0u8; N];
+                ctr.encrypt(&start, &mut got[..n]);
+                assert_eq!(got[..n], want[..n], "{n} bytes, {kernel:?}");
+            }
+        }
+        assert!(engines >= 1, "no kernel to test");
+        // The portable one is always to be had.
+        let portable = Kernel::Portable;
+        assert!(Ctr::<Aes128>::with_kernel(&key, portable).is_some());
+    }
+
+    /// The loops add to the last byte of the block without carrying
+    /// out of it, so a message long enough for that byte to overflow
+    /// must be cut where it would, and the carry done in full.
+    ///
+    /// Every starting byte is tried, since where the cut falls
+    /// depends on it, and the message is long enough to pass the
+    /// boundary more than once.
+    #[test]
+    fn crosses_the_low_byte_boundary() {
+        // Three times round the 256 blocks that byte counts.
+        const N: usize = 3 * 256 * 16 + 32;
+        let key = [0x11u8; 16];
+        let aes = Aes::<16>::new(&key);
+
+        for last in [0u8, 1, 15, 16, 127, 239, 240, 241, 254, 255] {
+            let mut start = [0x42u8; 16];
+            start[15] = last;
+
+            let mut want = [0u8; N];
+            let mut counter = start;
+            for chunk in want.chunks_mut(16) {
+                let mut block = counter;
+                aes.encrypt_one(&mut block);
+                chunk.copy_from_slice(&block[..chunk.len()]);
+                increment(&mut counter);
+            }
+
+            let mut got = [0u8; N];
+            ctr(&key).encrypt(&start, &mut got);
+            assert_eq!(got, want, "counter ending {last}");
+
+            // And in pieces, so a run starts at every offset within
+            // the byte as well as at the boundary itself.
+            for piece in [16, 4080, 4096, 4112] {
+                let mut got = [0u8; N];
+                let mode = ctr(&key);
+                let mut stream = mode.stream(&start);
+                for part in got.chunks_mut(piece) {
+                    stream.update(part);
+                }
+                assert_eq!(
+                    got, want,
+                    "counter ending {last}, {piece} at a time"
+                );
+            }
+        }
+    }
+
+    /// carry put back by hand. Starting two blocks short of the wrap
+    /// exercises both sides of the split, and the run after it is
+    /// long enough to reach the bulk path and leave a tail.
+    #[test]
+    fn crosses_the_four_byte_counter_boundary() {
+        const N: usize = 40;
+        let key = [0x2bu8; 16];
+        let mut start = [0xa5u8; 16];
+        start[12..].copy_from_slice(&0xffff_fffeu32.to_be_bytes());
+
+        // The keystream as counter mode defines it: a block at a
+        // time, counting in the whole block.
+        let aes = Aes::<16>::new(&key);
+        let mut want = [0u8; N * 16];
+        let mut counter = start;
+        for chunk in want.chunks_mut(16) {
+            let mut block = counter;
+            aes.encrypt_one(&mut block);
+            chunk.copy_from_slice(&block);
+            increment(&mut counter);
+        }
+
+        let mut got = [0u8; N * 16];
+        ctr(&key).encrypt(&start, &mut got);
+        assert_eq!(got, want);
+    }
+
+    /// NIST SP 800-38A F.5.1 and F.5.2, AES-128.
+    #[test]
+    fn sp800_38a_aes128() {
+        let key: [u8; 16] = unhex("2b7e151628aed2a6abf7158809cf4f3c");
+        let counter: [u8; 16] = unhex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff");
+        let plain: [u8; 64] = unhex(
+            "6bc1bee22e409f96e93d7e117393172a\
+             ae2d8a571e03ac9c9eb76fac45af8e51\
+             30c81c46a35ce411e5fbc1191a0a52ef\
+             f69f2445df4f9b17ad2b417be66c3710",
+        );
+        let cipher: [u8; 64] = unhex(
+            "874d6191b620e3261bef6864990db6ce\
+             9806f66b7970fdff8617187bb9fffdff\
+             5ae4df3edbd5d35e5b4f09020db03eab\
+             1e031dda2fbe03d1792170a0f3009cee",
+        );
+        let ctr = ctr(&key);
+
+        let mut data = plain;
+        ctr.encrypt(&counter, &mut data);
+        assert_eq!(data, cipher, "encrypt");
+        ctr.decrypt(&counter, &mut data);
+        assert_eq!(data, plain, "decrypt");
+    }
+
+    #[test]
+    fn counter_increments_and_carries() {
+        let mut counter = [0u8; 4];
+        increment(&mut counter);
+        assert_eq!(counter, [0, 0, 0, 1]);
+
+        // A carry out of the last byte.
+        let mut counter = [0x00, 0x00, 0x00, 0xff];
+        increment(&mut counter);
+        assert_eq!(counter, [0, 0, 1, 0]);
+
+        // A carry the whole way along.
+        let mut counter = [0x01, 0xff, 0xff, 0xff];
+        increment(&mut counter);
+        assert_eq!(counter, [2, 0, 0, 0]);
+
+        // And round the top, which the standard allows.
+        let mut counter = [0xff; 4];
+        increment(&mut counter);
+        assert_eq!(counter, [0; 4]);
+    }
+
+    /// The counter must carry between blocks of a single message, not
+    /// just between messages.
+    #[test]
+    fn carries_across_blocks_of_one_message() {
+        let ctr = ctr(&[0x11; 16]);
+        // Two blocks in, this counter carries into its third byte.
+        let start: [u8; 16] = unhex("000000000000000000000000ffffffff");
+        let mut together = [0u8; 48];
+        ctr.encrypt(&start, &mut together);
+
+        // The same three blocks, each with the counter written out.
+        let mut apart = [0u8; 48];
+        for (i, block) in apart.chunks_exact_mut(16).enumerate() {
+            let mut counter = start;
+            for _ in 0..i {
+                increment(&mut counter);
+            }
+            ctr.encrypt(&counter, block);
+        }
+        assert_eq!(together, apart);
+    }
+
+    #[test]
+    fn round_trips_at_many_lengths() {
+        let ctr = ctr(&[0x5a; 32]);
+        let counter = [0x77u8; 16];
+        let mut plain = [0u8; MAX];
+        for (i, b) in plain.iter_mut().enumerate() {
+            *b = (i * 7 + 1) as u8;
+        }
+        // Around the bulk group boundary, and partial final blocks.
+        for n in [0, 1, 15, 16, 17, 127, 128, 129, 255, MAX] {
+            let mut data = [0u8; MAX];
+            data[..n].copy_from_slice(&plain[..n]);
+            ctr.encrypt(&counter, &mut data[..n]);
+            if n > 0 {
+                assert_ne!(data[..n], plain[..n], "{n} bytes");
+            }
+            ctr.decrypt(&counter, &mut data[..n]);
+            assert_eq!(data[..n], plain[..n], "{n} bytes");
+        }
+    }
+
+    /// The bulk path handles whole groups of blocks while the tail
+    /// goes through one at a time, so the two must agree.
+    #[test]
+    fn pieces_match_one_call() {
+        let ctr = ctr(&[0x33; 24]);
+        let counter = [1u8; 16];
+        let mut plain = [0u8; MAX];
+        for (i, b) in plain.iter_mut().enumerate() {
+            *b = (i * 3) as u8;
+        }
+        let mut whole = plain;
+        ctr.encrypt(&counter, &mut whole);
+
+        for split in [1, 15, 16, 17, 128, 129] {
+            let mut pieces = plain;
+            let mut s = ctr.stream(&counter);
+            let (a, b) = pieces.split_at_mut(split);
+            s.update(a);
+            s.update(b);
+            assert_eq!(pieces, whole, "split at {split}");
+        }
+
+        // One byte at a time crosses every block boundary.
+        let mut pieces = plain;
+        let mut s = ctr.stream(&counter);
+        for byte in pieces.iter_mut() {
+            s.update(core::slice::from_mut(byte));
+        }
+        assert_eq!(pieces, whole, "one byte at a time");
+    }
+
+    /// The state derives from the key, so its debug output must not
+    /// show it.
+    #[test]
+    fn debug_omits_the_state() {
+        struct Buffer([u8; 256], usize);
+        impl core::fmt::Write for Buffer {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                let end = self.1 + s.len();
+                self.0[self.1..end].copy_from_slice(s.as_bytes());
+                self.1 = end;
+                Ok(())
+            }
+        }
+        let mode = ctr(&[0x5a; 16]);
+        let iv = [0x5a; 16];
+        let state = mode.stream(&iv);
+        let mut buffer = Buffer([0; 256], 0);
+        core::fmt::write(&mut buffer, format_args!("{mode:?} {state:?}"))
+            .unwrap();
+        let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();
+        // 0x5a prints as 90 in decimal.
+        assert!(!text.contains("90"), "{text}");
+    }
+}

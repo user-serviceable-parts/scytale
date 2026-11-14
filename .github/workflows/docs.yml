@@ -1,0 +1,77 @@
+# Publishes the API documentation for the main branch to GitHub
+# Pages. One tree is enough: the implementations that exist only on
+# one architecture are private now, so nothing in the documentation
+# varies with the target. This is the browsable copy between
+# releases; docs.rs builds the released ones.
+#
+# Pages must be enabled in the repository settings with "GitHub
+# Actions" as the source before the deploy step can succeed.
+
+name: docs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+env:
+  RUSTDOCFLAGS: -D warnings
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+
+      - name: Build
+        run: cargo doc --workspace --no-deps
+
+      - name: Write the index
+        # Two crates are documented, so there is no root page of
+        # cargo's own to land on.
+        run: |
+          cat > target/doc/index.html <<'HTML'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+          <meta charset="utf-8">
+          <title>scytale documentation</title>
+          <meta http-equiv="refresh" content="0; url=scytale/">
+          </head>
+          <body>
+          <p>API documentation for the main branch:
+          <a href="scytale/">scytale</a>.
+          Released versions are on
+          <a href="https://docs.rs/scytale">docs.rs</a>.</p>
+          </body>
+          </html>
+          HTML
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: target/doc
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    # Deploys wait for each other rather than cancelling: only this
+    # job is serialized, so no build is ever thrown away.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

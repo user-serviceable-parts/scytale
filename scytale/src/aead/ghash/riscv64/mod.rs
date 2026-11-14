@@ -1,0 +1,367 @@
+//! GHASH multiplication on RISC-V.
+//!
+//! Three different extensions can do this work, and a processor may
+//! have any one of them without the others, so there is a backend for
+//! each and the choice is made once, the first time a hash starts.
+//!
+//! * [`zvkg`] has `vgmul`, which performs the whole field
+//!   multiplication, reduction included, in one instruction. It is
+//!   the fastest and the first choice.
+//! * [`zvbc`] has a vector carry-less multiply, which is the
+//!   primitive x86 and ARM build this out of. Eight blocks are
+//!   multiplied at once, one to a lane.
+//! * [`zbc`] has the same primitive on the general registers, for a
+//!   processor with no vector unit. Every processor with the scalar
+//!   AES instructions has it, because Zkn pulls in Zbkc.
+//!
+//! The three are not alternatives a vendor picks between at whim:
+//! `Zvkng` is `Zvkn` plus Zvkg, `Zvknc` is `Zvkn` plus Zvbc, and
+//! `Zkn` includes Zbkc, so each of these is the only carry-less
+//! multiply some real configuration has.
+//!
+//! # What is shared
+//!
+//! Both carry-less backends end the same way, and [`finish`] is that
+//! ending: it corrects Karatsuba's middle product, folds it into the
+//! outer thirds of the 256-bit result, and reduces. Only the multiply
+//! itself differs, so each passes its own in.
+
+#![allow(unsafe_code)]
+
+use super::{KERNELS, Kernel};
+use crate::features::{self, Features, riscv64::Feature as R};
+
+mod zbc;
+mod zvbc;
+pub(crate) mod zvkg;
+
+/// The field polynomial `x^128 + x^7 + x^2 + x + 1` without its
+/// leading term, written in GHASH's reversed bit order.
+const POLYNOMIAL: u64 = 0xc200_0000_0000_0000;
+
+/// The whole field multiplication in one instruction, on registers of
+/// a block or more.
+pub(crate) const ZVKG: Features = features::riscv(&[R::V, R::Zvkg]);
+/// The vector carry-less multiply, with the byte reverse from Zvkb
+/// (which Zvbb includes), on registers of a block or more.
+pub(super) const ZVBC: Features = features::riscv(&[R::V, R::Zvbc, R::Zvkb]);
+/// The scalar carry-less multiply, from Zbc.
+pub(super) const ZBC: Features = features::riscv(&[R::Zbc]);
+/// The same instruction, from Zbkc; the scalar cryptography profile
+/// brings this one and not Zbc.
+pub(super) const ZBKC: Features = features::riscv(&[R::Zbkc]);
+
+/// The best multiply the features in force allow, or none. The rows
+/// are the family's, in [`KERNELS`].
+fn choice() -> Option<Kernel> {
+    features::select(KERNELS)
+}
+
+/// The best multiply the extensions in `ext` offer, on a processor
+/// whose vector registers are `bytes` wide.
+#[cfg(test)]
+fn best_of(ext: u64, bytes: usize) -> Option<Kernel> {
+    let found = crate::arch::riscv64::detected_from(ext, bytes);
+    KERNELS
+        .iter()
+        .find(|(_, needs)| needs.is_subset(found))
+        .map(|(c, _)| *c)
+}
+
+/// The processor's carry-less multiply, whichever of the three it
+/// is. A value exists only by way of [`probe`], so holding one is
+/// holding the proof that the instructions are there, and the calls
+/// on it are safe; which backend answers is carried in the value, so
+/// there is no arm for "none".
+#[derive(Clone, Copy)]
+pub(crate) struct Multiply(Kernel);
+
+/// The multiply, where the processor has one. Asked once.
+pub(crate) fn probe() -> Option<Multiply> {
+    choice().map(Multiply)
+}
+
+impl Multiply {
+    /// How many blocks the group multiply takes at once.
+    pub(crate) fn group(self) -> usize {
+        match self.0 {
+            Kernel::Zvkg => zvkg::GROUP,
+            Kernel::Zvbc => zvbc::GROUP,
+            Kernel::Zbc => zbc::GROUP,
+        }
+    }
+
+    /// Prepares the subkey for [`Multiply::multiply`].
+    pub(crate) fn prepare(self, h: &[u64; 2]) -> [u64; 2] {
+        match self.0 {
+            Kernel::Zvkg => zvkg::prepare(h),
+            Kernel::Zvbc => zvbc::prepare(h),
+            Kernel::Zbc => zbc::prepare(h),
+        }
+    }
+
+    /// Multiplies `value` by the prepared subkey `h`, in place.
+    pub(crate) fn multiply(self, value: &mut [u64; 2], h: &[u64; 2]) {
+        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // instructions of the backend it names.
+        unsafe {
+            match self.0 {
+                Kernel::Zvkg => zvkg::multiply(value, h),
+                Kernel::Zvbc => zvbc::multiply(value, h),
+                Kernel::Zbc => zbc::multiply(value, h),
+            }
+        }
+    }
+
+    /// Multiplies in the whole of `blocks`, which is
+    /// [`group`](Multiply::group) blocks, leaving the running hash in
+    /// `value`. `powers` holds the prepared powers of the subkey, `H`
+    /// first.
+    pub(crate) fn multiply_group(
+        self,
+        value: &mut [u64; 2],
+        powers: &[[u64; 2]; super::MAX_GROUP],
+        blocks: &[u8],
+    ) {
+        // Two of the three loops walk exactly their own group from
+        // the pointer, so a shorter slice reads past the end. The
+        // check is here rather than a `debug_assert` inside the
+        // unsafe functions, which a release build removes.
+        assert_eq!(blocks.len(), self.group() * super::BLOCK);
+        // SAFETY: as for `multiply`, and the length was just checked.
+        unsafe {
+            match self.0 {
+                Kernel::Zvkg => zvkg::multiply_group(value, powers, blocks),
+                Kernel::Zvbc => zvbc::multiply_group(value, powers, blocks),
+                Kernel::Zbc => zbc::multiply_group(value, powers, blocks),
+            }
+        }
+    }
+}
+
+/// Finishes a field multiplication from its three Karatsuba pieces,
+/// given a carry-less multiply. The scalar backend uses this; the
+/// vector one has no scalar multiply to give and reduces inside its
+/// own block instead.
+///
+/// `lo`, `m` and `hi` are the products of the operands' low halves,
+/// of their halves added together, and of their high halves, each
+/// least significant word first. `m` is the raw product, not yet
+/// corrected; since every piece is a sum over however many blocks
+/// went into it, and the correction is linear, it can be applied once
+/// here rather than once a block.
+///
+/// The result is the field product in register order, least
+/// significant word first.
+fn finish(
+    lo: [u64; 2],
+    m: [u64; 2],
+    hi: [u64; 2],
+    wide: impl Fn(u64, u64) -> [u64; 2],
+) -> [u64; 2] {
+    // Karatsuba's middle term is the sum of the two cross products,
+    // which this recovers from the product of the sums.
+    let mid = [m[0] ^ lo[0] ^ hi[0], m[1] ^ lo[1] ^ hi[1]];
+    // It belongs half in each end of the 256-bit result.
+    let lo = [lo[0], lo[1] ^ mid[0]];
+    let hi = [hi[0] ^ mid[1], hi[1]];
+
+    // Fold the low half down in two steps. Each multiplication by
+    // the polynomial moves one word's worth of excess up, and
+    // exchanging the halves in between lets the same step do both.
+    let p = wide(POLYNOMIAL, lo[0]);
+    let s = [lo[1] ^ p[0], lo[0] ^ p[1]];
+    let q = wide(POLYNOMIAL, s[0]);
+    [hi[0] ^ s[1] ^ q[0], hi[1] ^ s[0] ^ q[1]]
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use crate::aead::ghash::{BLOCK, MAX_GROUP, halve};
+    use std::eprintln;
+
+    /// A cheap spread of test values; the multiply is linear in each
+    /// operand, so agreement on a varied sample is strong evidence.
+    fn values(seed: u64) -> [u64; 2] {
+        let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        [next(), next()]
+    }
+
+    /// Everything one backend has to offer, so that a test can drive
+    /// each of them rather than only the one this processor would
+    /// pick.
+    struct Backend {
+        name: &'static str,
+        choice: Kernel,
+        group: usize,
+        prepare: fn(&[u64; 2]) -> [u64; 2],
+        multiply: unsafe fn(&mut [u64; 2], &[u64; 2]),
+        multiply_group: unsafe fn(&mut [u64; 2], &[[u64; 2]; MAX_GROUP], &[u8]),
+    }
+
+    const BACKENDS: [Backend; 3] = [
+        Backend {
+            name: "zvkg",
+            choice: Kernel::Zvkg,
+            group: zvkg::GROUP,
+            prepare: zvkg::prepare,
+            multiply: zvkg::multiply,
+            multiply_group: zvkg::multiply_group,
+        },
+        Backend {
+            name: "zvbc",
+            choice: Kernel::Zvbc,
+            group: zvbc::GROUP,
+            prepare: zvbc::prepare,
+            multiply: zvbc::multiply,
+            multiply_group: zvbc::multiply_group,
+        },
+        Backend {
+            name: "zbc",
+            choice: Kernel::Zbc,
+            group: zbc::GROUP,
+            prepare: zbc::prepare,
+            multiply: zbc::multiply,
+            multiply_group: zbc::multiply_group,
+        },
+    ];
+
+    /// Whether this processor has `choice`, which is what decides
+    /// whether a test can run that backend's instructions at all.
+    fn here(choice: Kernel) -> bool {
+        features::allows(KERNELS, choice)
+    }
+
+    /// The portable multiply is the reference; every backend has to
+    /// agree with it, not just the one this processor chooses.
+    #[test]
+    #[allow(unsafe_code)]
+    fn every_backend_agrees_with_portable() {
+        for backend in &BACKENDS {
+            if !here(backend.choice) {
+                eprintln!("skipping: no {}", backend.name);
+                continue;
+            }
+            // Zero and one are what the folding is most likely to get
+            // wrong, and a random sample would not reach them.
+            let edges = [[0, 0], [1 << 63, 0], [0, 1], [!0, !0]];
+            let pairs = edges
+                .iter()
+                .flat_map(|&a| edges.iter().map(move |&b| (a, b)))
+                .chain((0..200).map(|s| (values(s ^ 0x5555_5555), values(s))));
+            for (start, h) in pairs {
+                let mut want = start;
+                super::super::multiply(&mut want, &h);
+                let mut got = start;
+                let scaled = (backend.prepare)(&h);
+                unsafe { (backend.multiply)(&mut got, &scaled) };
+                assert_eq!(got, want, "{}: {start:x?} * {h:x?}", backend.name);
+            }
+        }
+    }
+
+    /// A group multiply has to give what the same blocks give one at
+    /// a time.
+    #[test]
+    #[allow(unsafe_code)]
+    fn every_group_multiply_agrees_with_its_own_blocks() {
+        for backend in &BACKENDS {
+            if !here(backend.choice) || backend.group == 1 {
+                eprintln!("skipping: no {} group multiply", backend.name);
+                continue;
+            }
+            assert_eq!(backend.group, MAX_GROUP);
+            for seed in 0..50 {
+                let h = values(seed);
+                let scaled = (backend.prepare)(&h);
+                let mut powers = [[0u64; 2]; MAX_GROUP];
+                let mut power = [1u64 << 63, 0];
+                for slot in powers.iter_mut() {
+                    unsafe { (backend.multiply)(&mut power, &scaled) };
+                    *slot = (backend.prepare)(&power);
+                }
+
+                let blocks: [u8; MAX_GROUP * BLOCK] =
+                    core::array::from_fn(|i| (i as u64 ^ seed) as u8);
+                let start = values(seed ^ 0xaaaa_aaaa);
+
+                let mut want = start;
+                for block in blocks.chunks_exact(BLOCK) {
+                    want[0] ^= halve(&block[..8]);
+                    want[1] ^= halve(&block[8..]);
+                    super::super::multiply(&mut want, &h);
+                }
+
+                let mut got = start;
+                unsafe { (backend.multiply_group)(&mut got, &powers, &blocks) };
+                assert_eq!(got, want, "{}: seed {seed}", backend.name);
+            }
+        }
+    }
+
+    /// Which backend each kind of real processor is given. The choice
+    /// is a function of the extension bit set, so this is the whole of
+    /// the dispatch rather than a sample of it, and it covers
+    /// combinations no emulator offers.
+    #[test]
+    fn the_choice_follows_the_extensions() {
+        use crate::arch::riscv64::profile;
+
+        // The vector profiles that carry a multiply, and the ones
+        // that carry none.
+        assert_eq!(best_of(profile::ZVKNG, 16), Some(Kernel::Zvkg));
+        assert_eq!(best_of(profile::ZVKNC, 16), Some(Kernel::Zvbc));
+        assert_eq!(best_of(profile::ZVKN, 16), None);
+        assert_eq!(best_of(profile::RVA23, 16), None);
+
+        // Zkn has no vector unit and Zbkc with it, which is the whole
+        // reason the scalar backend exists.
+        assert_eq!(best_of(profile::ZKN, 0), Some(Kernel::Zbc));
+
+        // Zvkg wins wherever it is, whatever else is there.
+        assert_eq!(
+            best_of(profile::ZVKNG | profile::ZVKNC | profile::ZKN, 16),
+            Some(Kernel::Zvkg)
+        );
+        // The scalar multiply is taken over nothing, even beside a
+        // vector unit that cannot help.
+        assert_eq!(
+            best_of(profile::RVA23 | profile::ZKN, 16),
+            Some(Kernel::Zbc)
+        );
+
+        // Registers too narrow for a 128-bit element group put the
+        // vector backends out, and a vector profile has nothing else.
+        assert_eq!(best_of(profile::ZVKNG, 8), None);
+        assert_eq!(best_of(profile::ZVKNC, 8), None);
+        // A processor with none of it has nothing.
+        assert_eq!(best_of(0, 0), None);
+    }
+
+    /// The dispatch has to pick a backend that is really there, and
+    /// report the group size of the one it picked.
+    #[test]
+    fn the_choice_is_one_the_processor_has() {
+        match choice() {
+            Some(chosen) => {
+                assert!(here(chosen));
+                let fast = probe().expect("a multiply");
+                let at = BACKENDS.iter().position(|b| b.choice == chosen);
+                assert_eq!(fast.group(), BACKENDS[at.unwrap()].group);
+                // Asking twice must give the same answer, now that
+                // the first call has cached it.
+                assert_eq!(choice(), Some(chosen));
+            }
+            None => assert!(probe().is_none()),
+        }
+    }
+}

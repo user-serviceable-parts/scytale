@@ -1,0 +1,277 @@
+//! `scytale hash`: a digest of each input, or of a tuple of values,
+//! and the hash-by-name dispatch every other command that takes a
+//! hash shares.
+
+use std::io::Write;
+use std::path::PathBuf;
+
+use clap::Args;
+use scytale::hash::{Hash, Xof, XofReader};
+
+use crate::fail::{Result, usage};
+use crate::io::Format;
+use crate::names::{self, Len};
+use crate::{io, value};
+
+/// Runs `$body` with `$H` bound to the hash type `$name` names, one
+/// of [`names::HASHES`]; the name has been looked up in a table
+/// already, so the last arm is never reached.
+macro_rules! with_hash {
+    ($name:expr, $H:ident => $body:expr) => {
+        match $name {
+            "sha1" => {
+                type $H = scytale::hash::sha1::Sha1;
+                $body
+            }
+            "sha224" => {
+                type $H = scytale::hash::sha2::Sha224;
+                $body
+            }
+            "sha256" => {
+                type $H = scytale::hash::sha2::Sha256;
+                $body
+            }
+            "sha384" => {
+                type $H = scytale::hash::sha2::Sha384;
+                $body
+            }
+            "sha512" => {
+                type $H = scytale::hash::sha2::Sha512;
+                $body
+            }
+            "sha512-224" => {
+                type $H = scytale::hash::sha2::Sha512_224;
+                $body
+            }
+            "sha512-256" => {
+                type $H = scytale::hash::sha2::Sha512_256;
+                $body
+            }
+            "sha3-224" => {
+                type $H = scytale::hash::sha3::Sha3_224;
+                $body
+            }
+            "sha3-256" => {
+                type $H = scytale::hash::sha3::Sha3_256;
+                $body
+            }
+            "sha3-384" => {
+                type $H = scytale::hash::sha3::Sha3_384;
+                $body
+            }
+            "sha3-512" => {
+                type $H = scytale::hash::sha3::Sha3_512;
+                $body
+            }
+            other => Err($crate::fail::usage!("no hash named \"{other}\"")),
+        }
+    };
+}
+
+pub(crate) use with_hash;
+
+#[derive(Args)]
+#[command(after_help = crate::help::VALUES)]
+pub struct HashArgs {
+    /// The hash: sha256, sha3-512, blake2b-512, shake128, ...
+    /// (scytale list hash)
+    pub algorithm: String,
+    /// Bytes of output, for shake, cshake and tuplehash
+    #[arg(short, long)]
+    length: Option<usize>,
+    /// The function name, for cshake
+    #[arg(long)]
+    function_name: Option<String>,
+    /// The customization string, for cshake and tuplehash
+    #[arg(long)]
+    customization: Option<String>,
+    /// A string of the tuple, in order, for tuplehash; may repeat
+    #[arg(long)]
+    element: Vec<String>,
+    /// Hex by default: "<digest>  <file>", one line each
+    #[command(flatten)]
+    format: Format,
+    /// The files to digest; standard input without any
+    files: Vec<PathBuf>,
+}
+
+pub fn run(args: HashArgs) -> Result<()> {
+    let entry = names::HASH.find(&args.algorithm)?;
+    let name = entry.name;
+    let xof = entry.output == Len::Any;
+    if xof && args.length.is_none() {
+        return Err(usage!("{name} gives any length; say which with --length"));
+    }
+    if !xof && args.length.is_some() {
+        return Err(usage!(
+            "{name} takes no --length; that is for shake, cshake and \
+             tuplehash"
+        ));
+    }
+    let cshake = name.starts_with("cshake");
+    let tuple = name.starts_with("tuplehash");
+    if !cshake && args.function_name.is_some() {
+        return Err(usage!(
+            "{name} takes no --function-name; that is cshake's"
+        ));
+    }
+    if !cshake && !tuple && args.customization.is_some() {
+        return Err(usage!(
+            "{name} takes no --customization; that is for cshake and \
+             tuplehash"
+        ));
+    }
+    if !tuple && !args.element.is_empty() {
+        return Err(usage!("{name} takes no --element; that is tuplehash's"));
+    }
+    let as_hex = args.format.as_hex(true);
+    if tuple {
+        return tuple_hash(&args, name, as_hex);
+    }
+    if !as_hex && args.files.len() > 1 {
+        return Err(usage!(
+            "--raw with {} files would run their digests together; one \
+             file, or hex",
+            args.files.len()
+        ));
+    }
+    let mut out = io::output(None, false)?;
+    let paths: Vec<Option<&std::path::Path>> = if args.files.is_empty() {
+        vec![None]
+    } else {
+        args.files.iter().map(|p| Some(p.as_path())).collect()
+    };
+    for path in paths {
+        let digest = digest(&args, name, xof, path)?;
+        if as_hex {
+            let shown = path.map_or("-".into(), |p| p.display().to_string());
+            let mut text = vec![0u8; digest.len() * 2];
+            scytale::codec::hex::encode(&digest, &mut text)?;
+            out.write_all(&text)?;
+            writeln!(out, "  {shown}")?;
+        } else {
+            out.write_all(&digest)?;
+        }
+    }
+    Ok(out.flush()?)
+}
+
+/// TupleHash over the `--element` values: one digest, written alone,
+/// since there is no file to name beside it. The strings are the
+/// tuple, so a file would be one more string and not the input, and
+/// files are refused rather than guessed at.
+fn tuple_hash(args: &HashArgs, name: &str, as_hex: bool) -> Result<()> {
+    if !args.files.is_empty() {
+        return Err(usage!(
+            "{name} hashes a tuple of --element values, not files; \
+             file:PATH makes a file one element"
+        ));
+    }
+    if args.element.is_empty() {
+        return Err(usage!(
+            "{name} hashes a tuple of strings; give each as --element"
+        ));
+    }
+    let elements = args
+        .element
+        .iter()
+        .map(|e| value::parse(e, "--element", true))
+        .collect::<Result<Vec<_>>>()?;
+    let custom = value::text(args.customization.as_deref(), "--customization")?;
+    let mut digest = vec![0u8; args.length.unwrap_or(0)];
+    macro_rules! tuple {
+        ($T:ident) => {{
+            let mut hash = scytale::hash::sha3::$T::new(&custom);
+            elements.iter().for_each(|e| hash.push(e));
+            hash.finalize_to(&mut digest);
+        }};
+    }
+    if name == "tuplehash128" {
+        tuple!(TupleHash128)
+    } else {
+        tuple!(TupleHash256)
+    }
+    let mut out = io::output(None, false)?;
+    io::write(&mut *out, &digest, as_hex)
+}
+
+fn digest(
+    args: &HashArgs,
+    name: &str,
+    xof: bool,
+    path: Option<&std::path::Path>,
+) -> Result<Vec<u8>> {
+    let mut input = io::input(path)?;
+    if xof {
+        let length = args.length.unwrap_or(0);
+        let function =
+            value::text(args.function_name.as_deref(), "--function-name")?;
+        let custom =
+            value::text(args.customization.as_deref(), "--customization")?;
+        let mut out = vec![0u8; length];
+        macro_rules! squeeze {
+            ($xof:expr) => {{
+                let mut xof = $xof;
+                io::for_each_chunk(&mut *input, |chunk| {
+                    xof.update(chunk);
+                    Ok(())
+                })?;
+                xof.finalize_xof().squeeze(&mut out);
+            }};
+        }
+        use scytale::hash::sha3::{CShake128, CShake256, Shake128, Shake256};
+        match name {
+            "shake128" => squeeze!(Shake128::default()),
+            "shake256" => squeeze!(Shake256::default()),
+            "cshake128" => squeeze!(CShake128::new(&function, &custom)),
+            _ => squeeze!(CShake256::new(&function, &custom)),
+        }
+        return Ok(out);
+    }
+    macro_rules! whole {
+        ($H:ty) => {{
+            let mut hash = <$H>::default();
+            io::for_each_chunk(&mut *input, |chunk| {
+                hash.update(chunk);
+                Ok(())
+            })?;
+            Ok(hash.finalize().as_ref().to_vec())
+        }};
+    }
+    use scytale::hash::blake2::{Blake2b256, Blake2b512};
+    match name {
+        "blake2b-256" => whole!(Blake2b256),
+        "blake2b-512" => whole!(Blake2b512),
+        _ => with_hash!(name, H => whole!(H)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The table's digest lengths are the types'.
+    #[test]
+    fn table_matches_types() {
+        for name in names::HASHES {
+            let n = with_hash!(name, H => Ok::<usize, crate::fail::Fail>(
+                H::default().finalize().as_ref().len()
+            ))
+            .unwrap();
+            assert_eq!(Some(n), names::digest_len(name), "{name}");
+        }
+    }
+
+    /// BLAKE2b's table lengths are its types'.
+    #[test]
+    fn blake2_table_matches_types() {
+        use scytale::hash::blake2::{Blake2b256, Blake2b512};
+        let lens = [
+            Blake2b256::default().finalize().len(),
+            Blake2b512::default().finalize().len(),
+        ];
+        for (entry, n) in names::BLAKE2.iter().zip(lens) {
+            assert_eq!(entry.output, Len::Exact(n), "{}", entry.name);
+        }
+    }
+}

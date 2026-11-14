@@ -1,0 +1,40 @@
+[package]
+name = "scytale-ring"
+description = "A drop-in replacement for ring 0.17, implemented with scytale: pure Rust, no C compiler, no build script"
+# Which ring API this presents is in the description and the docs.
+version = "0.10.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository = "https://github.com/user-serviceable-parts/scytale"
+documentation = "https://docs.rs/scytale-ring"
+readme = "README.md"
+keywords = ["cryptography", "ring", "tls", "no-std"]
+categories = ["cryptography", "no-std", "no-std::no-alloc"]
+
+# Code written against ring names the crate `ring`, and so do ring's
+# own test files, which run here unchanged.
+[lib]
+name = "ring"
+
+[dependencies]
+# The oldest release with everything this crate uses.
+scytale = { path = "../scytale", version = "0.10.0" }
+untrusted = "0.9"
+zeroize = { version = "1", default-features = false }
+
+# ring's features, so that a manifest which asks for them still
+# resolves. None changes anything here: there is no allocator to
+# enable, and randomness always comes from scytale's own source.
+[features]
+default = ["alloc", "dev_urandom_fallback"]
+alloc = []
+std = ["alloc"]
+dev_urandom_fallback = []
+less-safe-getrandom-custom-or-rdrand = []
+less-safe-getrandom-espidf = []
+slow_tests = []
+test_logging = []
+unstable-testing-arm-no-hw = []
+unstable-testing-arm-no-neon = []
+wasm32_unknown_unknown_js = []

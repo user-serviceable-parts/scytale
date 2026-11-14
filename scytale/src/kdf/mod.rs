@@ -1,0 +1,53 @@
+//! Key derivation functions.
+//!
+//! Two different jobs share the name. [`hkdf`] turns keying material
+//! that is already unguessable, such as a shared secret from a key
+//! agreement, into as many keys as a protocol needs. [`argon2`] and
+//! [`pbkdf2`] turn a password, which is guessable, into a key, and
+//! their costs are there to make each guess cost the attacker what it
+//! costs you. Argon2id's cost is memory as well as time, which
+//! special hardware cannot shrink as it can PBKDF2's. [`tls12`] is
+//! the first job as TLS 1.2 defined it, for the implementations that
+//! still speak that version.
+//!
+//! ```
+//! use scytale::hash::sha2::Sha256;
+//! use scytale::kdf::{hkdf, pbkdf2};
+//!
+//! # fn main() -> Result<(), scytale::Error> {
+//! // A shared secret from a key agreement: already unguessable, so
+//! // one hash's worth of work turns it into keys.
+//! let shared_secret = [0x5a; 32];
+//! let mut keys = [0u8; 64];
+//! let salt = b"session salt";
+//! hkdf::derive::<Sha256>(salt, &shared_secret, &[b"app v1"], &mut keys)?;
+//! let (encrypt_key, mac_key) = keys.split_at(32);
+//!
+//! // A password: guessable, so every guess must be made expensive.
+//! let mut key = [0u8; 32];
+//! let salt = b"per-user salt";
+//! pbkdf2::pbkdf2::<Sha256>(b"correct horse", salt, 600_000, &mut key)?;
+//! # let _ = (encrypt_key, mac_key);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! If the input came from a human, use `argon2`, or `pbkdf2` where a
+//! standard or policy names it; if it came from a machine, use
+//! `hkdf`. Running HKDF over a password gives a key that is exactly
+//! as guessable as the password was.
+//!
+//! The rest do the first job in the shapes NIST and ANSI define it,
+//! for the protocols and policies that name them:
+//! [`sp800_108`] derives keys from a key already held, over any MAC
+//! or KMAC; [`one_step`] is SP 800-56C's KDF for a key agreement's
+//! shared secret, the single-step alternative to HKDF; and [`x963`]
+//! is the ANSI X9.63 KDF that ECIES uses.
+
+pub mod argon2;
+pub mod hkdf;
+pub mod one_step;
+pub mod pbkdf2;
+pub mod sp800_108;
+pub mod tls12;
+pub mod x963;

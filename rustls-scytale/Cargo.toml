@@ -1,0 +1,31 @@
+[package]
+name = "rustls-scytale"
+description = "A rustls crypto provider implemented with scytale: pure Rust, no C compiler, no build script, post-quantum by default"
+# Which rustls this works with is in the README's table.
+version = "0.10.0-dev.2"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository = "https://github.com/user-serviceable-parts/scytale"
+documentation = "https://docs.rs/rustls-scytale"
+readme = "README.md"
+keywords = ["rustls", "tls", "cryptography", "post-quantum", "no-std"]
+categories = ["cryptography", "network-programming", "no-std"]
+
+[dependencies]
+# The oldest release with everything this crate uses.
+scytale = { path = "../scytale", version = "0.10.0" }
+# Pinned exactly while rustls 0.24 is a development release: each one
+# may change the provider traits.
+rustls = { version = "=0.24.0-dev.2", default-features = false }
+pki-types = { package = "rustls-pki-types", version = "1.15", features = [
+    "alloc",
+] }
+zeroize = { version = "1", default-features = false }
+
+[dev-dependencies]
+# The certificate verifier the handshake tests need, from rustls's
+# own webpki feature.
+rustls = { version = "=0.24.0-dev.2", features = ["webpki"] }
+# The client example's root certificates.
+webpki-roots = "1"

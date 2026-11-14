@@ -1,0 +1,37 @@
+[package]
+name = "scytale-cli"
+description = "The scytale cryptography library from a shell: AES, ChaCha20, AEAD, hashes, MACs, KDFs, keys, signatures, key agreement, ML-KEM"
+version = "0.10.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository = "https://github.com/user-serviceable-parts/scytale"
+# A binary has no rustdoc; the manual is the documentation.
+documentation = "https://github.com/user-serviceable-parts/scytale/blob/main/scytale-cli/scytale.1.md"
+readme = "README.md"
+keywords = ["cryptography", "cli", "encryption", "signature", "post-quantum"]
+categories = ["command-line-utilities", "cryptography"]
+
+[[bin]]
+name = "scytale"
+path = "src/main.rs"
+# The binary's name is the library's, and rustdoc would write both
+# to one place. Its module comments are for readers of the source;
+# the library's are the documentation.
+doc = false
+
+[dependencies]
+# The oldest release with everything this crate uses.
+scytale = { path = "../scytale", version = "0.10.1" }
+zeroize = "1"
+# The parser and its "did you mean" for a mistyped option: no colour
+# and no environment lookups, so the binary stays small and its
+# behaviour is what the code says.
+clap = { version = "4", default-features = false, features = [
+    "std",
+    "derive",
+    "help",
+    "usage",
+    "error-context",
+    "suggestions",
+] }
