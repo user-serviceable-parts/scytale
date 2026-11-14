@@ -102,7 +102,7 @@ is run; the Monte Carlo groups chain a thousand cipher calls per
 case, with the key re-derived at each step. Every implementation is
 put through the whole vector set for its primitive, at every key
 size, the modes and the AEADs included: the harness answers each
-suite once per feature profile the processor can run, so each kernel
+suite once per kernel of the type it tests, so each kernel
 written for a particular instruction set is tested as itself rather
 than only the one this processor would pick. Every implementation is
 also compared byte for byte against the portable one across a range of
@@ -586,9 +586,9 @@ The standards' own vectors are built into the unit tests, so
 them. The Project Wycheproof, CFRG HPKE and BLAKE2 reference vectors are not shipped,
 to keep the crate small; the suites that read them run from a
 checkout of the [repository][repo], whose README says how, and in
-its continuous integration on every push, natively on x86-64, arm64
-and riscv64. The ACVP suites run there too, from the `scytale-acvp`
-crate, through this crate's public API.
+its continuous integration on every push, natively on x86-64 and
+arm64 and under emulation for riscv64. The ACVP suites run there
+too, from the `scytale-acvp` crate, through this crate's public API.
 
 The public-key algorithms and the KDFs run against both: the ACVP sample
 vectors for ML-KEM, ML-DSA, SLH-DSA, LMS, RSA, KTS-IFC, ECDSA, EDDSA, XECDH,

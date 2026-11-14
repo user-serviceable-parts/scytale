@@ -1,23 +1,27 @@
 //! The check against the vendored vectors: every suite in full, the
-//! large-data groups and every SLH-DSA signature included, under
-//! every kernel this processor can run, each once.
+//! large-data groups and every SLH-DSA signature included, and every
+//! kernel this processor can run answering the vectors that test it,
+//! each exactly once.
 //!
 //! A kernel is reached through the feature profiles the library's
 //! types publish: setting a profile puts a feature set in force, and
-//! a type takes the first of its profiles the set meets. A suite is
-//! built from a few such types, so under a profile its implementation
-//! is the tuple of rows those types take, and the suite is answered
-//! under a profile only when that tuple is new. SHA-2 on x86-64 thus
-//! runs twice, SHA-NI and portable, and not once per profile that
-//! happens to differ elsewhere.
+//! a type takes the first of its profiles the set meets. A vector
+//! tests the kernels of one type: a hash suite the hash's, AES-ECB
+//! the cipher's, a mode's suite the mode's, an ECDSA group its
+//! curve's, the RSA suites RSA's. It is answered under a profile only
+//! when that type takes a row there it has not yet taken, so SHA-2 on
+//! x86-64 runs twice, SHA-NI and portable. A kernel that has passed
+//! its own vectors is taken as good wherever else it is used: ECDSA
+//! is not answered again for each hash kernel, and a suite with no
+//! kernel of its own, HMAC or LMS or a KDF, is answered once.
 //!
 //! The work is cut into units, a test group each, or a single case of
-//! a large-data group or of SLH-DSA signing, since those cases are
-//! minutes apiece under emulation. One worker per core takes the next
-//! unit of the profile in force, heaviest first, and the profile
-//! changes only between pools. `SCYTALE_SHARD` as `i/n` takes the
-//! i-th of n shares, equal by expected cost, which is how CI spreads
-//! the run over as many jobs as it needs.
+//! a large-data group, of SLH-DSA signing or of LMS key generation,
+//! since those cases are minutes apiece under emulation. One worker
+//! per core takes the next unit of the profile in force, heaviest
+//! first, and the profile changes only between pools. `SCYTALE_SHARD`
+//! as `i/n` takes the i-th of n shares, equal by expected cost, which
+//! is how CI spreads the run over as many jobs as it needs.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -41,76 +45,68 @@ use crate::support::Error;
 /// report, and its published profiles.
 pub type Built = (&'static str, fn() -> &'static [Features]);
 
-/// The public types `suite` is built from: the ones whose kernels its
-/// answers run through. Naming a type the suite does not use costs a
-/// run; missing one hides a kernel.
-pub fn built_from(suite: &Suite) -> Result<Vec<Built>, Error> {
-    let aes: Built = ("Aes128", Aes128::profiles);
-    let sha1: Built = ("Sha1", Sha1::profiles);
-    let sha256: Built = ("Sha256", Sha256::profiles);
-    let sha512: Built = ("Sha512", Sha512::profiles);
-    let sha3: Built = ("Sha3_256", Sha3_256::profiles);
-    let hashes = [sha1, sha256, sha512, sha3];
-    let curves: [Built; 3] = [
-        ("P-256", <ecdsa::p256::PrivateKey as Dispatcher>::profiles),
-        ("P-384", <ecdsa::p384::PrivateKey as Dispatcher>::profiles),
-        ("P-521", <ecdsa::p521::PrivateKey as Dispatcher>::profiles),
-    ];
-    let rsa: Built = ("RSA", <rsa::PrivateKey as Dispatcher>::profiles);
+/// The public types whose kernels `suite`'s vectors test, and so
+/// the ones it is answered again for: empty for a suite with no
+/// kernel of its own, which is answered once. Naming a type here
+/// costs a run under each of its kernels; missing one leaves a
+/// kernel untested.
+pub fn kernels_tested(suite: &Suite) -> Result<Vec<Built>, Error> {
     let a = suite.algorithm;
-    let types = match a {
+    let types: Vec<Built> = match a {
+        "ACVP-AES-ECB" => vec![("Aes128", Aes128::profiles)],
         "ACVP-AES-CBC" => {
-            vec![aes, ("Cbc", <Cbc<Aes128> as Dispatcher>::profiles)]
+            vec![("Cbc", <Cbc<Aes128> as Dispatcher>::profiles)]
         }
         "ACVP-AES-CTR" => {
-            vec![aes, ("Ctr", <Ctr<Aes128> as Dispatcher>::profiles)]
+            vec![("Ctr", <Ctr<Aes128> as Dispatcher>::profiles)]
         }
         "ACVP-AES-XTS" => {
-            vec![aes, ("Xts", <Xts<Aes128> as Dispatcher>::profiles)]
+            vec![("Xts", <Xts<Aes128> as Dispatcher>::profiles)]
         }
         "ACVP-AES-GCM" | "ACVP-AES-GMAC" => {
-            vec![aes, ("Gcm", <Gcm<Aes128> as Dispatcher>::profiles)]
+            vec![("Gcm", <Gcm<Aes128> as Dispatcher>::profiles)]
         }
         "ACVP-AES-XPN" => {
-            vec![aes, ("Xpn", <Xpn<Aes128> as Dispatcher>::profiles)]
+            vec![("Xpn", <Xpn<Aes128> as Dispatcher>::profiles)]
         }
         "ACVP-AES-GCM-SIV" => {
-            vec![aes, ("GcmSiv", <GcmSiv<Aes128> as Dispatcher>::profiles)]
+            vec![("GcmSiv", <GcmSiv<Aes128> as Dispatcher>::profiles)]
         }
         "ACVP-AES-CCM" => {
-            vec![aes, ("Ccm", <Ccm<Aes128> as Dispatcher>::profiles)]
+            vec![("Ccm", <Ccm<Aes128> as Dispatcher>::profiles)]
         }
-        "CMAC-AES" | "ctrDRBG" => vec![aes],
-        _ if a.starts_with("ACVP-AES-") => vec![aes],
-        "SHA2-224" | "SHA2-256" | "HMAC-SHA2-224" | "HMAC-SHA2-256" => {
-            vec![sha256]
+        "SHA2-224" | "SHA2-256" => vec![("Sha256", Sha256::profiles)],
+        "SHA2-384" | "SHA2-512" | "SHA2-512/224" | "SHA2-512/256" => {
+            vec![("Sha512", Sha512::profiles)]
         }
-        "SHA2-384" | "SHA2-512" | "SHA2-512/224" | "SHA2-512/256"
-        | "HMAC-SHA2-384" | "HMAC-SHA2-512" | "HMAC-SHA2-512/224"
-        | "HMAC-SHA2-512/256" | "EDDSA" => vec![sha512],
-        "HMAC-SHA-1" => vec![sha1],
-        "ML-KEM" | "ML-DSA" => vec![sha3],
-        _ if a.starts_with("SHA3-")
-            || a.starts_with("SHAKE-")
+        // SHA-1 has no suite of its own; its HMAC stands in.
+        "HMAC-SHA-1" => vec![("Sha1", Sha1::profiles)],
+        _ if a.starts_with("SHA3-") || a.starts_with("SHAKE-") => {
+            vec![("Sha3_256", Sha3_256::profiles)]
+        }
+        // A group tests its own curve; see `tested`.
+        "ECDSA" | "DetECDSA" => vec![
+            ("P-256", <ecdsa::p256::PrivateKey as Dispatcher>::profiles),
+            ("P-384", <ecdsa::p384::PrivateKey as Dispatcher>::profiles),
+            ("P-521", <ecdsa::p521::PrivateKey as Dispatcher>::profiles),
+        ],
+        "RSA" | "KTS-IFC" => {
+            vec![("RSA", <rsa::PrivateKey as Dispatcher>::profiles)]
+        }
+        // Built on kernels the suites above test, with none of their
+        // own.
+        "CMAC-AES" | "ctrDRBG" | "EDDSA" | "ML-KEM" | "ML-DSA" | "KDF"
+        | "hashDRBG" | "hmacDRBG" | "PBKDF" | "KDA" | "kdf-components"
+        | "TLS-v1.2" | "SLH-DSA" | "LMS" | "XECDH" => vec![],
+        _ if a.starts_with("ACVP-AES-")
+            || a.starts_with("HMAC-SHA2-")
+            || a.starts_with("HMAC-SHA3-")
             || a.starts_with("cSHAKE-")
             || a.starts_with("KMAC-")
-            || a.starts_with("TupleHash-")
-            || a.starts_with("HMAC-SHA3-") =>
+            || a.starts_with("TupleHash-") =>
         {
-            vec![sha3]
+            vec![]
         }
-        // The one KDF registration covers both the KMAC-based and the
-        // HMAC- and CMAC-based functions.
-        "KDF" if suite.directory.starts_with("KDF-KMAC") => vec![sha3],
-        "KDF" => [&hashes[..], &[aes]].concat(),
-        "hashDRBG" | "hmacDRBG" | "PBKDF" | "KDA" | "kdf-components"
-        | "TLS-v1.2" => hashes.to_vec(),
-        "RSA" | "KTS-IFC" => [&[rsa][..], &hashes].concat(),
-        "ECDSA" | "DetECDSA" => [&curves[..], &[sha256, sha512, sha3]].concat(),
-        "SLH-DSA" => vec![sha256, sha512, sha3],
-        "LMS" => vec![sha256, sha3],
-        // X25519 and X448 have no kernel to choose.
-        "XECDH" => vec![],
         _ => {
             return Err(Error::new(format!(
                 "{}: no types known for {a}",
@@ -119,6 +115,20 @@ pub fn built_from(suite: &Suite) -> Result<Vec<Built>, Error> {
         }
     };
     Ok(types)
+}
+
+/// Which of `types`, the suite's from [`kernels_tested`], `group`
+/// tests: its curve's for ECDSA, the suite's one type otherwise, and
+/// none for a suite without one or a curve the library lacks.
+fn tested(types: &[Built], group: &Value) -> Option<usize> {
+    match types {
+        [] => None,
+        [_] => Some(0),
+        _ => {
+            let curve = group["curve"].as_str()?;
+            types.iter().position(|(name, _)| *name == curve)
+        }
+    }
 }
 
 /// The row each of `types` takes under `profile`: the index of the
@@ -137,16 +147,21 @@ pub fn rows(types: &[Built], profile: Features) -> Vec<usize> {
         .collect()
 }
 
-/// The rows `types` took, each as the type's name and the feature set
-/// of its row: what the report says a suite-profile pair ran under.
-fn describe(types: &[Built], rows: &[usize]) -> String {
+/// The rows of `types` that `fresh` marks, each as the type's name
+/// and the feature set of its row: the kernels a suite is answered
+/// for under a profile.
+fn describe(types: &[Built], rows: &[usize], fresh: &[bool]) -> String {
     let taken: Vec<String> = types
         .iter()
         .zip(rows)
-        .map(|((name, profiles), &row)| format!("{name} {}", profiles()[row]))
+        .zip(fresh)
+        .filter(|(_, fresh)| **fresh)
+        .map(|(((name, profiles), &row), _)| {
+            format!("{name} {}", profiles()[row])
+        })
         .collect();
     if taken.is_empty() {
-        "no kernel to choose".into()
+        "no kernel of its own".into()
     } else {
         taken.join(", ")
     }
@@ -174,6 +189,8 @@ pub struct Unit {
 /// hypertree, `d` layers of 2^(h/d) leaves each of `len` chains of
 /// fifteen hashes, plus the FORS tree, `k` trees of 2^a leaves; ten
 /// thousand of those hashes measured as one ordinary case.
+///
+/// LMS is weighed by [`lms_weight`], where the units are made.
 fn weight(group: &Value, case: Option<&Value>, cases: usize) -> u64 {
     let Some(case) = case else {
         return cases as u64;
@@ -198,9 +215,47 @@ fn weight(group: &Value, case: Option<&Value>, cases: usize) -> u64 {
     (hashes / 10_000).max(1)
 }
 
+/// The height of an LMS group's tree and the hashes one of its
+/// leaves costs: an LM-OTS public key is `p` chains of `2^w - 1`
+/// hashes, `p` from RFC 8554 table 1 and SP 800-208 for the hash
+/// width `n` and the Winternitz width `w`. `None` for a group whose
+/// names are not of that form.
+fn lms_leaf(group: &Value) -> Option<(u32, u64)> {
+    let h: u32 = group["lmsMode"]
+        .as_str()?
+        .rsplit_once("_H")?
+        .1
+        .parse()
+        .ok()?;
+    let (ots, w) = group["lmOtsMode"].as_str()?.rsplit_once("_W")?;
+    let wide = ots.ends_with("_N32");
+    let (p, chain): (u64, u64) = match (w, wide) {
+        ("1", true) => (265, 1),
+        ("2", true) => (133, 3),
+        ("4", true) => (67, 15),
+        ("8", true) => (34, 255),
+        ("1", false) => (200, 1),
+        ("2", false) => (101, 3),
+        ("4", false) => (51, 15),
+        ("8", false) => (26, 255),
+        _ => return None,
+    };
+    (h < 40).then_some((h, p * chain))
+}
+
+/// The expected cost of an LMS unit that computes `leaves(h)` leaves
+/// of a tree of height `h`, on the scale of [`weight`]: key
+/// generation computes all `2^h`, and a signature about `h/2` more.
+fn lms_weight(group: &Value, leaves: impl Fn(u32) -> u64) -> Option<u64> {
+    let (h, hashes) = lms_leaf(group)?;
+    Some((leaves(h) * hashes / 10_000).max(1))
+}
+
 /// Every unit of `docs`, which are the suites' vendored documents in
 /// registry order, in a fixed order: a unit per group, except that the
-/// large-data groups and SLH-DSA signing give a unit per case.
+/// large-data groups, SLH-DSA signing and LMS key generation give a
+/// unit per case. An LMS signing group stays whole, since its cases
+/// share the one key the group generates.
 pub fn units(docs: &[Option<Value>]) -> Vec<Unit> {
     let mut out = Vec::new();
     for (suite, doc) in docs.iter().enumerate() {
@@ -211,9 +266,19 @@ pub fn units(docs: &[Option<Value>]) -> Vec<Unit> {
         };
         let s = &SUITES[suite];
         let signing = s.algorithm == "SLH-DSA" && s.mode == Some("sigGen");
+        let lms = |mode| s.algorithm == "LMS" && s.mode == Some(mode);
         for (group, g) in groups.iter().enumerate() {
             let cases = g["tests"].as_array().map_or(0, Vec::len);
-            if (g["testType"] == "LDT" || signing) && cases > 0 {
+            let tree =
+                lms("keyGen").then(|| lms_weight(g, |h| 1 << h)).flatten();
+            if let Some(weight) = tree.filter(|_| cases > 0) {
+                out.extend((0..cases).map(|case| Unit {
+                    suite,
+                    group,
+                    case: Some(case),
+                    weight,
+                }));
+            } else if (g["testType"] == "LDT" || signing) && cases > 0 {
                 for case in 0..cases {
                     out.push(Unit {
                         suite,
@@ -223,11 +288,19 @@ pub fn units(docs: &[Option<Value>]) -> Vec<Unit> {
                     });
                 }
             } else {
+                let signed = cases as u64;
+                let whole = lms("sigGen")
+                    .then(|| {
+                        lms_weight(g, |h| {
+                            (1 << h) + signed * u64::from(h / 2 + 2)
+                        })
+                    })
+                    .flatten();
                 out.push(Unit {
                     suite,
                     group,
                     case: None,
-                    weight: weight(g, None, cases),
+                    weight: whole.unwrap_or_else(|| weight(g, None, cases)),
                 });
             }
         }
@@ -256,6 +329,60 @@ pub fn answer_unit(
         return Ok(None);
     }
     compare(suite, doc, &answered).map(Some)
+}
+
+/// The work of a whole run: each unit paired with the index of every
+/// profile it is answered under, in walking order, and the count of
+/// suite-profile pairs that have any. A unit that tests a type's
+/// kernels is answered under each profile where that type takes a
+/// row it has not yet taken, so once per kernel; a unit that tests
+/// none is answered under the first profile only. `types` is each
+/// suite's from [`kernels_tested`]. Prints what each pair is run for.
+fn plan(
+    profiles: &[Features],
+    docs: &[Option<Value>],
+    types: &[Vec<Built>],
+    all: &[Unit],
+) -> (Vec<(usize, Unit)>, usize) {
+    let mut seen: Vec<Vec<HashSet<usize>>> = types
+        .iter()
+        .map(|t| t.iter().map(|_| HashSet::new()).collect())
+        .collect();
+    let mut work: Vec<(usize, Unit)> = Vec::new();
+    let mut pairs = 0;
+    for (p, &profile) in profiles.iter().enumerate() {
+        for (s, suite) in SUITES.iter().enumerate() {
+            let Some(doc) = &docs[s] else {
+                continue;
+            };
+            let taken = rows(&types[s], profile);
+            let fresh: Vec<bool> = taken
+                .iter()
+                .enumerate()
+                .map(|(t, &row)| seen[s][t].insert(row))
+                .collect();
+            let before = work.len();
+            for unit in all.iter().filter(|u| u.suite == s) {
+                let group = &doc["testGroups"][unit.group];
+                let due = match tested(&types[s], group) {
+                    Some(t) => fresh[t],
+                    None => p == 0,
+                };
+                if due {
+                    work.push((p, *unit));
+                }
+            }
+            if work.len() > before {
+                pairs += 1;
+                println!(
+                    "profile {profile}: {}: {}",
+                    suite.directory,
+                    describe(&types[s], &taken, &fresh)
+                );
+            }
+        }
+    }
+    (work, pairs)
 }
 
 /// Splits `work` over `shards` and returns shard `index`'s part,
@@ -310,8 +437,8 @@ pub struct Report {
     pub detected: usize,
     /// Units this shard ran, of the units the run has.
     pub units: (usize, usize),
-    /// Suite-profile pairs run, of the pairs there would be were every
-    /// suite run under every profile.
+    /// Suite-profile pairs with anything to run, of the pairs there
+    /// would be were every suite run under every profile.
     pub pairs: (usize, usize),
     pub shard: (usize, usize),
 }
@@ -350,36 +477,13 @@ pub fn run() -> Result<Report, Error> {
     }
 
     let docs: Vec<Option<Value>> = SUITES.iter().map(vendored).collect();
-    let types: Vec<Vec<Built>> =
-        SUITES.iter().map(built_from).collect::<Result<_, _>>()?;
+    let types: Vec<Vec<Built>> = SUITES
+        .iter()
+        .map(kernels_tested)
+        .collect::<Result<_, _>>()?;
     let all = units(&docs);
-
-    // Which suites run under which profile: each only where the tuple
-    // of kernels its types take is new.
-    let mut seen: Vec<HashSet<Vec<usize>>> =
-        SUITES.iter().map(|_| HashSet::new()).collect();
-    let mut work: Vec<(usize, Unit)> = Vec::new();
-    let mut pairs = 0;
-    let mut possible = 0;
-    for (p, &profile) in profiles.iter().enumerate() {
-        for (s, suite) in SUITES.iter().enumerate() {
-            if docs[s].is_none() {
-                continue;
-            }
-            possible += 1;
-            let kernels = rows(&types[s], profile);
-            if !seen[s].insert(kernels.clone()) {
-                continue;
-            }
-            pairs += 1;
-            println!(
-                "profile {profile}: {}: {}",
-                suite.directory,
-                describe(&types[s], &kernels)
-            );
-            work.extend(all.iter().filter(|u| u.suite == s).map(|u| (p, *u)));
-        }
-    }
+    let possible = profiles.len() * docs.iter().flatten().count();
+    let (work, pairs) = plan(&profiles, &docs, &types, &all);
     let (mine, loads) = split(&work, shards, index);
     println!(
         "shard {index}/{shards}: weight {} of {}",
@@ -510,10 +614,10 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn every_suite_is_built_from_listed_types() {
+    fn every_tested_type_is_walked() {
         let candidates = candidates();
         for suite in SUITES {
-            let types = built_from(suite)
+            let types = kernels_tested(suite)
                 .unwrap_or_else(|e| panic!("{}: {e}", suite.directory));
             for (_, profiles) in types {
                 for p in profiles() {
@@ -548,8 +652,116 @@ mod tests {
         assert_eq!(rows(&types, isolated), [0, 0]);
         assert_eq!(rows(&types, Features::new()), [1, 0]);
         assert_eq!(rows(&[], isolated), Vec::<usize>::new());
-        assert_eq!(describe(&types, &[1, 0]), "a none, b none");
-        assert_eq!(describe(&[], &[]), "no kernel to choose");
+        let both = [true, true];
+        assert_eq!(describe(&types, &[1, 0], &both), "a none, b none");
+        assert_eq!(describe(&types, &[1, 0], &[false, true]), "b none");
+        assert_eq!(describe(&types, &[1, 0], &[false; 2]), NONE);
+        assert_eq!(describe(&[], &[], &[]), NONE);
+    }
+
+    const NONE: &str = "no kernel of its own";
+
+    /// The registry index of the suite of `algorithm` and `mode`.
+    fn suite_of(algorithm: &str, mode: Option<&str>) -> usize {
+        SUITES
+            .iter()
+            .position(|s| s.algorithm == algorithm && s.mode == mode)
+            .expect("registered")
+    }
+
+    #[test]
+    fn a_group_tests_its_curve_and_other_suites_their_one_type() {
+        let types = |a, m| kernels_tested(&SUITES[suite_of(a, m)]).unwrap();
+        let curves = types("ECDSA", Some("sigGen"));
+        let on = |curve: &str| tested(&curves, &json!({"curve": curve}));
+        assert_eq!(on("P-256"), Some(0));
+        assert_eq!(on("P-384"), Some(1));
+        assert_eq!(on("P-521"), Some(2));
+        assert_eq!(on("P-224"), None);
+        assert_eq!(tested(&curves, &json!({})), None);
+        assert_eq!(tested(&types("SHA2-256", None), &json!({})), Some(0));
+        assert_eq!(tested(&types("LMS", Some("keyGen")), &json!({})), None);
+    }
+
+    #[test]
+    fn each_unit_is_planned_once_per_kernel_it_tests() {
+        let ecdsa = suite_of("ECDSA", Some("sigGen"));
+        let sha = suite_of("SHA2-256", None);
+        let lms = suite_of("LMS", Some("sigVer"));
+        let mut docs: Vec<Option<Value>> =
+            SUITES.iter().map(|_| None).collect();
+        let group = |curve: &str| json!({"curve": curve, "tests": [{}]});
+        docs[ecdsa] = Some(json!({"testGroups": [
+            group("P-256"), group("P-384"), group("P-224"), group("P-521"),
+        ]}));
+        docs[sha] = Some(json!({"testGroups": [{"tests": [{}, {}]}]}));
+        docs[lms] = Some(json!({"testGroups": [{"tests": [{}]}]}));
+        let types: Vec<Vec<Built>> =
+            SUITES.iter().map(|s| kernels_tested(s).unwrap()).collect();
+        let profiles = candidates();
+        let all = units(&docs);
+        assert_eq!(all.len(), 6);
+        let (work, pairs) = plan(&profiles, &docs, &types, &all);
+        assert!(pairs >= 3);
+        for unit in &all {
+            let under: Vec<usize> = work
+                .iter()
+                .filter(|(_, u)| u == unit)
+                .map(|(p, _)| *p)
+                .collect();
+            let doc = docs[unit.suite].as_ref().unwrap();
+            let group = &doc["testGroups"][unit.group];
+            let Some(t) = tested(&types[unit.suite], group) else {
+                assert_eq!(under, [0], "{unit:?}");
+                continue;
+            };
+            // The rows the type takes where the unit is answered:
+            // no row twice, and every row any profile reaches.
+            let row = |p: usize| rows(&types[unit.suite], profiles[p])[t];
+            let answered: Vec<usize> = under.iter().map(|&p| row(p)).collect();
+            let unique: HashSet<usize> = answered.iter().copied().collect();
+            assert_eq!(unique.len(), answered.len(), "{unit:?}");
+            let reached: HashSet<usize> =
+                (0..profiles.len()).map(row).collect();
+            assert_eq!(unique, reached, "{unit:?}");
+        }
+    }
+
+    #[test]
+    fn lms_units_weigh_their_trees() {
+        let set = |lms: &str, ots: &str, cases: usize| {
+            json!({
+                "lmsMode": lms,
+                "lmOtsMode": ots,
+                "tests": vec![json!({}); cases],
+            })
+        };
+        let small = set("LMS_SHA256_M24_H10", "LMOTS_SHA256_N24_W2", 10);
+        assert_eq!(lms_leaf(&small), Some((10, 303)));
+        let tall = set("LMS_SHAKE_M32_H15", "LMOTS_SHAKE_N32_W8", 3);
+        assert_eq!(lms_leaf(&tall), Some((15, 34 * 255)));
+        assert_eq!(lms_leaf(&json!({"lmsMode": "LMS_SHA256_M24"})), None);
+
+        let mut docs: Vec<Option<Value>> =
+            SUITES.iter().map(|_| None).collect();
+        let key_gen = suite_of("LMS", Some("keyGen"));
+        let sig_gen = suite_of("LMS", Some("sigGen"));
+        let sig_ver = suite_of("LMS", Some("sigVer"));
+        for s in [key_gen, sig_gen, sig_ver] {
+            docs[s] = Some(json!({"testGroups": [small.clone()]}));
+        }
+        let got = units(&docs);
+        let of = |s| got.iter().filter(move |u| u.suite == s);
+        // A tree of 1024 leaves of 303 hashes, a case each.
+        assert_eq!(of(key_gen).count(), 10);
+        assert!(of(key_gen).all(|u| u.case.is_some() && u.weight == 31));
+        // The group whole: its tree and ten signatures of 7 leaves.
+        let whole: Vec<_> = of(sig_gen).collect();
+        assert_eq!(whole.len(), 1);
+        assert_eq!((whole[0].case, whole[0].weight), (None, 33));
+        // Verifying is an ordinary case.
+        let verified: Vec<_> = of(sig_ver).collect();
+        assert_eq!((verified[0].case, verified[0].weight), (None, 10));
     }
 
     #[test]

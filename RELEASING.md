@@ -99,9 +99,10 @@ The checks are CI's, every job of `ci.yml`, run on the release
 branch's pull request with the versions bumped and the report of step
 5 written, so that one push carries the whole release and CI runs
 once. They pass when every job passes on that commit. `ci.yml` is the
-list: the style job, every crate's tests on every native, emulated,
-32-bit and wasm32 job, the run with nothing in force, the bare-metal
-builds, clippy, the docs, rustls and webpki on the shim, rustls and
+list: the style job, every crate's tests and the vendored vectors
+on the native, RISC-V and 32-bit jobs, the dispatch checks on the
+emulated processors, the wasm32 and bare-metal builds, clippy, the
+docs, rustls and webpki on the shim, rustls and
 BoGo on the provider, the provider against OpenSSL, and the crates
 packaged and built as they will be published. The README's ACVP case
 count is checked from the same run: the x86-64 vendored shards print

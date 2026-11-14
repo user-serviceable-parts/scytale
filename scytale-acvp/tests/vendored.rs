@@ -1,6 +1,7 @@
-//! `cargo test -p scytale-acvp`: the check against the vendored
-//! vectors, every suite in full under every kernel this processor can
-//! run, each once; see `scytale_acvp::vendored`. A binary of its own,
+//! `cargo test -p scytale-acvp --test vendored`: the check against
+//! the vendored vectors, every suite in full and every kernel this
+//! processor can run answering the vectors that test it, each exactly
+//! once; see `scytale_acvp::vendored`. A binary of its own,
 //! without the harness: the run edits the process-wide set of
 //! features, so nothing may run beside it, and its report is for
 //! reading.

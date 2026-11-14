@@ -169,6 +169,55 @@ mod sig {
     }
 }
 
+/// The suites above run once, under the kernels the processor picks,
+/// and the kernels below those answer the ACVP vectors that test
+/// them, from `scytale-acvp`. Poly1305 has no ACVP suite, so its
+/// other kernels answer Wycheproof's cases here, each once.
+///
+/// This changes the set in force for the whole process, so it is
+/// ignored by default and run on its own, single-threaded, as
+/// `features::tests::alone` is:
+///
+/// ```text
+/// cargo test --lib vectors::alone -- --ignored --test-threads=1
+/// ```
+mod alone {
+    use super::support;
+    use crate::features;
+    use crate::mac::poly1305::Poly1305;
+
+    /// Puts the hardware back in force when dropped, so a failed
+    /// assertion does not leave the next test a narrowed set.
+    struct Restore;
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            features::reset();
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn chacha20_poly1305_under_every_other_poly1305_kernel() {
+        let _restore = Restore;
+        let rows = Poly1305::profiles();
+        let row = |set| {
+            rows.iter()
+                .position(|p| p.is_subset(set))
+                .expect("every list ends empty")
+        };
+        // The row the plain test above ran under.
+        let picked = row(features::get());
+        for (i, &profile) in rows.iter().enumerate() {
+            if i == picked || features::set(profile).is_err() {
+                continue;
+            }
+            assert_eq!(row(profile), i, "{profile} selects its own row");
+            support::wycheproof::chacha20_poly1305::run();
+        }
+    }
+}
+
 /// Every implementation this build holds, whether this processor
 /// can run it, and whether that is the right answer.
 ///
