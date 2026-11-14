@@ -155,13 +155,7 @@ jobs:
         include:
           - arch: x86-64
             runner: ubuntu-latest
-            shard: 1/3
-          - arch: x86-64
-            runner: ubuntu-latest
-            shard: 2/3
-          - arch: x86-64
-            runner: ubuntu-latest
-            shard: 3/3
+            shard: 1/1
           - arch: arm64
             runner: ubuntu-24.04-arm
             shard: 1/1
@@ -213,7 +207,10 @@ jobs:
   # Under emulation that is too long for one job, so the run is
   # spread over the shards listed here, each taking an equal share by
   # weight; the count is the one number in the list. Each log says
-  # the weight it took of the whole.
+  # the weight it took of the whole. More shards than these would not
+  # finish sooner: the tallest LMS tree is one case of some
+  # twenty-five minutes on one core, and a shard is done no earlier
+  # than its longest case.
   #
   # The container is for its QEMU, as below. The arm64 runners are
   # an experiment: on the x86-64 pool two or three shards a run took
@@ -227,22 +224,12 @@ jobs:
       fail-fast: false
       matrix:
         shard:
-          - 1/16
-          - 2/16
-          - 3/16
-          - 4/16
-          - 5/16
-          - 6/16
-          - 7/16
-          - 8/16
-          - 9/16
-          - 10/16
-          - 11/16
-          - 12/16
-          - 13/16
-          - 14/16
-          - 15/16
-          - 16/16
+          - 1/6
+          - 2/6
+          - 3/6
+          - 4/6
+          - 5/6
+          - 6/6
     steps:
       - uses: actions/checkout@v7
 

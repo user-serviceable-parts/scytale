@@ -54,7 +54,9 @@ pub fn kernels_tested(suite: &Suite) -> Result<Vec<Built>, Error> {
     let a = suite.algorithm;
     let types: Vec<Built> = match a {
         "ACVP-AES-ECB" => vec![("Aes128", Aes128::profiles)],
-        "ACVP-AES-CBC" => {
+        // CMAC's chaining loops are the CBC kernels' own, chosen by
+        // the same rows, and no other suite runs them.
+        "ACVP-AES-CBC" | "CMAC-AES" => {
             vec![("Cbc", <Cbc<Aes128> as Dispatcher>::profiles)]
         }
         "ACVP-AES-CTR" => {
@@ -95,9 +97,9 @@ pub fn kernels_tested(suite: &Suite) -> Result<Vec<Built>, Error> {
         }
         // Built on kernels the suites above test, with none of their
         // own.
-        "CMAC-AES" | "ctrDRBG" | "EDDSA" | "ML-KEM" | "ML-DSA" | "KDF"
-        | "hashDRBG" | "hmacDRBG" | "PBKDF" | "KDA" | "kdf-components"
-        | "TLS-v1.2" | "SLH-DSA" | "LMS" | "XECDH" => vec![],
+        "ctrDRBG" | "EDDSA" | "ML-KEM" | "ML-DSA" | "KDF" | "hashDRBG"
+        | "hmacDRBG" | "PBKDF" | "KDA" | "kdf-components" | "TLS-v1.2"
+        | "SLH-DSA" | "LMS" | "XECDH" => vec![],
         _ if a.starts_with("ACVP-AES-")
             || a.starts_with("HMAC-SHA2-")
             || a.starts_with("HMAC-SHA3-")
@@ -427,6 +429,20 @@ pub fn shard(spec: &str) -> Result<(usize, usize), Error> {
     Ok((i, n))
 }
 
+/// The seconds between two lines of progress.
+const PROGRESS: u64 = 60;
+
+/// Whether a line of progress is due at `now`, in seconds since the
+/// profile began: when [`PROGRESS`] have passed since the last, which
+/// `said` holds. One caller of those that ask at once is told yes.
+fn progress_due(said: &AtomicU64, now: u64) -> bool {
+    let last = said.load(Ordering::Relaxed);
+    now >= last + PROGRESS
+        && said
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+}
+
 /// What a run did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Report {
@@ -518,6 +534,14 @@ pub fn run() -> Result<Report, Error> {
             SUITES.iter().map(|_| AtomicUsize::new(0)).collect();
         let nanos: Vec<AtomicU64> =
             SUITES.iter().map(|_| AtomicU64::new(0)).collect();
+        // The suites report when the profile is done, which under
+        // emulation is a long silence; a line a minute says how far
+        // it has got.
+        let total: u64 = list.iter().map(|u| u.weight).sum();
+        let began = Instant::now();
+        let said = AtomicU64::new(0);
+        let finished = AtomicUsize::new(0);
+        let weighed = AtomicU64::new(0);
         let work = || {
             loop {
                 let i = next.fetch_add(1, Ordering::Relaxed);
@@ -542,6 +566,17 @@ pub fn run() -> Result<Report, Error> {
                     started.elapsed().as_nanos() as u64,
                     Ordering::Relaxed,
                 );
+                let units = finished.fetch_add(1, Ordering::Relaxed) + 1;
+                let weight = weighed.fetch_add(unit.weight, Ordering::Relaxed)
+                    + unit.weight;
+                let now = began.elapsed().as_secs();
+                if progress_due(&said, now) {
+                    println!(
+                        "profile {profile}: {units} of {} units, weight \
+                         {weight} of {total}, after {now} s",
+                        list.len()
+                    );
+                }
             }
         };
         if workers == 1 {
@@ -762,6 +797,18 @@ mod tests {
         // Verifying is an ordinary case.
         let verified: Vec<_> = of(sig_ver).collect();
         assert_eq!((verified[0].case, verified[0].weight), (None, 10));
+    }
+
+    #[test]
+    fn progress_is_due_once_an_interval() {
+        let said = AtomicU64::new(0);
+        assert!(!progress_due(&said, 0));
+        assert!(!progress_due(&said, PROGRESS - 1));
+        assert!(progress_due(&said, PROGRESS));
+        assert!(!progress_due(&said, PROGRESS + 1));
+        assert!(!progress_due(&said, 2 * PROGRESS - 1));
+        assert!(progress_due(&said, 2 * PROGRESS + 5));
+        assert!(!progress_due(&said, 3 * PROGRESS + 4));
     }
 
     #[test]

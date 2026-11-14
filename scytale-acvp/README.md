@@ -47,7 +47,8 @@ its own vectors is taken as good wherever else it is used, so a
 suite with no kernel of its own, HMAC or LMS or a KDF, is answered
 once. The work is cut into test groups and spread over the cores,
 and the report says which suites ran under which profile and for
-which kernels, and the cases compared per suite. The run edits the
+which kernels, and the cases compared per suite; while a profile is
+running, a line a minute says how far it has got. The run edits the
 process-wide set of features, so it is a binary of its own, outside
 the harness. `cargo test -p scytale-acvp` runs it after the crate's
 unit tests.
