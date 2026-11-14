@@ -25,7 +25,7 @@ This crate is not part of the rustls project, nor endorsed by it in any way.
 ```toml
 [dependencies]
 rustls = "=0.24.0-dev.2"
-rustls-scytale = "=0.10.0-dev.2"
+rustls-scytale = "=0.10.0-dev.2.1"
 ```
 
 Hand the provider to a configuration:
@@ -147,7 +147,7 @@ rustls. This table does:
 
 | rustls-scytale | rustls |
 | --- | --- |
-| 0.10.0-dev.2 | 0.24.0-dev.2, pinned exactly |
+| 0.10.0-dev.2, 0.10.0-dev.2.1 | 0.24.0-dev.2, pinned exactly |
 
 While rustls 0.24 is a development release, each rustls-scytale
 release pins one rustls development release exactly and carries its

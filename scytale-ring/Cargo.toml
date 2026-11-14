@@ -2,7 +2,7 @@
 name = "scytale-ring"
 description = "A drop-in replacement for ring 0.17, implemented with scytale: pure Rust, no C compiler, no build script"
 # Which ring API this presents is in the description and the docs.
-version = "0.10.0"
+version = "0.10.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
