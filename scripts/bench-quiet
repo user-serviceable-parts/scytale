@@ -1,10 +1,17 @@
 #!/bin/sh
-# Settles one core for scripts/bench, as root, so that the rates
-# repeat between runs as well as the cycle counts do. Everything it
-# changes is written to a state file and put back by --restore.
+# Runs scripts/bench on a settled core: settles one core as root, so
+# that the rates repeat between runs as well as the cycle counts do,
+# runs the benchmark there as the user who called sudo, and puts the
+# machine back when the run ends, however it ends. Everything it
+# changes is written to a state file first, which is what is put
+# back.
 #
-# Usage: sudo scripts/bench-quiet [--cpu N]   # settle CPU N
-#        sudo scripts/bench-quiet --restore   # put everything back
+# Usage: sudo scripts/bench-quiet [--cpu N] [bench arguments]
+#        sudo scripts/bench-quiet --restore
+#
+# The arguments are scripts/bench's: `--save NAME`, filter words and
+# the rest. --restore is for a machine left settled by a run that
+# could not put it back, one cut off by a power failure, say.
 #
 # With no --cpu, the CPU is the one scripts/bench would pin to: the
 # fastest, and the lowest numbered among equals. What is done, each
@@ -22,8 +29,9 @@
 #     opens for an unprivileged run.
 #
 # A settled machine is not the machine as it is normally used; it is
-# the same machine every time, which is the point. Restore it before
-# measuring what a user would see, and before unplugging a laptop.
+# the same machine every time, which is the point. Only the settling
+# is done as root: the build and the measuring run as the caller, so
+# what they leave in target/ and scytale/benchmarks/ is the caller's.
 
 set -eu
 cd "$(dirname "$0")/.."
@@ -37,27 +45,31 @@ die() {
 
 [ "$(id -u)" = 0 ] || die "needs root; run it with sudo"
 
+# The options that are this script's are taken out; the rest are the
+# benchmark's and are handed on as they came.
 cpu=
-restore=
-while [ $# -gt 0 ]; do
-    case $1 in
+only_restore=
+n=$#
+while [ "$n" -gt 0 ]; do
+    arg=$1
+    shift
+    n=$((n - 1))
+    case $arg in
         --cpu)
-            [ $# -ge 2 ] || die "--cpu wants a CPU number"
-            cpu=$2
-            shift 2
-            ;;
-        --restore)
-            restore=yes
+            [ "$n" -ge 1 ] || die "--cpu wants a CPU number"
+            cpu=$1
             shift
+            n=$((n - 1))
             ;;
-        *) die "unknown argument: $1" ;;
+        --restore) only_restore=yes ;;
+        *) set -- "$@" "$arg" ;;
     esac
 done
 
 # Each line of the state file is a path and the value it held, so
 # restoring is writing the lines back, last change first.
-if [ -n "$restore" ]; then
-    [ -f "$state" ] || die "nothing to restore: no $state"
+restore() {
+    [ -f "$state" ] || return 0
     sed '1!G;h;$!d' "$state" | while read -r path value; do
         if ! echo "$value" > "$path" 2> /dev/null; then
             echo "bench-quiet: could not restore $path to $value" >&2
@@ -65,8 +77,30 @@ if [ -n "$restore" ]; then
     done
     rm -f "$state"
     echo "bench-quiet: restored" >&2
+}
+
+if [ -n "$only_restore" ]; then
+    [ -f "$state" ] || die "nothing to restore: no $state"
+    restore
     exit
 fi
+
+# The benchmark runs as whoever called sudo, with that user's
+# toolchain, which root's PATH does not hold.
+user=${SUDO_USER:-}
+[ -n "$user" ] && [ "$user" != root ] ||
+    die "run it with sudo from your own account, not as root"
+home=$(getent passwd "$user" | cut -d: -f6)
+[ -d "$home" ] || die "no home directory for $user"
+# By setpriv and not `sudo -u`, which opens a login session for the
+# user: on an encrypted home that prints a complaint about the
+# keyring at every call, and nothing here needs a session.
+group=$(id -g "$user")
+as_user() {
+    setpriv --reuid "$user" --regid "$group" --init-groups \
+        env "HOME=$home" "USER=$user" "LOGNAME=$user" \
+        "PATH=$home/.cargo/bin:$PATH" "$@"
+}
 
 [ -f "$state" ] && die "already settled; --restore first"
 
@@ -102,8 +136,13 @@ fastest_cpu() {
 [ -n "$cpu" ] || cpu=$(fastest_cpu)
 cpu_sys=/sys/devices/system/cpu/cpu$cpu
 [ -d "$cpu_sys" ] || die "no CPU $cpu"
-mkdir -p "$(dirname "$state")"
+# Made by the caller, so that the build can write to it afterwards.
+as_user mkdir -p "$(dirname "$state")"
 : > "$state"
+# From here on the machine is put back whenever the script ends: at
+# the end of the run, on a failure, and on an interrupt.
+trap restore EXIT
+trap 'exit 130' INT TERM
 
 set_value /sys/devices/system/cpu/intel_pstate/no_turbo 1
 set_value /sys/devices/system/cpu/cpufreq/boost 0
@@ -137,5 +176,6 @@ fi
 
 set_value /proc/sys/kernel/perf_event_paranoid 2
 
-echo "bench-quiet: CPU $cpu settled; scripts/bench --cpu $cpu measures" \
-    "it, and scripts/bench-quiet --restore puts the machine back" >&2
+echo "bench-quiet: CPU $cpu settled; measuring as $user" >&2
+# Not exec: the trap has the machine to put back afterwards.
+as_user scripts/bench --cpu "$cpu" "$@"

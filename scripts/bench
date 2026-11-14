@@ -27,7 +27,8 @@
 # and not wherever the scheduler put each row, and the header of a
 # saved file records what else the machine was doing: the governor and
 # turbo, how busy the core's other thread was, power, load and
-# throttling. scripts/bench-quiet, as root, settles those.
+# throttling. scripts/bench-quiet, under sudo, settles those, runs
+# this and puts the machine back.
 
 set -eu
 cd "$(dirname "$0")/.."

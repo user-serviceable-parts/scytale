@@ -563,16 +563,36 @@ which is what it is for.
 
 Every construction, every implementation of each, and the key
 agreement, signature and post-quantum operations can be measured.
-The benchmark ships with the library, and runs from a checkout of
-the [repository][repo]:
+The benchmark ships with the crate, so it runs on your own machine,
+from the crate's directory:
 
 ```sh
-taskset -c 0 scripts/bench
+cargo test --release --lib -- --ignored --nocapture --exact bench::speed
 ```
 
-The pin matters on a hybrid processor: unpinned, a row records which
-core the scheduler picked rather than how fast the code is. On a
-laptop running on battery, expect about half the speed.
+Its options go in `SCYTALE_BENCH`: words that pick rows by name,
+`--seconds N` for the time spent on each measurement, `--json PATH`
+to keep every figure, and `--help` for the rest. The GCM rows at a
+quarter of a second each:
+
+```sh
+SCYTALE_BENCH="gcm --seconds 0.25" cargo test --release --lib -- \
+    --ignored --nocapture --exact bench::speed
+```
+
+Put `taskset -c 0` in front to pin the run to one core. The pin
+matters on a hybrid processor: unpinned, a row records which core
+the scheduler picked rather than how fast the code is. On a laptop
+running on battery, expect about half the speed.
+
+From a checkout of the [repository][repo], `scripts/bench` is the
+same run with the pinning done, and `sudo scripts/bench-quiet --save
+NAME` runs it on a settled core and keeps the result.
+
+Benchmark results ship with the crate, in [`benchmarks/`][bench],
+one file per machine.
+
+[bench]: https://github.com/user-serviceable-parts/scytale/tree/main/scytale/benchmarks
 
 ## How it is tested
 

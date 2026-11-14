@@ -123,8 +123,7 @@ Then the two runs that only a release does, on the same commit. The
 benchmarks, a full pass on the reference machine, settled first:
 
 ```sh
-sudo scripts/bench-quiet
-scripts/bench --save i7-1355u
+sudo scripts/bench-quiet --save i7-1355u
 ```
 
 and a real session on NIST's demo server, every suite once, from a
