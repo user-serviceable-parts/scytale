@@ -75,7 +75,7 @@ scripts/test-ring-downstream   # rustls and rustls-webpki on scytale-ring
 scripts/test-rustls-downstream # rustls's tests and BoGo on rustls-scytale
 scripts/test-openssl-interop   # every rustls-scytale suite against OpenSSL
 scripts/bench                  # measures rather than checks
-scripts/bench-quiet            # settles a core first, as root
+sudo scripts/bench-quiet       # the same on a settled core
 ```
 
 In the library's own test build, `SCYTALE_FEATURES` names the set of
