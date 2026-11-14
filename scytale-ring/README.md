@@ -25,8 +25,10 @@ different implementation:
   per processor.
 - **Testing.** scytale is checked against the NIST ACVP sample
   vectors, run offline, and Project Wycheproof, more than 88,000
-  cases, on every implementation of every primitive, on x86-64, ARM64
-  and RISC-V hardware and on eleven emulated processors. This crate
+  cases, every implementation of every primitive answering the
+  vectors that test it, on x86-64 and ARM64 hardware and under
+  emulation for RISC-V, with the choice of implementation checked on
+  twelve emulated processors. This crate
   then runs ring's own test suite and the test suites of rustls and
   rustls-webpki on top.
 - **A second implementation.** Two independent implementations of one

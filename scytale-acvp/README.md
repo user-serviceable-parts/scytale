@@ -31,19 +31,26 @@ a sample file. They cover both hashes at both lengths, and are
 answered offline like any other suite.
 
 ```sh
-cargo test -p scytale-acvp
+cargo test -p scytale-acvp --test vendored
 ```
 
 answers every suite in full, the large-data groups and every SLH-DSA
-signature included, under every kernel this processor can run, each
-once. A kernel is reached through the feature profiles the library's
-types publish, and a suite is answered under a profile only when the
-profile changes a kernel the suite is built from, so SHA-2 on x86-64
-runs twice, SHA-NI and portable, and not once per profile. The work
-is cut into test groups and spread over the cores, and the report
-says which suites ran under which profile and why, and the cases
-compared per suite. The run edits the process-wide set of features,
-so it is a binary of its own, outside the harness.
+signature included, and has every kernel this processor can run
+answer the vectors that test it, each exactly once. A kernel is
+reached through the feature profiles the library's types publish. A
+vector tests the kernels of one type: a hash suite the hash's,
+AES-ECB the cipher's, a mode's suite the mode's, an ECDSA group its
+curve's, the RSA suites RSA's. It is answered under a profile only
+when that type takes a kernel there it has not yet taken, so SHA-2
+on x86-64 runs twice, SHA-NI and portable. A kernel that has passed
+its own vectors is taken as good wherever else it is used, so a
+suite with no kernel of its own, HMAC or LMS or a KDF, is answered
+once. The work is cut into test groups and spread over the cores,
+and the report says which suites ran under which profile and for
+which kernels, and the cases compared per suite. The run edits the
+process-wide set of features, so it is a binary of its own, outside
+the harness. `cargo test -p scytale-acvp` runs it after the crate's
+unit tests.
 
 `SCYTALE_SHARD=i/n` runs the i-th of n shares, equal by expected
 cost, which is how CI spreads the run over jobs.

@@ -81,8 +81,8 @@ scripts/bench-quiet            # settles a core first, as root
 In the library's own test build, `SCYTALE_FEATURES` names the set of
 features in force, so `SCYTALE_FEATURES=none cargo test -p scytale
 --lib` runs the suite with the hardware withheld: the portable kernels
-and every fallback, through the public types. CI does this on every
-host it tests on.
+and every fallback, through the public types. It is for a developer
+after one kernel; CI tests each kernel once, as said below.
 
 Each crate's README says what it is tested against. The Wycheproof
 and HPKE vectors are in `scytale/tests/vectors`, the ACVP vectors in
@@ -100,12 +100,17 @@ rustls-webpki at pinned releases and run their own test suites
 against these crates; the rustls one needs Go, a C compiler and `cpp`
 for BoGo. `scripts/test-openssl-interop` needs OpenSSL 3.
 
-Continuous integration covers the same ground on every push: every
-crate's tests natively on x86-64 and arm64 runners and on 32-bit x86
-and WebAssembly, the library's under qemu as older and newer
-processors of each architecture, riscv64 among them, the library
-built for targets with no operating system, the style checks, the
-downstream suites, the interop, and the packaging of every crate.
+Continuous integration covers the same ground on every push, and
+tests each kernel exactly once: every crate's tests and the vendored
+vectors natively on x86-64 and arm64 runners, under qemu's `max`
+processor for riscv64, and on 32-bit x86. A vector is answered by
+each kernel it tests and by no kernel twice. Older and newer
+processors of each architecture, the RVA22 and RVA23 profiles among
+them, are emulated for a dispatch check only: that the probes choose
+the right kernels there and that those kernels run. Then the library
+built for WebAssembly and for targets with no operating system, the
+style checks, the downstream suites, the interop, and the packaging
+of every crate.
 
 ## Security
 

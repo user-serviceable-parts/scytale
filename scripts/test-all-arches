@@ -1,5 +1,5 @@
 #!/bin/sh
-# Runs every crate's tests for each architecture. The host runs
+# Runs every crate's tests for each architecture, once. The host runs
 # natively and runs everything, the check against the vendored
 # vectors included; the others run with `cross`, which builds in a
 # container holding the cross linker, the target's libc and qemu, and
@@ -31,7 +31,9 @@ export QEMU_CPU
 # emulated processor would add nothing there. The vector length is the
 # exception: it is a property of the silicon rather than of a bit set,
 # the vector code sizes itself to whatever it finds, and `max` is 128
-# bits. So the fast tests run again at the other widths.
+# bits. So the dispatch check, the inventory and the tests that
+# compare each kernel with the portable code, runs at the other
+# widths; the suite itself runs once, at 128.
 RISCV_CONFIGS="
 max,vlen=256
 max,vlen=512
@@ -63,7 +65,8 @@ run_target() {
     echo "==> $target"
     if [ "$target" = "$host" ]; then
         cargo test --release --workspace
-        cargo test --release -p scytale --lib features::tests::alone -- \
+        cargo test --release -p scytale --lib -- \
+            features::tests::alone vectors::alone \
             --ignored --test-threads=1
         return
     fi
@@ -90,14 +93,15 @@ run_target() {
         export SCYTALE_EXPECT_ALL=1
     fi
     cross test --workspace --exclude scytale-acvp --target "$target"
-    cross test -p scytale --lib --target "$target" \
-        features::tests::alone -- --ignored --test-threads=1
+    cross test -p scytale --lib --target "$target" -- \
+        features::tests::alone vectors::alone \
+        --ignored --test-threads=1
     if [ "$target" = riscv64gc-unknown-linux-gnu ] \
         && [ -z "$QEMU_SWEEP" ]; then
         for cpu in $RISCV_CONFIGS; do
             echo "==> $target QEMU_CPU=$cpu"
-            QEMU_CPU=$cpu cross test --workspace --exclude scytale-acvp \
-                --target "$target"
+            QEMU_CPU=$cpu cross test -p scytale --lib \
+                --target "$target" -- vectors::inventory agree
         done
         unset SCYTALE_CPU_FEATURES
     fi

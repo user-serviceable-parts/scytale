@@ -674,11 +674,11 @@ fn baseline() -> Features {
 }
 
 /// In the library's own test build, `SCYTALE_FEATURES` names the
-/// baseline instead when it is set. One more run of the suite under
-/// `none` then takes the portable kernels and every fallback through
-/// the public types on a machine that has the hardware, which no
-/// test of the kernels one by one does. Read once; a set the
-/// processor cannot honour fails the run as [`set`] would refuse it.
+/// baseline instead when it is set. A run of the suite under `none`
+/// then takes the portable kernels and every fallback through the
+/// public types on a machine that has the hardware, for a developer
+/// after one of them. Read once; a set the processor cannot honour
+/// fails the run as [`set`] would refuse it.
 #[cfg(test)]
 fn baseline() -> Features {
     let kept = BASELINE.load(Ordering::Relaxed);
