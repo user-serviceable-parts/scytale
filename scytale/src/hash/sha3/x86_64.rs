@@ -372,8 +372,11 @@ pub(crate) struct Avx2(());
 impl Avx2 {
     /// The permutation, where the features in force allow it.
     pub(crate) fn probe() -> Option<Self> {
-        features::allows(super::four::KERNELS, super::four::Kernel::Avx2)
-            .then_some(Avx2(()))
+        features::allows(
+            super::together::KERNELS,
+            super::together::Kernel::Avx2,
+        )
+        .then_some(Avx2(()))
     }
 
     /// Applies the permutation to each of the four states.
