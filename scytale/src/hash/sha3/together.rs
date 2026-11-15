@@ -1,10 +1,12 @@
-//! SHAKE128 over four short messages at once.
+//! SHAKE128 over several short messages at once.
 //!
 //! One sponge cannot be hurried: each permutation waits for the one
-//! before it. Four sponges that have nothing to do with each other
-//! can share every instruction, a lane of each to a quarter of a
-//! wide register, and where the processor has such registers the
-//! four cost little more than two would apart.
+//! before it. Sponges that have nothing to do with each other can
+//! share every instruction, a lane of each to a part of a wide
+//! register: four to a 256-bit register with AVX2, at little more
+//! than two would cost apart, and two to a 128-bit one with the
+//! ARMv8.2 SHA3 instructions, which were being done to both halves
+//! of the register all along.
 //!
 //! What asks for this is a matrix whose every entry is its own
 //! SHAKE128 stream over a seed and two indices, as ML-KEM's is: the
@@ -17,12 +19,16 @@
 
 use crate::features::{self, Features};
 
-/// How the four streams are run.
+/// How the streams are run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Kernel {
-    /// Together, a lane of each in a 256-bit register.
+    /// Four together, a lane of each in a 256-bit register.
     #[cfg(target_arch = "x86_64")]
     Avx2,
+    /// Two together, a lane of each in a 128-bit register, on the
+    /// ARMv8.2 SHA3 instructions.
+    #[cfg(target_arch = "aarch64")]
+    Armv8,
     /// One after another, on whatever permutation one stream gets.
     Apart,
 }
@@ -31,6 +37,8 @@ pub(crate) enum Kernel {
 pub(crate) const KERNELS: &[(Kernel, Features)] = &[
     #[cfg(target_arch = "x86_64")]
     (Kernel::Avx2, super::x86_64::AVX2),
+    #[cfg(target_arch = "aarch64")]
+    (Kernel::Armv8, super::ARMV8),
     (Kernel::Apart, Features::new()),
 ];
 
@@ -41,43 +49,55 @@ pub(crate) const PROFILES: [Features; KERNELS.len()] =
 /// SHAKE128's rate: the bytes of output a permutation yields.
 pub(crate) const RATE: usize = 168;
 
-#[cfg(target_arch = "x86_64")]
-pub(crate) use together::Shake128x4;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) use wide::{Shake128Together, WIDTH};
 
-#[cfg(target_arch = "x86_64")]
-mod together {
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+mod wide {
     use zeroize::Zeroize;
 
     use super::super::engine::LANES;
-    use super::super::x86_64::{Avx2, Four};
     use super::RATE;
     use crate::align::At32;
 
-    /// Four SHAKE128 streams, each over its own message, squeezed a
-    /// block of each at a time.
-    pub(crate) struct Shake128x4 {
-        state: Four,
+    #[cfg(target_arch = "aarch64")]
+    use super::super::aarch64::Pair as Permutation;
+    #[cfg(target_arch = "x86_64")]
+    use super::super::x86_64::Avx2 as Permutation;
+
+    /// How many streams this architecture's kernel runs together.
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) const WIDTH: usize = 4;
+    /// How many streams this architecture's kernel runs together.
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) const WIDTH: usize = 2;
+
+    /// [`WIDTH`] SHAKE128 streams, each over its own message, squeezed
+    /// a block of each at a time.
+    pub(crate) struct Shake128Together {
+        /// `state[i][s]` is lane `i` of stream `s`.
+        state: At32<[[u64; WIDTH]; LANES]>,
         /// The permutation, which is the proof the processor can
         /// run it.
-        avx2: Avx2,
+        permutation: Permutation,
         /// Whether the block the state now holds has been read, so
         /// that the next read permutes first and the last block
         /// wanted is not followed by a permutation nobody reads.
         read: bool,
     }
 
-    impl Shake128x4 {
-        /// The four streams over `messages`, or `None` where the
+    impl Shake128Together {
+        /// The streams over `messages`, or `None` where the
         /// features in force have no kernel that runs them
         /// together.
         pub(crate) fn new<const M: usize>(
-            messages: [&[u8; M]; 4],
+            messages: [&[u8; M]; WIDTH],
         ) -> Option<Self> {
             // Shorter than a block, so the padding ends the first
             // block and there is exactly one to absorb.
             const { assert!(M < RATE) };
-            let avx2 = Avx2::probe()?;
-            let mut state: Four = At32([[0; 4]; LANES]);
+            let permutation = Permutation::probe()?;
+            let mut state = At32([[0; WIDTH]; LANES]);
             for (s, message) in messages.iter().enumerate() {
                 let mut block = [0u8; RATE];
                 block[..M].copy_from_slice(*message);
@@ -91,18 +111,18 @@ mod together {
                 }
                 block.zeroize();
             }
-            avx2.permute(&mut state);
-            Some(Shake128x4 {
+            permutation.permute(&mut state);
+            Some(Shake128Together {
                 state,
-                avx2,
+                permutation,
                 read: false,
             })
         }
 
         /// The next block of each stream.
-        pub(crate) fn squeeze(&mut self, out: &mut [[u8; RATE]; 4]) {
+        pub(crate) fn squeeze(&mut self, out: &mut [[u8; RATE]; WIDTH]) {
             if self.read {
-                self.avx2.permute(&mut self.state);
+                self.permutation.permute(&mut self.state);
             }
             self.read = true;
             for (s, block) in out.iter_mut().enumerate() {
@@ -114,7 +134,7 @@ mod together {
         }
     }
 
-    impl Drop for Shake128x4 {
+    impl Drop for Shake128Together {
         fn drop(&mut self) {
             self.state.0.zeroize();
         }
@@ -130,32 +150,33 @@ mod tests {
     /// in force meets says so.
     #[test]
     fn dispatches_by_the_list() {
-        #[cfg(target_arch = "x86_64")]
-        let built = match Shake128x4::new([&[0u8; 1]; 4]) {
-            Some(_) => Kernel::Avx2,
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        let built = match Shake128Together::new([&[0u8; 1]; WIDTH]) {
+            Some(_) => KERNELS[0].0,
             None => Kernel::Apart,
         };
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         let built = Kernel::Apart;
         features::dispatches(KERNELS, &PROFILES, built);
     }
 
-    /// Four streams together are the four apart: over messages that
-    /// differ, so that a lane in the wrong stream shows, at the
+    /// The streams together are the streams apart: over messages
+    /// that differ, so that a lane in the wrong stream shows, at the
     /// shortest and longest lengths there are and the one ML-KEM
     /// uses, and for more blocks than a matrix entry ever takes.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     #[test]
     fn together_agrees_with_apart() {
         use super::super::Shake128;
         use crate::hash::{Xof, XofReader};
 
         fn check<const M: usize>() {
-            let messages: [[u8; M]; 4] = core::array::from_fn(|s| {
+            let messages: [[u8; M]; WIDTH] = core::array::from_fn(|s| {
                 core::array::from_fn(|i| (i * 7 + s * 59 + M) as u8)
             });
-            let Some(mut four) = Shake128x4::new(messages.each_ref()) else {
-                std::eprintln!("no kernel runs four together; skipping");
+            let Some(mut wide) = Shake128Together::new(messages.each_ref())
+            else {
+                std::eprintln!("no kernel runs streams together; skipping");
                 return;
             };
             let mut readers = messages.each_ref().map(|message| {
@@ -164,8 +185,8 @@ mod tests {
                 xof.finalize_xof()
             });
             for block in 0..6 {
-                let mut together = [[0u8; RATE]; 4];
-                four.squeeze(&mut together);
+                let mut together = [[0u8; RATE]; WIDTH];
+                wide.squeeze(&mut together);
                 for (s, reader) in readers.iter_mut().enumerate() {
                     let mut apart = [0u8; RATE];
                     reader.squeeze(&mut apart);

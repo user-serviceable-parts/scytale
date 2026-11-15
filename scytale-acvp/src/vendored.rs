@@ -96,9 +96,9 @@ pub fn kernels_tested(suite: &Suite) -> Result<Vec<Built>, Error> {
         "RSA" | "KTS-IFC" => {
             vec![("RSA", <rsa::PrivateKey as Dispatcher>::profiles)]
         }
-        // The matrix is read from SHAKE-128 streams run four together
-        // or apart, which no hash suite reaches: the rows are every
-        // parameter set's alike.
+        // The matrix is read from SHAKE-128 streams run several
+        // together or apart, which no hash suite reaches: the rows
+        // are every parameter set's alike.
         "ML-KEM" => {
             vec![("ML-KEM", <ml_kem_768::PrivateKey as Dispatcher>::profiles)]
         }

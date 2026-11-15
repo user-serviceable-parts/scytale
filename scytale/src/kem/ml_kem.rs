@@ -56,7 +56,7 @@
 use zeroize::Zeroize;
 
 use crate::constant_time;
-use crate::hash::sha3::{Sha3_256, Sha3_512, Shake128, Shake256, four};
+use crate::hash::sha3::{Sha3_256, Sha3_512, Shake128, Shake256, together};
 use crate::hash::{Hash, Xof, XofReader};
 
 /// The modulus.
@@ -307,7 +307,7 @@ fn inverse_layer<const LEN: usize>(f: &mut [i16; N], zetas: &[i16]) {
 }
 
 /// The candidates one block of SHAKE-128 holds: two to three bytes.
-const CANDIDATES: usize = four::RATE / 3 * 2;
+const CANDIDATES: usize = together::RATE / 3 * 2;
 
 /// The coefficients kept so far of a matrix entry being sampled.
 ///
@@ -338,7 +338,7 @@ impl Kept {
     /// Takes one block's candidates, twelve bits each, two to every
     /// three bytes. Not to be called once [`full`](Kept::full): the
     /// room past the end is for one block and no more.
-    fn take(&mut self, block: &[u8; four::RATE]) {
+    fn take(&mut self, block: &[u8; together::RATE]) {
         debug_assert!(!self.full());
         let (chunks, _) = block.as_chunks::<3>();
         let mut filled = self.filled;
@@ -528,7 +528,7 @@ impl Poly {
         xof.update(&[col, row]);
         let mut reader = xof.finalize_xof();
         let mut kept = Kept::new();
-        let mut block = [0u8; four::RATE];
+        let mut block = [0u8; together::RATE];
         while !kept.full() {
             reader.squeeze(&mut block);
             kept.take(&block);
@@ -536,17 +536,20 @@ impl Poly {
         kept.poly()
     }
 
-    /// Four entries of `A` at once, each as [`sample_ntt`] makes it,
-    /// or `None` where the features in force have no kernel that
-    /// runs four SHAKE-128 streams together.
+    /// As many entries of `A` at once as a kernel runs SHAKE-128
+    /// streams together, each as [`sample_ntt`] makes it, or `None`
+    /// where the features in force have no such kernel.
     ///
-    /// The four are squeezed a block of each at a time until every
-    /// one has its coefficients; an entry that fills first ignores
-    /// the rest of its stream, as it would had it stopped.
+    /// They are squeezed a block of each at a time until every one
+    /// has its coefficients; an entry that fills first ignores the
+    /// rest of its stream, as it would had it stopped.
     ///
     /// [`sample_ntt`]: Poly::sample_ntt
-    #[cfg(target_arch = "x86_64")]
-    fn sample_ntt4(rho: &[u8; 32], at: [(u8, u8); 4]) -> Option<[Poly; 4]> {
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn sample_ntt_together(
+        rho: &[u8; 32],
+        at: [(u8, u8); together::WIDTH],
+    ) -> Option<[Poly; together::WIDTH]> {
         let messages = at.map(|(row, col)| {
             let mut message = [0u8; 34];
             message[..32].copy_from_slice(rho);
@@ -554,9 +557,10 @@ impl Poly {
             message[33] = row;
             message
         });
-        let mut streams = four::Shake128x4::new(messages.each_ref())?;
-        let mut kept = [Kept::new(), Kept::new(), Kept::new(), Kept::new()];
-        let mut blocks = [[0u8; four::RATE]; 4];
+        let mut streams = together::Shake128Together::new(messages.each_ref())?;
+        let mut kept: [Kept; together::WIDTH] =
+            core::array::from_fn(|_| Kept::new());
+        let mut blocks = [[0u8; together::RATE]; together::WIDTH];
         while !kept.iter().all(Kept::full) {
             streams.squeeze(&mut blocks);
             for (kept, block) in kept.iter_mut().zip(&blocks) {
@@ -679,22 +683,24 @@ struct Expanded<const K: usize> {
 
 /// The matrix `A` from its seed, row first: every entry its own
 /// SHAKE-128 stream, which have nothing to do with each other, so
-/// they are taken four together for as long as there are four and a
-/// kernel that runs them so, and one at a time after that.
+/// they are taken as many together as a kernel runs for as long as
+/// there are that many, and one at a time after that.
 fn sample_matrix<const K: usize>(rho: &[u8; 32]) -> [[Poly; K]; K] {
     let mut a = [[Poly::ZERO; K]; K];
     let entries = a.as_flattened_mut();
-    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
-    let mut done = 0;
     let at = |n: usize| ((n / K) as u8, (n % K) as u8);
-    #[cfg(target_arch = "x86_64")]
-    while done + 4 <= entries.len() {
-        let next = [at(done), at(done + 1), at(done + 2), at(done + 3)];
-        let Some(polys) = Poly::sample_ntt4(rho, next) else {
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let done = 0;
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let mut done = 0;
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    while done + together::WIDTH <= entries.len() {
+        let next = core::array::from_fn(|i| at(done + i));
+        let Some(polys) = Poly::sample_ntt_together(rho, next) else {
             break;
         };
-        entries[done..done + 4].copy_from_slice(&polys);
-        done += 4;
+        entries[done..done + together::WIDTH].copy_from_slice(&polys);
+        done += together::WIDTH;
     }
     for (n, entry) in entries.iter_mut().enumerate().skip(done) {
         let (row, col) = at(n);
@@ -1006,10 +1012,10 @@ macro_rules! parameter_set {
         impl crate::features::sealed::Sealed for PrivateKey {}
 
         /// The profiles a key tells apart: how the streams its
-        /// matrix is read from are run, four together or apart.
+        /// matrix is read from are run, together or apart.
         impl crate::features::Dispatcher for PrivateKey {
             fn profiles() -> &'static [crate::features::Features] {
-                &crate::hash::sha3::four::PROFILES
+                &crate::hash::sha3::together::PROFILES
             }
         }
 
@@ -1018,7 +1024,7 @@ macro_rules! parameter_set {
         /// As for the private key, whose matrix it is.
         impl crate::features::Dispatcher for PublicKey {
             fn profiles() -> &'static [crate::features::Features] {
-                &crate::hash::sha3::four::PROFILES
+                &crate::hash::sha3::together::PROFILES
             }
         }
 
@@ -1450,7 +1456,8 @@ mod tests {
 
     /// The matrix is its entries, each sampled alone, whichever way
     /// the features in force have its streams run: at every rank,
-    /// which leave no entry, one, and none over from the fours.
+    /// which leave entries over from the groups taken together
+    /// or none.
     #[test]
     fn the_matrix_agrees_with_its_entries() {
         fn check<const K: usize>() {
@@ -1470,21 +1477,24 @@ mod tests {
         check::<4>();
     }
 
-    /// Four entries sampled together are the four sampled alone, for
-    /// enough seeds that some entry needs a block its neighbours do
-    /// not, which is where one that has filled must sit a block out.
-    #[cfg(target_arch = "x86_64")]
+    /// Entries sampled together are the same entries sampled alone,
+    /// for enough seeds that some entry needs a block its neighbours
+    /// do not, which is where one that has filled must sit a block
+    /// out.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     #[test]
-    fn four_entries_together_agree_with_four_alone() {
+    fn entries_together_agree_with_entries_alone() {
+        let places = [(0, 0), (0, 1), (1, 0), (3, 3)];
+        let at: [(u8, u8); together::WIDTH] =
+            core::array::from_fn(|i| places[i]);
         let mut uneven = 0;
         for seed in 0..=255u8 {
             let rho = [seed; 32];
-            let at = [(0, 0), (0, 1), (1, 0), (3, 3)];
-            let Some(four) = Poly::sample_ntt4(&rho, at) else {
-                std::eprintln!("no kernel runs four together; skipping");
+            let Some(polys) = Poly::sample_ntt_together(&rho, at) else {
+                std::eprintln!("no kernel runs streams together; skipping");
                 return;
             };
-            for (poly, (row, col)) in four.iter().zip(at) {
+            for (poly, (row, col)) in polys.iter().zip(at) {
                 assert_eq!(poly.0, Poly::sample_ntt(&rho, row, col).0);
             }
             // How many blocks each entry needs alone.
@@ -1494,7 +1504,7 @@ mod tests {
                 xof.update(&[col, row]);
                 let mut reader = xof.finalize_xof();
                 let mut kept = Kept::new();
-                let mut block = [0u8; four::RATE];
+                let mut block = [0u8; together::RATE];
                 let mut blocks = 0;
                 while !kept.full() {
                     reader.squeeze(&mut block);
@@ -1505,14 +1515,14 @@ mod tests {
             });
             uneven += usize::from(blocks.iter().any(|&b| b != blocks[0]));
         }
-        assert!(uneven > 0, "no group of four was uneven");
+        assert!(uneven > 0, "no group was uneven");
     }
 
     /// The keys publish the rows the matrix's streams choose among.
     #[test]
     fn keys_publish_the_matrix_profiles() {
         use crate::features::Dispatcher;
-        let rows = &four::PROFILES[..];
+        let rows = &together::PROFILES[..];
         assert_eq!(<ml_kem_512::PrivateKey as Dispatcher>::profiles(), rows);
         assert_eq!(<ml_kem_768::PublicKey as Dispatcher>::profiles(), rows);
         assert_eq!(<ml_kem_1024::PrivateKey as Dispatcher>::profiles(), rows);
