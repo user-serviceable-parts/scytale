@@ -279,6 +279,33 @@ fn mul(a: u16, b: u16) -> u16 {
     reduce(u32::from(a) * u32::from(b))
 }
 
+/// The factors in the order the inverse transform meets them, which
+/// is the forward order backwards, leaving out the unused first.
+const INVERSE_ZETAS: [i16; 127] = {
+    let mut out = [0i16; 127];
+    let mut i = 0;
+    while i < 127 {
+        out[i] = ZETAS_MONT[127 - i];
+        i += 1;
+    }
+    out
+};
+
+/// One layer of the inverse transform: blocks of `2 LEN`, a factor
+/// to each, the lower half of a block against its upper.
+#[inline(always)]
+fn inverse_layer<const LEN: usize>(f: &mut [i16; N], zetas: &[i16]) {
+    debug_assert_eq!(zetas.len() * 2 * LEN, N);
+    for (block, &zeta) in f.chunks_exact_mut(2 * LEN).zip(zetas) {
+        let (low, high) = block.split_at_mut(LEN);
+        for (a, b) in low.iter_mut().zip(high.iter_mut()) {
+            let t = *a;
+            *a = barrett(t + *b);
+            *b = fqmul(zeta, *b - t);
+        }
+    }
+}
+
 /// A polynomial, its coefficients in `[0, q)`, in whichever domain
 /// its use says.
 #[derive(Clone, Copy)]
@@ -318,23 +345,21 @@ impl Poly {
     ///
     /// The sums are reduced as they are made, which keeps them in a
     /// word; the differences go straight into a Montgomery product.
+    ///
+    /// Each layer is written out with its block length fixed. As one
+    /// loop over a length that doubles, the compiler kept a single
+    /// body for every layer, which ran the two shortest a butterfly
+    /// at a time and multiplied at twice the width in the rest, and
+    /// the transform cost three times what the forward one does.
     fn inverse_ntt(&mut self) {
         let mut f = self.0.map(|c| c as i16);
-        let mut k = 127;
-        let mut len = 2;
-        while len <= 128 {
-            for block in f.chunks_exact_mut(2 * len) {
-                let zeta = ZETAS_MONT[k];
-                k -= 1;
-                let (low, high) = block.split_at_mut(len);
-                for (a, b) in low.iter_mut().zip(high.iter_mut()) {
-                    let t = *a;
-                    *a = barrett(t + *b);
-                    *b = fqmul(zeta, *b - t);
-                }
-            }
-            len *= 2;
-        }
+        inverse_layer::<2>(&mut f, &INVERSE_ZETAS[..64]);
+        inverse_layer::<4>(&mut f, &INVERSE_ZETAS[64..96]);
+        inverse_layer::<8>(&mut f, &INVERSE_ZETAS[96..112]);
+        inverse_layer::<16>(&mut f, &INVERSE_ZETAS[112..120]);
+        inverse_layer::<32>(&mut f, &INVERSE_ZETAS[120..124]);
+        inverse_layer::<64>(&mut f, &INVERSE_ZETAS[124..126]);
+        inverse_layer::<128>(&mut f, &INVERSE_ZETAS[126..]);
         // Divided by 128, which the butterflies left multiplied in.
         for (c, &x) in self.0.iter_mut().zip(&f) {
             *c = canonical(fqmul(x, INV128_MONT));
@@ -1218,6 +1243,55 @@ mod tests {
         let mut product = fh.mul_ntt(&gh);
         product.inverse_ntt();
         assert_eq!(product.0, expected.0);
+    }
+
+    /// The inverse transform is the standard's loop, algorithm 10,
+    /// done there in plain arithmetic modulo `q`: at the edges of the
+    /// range, where a lazy reduction would show, and across it.
+    #[test]
+    fn inverse_transform_matches_the_standard() {
+        fn standard(f: &mut [u16; N]) {
+            let mut k = 127;
+            let mut len = 2;
+            while len <= 128 {
+                for start in (0..N).step_by(2 * len) {
+                    let zeta = ZETAS[k];
+                    k -= 1;
+                    for j in start..start + len {
+                        let t = f[j];
+                        f[j] = add(t, f[j + len]);
+                        f[j + len] = mul(zeta, sub(f[j + len], t));
+                    }
+                }
+                len *= 2;
+            }
+            for c in f.iter_mut() {
+                *c = mul(*c, 3303);
+            }
+        }
+        fn check(case: Poly) {
+            let mut expected = case.0;
+            standard(&mut expected);
+            let mut got = case;
+            got.inverse_ntt();
+            assert_eq!(got.0, expected);
+        }
+        let top = (Q - 1) as u16;
+        check(Poly::ZERO);
+        check(Poly([top; N]));
+        check(Poly([1; N]));
+        let mut alternating = Poly::ZERO;
+        for (i, c) in alternating.0.iter_mut().enumerate() {
+            *c = if i % 2 == 0 { top } else { 0 };
+        }
+        check(alternating);
+        for seed in 1..=16u32 {
+            let mut f = Poly::ZERO;
+            for (i, c) in f.0.iter_mut().enumerate() {
+                *c = ((i as u32 * 2731 + seed * 977) * seed % Q) as u16;
+            }
+            check(f);
+        }
     }
 
     /// Every value below 2^26 reduces as plain division says.
