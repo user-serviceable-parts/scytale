@@ -2041,15 +2041,26 @@ macro_rules! kem_key {
     };
 }
 
-/// The three rows for one parameter set.
+/// The four rows for one parameter set.
 macro_rules! kem_rows {
     ($jobs:expr, $key:ident, $ciphertext:ident, $keygen:expr, $encap:expr,
-     $private:ty, $name:literal) => {
+     $private:ty, $public:ty, $name:literal) => {
         $jobs.push((
             concat!($name, "-keygen"),
             Box::new(|| {
                 black_box(<$private>::generate($keygen)).ok();
             }) as Once<'_>,
+        ));
+        // A key keeps its matrix and its hash from the moment it is
+        // made, so the encapsulation row below pays for neither. This
+        // is where a peer's key pays for them: what a side that
+        // encapsulates once to each key it is sent spends on top.
+        let bytes = $key.public_key().bytes();
+        $jobs.push((
+            concat!($name, "-public-key"),
+            Box::new(move || {
+                black_box(<$public>::try_new(&bytes)).ok();
+            }),
         ));
         $jobs.push((
             concat!($name, "-encapsulate"),
@@ -2111,6 +2122,7 @@ fn kem_ops(run: &mut Run) -> bool {
         &mut k1,
         &mut e1,
         crate::kem::ml_kem::ml_kem_512::PrivateKey,
+        crate::kem::ml_kem::ml_kem_512::PublicKey,
         "ml-kem-512"
     );
     kem_rows!(
@@ -2120,6 +2132,7 @@ fn kem_ops(run: &mut Run) -> bool {
         &mut k2,
         &mut e2,
         crate::kem::ml_kem::ml_kem_768::PrivateKey,
+        crate::kem::ml_kem::ml_kem_768::PublicKey,
         "ml-kem-768"
     );
     kem_rows!(
@@ -2129,6 +2142,7 @@ fn kem_ops(run: &mut Run) -> bool {
         &mut k3,
         &mut e3,
         crate::kem::ml_kem::ml_kem_1024::PrivateKey,
+        crate::kem::ml_kem::ml_kem_1024::PublicKey,
         "ml-kem-1024"
     );
     ops_section(run, "kem", jobs)
