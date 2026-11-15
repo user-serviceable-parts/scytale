@@ -472,25 +472,35 @@ impl Poly {
         xof.update(rho);
         xof.update(&[col, row]);
         let mut reader = xof.finalize_xof();
-        let mut out = Poly::ZERO;
-        let mut filled = 0;
         // Three bytes give two twelve-bit candidates; a block of the
         // sponge's rate at a time.
+        //
+        // Every candidate is stored and the place moves on only for
+        // one that is kept, so there is no branch on a value that is
+        // rejected one time in five, which a processor cannot guess.
+        // A block is finished once begun, so the store has room for
+        // one block's candidates past the end; what lands there is
+        // beyond the first `N` kept and is dropped, as the standard
+        // drops it by stopping.
+        const CANDIDATES: usize = 168 / 3 * 2;
+        let mut kept = [0u16; N + CANDIDATES];
+        let mut filled = 0;
         let mut buf = [0u8; 168];
         while filled < N {
             reader.squeeze(&mut buf);
-            for chunk in buf.chunks_exact(3) {
+            let (chunks, _) = buf.as_chunks::<3>();
+            for chunk in chunks {
                 let d1 =
                     u16::from(chunk[0]) | (u16::from(chunk[1] & 0x0f) << 8);
                 let d2 = u16::from(chunk[1] >> 4) | (u16::from(chunk[2]) << 4);
-                for d in [d1, d2] {
-                    if filled < N && u32::from(d) < Q {
-                        out.0[filled] = d;
-                        filled += 1;
-                    }
-                }
+                kept[filled] = d1;
+                filled += usize::from(u32::from(d1) < Q);
+                kept[filled] = d2;
+                filled += usize::from(u32::from(d2) < Q);
             }
         }
+        let mut out = Poly::ZERO;
+        out.0.copy_from_slice(&kept[..N]);
         out
     }
 
@@ -1291,6 +1301,47 @@ mod tests {
                 *c = ((i as u32 * 2731 + seed * 977) * seed % Q) as u16;
             }
             check(f);
+        }
+    }
+
+    /// The matrix sampler is the standard's loop, algorithm 7: three
+    /// bytes at a time, each candidate below `q` kept in order, until
+    /// there are `N`. Over enough seeds that some need a fourth block
+    /// and most end part way through one.
+    #[test]
+    fn matrix_sampling_matches_the_standard() {
+        fn standard(rho: &[u8; 32], row: u8, col: u8) -> [u16; N] {
+            let mut xof = Shake128::new();
+            xof.update(rho);
+            xof.update(&[col, row]);
+            let mut reader = xof.finalize_xof();
+            let mut out = [0u16; N];
+            let mut filled = 0;
+            while filled < N {
+                let mut c = [0u8; 3];
+                reader.squeeze(&mut c);
+                let d1 = u16::from(c[0]) | (u16::from(c[1] & 0x0f) << 8);
+                let d2 = u16::from(c[1] >> 4) | (u16::from(c[2]) << 4);
+                if u32::from(d1) < Q {
+                    out[filled] = d1;
+                    filled += 1;
+                }
+                if u32::from(d2) < Q && filled < N {
+                    out[filled] = d2;
+                    filled += 1;
+                }
+            }
+            out
+        }
+        for seed in 0..=255u8 {
+            let rho = [seed; 32];
+            for (row, col) in [(0, 0), (1, 2), (3, 3)] {
+                assert_eq!(
+                    Poly::sample_ntt(&rho, row, col).0,
+                    standard(&rho, row, col),
+                    "{seed} {row} {col}"
+                );
+            }
         }
     }
 
