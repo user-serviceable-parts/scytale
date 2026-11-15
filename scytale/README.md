@@ -416,6 +416,7 @@ state is wiped when the generator is dropped.
 | aarch64 | ARMv8 SHA3 extension | SHA-3, SHAKE, cSHAKE, TupleHash, KMAC |
 | x86-64 | BMI1 and BMI2 | SHA-3, SHAKE, cSHAKE, TupleHash, KMAC |
 | riscv64 | scalar bit manipulation (Zbb) | SHA-3, SHAKE, cSHAKE, TupleHash, KMAC |
+| x86-64 | AVX2 | ML-KEM's matrix, four SHAKE-128 streams together |
 | x86-64 | BMI2 and ADX | RSA, P-256 and P-384 field arithmetic |
 | x86-64 | AVX2 | ChaCha20 |
 | aarch64 | NEON | ChaCha20 |
@@ -442,9 +443,14 @@ permutation, which only AArch64 has instructions for. On x86-64 the portable
 permutation is compiled a second time for BMI1 and BMI2, whose
 `andn` and `rorx` are chi and rho in fewer instructions, and on
 RISC-V for Zbb, whose `andn` and `rori` are the same two; elsewhere
-it is portable. ChaCha20 needs no special instructions, only a vector
-unit: several blocks are computed at once, eight with AVX2, four with
-NEON, and as many as a register holds on RISC-V. Poly1305 is portable
+it is portable. One sponge cannot be run any faster than its
+permutation, but the matrix of an ML-KEM key is four, nine or sixteen
+SHAKE-128 streams that have nothing to do with each other, and with
+AVX2 those are run four together, a lane of each to a register, for
+about half of what they cost apart. ChaCha20 needs no special
+instructions, only a vector unit: several blocks are computed at
+once, eight with AVX2, four with NEON, and as many as a register
+holds on RISC-V. Poly1305 is portable
 everywhere.
 
 The prime curves and RSA are integer arithmetic rather than a

@@ -80,6 +80,7 @@
 pub(crate) mod aarch64;
 pub(crate) mod cshake;
 pub(crate) mod engine;
+pub(crate) mod four;
 pub(crate) mod portable;
 #[cfg(target_arch = "riscv64")]
 mod riscv64;

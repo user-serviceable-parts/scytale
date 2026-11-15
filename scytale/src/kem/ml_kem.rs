@@ -56,7 +56,7 @@
 use zeroize::Zeroize;
 
 use crate::constant_time;
-use crate::hash::sha3::{Sha3_256, Sha3_512, Shake128, Shake256};
+use crate::hash::sha3::{Sha3_256, Sha3_512, Shake128, Shake256, four};
 use crate::hash::{Hash, Xof, XofReader};
 
 /// The modulus.
@@ -306,6 +306,61 @@ fn inverse_layer<const LEN: usize>(f: &mut [i16; N], zetas: &[i16]) {
     }
 }
 
+/// The candidates one block of SHAKE-128 holds: two to three bytes.
+const CANDIDATES: usize = four::RATE / 3 * 2;
+
+/// The coefficients kept so far of a matrix entry being sampled.
+///
+/// Every candidate is stored and the place moves on only for one
+/// that is kept, so there is no branch on a value that is rejected
+/// one time in five, which a processor cannot guess. A block is
+/// finished once begun, so the store has room for one block's
+/// candidates past the end; what lands there is beyond the first `N`
+/// kept and is dropped, as the standard drops it by stopping.
+struct Kept {
+    coefficients: [u16; N + CANDIDATES],
+    filled: usize,
+}
+
+impl Kept {
+    fn new() -> Self {
+        Kept {
+            coefficients: [0; N + CANDIDATES],
+            filled: 0,
+        }
+    }
+
+    /// Whether there are `N`, which is when to stop feeding it.
+    fn full(&self) -> bool {
+        self.filled >= N
+    }
+
+    /// Takes one block's candidates, twelve bits each, two to every
+    /// three bytes. Not to be called once [`full`](Kept::full): the
+    /// room past the end is for one block and no more.
+    fn take(&mut self, block: &[u8; four::RATE]) {
+        debug_assert!(!self.full());
+        let (chunks, _) = block.as_chunks::<3>();
+        let mut filled = self.filled;
+        for chunk in chunks {
+            let d1 = u16::from(chunk[0]) | (u16::from(chunk[1] & 0x0f) << 8);
+            let d2 = u16::from(chunk[1] >> 4) | (u16::from(chunk[2]) << 4);
+            self.coefficients[filled] = d1;
+            filled += usize::from(u32::from(d1) < Q);
+            self.coefficients[filled] = d2;
+            filled += usize::from(u32::from(d2) < Q);
+        }
+        self.filled = filled;
+    }
+
+    /// The first `N` kept.
+    fn poly(&self) -> Poly {
+        let mut out = Poly::ZERO;
+        out.0.copy_from_slice(&self.coefficients[..N]);
+        out
+    }
+}
+
 /// A polynomial, its coefficients in `[0, q)`, in whichever domain
 /// its use says.
 #[derive(Clone, Copy)]
@@ -472,36 +527,45 @@ impl Poly {
         xof.update(rho);
         xof.update(&[col, row]);
         let mut reader = xof.finalize_xof();
-        // Three bytes give two twelve-bit candidates; a block of the
-        // sponge's rate at a time.
-        //
-        // Every candidate is stored and the place moves on only for
-        // one that is kept, so there is no branch on a value that is
-        // rejected one time in five, which a processor cannot guess.
-        // A block is finished once begun, so the store has room for
-        // one block's candidates past the end; what lands there is
-        // beyond the first `N` kept and is dropped, as the standard
-        // drops it by stopping.
-        const CANDIDATES: usize = 168 / 3 * 2;
-        let mut kept = [0u16; N + CANDIDATES];
-        let mut filled = 0;
-        let mut buf = [0u8; 168];
-        while filled < N {
-            reader.squeeze(&mut buf);
-            let (chunks, _) = buf.as_chunks::<3>();
-            for chunk in chunks {
-                let d1 =
-                    u16::from(chunk[0]) | (u16::from(chunk[1] & 0x0f) << 8);
-                let d2 = u16::from(chunk[1] >> 4) | (u16::from(chunk[2]) << 4);
-                kept[filled] = d1;
-                filled += usize::from(u32::from(d1) < Q);
-                kept[filled] = d2;
-                filled += usize::from(u32::from(d2) < Q);
+        let mut kept = Kept::new();
+        let mut block = [0u8; four::RATE];
+        while !kept.full() {
+            reader.squeeze(&mut block);
+            kept.take(&block);
+        }
+        kept.poly()
+    }
+
+    /// Four entries of `A` at once, each as [`sample_ntt`] makes it,
+    /// or `None` where the features in force have no kernel that
+    /// runs four SHAKE-128 streams together.
+    ///
+    /// The four are squeezed a block of each at a time until every
+    /// one has its coefficients; an entry that fills first ignores
+    /// the rest of its stream, as it would had it stopped.
+    ///
+    /// [`sample_ntt`]: Poly::sample_ntt
+    #[cfg(target_arch = "x86_64")]
+    fn sample_ntt4(rho: &[u8; 32], at: [(u8, u8); 4]) -> Option<[Poly; 4]> {
+        let messages = at.map(|(row, col)| {
+            let mut message = [0u8; 34];
+            message[..32].copy_from_slice(rho);
+            message[32] = col;
+            message[33] = row;
+            message
+        });
+        let mut streams = four::Shake128x4::new(messages.each_ref())?;
+        let mut kept = [Kept::new(), Kept::new(), Kept::new(), Kept::new()];
+        let mut blocks = [[0u8; four::RATE]; 4];
+        while !kept.iter().all(Kept::full) {
+            streams.squeeze(&mut blocks);
+            for (kept, block) in kept.iter_mut().zip(&blocks) {
+                if !kept.full() {
+                    kept.take(block);
+                }
             }
         }
-        let mut out = Poly::ZERO;
-        out.0.copy_from_slice(&kept[..N]);
-        out
+        Some(kept.map(|kept| kept.poly()))
     }
 
     /// `SamplePolyCBD_eta`, algorithm 8, over `64 eta` bytes of PRF
@@ -613,17 +677,38 @@ struct Expanded<const K: usize> {
     hash: [u8; 32],
 }
 
+/// The matrix `A` from its seed, row first: every entry its own
+/// SHAKE-128 stream, which have nothing to do with each other, so
+/// they are taken four together for as long as there are four and a
+/// kernel that runs them so, and one at a time after that.
+fn sample_matrix<const K: usize>(rho: &[u8; 32]) -> [[Poly; K]; K] {
+    let mut a = [[Poly::ZERO; K]; K];
+    let entries = a.as_flattened_mut();
+    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
+    let mut done = 0;
+    let at = |n: usize| ((n / K) as u8, (n % K) as u8);
+    #[cfg(target_arch = "x86_64")]
+    while done + 4 <= entries.len() {
+        let next = [at(done), at(done + 1), at(done + 2), at(done + 3)];
+        let Some(polys) = Poly::sample_ntt4(rho, next) else {
+            break;
+        };
+        entries[done..done + 4].copy_from_slice(&polys);
+        done += 4;
+    }
+    for (n, entry) in entries.iter_mut().enumerate().skip(done) {
+        let (row, col) = at(n);
+        *entry = Poly::sample_ntt(rho, row, col);
+    }
+    a
+}
+
 /// Takes apart an encapsulation key already checked well formed.
 fn expand<const K: usize>(ek: &[u8]) -> Expanded<K> {
     debug_assert_eq!(ek.len(), public_len(K));
     let mut rho = [0u8; 32];
     rho.copy_from_slice(&ek[384 * K..]);
-    let mut a = [[Poly::ZERO; K]; K];
-    for (i, row) in a.iter_mut().enumerate() {
-        for (j, entry) in row.iter_mut().enumerate() {
-            *entry = Poly::sample_ntt(&rho, i as u8, j as u8);
-        }
-    }
+    let a = sample_matrix::<K>(&rho);
     let mut t = [Poly::ZERO; K];
     for (i, t_i) in t.iter_mut().enumerate() {
         *t_i = Poly::decode(12, &ek[384 * i..384 * (i + 1)]);
@@ -659,11 +744,10 @@ fn key_gen<const K: usize>(
     sigma.zeroize();
 
     // t = A s + e.
-    let mut a = [[Poly::ZERO; K]; K];
+    let a = sample_matrix::<K>(&rho);
     let mut t = e;
-    for (i, (row, t_i)) in a.iter_mut().zip(t.iter_mut()).enumerate() {
-        for (j, (entry, s_j)) in row.iter_mut().zip(&s).enumerate() {
-            *entry = Poly::sample_ntt(&rho, i as u8, j as u8);
+    for (i, (row, t_i)) in a.iter().zip(t.iter_mut()).enumerate() {
+        for (entry, s_j) in row.iter().zip(&s) {
             t_i.add_assign(&entry.mul_ntt(s_j));
         }
         t_i.encode(12, &mut ek[384 * i..384 * (i + 1)]);
@@ -917,6 +1001,25 @@ macro_rules! parameter_set {
         pub struct PublicKey {
             bytes: [u8; PUBLIC_KEY_SIZE],
             expanded: ml_kem::Expanded<$k>,
+        }
+
+        impl crate::features::sealed::Sealed for PrivateKey {}
+
+        /// The profiles a key tells apart: how the streams its
+        /// matrix is read from are run, four together or apart.
+        impl crate::features::Dispatcher for PrivateKey {
+            fn profiles() -> &'static [crate::features::Features] {
+                &crate::hash::sha3::four::PROFILES
+            }
+        }
+
+        impl crate::features::sealed::Sealed for PublicKey {}
+
+        /// As for the private key, whose matrix it is.
+        impl crate::features::Dispatcher for PublicKey {
+            fn profiles() -> &'static [crate::features::Features] {
+                &crate::hash::sha3::four::PROFILES
+            }
         }
 
         impl Drop for PrivateKey {
@@ -1343,6 +1446,76 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The matrix is its entries, each sampled alone, whichever way
+    /// the features in force have its streams run: at every rank,
+    /// which leave no entry, one, and none over from the fours.
+    #[test]
+    fn the_matrix_agrees_with_its_entries() {
+        fn check<const K: usize>() {
+            for seed in [0u8, 1, 0x5a, 0xff] {
+                let rho = [seed; 32];
+                let a = sample_matrix::<K>(&rho);
+                for (i, row) in a.iter().enumerate() {
+                    for (j, entry) in row.iter().enumerate() {
+                        let alone = Poly::sample_ntt(&rho, i as u8, j as u8);
+                        assert_eq!(entry.0, alone.0, "{K} {seed} {i} {j}");
+                    }
+                }
+            }
+        }
+        check::<2>();
+        check::<3>();
+        check::<4>();
+    }
+
+    /// Four entries sampled together are the four sampled alone, for
+    /// enough seeds that some entry needs a block its neighbours do
+    /// not, which is where one that has filled must sit a block out.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn four_entries_together_agree_with_four_alone() {
+        let mut uneven = 0;
+        for seed in 0..=255u8 {
+            let rho = [seed; 32];
+            let at = [(0, 0), (0, 1), (1, 0), (3, 3)];
+            let Some(four) = Poly::sample_ntt4(&rho, at) else {
+                std::eprintln!("no kernel runs four together; skipping");
+                return;
+            };
+            for (poly, (row, col)) in four.iter().zip(at) {
+                assert_eq!(poly.0, Poly::sample_ntt(&rho, row, col).0);
+            }
+            // How many blocks each entry needs alone.
+            let blocks = at.map(|(row, col)| {
+                let mut xof = Shake128::new();
+                xof.update(&rho);
+                xof.update(&[col, row]);
+                let mut reader = xof.finalize_xof();
+                let mut kept = Kept::new();
+                let mut block = [0u8; four::RATE];
+                let mut blocks = 0;
+                while !kept.full() {
+                    reader.squeeze(&mut block);
+                    kept.take(&block);
+                    blocks += 1;
+                }
+                blocks
+            });
+            uneven += usize::from(blocks.iter().any(|&b| b != blocks[0]));
+        }
+        assert!(uneven > 0, "no group of four was uneven");
+    }
+
+    /// The keys publish the rows the matrix's streams choose among.
+    #[test]
+    fn keys_publish_the_matrix_profiles() {
+        use crate::features::Dispatcher;
+        let rows = &four::PROFILES[..];
+        assert_eq!(<ml_kem_512::PrivateKey as Dispatcher>::profiles(), rows);
+        assert_eq!(<ml_kem_768::PublicKey as Dispatcher>::profiles(), rows);
+        assert_eq!(<ml_kem_1024::PrivateKey as Dispatcher>::profiles(), rows);
     }
 
     /// Every value below 2^26 reduces as plain division says.
