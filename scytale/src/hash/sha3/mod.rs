@@ -83,6 +83,7 @@ pub(crate) mod engine;
 pub(crate) mod portable;
 #[cfg(target_arch = "riscv64")]
 mod riscv64;
+pub(crate) mod together;
 mod tuple_hash;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
@@ -767,6 +768,31 @@ pub(crate) mod tests {
         reader.squeeze(&mut again[167..169]);
         reader.squeeze(&mut again[169..]);
         assert_eq!(long[..], again[..]);
+    }
+
+    /// Output comes out a lane at a time where a piece is aligned and
+    /// long enough, and a byte at a time otherwise. A piece of one
+    /// byte only ever takes the second path, so the stream read that
+    /// way is the reference, and every other piece length, which
+    /// starts and ends at every offset within a lane and across the
+    /// end of a block, must give the same bytes.
+    #[test]
+    fn every_piece_length_is_the_same_stream() {
+        fn stream<X: Xof>(mut xof: X, piece: usize) -> [u8; 700] {
+            xof.update(b"abc");
+            let mut reader = xof.finalize_xof();
+            let mut out = [0u8; 700];
+            for part in out.chunks_mut(piece) {
+                reader.squeeze(part);
+            }
+            out
+        }
+        let bytes128 = stream(Shake128::new(), 1);
+        let bytes256 = stream(Shake256::new(), 1);
+        for piece in [2, 3, 5, 7, 8, 9, 13, 16, 17, 136, 167, 168, 169, 700] {
+            assert_eq!(stream(Shake128::new(), piece), bytes128, "{piece}");
+            assert_eq!(stream(Shake256::new(), piece), bytes256, "{piece}");
+        }
     }
 
     #[test]

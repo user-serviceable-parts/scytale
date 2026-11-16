@@ -187,10 +187,28 @@ impl<P: Permutation> State<P> {
             }
             let take = (rate - self.used).min(out.len());
             let (now, rest) = out.split_at_mut(take);
-            for (i, byte) in now.iter_mut().enumerate() {
-                *byte = self.byte(self.used + i);
+            // Whole lanes at once where the offset allows, as when
+            // absorbing: a byte at a time is a shift and a store for
+            // each, which a profile of ML-KEM key generation, whose
+            // matrix is read from here, showed as a tenth of it.
+            let mut at = self.used;
+            let mut now = now;
+            while !at.is_multiple_of(8) && !now.is_empty() {
+                let (first, later) = now.split_at_mut(1);
+                first[0] = self.byte(at);
+                at += 1;
+                now = later;
             }
-            self.used += take;
+            let (lanes, tail) = now.as_chunks_mut::<8>();
+            for lane in lanes {
+                *lane = self.lanes[at / 8].to_le_bytes();
+                at += 8;
+            }
+            for byte in tail {
+                *byte = self.byte(at);
+                at += 1;
+            }
+            self.used = at;
             out = rest;
         }
     }

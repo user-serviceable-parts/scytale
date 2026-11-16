@@ -34,6 +34,7 @@ use scytale::features::{self, Dispatcher, Feature, Features};
 use scytale::hash::sha1::Sha1;
 use scytale::hash::sha2::{Sha256, Sha512};
 use scytale::hash::sha3::Sha3_256;
+use scytale::kem::ml_kem::ml_kem_768;
 use scytale::sig::{ecdsa, rsa};
 use serde_json::Value;
 
@@ -95,11 +96,17 @@ pub fn kernels_tested(suite: &Suite) -> Result<Vec<Built>, Error> {
         "RSA" | "KTS-IFC" => {
             vec![("RSA", <rsa::PrivateKey as Dispatcher>::profiles)]
         }
+        // The matrix is read from SHAKE-128 streams run several
+        // together or apart, which no hash suite reaches: the rows
+        // are every parameter set's alike.
+        "ML-KEM" => {
+            vec![("ML-KEM", <ml_kem_768::PrivateKey as Dispatcher>::profiles)]
+        }
         // Built on kernels the suites above test, with none of their
         // own.
-        "ctrDRBG" | "EDDSA" | "ML-KEM" | "ML-DSA" | "KDF" | "hashDRBG"
-        | "hmacDRBG" | "PBKDF" | "KDA" | "kdf-components" | "TLS-v1.2"
-        | "SLH-DSA" | "LMS" | "XECDH" => vec![],
+        "ctrDRBG" | "EDDSA" | "ML-DSA" | "KDF" | "hashDRBG" | "hmacDRBG"
+        | "PBKDF" | "KDA" | "kdf-components" | "TLS-v1.2" | "SLH-DSA"
+        | "LMS" | "XECDH" => vec![],
         _ if a.starts_with("ACVP-AES-")
             || a.starts_with("HMAC-SHA2-")
             || a.starts_with("HMAC-SHA3-")
