@@ -56,7 +56,7 @@
 use zeroize::Zeroize;
 
 use crate::constant_time;
-use crate::hash::sha3::{Sha3_256, Sha3_512, Shake128, Shake256};
+use crate::hash::sha3::{Sha3_256, Sha3_512, Shake128, Shake256, together};
 use crate::hash::{Hash, Xof, XofReader};
 
 /// The modulus.
@@ -279,6 +279,88 @@ fn mul(a: u16, b: u16) -> u16 {
     reduce(u32::from(a) * u32::from(b))
 }
 
+/// The factors in the order the inverse transform meets them, which
+/// is the forward order backwards, leaving out the unused first.
+const INVERSE_ZETAS: [i16; 127] = {
+    let mut out = [0i16; 127];
+    let mut i = 0;
+    while i < 127 {
+        out[i] = ZETAS_MONT[127 - i];
+        i += 1;
+    }
+    out
+};
+
+/// One layer of the inverse transform: blocks of `2 LEN`, a factor
+/// to each, the lower half of a block against its upper.
+#[inline(always)]
+fn inverse_layer<const LEN: usize>(f: &mut [i16; N], zetas: &[i16]) {
+    debug_assert_eq!(zetas.len() * 2 * LEN, N);
+    for (block, &zeta) in f.chunks_exact_mut(2 * LEN).zip(zetas) {
+        let (low, high) = block.split_at_mut(LEN);
+        for (a, b) in low.iter_mut().zip(high.iter_mut()) {
+            let t = *a;
+            *a = barrett(t + *b);
+            *b = fqmul(zeta, *b - t);
+        }
+    }
+}
+
+/// The candidates one block of SHAKE-128 holds: two to three bytes.
+const CANDIDATES: usize = together::RATE / 3 * 2;
+
+/// The coefficients kept so far of a matrix entry being sampled.
+///
+/// Every candidate is stored and the place moves on only for one
+/// that is kept, so there is no branch on a value that is rejected
+/// one time in five, which a processor cannot guess. A block is
+/// finished once begun, so the store has room for one block's
+/// candidates past the end; what lands there is beyond the first `N`
+/// kept and is dropped, as the standard drops it by stopping.
+struct Kept {
+    coefficients: [u16; N + CANDIDATES],
+    filled: usize,
+}
+
+impl Kept {
+    fn new() -> Self {
+        Kept {
+            coefficients: [0; N + CANDIDATES],
+            filled: 0,
+        }
+    }
+
+    /// Whether there are `N`, which is when to stop feeding it.
+    fn full(&self) -> bool {
+        self.filled >= N
+    }
+
+    /// Takes one block's candidates, twelve bits each, two to every
+    /// three bytes. Not to be called once [`full`](Kept::full): the
+    /// room past the end is for one block and no more.
+    fn take(&mut self, block: &[u8; together::RATE]) {
+        debug_assert!(!self.full());
+        let (chunks, _) = block.as_chunks::<3>();
+        let mut filled = self.filled;
+        for chunk in chunks {
+            let d1 = u16::from(chunk[0]) | (u16::from(chunk[1] & 0x0f) << 8);
+            let d2 = u16::from(chunk[1] >> 4) | (u16::from(chunk[2]) << 4);
+            self.coefficients[filled] = d1;
+            filled += usize::from(u32::from(d1) < Q);
+            self.coefficients[filled] = d2;
+            filled += usize::from(u32::from(d2) < Q);
+        }
+        self.filled = filled;
+    }
+
+    /// The first `N` kept.
+    fn poly(&self) -> Poly {
+        let mut out = Poly::ZERO;
+        out.0.copy_from_slice(&self.coefficients[..N]);
+        out
+    }
+}
+
 /// A polynomial, its coefficients in `[0, q)`, in whichever domain
 /// its use says.
 #[derive(Clone, Copy)]
@@ -318,23 +400,21 @@ impl Poly {
     ///
     /// The sums are reduced as they are made, which keeps them in a
     /// word; the differences go straight into a Montgomery product.
+    ///
+    /// Each layer is written out with its block length fixed. As one
+    /// loop over a length that doubles, the compiler kept a single
+    /// body for every layer, which ran the two shortest a butterfly
+    /// at a time and multiplied at twice the width in the rest, and
+    /// the transform cost three times what the forward one does.
     fn inverse_ntt(&mut self) {
         let mut f = self.0.map(|c| c as i16);
-        let mut k = 127;
-        let mut len = 2;
-        while len <= 128 {
-            for block in f.chunks_exact_mut(2 * len) {
-                let zeta = ZETAS_MONT[k];
-                k -= 1;
-                let (low, high) = block.split_at_mut(len);
-                for (a, b) in low.iter_mut().zip(high.iter_mut()) {
-                    let t = *a;
-                    *a = barrett(t + *b);
-                    *b = fqmul(zeta, *b - t);
-                }
-            }
-            len *= 2;
-        }
+        inverse_layer::<2>(&mut f, &INVERSE_ZETAS[..64]);
+        inverse_layer::<4>(&mut f, &INVERSE_ZETAS[64..96]);
+        inverse_layer::<8>(&mut f, &INVERSE_ZETAS[96..112]);
+        inverse_layer::<16>(&mut f, &INVERSE_ZETAS[112..120]);
+        inverse_layer::<32>(&mut f, &INVERSE_ZETAS[120..124]);
+        inverse_layer::<64>(&mut f, &INVERSE_ZETAS[124..126]);
+        inverse_layer::<128>(&mut f, &INVERSE_ZETAS[126..]);
         // Divided by 128, which the butterflies left multiplied in.
         for (c, &x) in self.0.iter_mut().zip(&f) {
             *c = canonical(fqmul(x, INV128_MONT));
@@ -447,26 +527,49 @@ impl Poly {
         xof.update(rho);
         xof.update(&[col, row]);
         let mut reader = xof.finalize_xof();
-        let mut out = Poly::ZERO;
-        let mut filled = 0;
-        // Three bytes give two twelve-bit candidates; a block of the
-        // sponge's rate at a time.
-        let mut buf = [0u8; 168];
-        while filled < N {
-            reader.squeeze(&mut buf);
-            for chunk in buf.chunks_exact(3) {
-                let d1 =
-                    u16::from(chunk[0]) | (u16::from(chunk[1] & 0x0f) << 8);
-                let d2 = u16::from(chunk[1] >> 4) | (u16::from(chunk[2]) << 4);
-                for d in [d1, d2] {
-                    if filled < N && u32::from(d) < Q {
-                        out.0[filled] = d;
-                        filled += 1;
-                    }
+        let mut kept = Kept::new();
+        let mut block = [0u8; together::RATE];
+        while !kept.full() {
+            reader.squeeze(&mut block);
+            kept.take(&block);
+        }
+        kept.poly()
+    }
+
+    /// As many entries of `A` at once as a kernel runs SHAKE-128
+    /// streams together, each as [`sample_ntt`] makes it, or `None`
+    /// where the features in force have no such kernel.
+    ///
+    /// They are squeezed a block of each at a time until every one
+    /// has its coefficients; an entry that fills first ignores the
+    /// rest of its stream, as it would had it stopped.
+    ///
+    /// [`sample_ntt`]: Poly::sample_ntt
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn sample_ntt_together(
+        rho: &[u8; 32],
+        at: [(u8, u8); together::WIDTH],
+    ) -> Option<[Poly; together::WIDTH]> {
+        let messages = at.map(|(row, col)| {
+            let mut message = [0u8; 34];
+            message[..32].copy_from_slice(rho);
+            message[32] = col;
+            message[33] = row;
+            message
+        });
+        let mut streams = together::Shake128Together::new(messages.each_ref())?;
+        let mut kept: [Kept; together::WIDTH] =
+            core::array::from_fn(|_| Kept::new());
+        let mut blocks = [[0u8; together::RATE]; together::WIDTH];
+        while !kept.iter().all(Kept::full) {
+            streams.squeeze(&mut blocks);
+            for (kept, block) in kept.iter_mut().zip(&blocks) {
+                if !kept.full() {
+                    kept.take(block);
                 }
             }
         }
-        out
+        Some(kept.map(|kept| kept.poly()))
     }
 
     /// `SamplePolyCBD_eta`, algorithm 8, over `64 eta` bytes of PRF
@@ -578,17 +681,40 @@ struct Expanded<const K: usize> {
     hash: [u8; 32],
 }
 
+/// The matrix `A` from its seed, row first: every entry its own
+/// SHAKE-128 stream, which have nothing to do with each other, so
+/// they are taken as many together as a kernel runs for as long as
+/// there are that many, and one at a time after that.
+fn sample_matrix<const K: usize>(rho: &[u8; 32]) -> [[Poly; K]; K] {
+    let mut a = [[Poly::ZERO; K]; K];
+    let entries = a.as_flattened_mut();
+    let at = |n: usize| ((n / K) as u8, (n % K) as u8);
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let done = 0;
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let mut done = 0;
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    while done + together::WIDTH <= entries.len() {
+        let next = core::array::from_fn(|i| at(done + i));
+        let Some(polys) = Poly::sample_ntt_together(rho, next) else {
+            break;
+        };
+        entries[done..done + together::WIDTH].copy_from_slice(&polys);
+        done += together::WIDTH;
+    }
+    for (n, entry) in entries.iter_mut().enumerate().skip(done) {
+        let (row, col) = at(n);
+        *entry = Poly::sample_ntt(rho, row, col);
+    }
+    a
+}
+
 /// Takes apart an encapsulation key already checked well formed.
 fn expand<const K: usize>(ek: &[u8]) -> Expanded<K> {
     debug_assert_eq!(ek.len(), public_len(K));
     let mut rho = [0u8; 32];
     rho.copy_from_slice(&ek[384 * K..]);
-    let mut a = [[Poly::ZERO; K]; K];
-    for (i, row) in a.iter_mut().enumerate() {
-        for (j, entry) in row.iter_mut().enumerate() {
-            *entry = Poly::sample_ntt(&rho, i as u8, j as u8);
-        }
-    }
+    let a = sample_matrix::<K>(&rho);
     let mut t = [Poly::ZERO; K];
     for (i, t_i) in t.iter_mut().enumerate() {
         *t_i = Poly::decode(12, &ek[384 * i..384 * (i + 1)]);
@@ -624,11 +750,10 @@ fn key_gen<const K: usize>(
     sigma.zeroize();
 
     // t = A s + e.
-    let mut a = [[Poly::ZERO; K]; K];
+    let a = sample_matrix::<K>(&rho);
     let mut t = e;
-    for (i, (row, t_i)) in a.iter_mut().zip(t.iter_mut()).enumerate() {
-        for (j, (entry, s_j)) in row.iter_mut().zip(&s).enumerate() {
-            *entry = Poly::sample_ntt(&rho, i as u8, j as u8);
+    for (i, (row, t_i)) in a.iter().zip(t.iter_mut()).enumerate() {
+        for (entry, s_j) in row.iter().zip(&s) {
             t_i.add_assign(&entry.mul_ntt(s_j));
         }
         t_i.encode(12, &mut ek[384 * i..384 * (i + 1)]);
@@ -882,6 +1007,25 @@ macro_rules! parameter_set {
         pub struct PublicKey {
             bytes: [u8; PUBLIC_KEY_SIZE],
             expanded: ml_kem::Expanded<$k>,
+        }
+
+        impl crate::features::sealed::Sealed for PrivateKey {}
+
+        /// The profiles a key tells apart: how the streams its
+        /// matrix is read from are run, together or apart.
+        impl crate::features::Dispatcher for PrivateKey {
+            fn profiles() -> &'static [crate::features::Features] {
+                &crate::hash::sha3::together::PROFILES
+            }
+        }
+
+        impl crate::features::sealed::Sealed for PublicKey {}
+
+        /// As for the private key, whose matrix it is.
+        impl crate::features::Dispatcher for PublicKey {
+            fn profiles() -> &'static [crate::features::Features] {
+                &crate::hash::sha3::together::PROFILES
+            }
         }
 
         impl Drop for PrivateKey {
@@ -1218,6 +1362,170 @@ mod tests {
         let mut product = fh.mul_ntt(&gh);
         product.inverse_ntt();
         assert_eq!(product.0, expected.0);
+    }
+
+    /// The inverse transform is the standard's loop, algorithm 10,
+    /// done there in plain arithmetic modulo `q`: at the edges of the
+    /// range, where a lazy reduction would show, and across it.
+    #[test]
+    fn inverse_transform_matches_the_standard() {
+        fn standard(f: &mut [u16; N]) {
+            let mut k = 127;
+            let mut len = 2;
+            while len <= 128 {
+                for start in (0..N).step_by(2 * len) {
+                    let zeta = ZETAS[k];
+                    k -= 1;
+                    for j in start..start + len {
+                        let t = f[j];
+                        f[j] = add(t, f[j + len]);
+                        f[j + len] = mul(zeta, sub(f[j + len], t));
+                    }
+                }
+                len *= 2;
+            }
+            for c in f.iter_mut() {
+                *c = mul(*c, 3303);
+            }
+        }
+        fn check(case: Poly) {
+            let mut expected = case.0;
+            standard(&mut expected);
+            let mut got = case;
+            got.inverse_ntt();
+            assert_eq!(got.0, expected);
+        }
+        let top = (Q - 1) as u16;
+        check(Poly::ZERO);
+        check(Poly([top; N]));
+        check(Poly([1; N]));
+        let mut alternating = Poly::ZERO;
+        for (i, c) in alternating.0.iter_mut().enumerate() {
+            *c = if i % 2 == 0 { top } else { 0 };
+        }
+        check(alternating);
+        for seed in 1..=16u32 {
+            let mut f = Poly::ZERO;
+            for (i, c) in f.0.iter_mut().enumerate() {
+                *c = ((i as u32 * 2731 + seed * 977) * seed % Q) as u16;
+            }
+            check(f);
+        }
+    }
+
+    /// The matrix sampler is the standard's loop, algorithm 7: three
+    /// bytes at a time, each candidate below `q` kept in order, until
+    /// there are `N`. Over enough seeds that some need a fourth block
+    /// and most end part way through one.
+    #[test]
+    fn matrix_sampling_matches_the_standard() {
+        fn standard(rho: &[u8; 32], row: u8, col: u8) -> [u16; N] {
+            let mut xof = Shake128::new();
+            xof.update(rho);
+            xof.update(&[col, row]);
+            let mut reader = xof.finalize_xof();
+            let mut out = [0u16; N];
+            let mut filled = 0;
+            while filled < N {
+                let mut c = [0u8; 3];
+                reader.squeeze(&mut c);
+                let d1 = u16::from(c[0]) | (u16::from(c[1] & 0x0f) << 8);
+                let d2 = u16::from(c[1] >> 4) | (u16::from(c[2]) << 4);
+                if u32::from(d1) < Q {
+                    out[filled] = d1;
+                    filled += 1;
+                }
+                if u32::from(d2) < Q && filled < N {
+                    out[filled] = d2;
+                    filled += 1;
+                }
+            }
+            out
+        }
+        for seed in 0..=255u8 {
+            let rho = [seed; 32];
+            for (row, col) in [(0, 0), (1, 2), (3, 3)] {
+                assert_eq!(
+                    Poly::sample_ntt(&rho, row, col).0,
+                    standard(&rho, row, col),
+                    "{seed} {row} {col}"
+                );
+            }
+        }
+    }
+
+    /// The matrix is its entries, each sampled alone, whichever way
+    /// the features in force have its streams run: at every rank,
+    /// which leave entries over from the groups taken together
+    /// or none.
+    #[test]
+    fn the_matrix_agrees_with_its_entries() {
+        fn check<const K: usize>() {
+            for seed in [0u8, 1, 0x5a, 0xff] {
+                let rho = [seed; 32];
+                let a = sample_matrix::<K>(&rho);
+                for (i, row) in a.iter().enumerate() {
+                    for (j, entry) in row.iter().enumerate() {
+                        let alone = Poly::sample_ntt(&rho, i as u8, j as u8);
+                        assert_eq!(entry.0, alone.0, "{K} {seed} {i} {j}");
+                    }
+                }
+            }
+        }
+        check::<2>();
+        check::<3>();
+        check::<4>();
+    }
+
+    /// Entries sampled together are the same entries sampled alone,
+    /// for enough seeds that some entry needs a block its neighbours
+    /// do not, which is where one that has filled must sit a block
+    /// out.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn entries_together_agree_with_entries_alone() {
+        let places = [(0, 0), (0, 1), (1, 0), (3, 3)];
+        let at: [(u8, u8); together::WIDTH] =
+            core::array::from_fn(|i| places[i]);
+        let mut uneven = 0;
+        for seed in 0..=255u8 {
+            let rho = [seed; 32];
+            let Some(polys) = Poly::sample_ntt_together(&rho, at) else {
+                std::eprintln!("no kernel runs streams together; skipping");
+                return;
+            };
+            for (poly, (row, col)) in polys.iter().zip(at) {
+                assert_eq!(poly.0, Poly::sample_ntt(&rho, row, col).0);
+            }
+            // How many blocks each entry needs alone.
+            let blocks = at.map(|(row, col)| {
+                let mut xof = Shake128::new();
+                xof.update(&rho);
+                xof.update(&[col, row]);
+                let mut reader = xof.finalize_xof();
+                let mut kept = Kept::new();
+                let mut block = [0u8; together::RATE];
+                let mut blocks = 0;
+                while !kept.full() {
+                    reader.squeeze(&mut block);
+                    kept.take(&block);
+                    blocks += 1;
+                }
+                blocks
+            });
+            uneven += usize::from(blocks.iter().any(|&b| b != blocks[0]));
+        }
+        assert!(uneven > 0, "no group was uneven");
+    }
+
+    /// The keys publish the rows the matrix's streams choose among.
+    #[test]
+    fn keys_publish_the_matrix_profiles() {
+        use crate::features::Dispatcher;
+        let rows = &together::PROFILES[..];
+        assert_eq!(<ml_kem_512::PrivateKey as Dispatcher>::profiles(), rows);
+        assert_eq!(<ml_kem_768::PublicKey as Dispatcher>::profiles(), rows);
+        assert_eq!(<ml_kem_1024::PrivateKey as Dispatcher>::profiles(), rows);
     }
 
     /// Every value below 2^26 reduces as plain division says.

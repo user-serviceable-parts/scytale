@@ -470,6 +470,12 @@ mod inventory {
         kernels(&audit, "GHASH", ghash::KERNELS, &|k| {
             features::allows(ghash::KERNELS, k)
         });
+        kernels(
+            &audit,
+            "SHAKE-128 together",
+            sha3::together::KERNELS,
+            &|k| features::allows(sha3::together::KERNELS, k),
+        );
         #[cfg(target_arch = "x86_64")]
         {
             use crate::mac::poly1305;
