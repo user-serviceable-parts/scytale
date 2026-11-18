@@ -7,8 +7,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::sealed::{Chosen, Variant};
 use super::{
-    C0, C1, Decryptor, Encryptor, MAX_RATE, State, TAG, and, open, portable,
-    seal, xor,
+    C0, C1, Decryptor, Encryptor, MAX_RATE, State, TAG, and, lengths, open,
+    portable, seal, xor,
 };
 use crate::aead::Aead;
 use crate::cipher::aes::{BLOCK_SIZE, ISOLATED, Kernel};
@@ -185,22 +185,22 @@ impl Variant for Aegis128L {
 
     fn absorb(kernel: Chosen, state: &mut State, blocks: &[u8]) {
         match kernel.0 {
-            Kernel::Tables => portable::tables::absorb(state, blocks),
-            _ => portable::bitsliced::absorb(state, blocks),
+            Kernel::Tables => portable::tables128l::absorb(state, blocks),
+            _ => portable::bitsliced128l::absorb(state, blocks),
         }
     }
 
     fn encrypt(kernel: Chosen, state: &mut State, data: &mut [u8]) {
         match kernel.0 {
-            Kernel::Tables => portable::tables::encrypt(state, data),
-            _ => portable::bitsliced::encrypt(state, data),
+            Kernel::Tables => portable::tables128l::encrypt(state, data),
+            _ => portable::bitsliced128l::encrypt(state, data),
         }
     }
 
     fn decrypt(kernel: Chosen, state: &mut State, data: &mut [u8]) {
         match kernel.0 {
-            Kernel::Tables => portable::tables::decrypt(state, data),
-            _ => portable::bitsliced::decrypt(state, data),
+            Kernel::Tables => portable::tables128l::decrypt(state, data),
+            _ => portable::bitsliced128l::decrypt(state, data),
         }
     }
 
@@ -214,14 +214,7 @@ impl Variant for Aegis128L {
         aad_bits: u64,
         message_bits: u64,
     ) -> [u8; TAG] {
-        let mut t = state[2];
-        let (aad, message) = t.split_at_mut(8);
-        for (t, length) in aad.iter_mut().zip(aad_bits.to_le_bytes()) {
-            *t ^= length;
-        }
-        for (t, length) in message.iter_mut().zip(message_bits.to_le_bytes()) {
-            *t ^= length;
-        }
+        let mut t = xor(&state[2], &lengths(aad_bits, message_bits));
         // Seven updates with that block in both halves.
         let mut blocks = [0u8; 7 * 2 * BLOCK_SIZE];
         for half in blocks.chunks_exact_mut(BLOCK_SIZE) {

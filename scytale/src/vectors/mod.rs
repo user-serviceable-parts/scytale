@@ -91,6 +91,7 @@ mod aegis {
     use super::*;
     use crate::Key;
     use crate::aead::aegis::aegis128l::{self, Aegis128L};
+    use crate::aead::aegis::aegis256::{self, Aegis256};
 
     #[test]
     fn wycheproof_128l() {
@@ -100,6 +101,19 @@ mod aegis {
             |kernel| {
                 support::wycheproof::aegis::aegis128l(&|key| {
                     Aegis128L::with_kernel(key, kernel).expect("available")
+                })
+            },
+        );
+    }
+
+    #[test]
+    fn wycheproof_256() {
+        every_kernel(
+            aegis256::KERNELS,
+            |kernel| Aegis256::with_kernel(&Key::zeroed(), kernel).is_some(),
+            |kernel| {
+                support::wycheproof::aegis::aegis256(&|key| {
+                    Aegis256::with_kernel(key, kernel).expect("available")
                 })
             },
         );
@@ -479,10 +493,13 @@ mod inventory {
             chacha20::ChaCha20::with_kernel(&key, k).is_some()
         });
 
-        use crate::aead::aegis::aegis128l;
+        use crate::aead::aegis::{aegis128l, aegis256};
         kernels(&audit, "AEGIS-128L", aegis128l::KERNELS, &|k| {
             aegis128l::Aegis128L::with_kernel(&crate::Key::zeroed(), k)
                 .is_some()
+        });
+        kernels(&audit, "AEGIS-256", aegis256::KERNELS, &|k| {
+            aegis256::Aegis256::with_kernel(&crate::Key::zeroed(), k).is_some()
         });
 
         // The kernels no dispatching type stands over: a hash with

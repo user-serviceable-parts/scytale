@@ -9,7 +9,10 @@
 //! separate hash, so with AES instructions it costs a fraction of a
 //! full encryption for each block, and nothing in it multiplies.
 //!
-//! [`Aegis128L`] takes a 128-bit key and a 128-bit nonce.
+//! [`Aegis128L`] takes a 128-bit key and a 128-bit nonce, and two
+//! blocks of input to each stir of its eight; it is the faster.
+//! [`Aegis256`] takes a 256-bit key and a 256-bit nonce, wide enough
+//! to draw at random, and one block to each stir of its six.
 //!
 //! ```
 //! use scytale::Key;
@@ -51,6 +54,7 @@
 //! one every protocol speaks; AEGIS is for both ends being yours.
 
 pub(crate) mod aegis128l;
+pub(crate) mod aegis256;
 mod portable;
 
 use core::fmt;
@@ -59,6 +63,7 @@ use core::marker::PhantomData;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub use aegis128l::Aegis128L;
+pub use aegis256::Aegis256;
 
 use crate::Error;
 use crate::cipher::aes::{BLOCK_SIZE, Kernel};
@@ -98,6 +103,15 @@ fn xor(a: &[u8; BLOCK_SIZE], b: &[u8; BLOCK_SIZE]) -> [u8; BLOCK_SIZE] {
 /// `a & b`.
 fn and(a: &[u8; BLOCK_SIZE], b: &[u8; BLOCK_SIZE]) -> [u8; BLOCK_SIZE] {
     core::array::from_fn(|i| a[i] & b[i])
+}
+
+/// The two lengths, in bits, as the block `Finalize` stirs in.
+fn lengths(aad_bits: u64, message_bits: u64) -> [u8; BLOCK_SIZE] {
+    let mut block = [0u8; BLOCK_SIZE];
+    let (aad, message) = block.split_at_mut(8);
+    aad.copy_from_slice(&aad_bits.to_le_bytes());
+    message.copy_from_slice(&message_bits.to_le_bytes());
+    block
 }
 
 mod sealed {
@@ -324,7 +338,7 @@ impl<A: Variant> Drop for Core<A> {
 impl<A: Variant> ZeroizeOnDrop for Core<A> {}
 
 /// Encryption of a message that arrives in pieces, under `A`:
-/// [`Aegis128L`].
+/// [`Aegis128L`] or [`Aegis256`].
 ///
 /// Additional data first, then the message, then the tag; the
 /// ciphertext is in place as each piece is given.
@@ -358,7 +372,7 @@ impl<A: Variant> Encryptor<A> {
 }
 
 /// Decryption of a message that arrives in pieces, under `A`:
-/// [`Aegis128L`].
+/// [`Aegis128L`] or [`Aegis256`].
 ///
 /// **The pieces this hands back are not yet authenticated.** Nothing
 /// can vouch for any of the message until [`verify`](Self::verify)
