@@ -52,16 +52,20 @@ fn aead_round_trips_and_detects_tampering() {
         "aes-128-ccm",
         "chacha20-poly1305",
         "xchacha20-poly1305",
+        "aegis-128l",
+        "aegis-256",
     ] {
-        let key = if alg.ends_with("chacha20-poly1305") {
+        let key = if alg.ends_with("chacha20-poly1305") || alg == "aegis-256" {
             KEY32
         } else {
             KEY16
         };
-        let nonce = if alg == "xchacha20-poly1305" {
-            NONCE24
-        } else {
-            NONCE
+        // The keys are hex of the right width, and a nonce is too.
+        let nonce = match alg {
+            "xchacha20-poly1305" => NONCE24,
+            "aegis-128l" => KEY16,
+            "aegis-256" => KEY32,
+            _ => NONCE,
         };
         let message = b"the quick brown fox".repeat(1000);
         let enc = [

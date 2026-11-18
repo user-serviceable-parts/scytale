@@ -15,7 +15,7 @@
 //!
 //! Four of these are modes of operation of a block cipher and name
 //! their cipher as a type parameter: `Gcm::<Aes128>::new(&key)`. The
-//! other two are not built that way at all, which is the reason this
+//! other four are not built that way at all, which is the reason this
 //! module groups by what a construction does rather than by how it is
 //! made. [`Aead`] is that contract written down, and the one-shot
 //! calls live on it: a caller imports the trait and then does not care
@@ -31,6 +31,8 @@
 //! | The same, when a nonce might repeat | [`GcmSiv`] |
 //! | MACsec frames | [`Xpn`] |
 //! | Bluetooth LE, 802.15.4, CCMP, or a TLS CCM suite | [`Ccm`] |
+//! | Long messages on AES instructions, both ends yours | [`Aegis128L`] |
+//! | The same, with a 256-bit key and nonce | [`Aegis256`] |
 //!
 //! [`Gcm`] is the default. It is fast, standard, and every protocol
 //! that matters speaks it. Its one hazard is a repeated nonce, which
@@ -44,17 +46,24 @@
 //! block a message. [`Xpn`] is [`Gcm`] with the nonce assembled from a secret
 //! salt and a frame number, as MACsec does it. [`Ccm`] is counter
 //! mode with a CBC-MAC, slower than [`Gcm`] because the MAC chains,
-//! and there for the protocols that fixed on it.
+//! and there for the protocols that fixed on it. [`Aegis128L`] and
+//! [`Aegis256`] are built on the AES round itself rather than on the
+//! cipher, and with AES instructions a long message costs less under
+//! them than under [`Gcm`]; a short one costs more, since the key
+//! and nonce are stirred into the state for every message. They are
+//! an Internet-Draft still, and few protocols name them.
 //!
 //! # Nonces
 //!
-//! All six need a nonce that has never been used before under the
+//! All eight need a nonce that has never been used before under the
 //! same key. For [`Gcm`], [`Xpn`], [`ChaCha20Poly1305`] and
 //! [`XChaCha20Poly1305`] a repeat is fatal rather than merely
 //! revealing: it gives up the hash key, and with it the ability to
-//! forge tags. For [`Ccm`] it leaks the two messages into each
-//! other. Count nonces with [`Nonces`] rather than drawing them;
-//! only [`XChaCha20Poly1305`]'s are wide enough to draw.
+//! forge tags. For [`Aegis128L`] and [`Aegis256`] it gives up the
+//! state. For [`Ccm`] it leaks the two messages into each other.
+//! Count nonces with [`Nonces`] rather than drawing them; only
+//! [`XChaCha20Poly1305`]'s and [`Aegis256`]'s are wide enough to
+//! draw.
 //!
 //! # Example
 //!
@@ -106,10 +115,11 @@ use crate::{Error, KeyType};
 
 /// Authenticated encryption under one key.
 ///
-/// [`Gcm`], [`GcmSiv`], [`Ccm`], [`ChaCha20Poly1305`] and
-/// [`XChaCha20Poly1305`] implement this, so a caller that does not
-/// care which one it got -- a protocol that negotiated it, or a
-/// format that records it -- can hold any of them.
+/// [`Gcm`], [`GcmSiv`], [`Ccm`], [`ChaCha20Poly1305`],
+/// [`XChaCha20Poly1305`], [`Aegis128L`] and [`Aegis256`] implement
+/// this, so a caller that does not care which one it got -- a
+/// protocol that negotiated it, or a format that records it -- can
+/// hold any of them.
 /// The nonce, the key and the tag are types, so the trait is usable as
 /// an object once they are named:
 /// `&dyn Aead<Key = Key<[u8; 16]>, Nonce = [u8; 12], Tag = [u8; 16]>`
@@ -128,11 +138,12 @@ use crate::{Error, KeyType};
 /// all agree on whether that is possible.
 pub trait Aead: KeyType {
     /// The nonce; `[u8; 12]` for all of these but
-    /// [`XChaCha20Poly1305`], whose is `[u8; 24]`.
+    /// [`XChaCha20Poly1305`], whose is `[u8; 24]`, [`Aegis128L`],
+    /// whose is `[u8; 16]`, and [`Aegis256`], whose is `[u8; 32]`.
     ///
     /// It must never repeat under one key. Count nonces with
     /// [`Nonces`](crate::cipher::Nonces) rather than drawing them,
-    /// unless they are 24 bytes wide.
+    /// unless they are 24 bytes wide or more.
     type Nonce: ByteArray;
 
     /// The tag; `[u8; 16]` for all of these.

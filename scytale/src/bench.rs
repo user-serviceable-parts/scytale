@@ -115,7 +115,8 @@ use serde_json::{Value, json};
 
 use crate::Key;
 use crate::aead::{
-    Aead, Ccm, ChaCha20Poly1305, Gcm, GcmSiv, XChaCha20Poly1305, Xpn,
+    Aead, Aegis128L, Aegis256, Ccm, ChaCha20Poly1305, Gcm, GcmSiv,
+    XChaCha20Poly1305, Xpn,
 };
 use crate::cipher::aes::{Aes128, Aes256};
 use crate::cipher::chacha20;
@@ -533,6 +534,8 @@ const TYPES: &[Profiles] = &[
     <Poly1305 as Dispatcher>::profiles,
     <ChaCha20Poly1305 as Dispatcher>::profiles,
     <XChaCha20Poly1305 as Dispatcher>::profiles,
+    <Aegis128L as Dispatcher>::profiles,
+    <Aegis256 as Dispatcher>::profiles,
 ];
 
 const AES128: &[Profiles] = &[<Aes128 as Dispatcher>::profiles];
@@ -597,6 +600,12 @@ fn deciders(row: &str) -> &'static [Profiles] {
         }
         "xchacha20-poly1305-enc" | "xchacha20-poly1305-dec" => {
             &[<XChaCha20Poly1305 as Dispatcher>::profiles]
+        }
+        "aegis-128l-enc" | "aegis-128l-dec" => {
+            &[<Aegis128L as Dispatcher>::profiles]
+        }
+        "aegis-256-enc" | "aegis-256-dec" => {
+            &[<Aegis256 as Dispatcher>::profiles]
         }
         _ => &[],
     }
@@ -891,7 +900,7 @@ fn sha3_section(under: &mut Under<'_>, run: &mut Run) -> bool {
 }
 
 /// The rows that belong to no family above.
-const OTHER: [&str; 11] = [
+const OTHER: [&str; 15] = [
     "sha-1",
     "ctr-drbg",
     "hash-drbg-sha-256",
@@ -903,6 +912,10 @@ const OTHER: [&str; 11] = [
     "chacha20-poly1305-dec",
     "xchacha20-poly1305-enc",
     "xchacha20-poly1305-dec",
+    "aegis-128l-enc",
+    "aegis-128l-dec",
+    "aegis-256-enc",
+    "aegis-256-dec",
 ];
 
 /// Measures them, returning whether it ran anything.
@@ -926,6 +939,8 @@ fn other_section(under: &mut Under<'_>, run: &mut Run) -> bool {
             XChaCha20Poly1305::new(&Key::from(KEY256)),
             Kmac128::new(&KEY256, b""),
             TupleHash128::new(b""),
+            Aegis128L::new(&Key::from(KEY128)),
+            Aegis256::new(&Key::from(KEY256)),
         );
         (generators, macs)
     }) else {
@@ -934,12 +949,17 @@ fn other_section(under: &mut Under<'_>, run: &mut Run) -> bool {
     let (Ok(mut rng), Ok(mut hash_rng), Ok(mut hmac_rng)) = generators else {
         return false;
     };
-    let (mut sha1, mut mac, aead, xaead, mut kmac, mut tuple) = macs;
+    let (mut sha1, mut mac, aead, xaead, mut kmac, mut tuple, aegis, aegis256) =
+        macs;
     let mut tuple_out = [0u8; 32];
-    let mut tags = [[0u8; 16]; 4];
+    let mut tags = [[0u8; 16]; 8];
     let (enc_tag, rest) = tags.split_at_mut(1);
     let (dec_tag, rest) = rest.split_at_mut(1);
-    let (xenc_tag, xdec_tag) = rest.split_at_mut(1);
+    let (xenc_tag, rest) = rest.split_at_mut(1);
+    let (xdec_tag, rest) = rest.split_at_mut(1);
+    let (aegis_enc_tag, rest) = rest.split_at_mut(1);
+    let (aegis_dec_tag, rest) = rest.split_at_mut(1);
+    let (aegis256_enc_tag, aegis256_dec_tag) = rest.split_at_mut(1);
     let mut tasks: Vec<Task<'_>> = vec![
         (
             "sha-1",
@@ -1025,6 +1045,40 @@ fn other_section(under: &mut Under<'_>, run: &mut Run) -> bool {
                 };
                 let _ = state.update(d);
                 let _ = state.verify(&xdec_tag[0]);
+            }),
+        ),
+        (
+            "aegis-128l-enc",
+            Box::new(|d: &mut [u8]| {
+                let _ =
+                    aegis.encrypt(&[0x24; 16], &[], d, &mut aegis_enc_tag[0]);
+            }),
+        ),
+        (
+            "aegis-128l-dec",
+            Box::new(|d: &mut [u8]| {
+                let mut state = aegis.decryptor(&[0x24; 16]);
+                let _ = state.update(d);
+                let _ = state.verify(&aegis_dec_tag[0]);
+            }),
+        ),
+        (
+            "aegis-256-enc",
+            Box::new(|d: &mut [u8]| {
+                let _ = aegis256.encrypt(
+                    &[0x24; 32],
+                    &[],
+                    d,
+                    &mut aegis256_enc_tag[0],
+                );
+            }),
+        ),
+        (
+            "aegis-256-dec",
+            Box::new(|d: &mut [u8]| {
+                let mut state = aegis256.decryptor(&[0x24; 32]);
+                let _ = state.update(d);
+                let _ = state.verify(&aegis256_dec_tag[0]);
             }),
         ),
     ];
