@@ -17,6 +17,8 @@ use crate::{Error, Key, KeyType};
 
 #[cfg(target_arch = "aarch64")]
 use super::aarch64;
+#[cfg(target_arch = "riscv64")]
+use super::riscv64;
 #[cfg(target_arch = "x86_64")]
 use super::x86_64;
 
@@ -35,6 +37,10 @@ pub(crate) const KERNELS: &[(Kernel, Features)] = &[
     (Kernel::AesNi, crate::cipher::aes::x86_64::AESNI),
     #[cfg(target_arch = "aarch64")]
     (Kernel::Armv8, crate::cipher::aes::ARMV8),
+    #[cfg(target_arch = "riscv64")]
+    (Kernel::Zvkned, crate::cipher::aes::ZVKNED),
+    #[cfg(target_arch = "riscv64")]
+    (Kernel::Zkn, super::ZKNE),
     (Kernel::Tables, ISOLATED),
     (Kernel::Bitsliced, Features::new()),
 ];
@@ -210,6 +216,10 @@ impl Variant for Aegis256 {
             Kernel::AesNi => x86_64::absorb256(state, blocks),
             #[cfg(target_arch = "aarch64")]
             Kernel::Armv8 => aarch64::absorb256(state, blocks),
+            #[cfg(target_arch = "riscv64")]
+            Kernel::Zvkned => riscv64::zvkned::absorb256(state, blocks),
+            #[cfg(target_arch = "riscv64")]
+            Kernel::Zkn => riscv64::zkn::absorb256(state, blocks),
             Kernel::Tables => portable::tables256::absorb(state, blocks),
             _ => portable::bitsliced256::absorb(state, blocks),
         }
@@ -221,6 +231,10 @@ impl Variant for Aegis256 {
             Kernel::AesNi => x86_64::encrypt256(state, data),
             #[cfg(target_arch = "aarch64")]
             Kernel::Armv8 => aarch64::encrypt256(state, data),
+            #[cfg(target_arch = "riscv64")]
+            Kernel::Zvkned => riscv64::zvkned::encrypt256(state, data),
+            #[cfg(target_arch = "riscv64")]
+            Kernel::Zkn => riscv64::zkn::encrypt256(state, data),
             Kernel::Tables => portable::tables256::encrypt(state, data),
             _ => portable::bitsliced256::encrypt(state, data),
         }
@@ -232,6 +246,10 @@ impl Variant for Aegis256 {
             Kernel::AesNi => x86_64::decrypt256(state, data),
             #[cfg(target_arch = "aarch64")]
             Kernel::Armv8 => aarch64::decrypt256(state, data),
+            #[cfg(target_arch = "riscv64")]
+            Kernel::Zvkned => riscv64::zvkned::decrypt256(state, data),
+            #[cfg(target_arch = "riscv64")]
+            Kernel::Zkn => riscv64::zkn::decrypt256(state, data),
             Kernel::Tables => portable::tables256::decrypt(state, data),
             _ => portable::bitsliced256::decrypt(state, data),
         }
