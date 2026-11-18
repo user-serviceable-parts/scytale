@@ -56,6 +56,8 @@
 pub(crate) mod aegis128l;
 pub(crate) mod aegis256;
 mod portable;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
 
 use core::fmt;
 use core::marker::PhantomData;

@@ -15,6 +15,9 @@ use crate::cipher::aes::{BLOCK_SIZE, ISOLATED, Kernel};
 use crate::features::{self, Dispatcher, Features};
 use crate::{Error, Key, KeyType};
 
+#[cfg(target_arch = "x86_64")]
+use super::x86_64;
+
 /// The key length, in bytes.
 const KEY_SIZE: usize = 32;
 
@@ -26,6 +29,8 @@ const NONCE_SIZE: usize = 32;
 /// round; the table-driven one leaks as its cipher does and is
 /// admitted the same way.
 pub(crate) const KERNELS: &[(Kernel, Features)] = &[
+    #[cfg(target_arch = "x86_64")]
+    (Kernel::AesNi, crate::cipher::aes::x86_64::AESNI),
     (Kernel::Tables, ISOLATED),
     (Kernel::Bitsliced, Features::new()),
 ];
@@ -197,6 +202,8 @@ impl Variant for Aegis256 {
 
     fn absorb(kernel: Chosen, state: &mut State, blocks: &[u8]) {
         match kernel.0 {
+            #[cfg(target_arch = "x86_64")]
+            Kernel::AesNi => x86_64::absorb256(state, blocks),
             Kernel::Tables => portable::tables256::absorb(state, blocks),
             _ => portable::bitsliced256::absorb(state, blocks),
         }
@@ -204,6 +211,8 @@ impl Variant for Aegis256 {
 
     fn encrypt(kernel: Chosen, state: &mut State, data: &mut [u8]) {
         match kernel.0 {
+            #[cfg(target_arch = "x86_64")]
+            Kernel::AesNi => x86_64::encrypt256(state, data),
             Kernel::Tables => portable::tables256::encrypt(state, data),
             _ => portable::bitsliced256::encrypt(state, data),
         }
@@ -211,6 +220,8 @@ impl Variant for Aegis256 {
 
     fn decrypt(kernel: Chosen, state: &mut State, data: &mut [u8]) {
         match kernel.0 {
+            #[cfg(target_arch = "x86_64")]
+            Kernel::AesNi => x86_64::decrypt256(state, data),
             Kernel::Tables => portable::tables256::decrypt(state, data),
             _ => portable::bitsliced256::decrypt(state, data),
         }
@@ -411,7 +422,7 @@ mod tests {
         }
     }
 
-    /// A message of every length to a little over eight blocks, with
+    /// A message of every length to a little over twenty blocks, with
     /// additional data of every length likewise, sealed whole and
     /// then again in pieces of every size: every kernel must agree
     /// with the first, and the pieces with the whole.
@@ -420,7 +431,7 @@ mod tests {
         let key = "000102030405060708090a0b0c0d0e0f\
                    101112131415161718191a1b1c1d1e1f";
         let nonce = [0x5au8; 32];
-        let bytes: [u8; 140] = core::array::from_fn(|i| (i * 7 + 3) as u8);
+        let bytes: [u8; 330] = core::array::from_fn(|i| (i * 7 + 3) as u8);
         let mut reference: Vec<(Vec<u8>, [u8; 16])> = Vec::new();
         for (k, kernel) in kernels().enumerate() {
             let aead = aead(key, kernel);
