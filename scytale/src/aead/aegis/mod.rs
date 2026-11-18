@@ -53,6 +53,8 @@
 //! constant-time bitsliced round, as AES itself does here. GCM is the
 //! one every protocol speaks; AEGIS is for both ends being yours.
 
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
 pub(crate) mod aegis128l;
 pub(crate) mod aegis256;
 mod portable;

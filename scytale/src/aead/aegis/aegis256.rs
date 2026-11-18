@@ -15,6 +15,8 @@ use crate::cipher::aes::{BLOCK_SIZE, ISOLATED, Kernel};
 use crate::features::{self, Dispatcher, Features};
 use crate::{Error, Key, KeyType};
 
+#[cfg(target_arch = "aarch64")]
+use super::aarch64;
 #[cfg(target_arch = "x86_64")]
 use super::x86_64;
 
@@ -31,6 +33,8 @@ const NONCE_SIZE: usize = 32;
 pub(crate) const KERNELS: &[(Kernel, Features)] = &[
     #[cfg(target_arch = "x86_64")]
     (Kernel::AesNi, crate::cipher::aes::x86_64::AESNI),
+    #[cfg(target_arch = "aarch64")]
+    (Kernel::Armv8, crate::cipher::aes::ARMV8),
     (Kernel::Tables, ISOLATED),
     (Kernel::Bitsliced, Features::new()),
 ];
@@ -204,6 +208,8 @@ impl Variant for Aegis256 {
         match kernel.0 {
             #[cfg(target_arch = "x86_64")]
             Kernel::AesNi => x86_64::absorb256(state, blocks),
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Armv8 => aarch64::absorb256(state, blocks),
             Kernel::Tables => portable::tables256::absorb(state, blocks),
             _ => portable::bitsliced256::absorb(state, blocks),
         }
@@ -213,6 +219,8 @@ impl Variant for Aegis256 {
         match kernel.0 {
             #[cfg(target_arch = "x86_64")]
             Kernel::AesNi => x86_64::encrypt256(state, data),
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Armv8 => aarch64::encrypt256(state, data),
             Kernel::Tables => portable::tables256::encrypt(state, data),
             _ => portable::bitsliced256::encrypt(state, data),
         }
@@ -222,6 +230,8 @@ impl Variant for Aegis256 {
         match kernel.0 {
             #[cfg(target_arch = "x86_64")]
             Kernel::AesNi => x86_64::decrypt256(state, data),
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Armv8 => aarch64::decrypt256(state, data),
             Kernel::Tables => portable::tables256::decrypt(state, data),
             _ => portable::bitsliced256::decrypt(state, data),
         }
