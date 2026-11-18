@@ -35,7 +35,7 @@ const LANES: usize = 4;
 const GROUP: usize = LANES * BLOCK_SIZE;
 
 /// Eight bit planes holding four blocks.
-type State = [u64; 8];
+pub(crate) type State = [u64; 8];
 
 /// A bitsliced AES cipher with an expanded key.
 ///
@@ -211,9 +211,19 @@ fn decrypt_state<const R: usize>(
     add_round_key(q, &keys[0]);
 }
 
+/// One round without its key: SubBytes, ShiftRows and MixColumns on
+/// all four lanes. AEGIS is built from this alone, and xors what it
+/// calls the round key in itself.
+#[inline(always)]
+pub(crate) fn round(q: &mut State) {
+    sbox(q);
+    shift_rows(q);
+    mix_columns(q);
+}
+
 /// Packs up to four blocks (`data.len()` a multiple of 16, at most
 /// 64) into bit planes. Missing blocks leave their lanes zero.
-fn pack(data: &[u8]) -> State {
+pub(crate) fn pack(data: &[u8]) -> State {
     let mut q = [0u64; 8];
     for (b, block) in data.chunks_exact(BLOCK_SIZE).enumerate() {
         let (even, odd) = interleave(block);
@@ -225,7 +235,7 @@ fn pack(data: &[u8]) -> State {
 }
 
 /// Inverse of [`pack`]: writes the blocks back into `data`.
-fn unpack(q: &State, data: &mut [u8]) {
+pub(crate) fn unpack(q: &State, data: &mut [u8]) {
     let mut q = *q;
     transpose(&mut q);
     for (b, block) in data.chunks_exact_mut(BLOCK_SIZE).enumerate() {

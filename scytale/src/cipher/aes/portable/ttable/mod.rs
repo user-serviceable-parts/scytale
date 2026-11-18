@@ -239,6 +239,20 @@ fn byte(w: u32, n: u32) -> usize {
     (w >> (24 - 8 * n)) as u8 as usize
 }
 
+/// One round on a block of its own, `rk` xored in at the end: the
+/// whole of what AEGIS takes from AES.
+pub(crate) fn round(
+    block: &[u8; BLOCK_SIZE],
+    rk: &[u8; BLOCK_SIZE],
+) -> [u8; 16] {
+    let mut out = [0u8; BLOCK_SIZE];
+    store(
+        &mut out,
+        enc_round(load(block, &[0; 4]), &load(rk, &[0; 4])),
+    );
+    out
+}
+
 /// One full encryption round: the column `i` of the output draws its
 /// bytes from the diagonal starting at column `i`, which is ShiftRows.
 #[inline(always)]
