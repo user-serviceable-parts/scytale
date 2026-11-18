@@ -28,6 +28,10 @@
 //!
 //! The callers name this kernel only where its row of their list is
 //! in force, which is where the processor has the AES instructions.
+//!
+//! The input pointer moves on by a step the caller gives, so that the
+//! one loop takes a run of blocks and also one block many times over,
+//! which is what `Init` and `Finalize` do.
 
 #![allow(unsafe_code)]
 
@@ -140,7 +144,7 @@ macro_rules! absorb128l {
     ($label:literal, $s0:literal, $s1:literal, $s2:literal, $s3:literal,
      $s4:literal, $s5:literal, $s6:literal, $s7:literal) => {
         concat!(
-            "ld1 {{v17.16b, v18.16b}}, [{data}], #32\n",
+            "ld1 {{v17.16b, v18.16b}}, [{data}], {step}\n",
             update128l!($label, $s0, $s1, $s2, $s3, $s4, $s5, $s6, $s7),
         )
     };
@@ -154,7 +158,7 @@ macro_rules! encrypt128l {
             keystream128l!($s1, $s2, $s3, $s5, $s6, $s7),
             "eor v19.16b, v19.16b, v17.16b\n",
             "eor v20.16b, v20.16b, v18.16b\n",
-            "st1 {{v19.16b, v20.16b}}, [{data}], #32\n",
+            "st1 {{v19.16b, v20.16b}}, [{data}], {step}\n",
             update128l!($label, $s0, $s1, $s2, $s3, $s4, $s5, $s6, $s7),
         )
     };
@@ -170,7 +174,7 @@ macro_rules! decrypt128l {
             keystream128l!($s1, $s2, $s3, $s5, $s6, $s7),
             "eor v17.16b, v17.16b, v19.16b\n",
             "eor v18.16b, v18.16b, v20.16b\n",
-            "st1 {{v17.16b, v18.16b}}, [{data}], #32\n",
+            "st1 {{v17.16b, v18.16b}}, [{data}], {step}\n",
             update128l!($label, $s0, $s1, $s2, $s3, $s4, $s5, $s6, $s7),
         )
     };
@@ -282,7 +286,7 @@ macro_rules! absorb256 {
     ($label:literal, $s0:literal, $s1:literal, $s2:literal, $s3:literal,
      $s4:literal, $s5:literal) => {
         concat!(
-            "ld1 {{v17.16b}}, [{data}], #16\n",
+            "ld1 {{v17.16b}}, [{data}], {step}\n",
             update256!($label, $s0, $s1, $s2, $s3, $s4, $s5),
         )
     };
@@ -295,7 +299,7 @@ macro_rules! encrypt256 {
             "ld1 {{v17.16b}}, [{data}]\n",
             keystream256!($s1, $s2, $s3, $s4, $s5),
             "eor v19.16b, v19.16b, v17.16b\n",
-            "st1 {{v19.16b}}, [{data}], #16\n",
+            "st1 {{v19.16b}}, [{data}], {step}\n",
             update256!($label, $s0, $s1, $s2, $s3, $s4, $s5),
         )
     };
@@ -308,7 +312,7 @@ macro_rules! decrypt256 {
             "ld1 {{v17.16b}}, [{data}]\n",
             keystream256!($s1, $s2, $s3, $s4, $s5),
             "eor v17.16b, v17.16b, v19.16b\n",
-            "st1 {{v17.16b}}, [{data}], #16\n",
+            "st1 {{v17.16b}}, [{data}], {step}\n",
             update256!($label, $s0, $s1, $s2, $s3, $s4, $s5),
         )
     };
@@ -349,121 +353,121 @@ macro_rules! load256 {
 }
 
 /// Defines a kernel: the state into the registers, `$body` for each
-/// block of `$rate` bytes round the places the state can lie, and
-/// the state back from wherever the input ended.
+/// block of input round the places the state can lie, and the state
+/// back from wherever the input ended.
 macro_rules! kernel {
-    ($(#[$doc:meta])* $name:ident, $data:ty, $pointer:ident, $rate:literal,
-     $load:ident, $rotations:ident, $body:ident, $store:ident) => {
+    ($(#[$doc:meta])* $name:ident, $data:ty, $load:ident,
+     $rotations:ident, $body:ident, $store:ident) => {
         $(#[$doc])*
         ///
-        /// The processor must have the AES instructions.
-        pub(super) fn $name(state: &mut State, data: $data) {
-            /// # Safety
-            /// Requires the AES instructions; `state` must point at
-            /// eight blocks and `data` at `blocks` blocks of input,
-            /// `blocks >= 1`.
-            #[target_feature(enable = "aes")]
-            unsafe fn run(
-                state: *mut [u8; 16],
-                data: *const u8,
-                blocks: usize,
-            ) {
-                unsafe {
-                    core::arch::asm!(
-                        "movi v16.16b, #0",
-                        $load!(),
-                        "2:",
-                        $rotations!($body),
-                        "b 2b",
-                        $rotations!($store),
-                        "4:",
-                        state = in(reg) state,
-                        data = inout(reg) data => _,
-                        n = inout(reg) blocks => _,
-                        out("v0") _, out("v1") _, out("v2") _,
-                        out("v3") _, out("v4") _, out("v5") _,
-                        out("v6") _, out("v7") _, out("v16") _,
-                        out("v17") _, out("v18") _, out("v19") _,
-                        out("v20") _,
-                        options(nostack),
-                    );
-                }
+        /// # Safety
+        /// Requires the AES instructions; `data` must point at
+        /// `blocks` blocks of input, each `step` bytes on from the
+        /// last, and `blocks >= 1`.
+        #[target_feature(enable = "aes")]
+        unsafe fn $name(
+            state: &mut State,
+            data: $data,
+            step: usize,
+            blocks: usize,
+        ) {
+            unsafe {
+                core::arch::asm!(
+                    "movi v16.16b, #0",
+                    $load!(),
+                    "2:",
+                    $rotations!($body),
+                    "b 2b",
+                    $rotations!($store),
+                    "4:",
+                    state = in(reg) state.as_mut_ptr(),
+                    data = inout(reg) data => _,
+                    step = in(reg) step,
+                    n = inout(reg) blocks => _,
+                    out("v0") _, out("v1") _, out("v2") _,
+                    out("v3") _, out("v4") _, out("v5") _,
+                    out("v6") _, out("v7") _, out("v16") _,
+                    out("v17") _, out("v18") _, out("v19") _,
+                    out("v20") _,
+                    options(nostack),
+                );
             }
-
-            let blocks = data.len() / $rate;
-            if blocks == 0 {
-                return;
-            }
-            // SAFETY: `data` is `blocks` whole blocks long and the
-            // state is eight; the instructions are the caller's word.
-            unsafe { run(state.as_mut_ptr(), data.$pointer(), blocks) }
         }
     };
 }
 
 kernel!(
-    /// The AEGIS-128L `Absorb`, over each block of `data`.
-    absorb128l,
-    &[u8],
-    as_ptr,
-    32,
+    /// The AEGIS-128L `Absorb`.
+    run_absorb128l,
+    *const u8,
     load128l,
     rotations128l,
     absorb128l,
     store128l
 );
 kernel!(
-    /// The AEGIS-128L `Enc`, over each block of `data` in place.
-    encrypt128l,
-    &mut [u8],
-    as_mut_ptr,
-    32,
+    /// The AEGIS-128L `Enc`, in place.
+    run_encrypt128l,
+    *mut u8,
     load128l,
     rotations128l,
     encrypt128l,
     store128l
 );
 kernel!(
-    /// The AEGIS-128L `Dec`, over each block of `data` in place.
-    decrypt128l,
-    &mut [u8],
-    as_mut_ptr,
-    32,
+    /// The AEGIS-128L `Dec`, in place.
+    run_decrypt128l,
+    *mut u8,
     load128l,
     rotations128l,
     decrypt128l,
     store128l
 );
 kernel!(
-    /// The AEGIS-256 `Absorb`, over each block of `data`.
-    absorb256,
-    &[u8],
-    as_ptr,
-    16,
+    /// The AEGIS-256 `Absorb`.
+    run_absorb256,
+    *const u8,
     load256,
     rotations256,
     absorb256,
     store256
 );
 kernel!(
-    /// The AEGIS-256 `Enc`, over each block of `data` in place.
-    encrypt256,
-    &mut [u8],
-    as_mut_ptr,
-    16,
+    /// The AEGIS-256 `Enc`, in place.
+    run_encrypt256,
+    *mut u8,
     load256,
     rotations256,
     encrypt256,
     store256
 );
 kernel!(
-    /// The AEGIS-256 `Dec`, over each block of `data` in place.
-    decrypt256,
-    &mut [u8],
-    as_mut_ptr,
-    16,
+    /// The AEGIS-256 `Dec`, in place.
+    run_decrypt256,
+    *mut u8,
     load256,
     rotations256,
     decrypt256,
     store256
+);
+
+entries!(
+    32,
+    run_absorb128l,
+    run_encrypt128l,
+    run_decrypt128l,
+    absorb128l,
+    stir128l,
+    encrypt128l,
+    decrypt128l
+);
+entries!(
+    16,
+    run_absorb256,
+    run_encrypt256,
+    run_decrypt256,
+    absorb256,
+    stir256,
+    encrypt256,
+    decrypt256
 );

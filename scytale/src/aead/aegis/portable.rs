@@ -99,6 +99,20 @@ pub(super) mod bitsliced128l {
         sliced.store(state);
     }
 
+    /// `Absorb`, of `block` `times` over.
+    pub(in super::super) fn stir(
+        state: &mut State,
+        block: &[u8; RATE],
+        times: usize,
+    ) {
+        let mut sliced = Sliced::load(state);
+        let message = pack(block);
+        for _ in 0..times {
+            sliced.update(&message);
+        }
+        sliced.store(state);
+    }
+
     pub(in super::super) fn encrypt(state: &mut State, data: &mut [u8]) {
         let mut sliced = Sliced::load(state);
         for block in data.chunks_exact_mut(RATE) {
@@ -157,6 +171,17 @@ pub(super) mod tables128l {
 
     pub(in super::super) fn absorb(state: &mut State, blocks: &[u8]) {
         for block in blocks.chunks_exact(RATE) {
+            update(state, block);
+        }
+    }
+
+    /// `Absorb`, of `block` `times` over.
+    pub(in super::super) fn stir(
+        state: &mut State,
+        block: &[u8; RATE],
+        times: usize,
+    ) {
+        for _ in 0..times {
             update(state, block);
         }
     }
@@ -271,6 +296,20 @@ pub(super) mod bitsliced256 {
         sliced.store(state);
     }
 
+    /// `Absorb`, of `block` `times` over.
+    pub(in super::super) fn stir(
+        state: &mut State,
+        block: &[u8; RATE],
+        times: usize,
+    ) {
+        let mut sliced = Sliced::load(state);
+        let message = pack(block);
+        for _ in 0..times {
+            sliced.update(&message);
+        }
+        sliced.store(state);
+    }
+
     pub(in super::super) fn encrypt(state: &mut State, data: &mut [u8]) {
         let mut sliced = Sliced::load(state);
         for block in data.chunks_exact_mut(RATE) {
@@ -324,6 +363,17 @@ pub(super) mod tables256 {
 
     pub(in super::super) fn absorb(state: &mut State, blocks: &[u8]) {
         for block in blocks.chunks_exact(RATE) {
+            update(state, block);
+        }
+    }
+
+    /// `Absorb`, of `block` `times` over.
+    pub(in super::super) fn stir(
+        state: &mut State,
+        block: &[u8; RATE],
+        times: usize,
+    ) {
+        for _ in 0..times {
             update(state, block);
         }
     }

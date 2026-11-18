@@ -168,6 +168,30 @@ pub(super) fn keystream(s: &State) -> [u8; MAX_RATE] {
     z
 }
 
+/// `Absorb`, of the one block `block`, `times` over: what `Init` and
+/// `Finalize` are made of. A kernel does this without the block
+/// being written out that many times, which would be a secret that
+/// many times as long to wipe.
+fn stir(
+    kernel: Chosen,
+    state: &mut State,
+    block: &[u8; 2 * BLOCK_SIZE],
+    times: usize,
+) {
+    match kernel.0 {
+        #[cfg(target_arch = "x86_64")]
+        Kernel::AesNi => x86_64::stir128l(state, block, times),
+        #[cfg(target_arch = "aarch64")]
+        Kernel::Armv8 => aarch64::stir128l(state, block, times),
+        #[cfg(target_arch = "riscv64")]
+        Kernel::Zvkned => riscv64::zvkned::stir128l(state, block, times),
+        #[cfg(target_arch = "riscv64")]
+        Kernel::Zkn => riscv64::zkn::stir128l(state, block, times),
+        Kernel::Tables => portable::tables128l::stir(state, block, times),
+        _ => portable::bitsliced128l::stir(state, block, times),
+    }
+}
+
 impl Variant for Aegis128L {
     type Nonce = [u8; NONCE_SIZE];
 
@@ -185,16 +209,13 @@ impl Variant for Aegis128L {
             xor(key, &C1),
             xor(key, &C0),
         ];
-        // Ten updates with the nonce and the key, which is to absorb
-        // the pair ten times over.
-        let mut blocks = [0u8; 10 * 2 * BLOCK_SIZE];
-        for block in blocks.chunks_exact_mut(2 * BLOCK_SIZE) {
-            let (m0, m1) = block.split_at_mut(BLOCK_SIZE);
-            m0.copy_from_slice(nonce);
-            m1.copy_from_slice(key);
-        }
-        Self::absorb(kernel, &mut state, &blocks);
-        blocks.zeroize();
+        // Ten updates with the nonce and the key.
+        let mut block = [0u8; 2 * BLOCK_SIZE];
+        let (m0, m1) = block.split_at_mut(BLOCK_SIZE);
+        m0.copy_from_slice(nonce);
+        m1.copy_from_slice(key);
+        stir(kernel, &mut state, &block, 10);
+        block.zeroize();
         state
     }
 
@@ -255,12 +276,12 @@ impl Variant for Aegis128L {
     ) -> [u8; TAG] {
         let mut t = xor(&state[2], &lengths(aad_bits, message_bits));
         // Seven updates with that block in both halves.
-        let mut blocks = [0u8; 7 * 2 * BLOCK_SIZE];
-        for half in blocks.chunks_exact_mut(BLOCK_SIZE) {
-            half.copy_from_slice(&t);
-        }
-        Self::absorb(kernel, state, &blocks);
-        blocks.zeroize();
+        let mut block = [0u8; 2 * BLOCK_SIZE];
+        let (m0, m1) = block.split_at_mut(BLOCK_SIZE);
+        m0.copy_from_slice(&t);
+        m1.copy_from_slice(&t);
+        stir(kernel, state, &block, 7);
+        block.zeroize();
         t.zeroize();
         state[1..7].iter().fold(state[0], |tag, s| xor(&tag, s))
     }
