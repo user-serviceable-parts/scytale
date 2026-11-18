@@ -136,22 +136,22 @@ The KMAC customization string.
 
 **scytale aead** {**encrypt**\|**decrypt**} *algorithm* **-k** *key* **-n** *nonce* \[*--aad value*\] \[*--tag-length bytes*\] \[*-o file*\] \[*file*\]
 
-Authenticated encryption. Encryption writes the ciphertext and then the tag; decryption reads ciphertext and tag as one input, checks the tag, and writes the plaintext only if it checked. A message that fails leaves standard output empty and exits with status 1. Encryption with GCM, ChaCha20-Poly1305 and XChaCha20-Poly1305 streams; decryption reads the whole input first, since plaintext handed out before the tag is checked is plaintext an attacker chose.
+Authenticated encryption. Encryption writes the ciphertext and then the tag; decryption reads ciphertext and tag as one input, checks the tag, and writes the plaintext only if it checked. A message that fails leaves standard output empty and exits with status 1. Encryption with GCM, ChaCha20-Poly1305, XChaCha20-Poly1305 and AEGIS streams; decryption reads the whole input first, since plaintext handed out before the tag is checked is plaintext an attacker chose.
 
 *algorithm*  
-One of **aes-128-gcm**, **aes-192-gcm**, **aes-256-gcm**, **aes-128-gcm-siv**, **aes-256-gcm-siv**, **aes-128-ccm**, **aes-192-ccm**, **aes-256-ccm**, **aes-128-xpn**, **aes-192-xpn**, **aes-256-xpn**, **chacha20-poly1305**, **xchacha20-poly1305**.
+One of **aes-128-gcm**, **aes-192-gcm**, **aes-256-gcm**, **aes-128-gcm-siv**, **aes-256-gcm-siv**, **aes-128-ccm**, **aes-192-ccm**, **aes-256-ccm**, **aes-128-xpn**, **aes-192-xpn**, **aes-256-xpn**, **chacha20-poly1305**, **xchacha20-poly1305**, **aegis-128l**, **aegis-256**.
 
 **-k, --key** *value*  
-The key, of the width the name says: 16, 24 or 32 bytes for AES, 32 for ChaCha20-Poly1305 and XChaCha20-Poly1305.
+The key, of the width the name says: 16, 24 or 32 bytes for AES, 32 for ChaCha20-Poly1305 and XChaCha20-Poly1305, 16 for AEGIS-128L and 32 for AEGIS-256.
 
 **-n, --nonce** *value*  
-The nonce. Twelve bytes, except that GCM takes any length, CCM takes 7 to 13, XPN takes 24: the 12-byte salt followed by the 12-byte frame, and XChaCha20-Poly1305 takes 24 that may be drawn at random. A nonce must never repeat under one key.
+The nonce. Twelve bytes, except that GCM takes any length, CCM takes 7 to 13, XPN takes 24: the 12-byte salt followed by the 12-byte frame, XChaCha20-Poly1305 takes 24 that may be drawn at random, AEGIS-128L takes 16, and AEGIS-256 takes 32 that may be drawn at random. A nonce must never repeat under one key.
 
 **--aad** *value*  
 Additional data, authenticated but not encrypted; the same value must be given to decrypt. Empty without it.
 
 **--tag-length** *bytes*  
-The tag length, 16 by default. GCM and XPN take 4 to 16, CCM an even number from 4 to 16; GCM-SIV, ChaCha20-Poly1305 and XChaCha20-Poly1305 take 16 only.
+The tag length, 16 by default. GCM and XPN take 4 to 16, CCM an even number from 4 to 16; GCM-SIV, ChaCha20-Poly1305, XChaCha20-Poly1305 and AEGIS take 16 only.
 
 ## cipher encrypt, cipher decrypt
 

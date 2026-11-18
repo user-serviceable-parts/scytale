@@ -36,6 +36,9 @@
 //! - **Never reuse a nonce with the same key.** A repeat gives away
 //!   the state, and with it everything the key protects. Count
 //!   nonces, with [`Nonces`](crate::cipher::Nonces) or otherwise.
+//!   The draft allows a nonce drawn at random for up to 2^48
+//!   messages under one [`Aegis128L`] key, and without limit under
+//!   [`Aegis256`].
 //! - Do not use a decrypted message before the tag has been checked.
 //!   The one-shot [`decrypt`](crate::aead::Aead::decrypt) checks
 //!   first and wipes the buffer on failure; the incremental form
@@ -47,11 +50,14 @@
 //!
 //! # Compared with GCM
 //!
-//! The same job. Where the processor has AES instructions this is
-//! the faster, since a block costs a few rounds rather than a whole
-//! encryption and a multiplication. Without them it runs the
-//! constant-time bitsliced round, as AES itself does here. GCM is the
-//! one every protocol speaks; AEGIS is for both ends being yours.
+//! The same job. With AES instructions a long message costs less
+//! here, since a block costs a few rounds rather than a whole
+//! encryption and a multiplication. A short one costs more: the key
+//! and the nonce are stirred into the state for every message, where
+//! GCM expands its key once. Without the instructions this runs the
+//! constant-time bitsliced round, as AES itself does here. GCM is
+//! the one every protocol speaks; AEGIS is still an Internet-Draft,
+//! and is for both ends being yours.
 
 /// Defines the four ways into a hardware kernel for one variant,
 /// over the three loops the architecture's file has written: a run of
