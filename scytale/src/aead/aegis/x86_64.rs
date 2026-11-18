@@ -29,6 +29,10 @@
 //! These are in the legacy SSE encoding, so they need the AES
 //! instructions and nothing newer. The callers name this kernel only
 //! where its row of their list is in force.
+//!
+//! The input pointer moves on by a step the caller gives, so that the
+//! one loop takes a run of blocks and also one block many times over,
+//! which is what `Init` and `Finalize` do.
 
 #![allow(unsafe_code)]
 
@@ -125,7 +129,7 @@ macro_rules! update128l {
             "aesenc ",
             $s7,
             ", xmm8\n",
-            "add {data}, 32\n",
+            "add {data}, {step}\n",
             "dec {n}\n",
             "jz ",
             $label,
@@ -318,7 +322,7 @@ macro_rules! update256 {
             "aesenc ",
             $s5,
             ", xmm8\n",
-            "add {data}, 16\n",
+            "add {data}, {step}\n",
             "dec {n}\n",
             "jz ",
             $label,
@@ -427,22 +431,23 @@ macro_rules! load256 {
 }
 
 /// Defines a kernel: the state into the registers, `$body` for each
-/// block of `$rate` bytes round the places the state can lie, and
-/// the state back from wherever the input ended.
+/// block of input round the places the state can lie, and the state
+/// back from wherever the input ended.
 macro_rules! kernel {
-    ($(#[$doc:meta])* $name:ident, $data:ty, $pointer:ident, $rate:literal,
-     $load:ident, $rotations:ident, $body:ident, $store:ident) => {
+    ($(#[$doc:meta])* $name:ident, $data:ty, $load:ident,
+     $rotations:ident, $body:ident, $store:ident) => {
         $(#[$doc])*
         ///
-        /// The processor must have the AES instructions.
-        pub(super) fn $name(state: &mut State, data: $data) {
-            let blocks = data.len() / $rate;
-            if blocks == 0 {
-                return;
-            }
-            // SAFETY: the loop reads and writes `blocks` whole blocks
-            // at `data`, which is that long, and the state, which is
-            // eight blocks; the instructions are the caller's word.
+        /// # Safety
+        /// Requires the AES instructions; `data` must point at
+        /// `blocks` blocks of input, each `step` bytes on from the
+        /// last, and `blocks >= 1`.
+        unsafe fn $name(
+            state: &mut State,
+            data: $data,
+            step: usize,
+            blocks: usize,
+        ) {
             unsafe {
                 core::arch::asm!(
                     $load!(),
@@ -452,7 +457,8 @@ macro_rules! kernel {
                     $rotations!($store),
                     "4:",
                     state = in(reg) state.as_mut_ptr(),
-                    data = inout(reg) data.$pointer() => _,
+                    data = inout(reg) data => _,
+                    step = in(reg) step,
                     n = inout(reg) blocks => _,
                     out("xmm0") _, out("xmm1") _, out("xmm2") _,
                     out("xmm3") _, out("xmm4") _, out("xmm5") _,
@@ -466,68 +472,77 @@ macro_rules! kernel {
 }
 
 kernel!(
-    /// The AEGIS-128L `Absorb`, over each block of `data`.
-    absorb128l,
-    &[u8],
-    as_ptr,
-    32,
+    /// The AEGIS-128L `Absorb`.
+    run_absorb128l,
+    *const u8,
     load128l,
     rotations128l,
     absorb128l,
     store128l
 );
 kernel!(
-    /// The AEGIS-128L `Enc`, over each block of `data` in place.
-    encrypt128l,
-    &mut [u8],
-    as_mut_ptr,
-    32,
+    /// The AEGIS-128L `Enc`, in place.
+    run_encrypt128l,
+    *mut u8,
     load128l,
     rotations128l,
     encrypt128l,
     store128l
 );
 kernel!(
-    /// The AEGIS-128L `Dec`, over each block of `data` in place.
-    decrypt128l,
-    &mut [u8],
-    as_mut_ptr,
-    32,
+    /// The AEGIS-128L `Dec`, in place.
+    run_decrypt128l,
+    *mut u8,
     load128l,
     rotations128l,
     decrypt128l,
     store128l
 );
 kernel!(
-    /// The AEGIS-256 `Absorb`, over each block of `data`.
-    absorb256,
-    &[u8],
-    as_ptr,
-    16,
+    /// The AEGIS-256 `Absorb`.
+    run_absorb256,
+    *const u8,
     load256,
     rotations256,
     absorb256,
     store256
 );
 kernel!(
-    /// The AEGIS-256 `Enc`, over each block of `data` in place.
-    encrypt256,
-    &mut [u8],
-    as_mut_ptr,
-    16,
+    /// The AEGIS-256 `Enc`, in place.
+    run_encrypt256,
+    *mut u8,
     load256,
     rotations256,
     encrypt256,
     store256
 );
 kernel!(
-    /// The AEGIS-256 `Dec`, over each block of `data` in place.
-    decrypt256,
-    &mut [u8],
-    as_mut_ptr,
-    16,
+    /// The AEGIS-256 `Dec`, in place.
+    run_decrypt256,
+    *mut u8,
     load256,
     rotations256,
     decrypt256,
     store256
+);
+
+entries!(
+    32,
+    run_absorb128l,
+    run_encrypt128l,
+    run_decrypt128l,
+    absorb128l,
+    stir128l,
+    encrypt128l,
+    decrypt128l
+);
+entries!(
+    16,
+    run_absorb256,
+    run_encrypt256,
+    run_decrypt256,
+    absorb256,
+    stir256,
+    encrypt256,
+    decrypt256
 );

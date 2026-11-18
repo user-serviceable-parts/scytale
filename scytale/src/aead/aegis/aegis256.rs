@@ -176,6 +176,30 @@ fn halves(bytes: &[u8; 32]) -> ([u8; BLOCK_SIZE], [u8; BLOCK_SIZE]) {
     (low, high)
 }
 
+/// `Absorb`, of the one block `block`, `times` over: what `Init` and
+/// `Finalize` are made of. A kernel does this without the block
+/// being written out that many times, which would be a secret that
+/// many times as long to wipe.
+fn stir(
+    kernel: Chosen,
+    state: &mut State,
+    block: &[u8; BLOCK_SIZE],
+    times: usize,
+) {
+    match kernel.0 {
+        #[cfg(target_arch = "x86_64")]
+        Kernel::AesNi => x86_64::stir256(state, block, times),
+        #[cfg(target_arch = "aarch64")]
+        Kernel::Armv8 => aarch64::stir256(state, block, times),
+        #[cfg(target_arch = "riscv64")]
+        Kernel::Zvkned => riscv64::zvkned::stir256(state, block, times),
+        #[cfg(target_arch = "riscv64")]
+        Kernel::Zkn => riscv64::zkn::stir256(state, block, times),
+        Kernel::Tables => portable::tables256::stir(state, block, times),
+        _ => portable::bitsliced256::stir(state, block, times),
+    }
+}
+
 impl Variant for Aegis256 {
     type Nonce = [u8; NONCE_SIZE];
 
@@ -195,18 +219,16 @@ impl Variant for Aegis256 {
             [0; BLOCK_SIZE],
         ];
         // Four times over: the two halves of the key, then each with
-        // its half of the nonce.
-        let mut blocks = [0u8; 4 * 4 * BLOCK_SIZE];
-        for four in blocks.chunks_exact_mut(4 * BLOCK_SIZE) {
-            let inputs = [k0, k1, state[0], state[1]];
-            four.copy_from_slice(inputs.as_flattened());
-        }
+        // its half of the nonce. Those last two are the first two
+        // blocks of the state as it starts, which the updates
+        // change, so they are copied before any.
+        let mut inputs = [k0, k1, state[0], state[1]];
         k0.zeroize();
         k1.zeroize();
-        // The first two blocks of the state are among the inputs,
-        // and the updates change them, so they were copied first.
-        Self::absorb(kernel, &mut state, &blocks);
-        blocks.zeroize();
+        for _ in 0..4 {
+            Self::absorb(kernel, &mut state, inputs.as_flattened());
+        }
+        inputs.zeroize();
         state
     }
 
@@ -267,12 +289,7 @@ impl Variant for Aegis256 {
     ) -> [u8; TAG] {
         let mut t = xor(&state[3], &lengths(aad_bits, message_bits));
         // Seven updates with that block.
-        let mut blocks = [0u8; 7 * BLOCK_SIZE];
-        for block in blocks.chunks_exact_mut(BLOCK_SIZE) {
-            block.copy_from_slice(&t);
-        }
-        Self::absorb(kernel, state, &blocks);
-        blocks.zeroize();
+        stir(kernel, state, &t, 7);
         t.zeroize();
         state[1..6].iter().fold(state[0], |tag, s| xor(&tag, s))
     }

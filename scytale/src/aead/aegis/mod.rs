@@ -53,6 +53,72 @@
 //! constant-time bitsliced round, as AES itself does here. GCM is the
 //! one every protocol speaks; AEGIS is for both ends being yours.
 
+/// Defines the four ways into a hardware kernel for one variant,
+/// over the three loops the architecture's file has written: a run of
+/// blocks absorbed, one block absorbed `times` over, and a run
+/// encrypted or decrypted in place. `$rate` is the bytes to a block.
+///
+/// Here rather than once in each file, since what they say is the
+/// same on every architecture. Each is safe to call only in the
+/// sense that it keeps to the memory it is given: that the processor
+/// has the instructions is the caller's word.
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    target_arch = "x86_64"
+))]
+macro_rules! entries {
+    ($rate:literal, $run_absorb:ident, $run_encrypt:ident,
+     $run_decrypt:ident, $absorb:ident, $stir:ident, $encrypt:ident,
+     $decrypt:ident) => {
+        /// `Absorb`, over each whole block of `data`.
+        pub(in crate::aead::aegis) fn $absorb(state: &mut State, data: &[u8]) {
+            let blocks = data.len() / $rate;
+            if blocks != 0 {
+                // SAFETY: `data` holds that many blocks end to end.
+                unsafe { $run_absorb(state, data.as_ptr(), $rate, blocks) }
+            }
+        }
+
+        /// `Absorb`, of `block` `times` over.
+        pub(in crate::aead::aegis) fn $stir(
+            state: &mut State,
+            block: &[u8; $rate],
+            times: usize,
+        ) {
+            if times != 0 {
+                // SAFETY: a step of nothing reads the one block
+                // every time.
+                unsafe { $run_absorb(state, block.as_ptr(), 0, times) }
+            }
+        }
+
+        /// `Enc`, over each whole block of `data` in place.
+        pub(in crate::aead::aegis) fn $encrypt(
+            state: &mut State,
+            data: &mut [u8],
+        ) {
+            let blocks = data.len() / $rate;
+            if blocks != 0 {
+                // SAFETY: `data` holds that many blocks end to end.
+                unsafe { $run_encrypt(state, data.as_mut_ptr(), $rate, blocks) }
+            }
+        }
+
+        /// `Dec`, over each whole block of `data` in place.
+        pub(in crate::aead::aegis) fn $decrypt(
+            state: &mut State,
+            data: &mut [u8],
+        ) {
+            let blocks = data.len() / $rate;
+            if blocks != 0 {
+                // SAFETY: `data` holds that many blocks end to end.
+                unsafe { $run_decrypt(state, data.as_mut_ptr(), $rate, blocks) }
+            }
+        }
+    };
+}
+
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
 pub(crate) mod aegis128l;

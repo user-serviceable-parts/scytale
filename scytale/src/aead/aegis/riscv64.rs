@@ -11,6 +11,10 @@
 //! The callers name these kernels only where their rows of the lists
 //! are in force. The `.option arch` directives only tell the
 //! assembler the instructions are allowed.
+//!
+//! The input pointer moves on by a step the caller gives, so that the
+//! one loop takes a run of blocks and also one block many times over,
+//! which is what `Init` and `Finalize` do.
 
 #![allow(unsafe_code)]
 
@@ -98,7 +102,7 @@ pub(super) mod zvkned {
                 "vaesem.vv ",
                 $s7,
                 ", v8\n",
-                "addi {data}, {data}, 32\n",
+                "add {data}, {data}, {step}\n",
                 "addi {n}, {n}, -1\n",
                 "beqz {n}, ",
                 $label,
@@ -300,7 +304,7 @@ pub(super) mod zvkned {
                 "vaesem.vv ",
                 $s5,
                 ", v8\n",
-                "addi {data}, {data}, 16\n",
+                "add {data}, {data}, {step}\n",
                 "addi {n}, {n}, -1\n",
                 "beqz {n}, ",
                 $label,
@@ -401,25 +405,23 @@ pub(super) mod zvkned {
     }
 
     /// Defines a kernel: the state into the registers, `$body` for
-    /// each block of `$rate` bytes round the places the state can
-    /// lie, and the state back from wherever the input ended.
+    /// each block of input round the places the state can lie, and
+    /// the state back from wherever the input ended.
     macro_rules! kernel {
-        ($(#[$doc:meta])* $name:ident, $data:ty, $pointer:ident,
-         $rate:literal, $load:ident, $rotations:ident, $body:ident,
-         $store:ident) => {
+        ($(#[$doc:meta])* $name:ident, $data:ty, $load:ident,
+         $rotations:ident, $body:ident, $store:ident) => {
             $(#[$doc])*
             ///
-            /// The processor must have the vector extension and
-            /// Zvkned.
-            pub(in super::super) fn $name(state: &mut State, data: $data) {
-                let blocks = data.len() / $rate;
-                if blocks == 0 {
-                    return;
-                }
-                // SAFETY: the loop reads and writes `blocks` whole
-                // blocks at `data`, which is that long, and the
-                // state, which is eight blocks; the instructions are
-                // the caller's word.
+            /// # Safety
+            /// Requires the vector extension and Zvkned; `data` must
+            /// point at `blocks` blocks of input, each `step` bytes
+            /// on from the last, and `blocks >= 1`.
+            unsafe fn $name(
+                state: &mut State,
+                data: $data,
+                step: usize,
+                blocks: usize,
+            ) {
                 unsafe {
                     core::arch::asm!(
                         ".option push",
@@ -433,7 +435,8 @@ pub(super) mod zvkned {
                         "4:",
                         ".option pop",
                         state = in(reg) state.as_mut_ptr(),
-                        data = inout(reg) data.$pointer() => _,
+                        data = inout(reg) data => _,
+                        step = in(reg) step,
                         n = inout(reg) blocks => _,
                         t = out(reg) _,
                         out("v0") _, out("v1") _, out("v2") _,
@@ -448,70 +451,79 @@ pub(super) mod zvkned {
     }
 
     kernel!(
-        /// The AEGIS-128L `Absorb`, over each block of `data`.
-        absorb128l,
-        &[u8],
-        as_ptr,
-        32,
+        /// The AEGIS-128L `Absorb`.
+        run_absorb128l,
+        *const u8,
         load128l,
         rotations128l,
         absorb128l,
         store128l
     );
     kernel!(
-        /// The AEGIS-128L `Enc`, over each block of `data` in place.
-        encrypt128l,
-        &mut [u8],
-        as_mut_ptr,
-        32,
+        /// The AEGIS-128L `Enc`, in place.
+        run_encrypt128l,
+        *mut u8,
         load128l,
         rotations128l,
         encrypt128l,
         store128l
     );
     kernel!(
-        /// The AEGIS-128L `Dec`, over each block of `data` in place.
-        decrypt128l,
-        &mut [u8],
-        as_mut_ptr,
-        32,
+        /// The AEGIS-128L `Dec`, in place.
+        run_decrypt128l,
+        *mut u8,
         load128l,
         rotations128l,
         decrypt128l,
         store128l
     );
     kernel!(
-        /// The AEGIS-256 `Absorb`, over each block of `data`.
-        absorb256,
-        &[u8],
-        as_ptr,
-        16,
+        /// The AEGIS-256 `Absorb`.
+        run_absorb256,
+        *const u8,
         load256,
         rotations256,
         absorb256,
         store256
     );
     kernel!(
-        /// The AEGIS-256 `Enc`, over each block of `data` in place.
-        encrypt256,
-        &mut [u8],
-        as_mut_ptr,
-        16,
+        /// The AEGIS-256 `Enc`, in place.
+        run_encrypt256,
+        *mut u8,
         load256,
         rotations256,
         encrypt256,
         store256
     );
     kernel!(
-        /// The AEGIS-256 `Dec`, over each block of `data` in place.
-        decrypt256,
-        &mut [u8],
-        as_mut_ptr,
-        16,
+        /// The AEGIS-256 `Dec`, in place.
+        run_decrypt256,
+        *mut u8,
         load256,
         rotations256,
         decrypt256,
         store256
+    );
+
+    entries!(
+        32,
+        run_absorb128l,
+        run_encrypt128l,
+        run_decrypt128l,
+        absorb128l,
+        stir128l,
+        encrypt128l,
+        decrypt128l
+    );
+    entries!(
+        16,
+        run_absorb256,
+        run_encrypt256,
+        run_decrypt256,
+        absorb256,
+        stir256,
+        encrypt256,
+        decrypt256
     );
 }
 
@@ -525,7 +537,8 @@ pub(super) mod zvkned {
 /// overwritten first, is made before the rest.
 ///
 /// AEGIS-128L holds its sixteen halves in registers, which leaves
-/// ten of the twenty-six there are to use for everything else.
+/// ten of the twenty-six there are to use for everything else, and
+/// that takes all ten.
 pub(super) mod zkn {
     use super::super::State;
 
@@ -651,7 +664,7 @@ pub(super) mod zkn {
                 round!("0", "1"),
                 "xor {s0l}, {s0l}, {rl}\n",
                 "xor {s0h}, {s0h}, {rh}\n",
-                "addi {data}, {data}, 32\n",
+                "add {data}, {data}, {step}\n",
                 "addi {n}, {n}, -1\n",
                 "bnez {n}, 2b\n",
             )
@@ -724,20 +737,19 @@ pub(super) mod zkn {
 
     /// Defines an AEGIS-128L kernel over `$body`.
     macro_rules! kernel128l {
-        ($(#[$doc:meta])* $name:ident, $data:ty, $pointer:ident,
-         $body:ident) => {
+        ($(#[$doc:meta])* $name:ident, $data:ty, $body:ident) => {
             $(#[$doc])*
             ///
-            /// The processor must have Zkne.
-            pub(in super::super) fn $name(state: &mut State, data: $data) {
-                let blocks = data.len() / 32;
-                if blocks == 0 {
-                    return;
-                }
-                // SAFETY: the loop reads and writes `blocks` whole
-                // blocks at `data`, which is that long, and the
-                // state, which is eight blocks; the instructions are
-                // the caller's word.
+            /// # Safety
+            /// Requires Zkne; `data` must point at `blocks` blocks of
+            /// input, each `step` bytes on from the last, and
+            /// `blocks >= 1`.
+            unsafe fn $name(
+                state: &mut State,
+                data: $data,
+                step: usize,
+                blocks: usize,
+            ) {
                 unsafe {
                     core::arch::asm!(
                         ".option push",
@@ -762,7 +774,8 @@ pub(super) mod zkn {
                         put!("7", "112", "120"),
                         ".option pop",
                         state = in(reg) state.as_mut_ptr(),
-                        data = inout(reg) data.$pointer() => _,
+                        data = inout(reg) data => _,
+                        step = in(reg) step,
                         n = inout(reg) blocks => _,
                         s0l = out(reg) _, s0h = out(reg) _,
                         s1l = out(reg) _, s1h = out(reg) _,
@@ -783,24 +796,32 @@ pub(super) mod zkn {
     }
 
     kernel128l!(
-        /// The AEGIS-128L `Absorb`, over each block of `data`.
-        absorb128l,
-        &[u8],
-        as_ptr,
+        /// The AEGIS-128L `Absorb`.
+        run_absorb128l,
+        *const u8,
         absorb128l
     );
     kernel128l!(
-        /// The AEGIS-128L `Enc`, over each block of `data` in place.
-        encrypt128l,
-        &mut [u8],
-        as_mut_ptr,
+        /// The AEGIS-128L `Enc`, in place.
+        run_encrypt128l,
+        *mut u8,
         encrypt128l
     );
     kernel128l!(
-        /// The AEGIS-128L `Dec`, over each block of `data` in place.
-        decrypt128l,
-        &mut [u8],
-        as_mut_ptr,
+        /// The AEGIS-128L `Dec`, in place.
+        run_decrypt128l,
+        *mut u8,
+        decrypt128l
+    );
+
+    entries!(
+        32,
+        run_absorb128l,
+        run_encrypt128l,
+        run_decrypt128l,
+        absorb128l,
+        stir128l,
+        encrypt128l,
         decrypt128l
     );
 
@@ -820,7 +841,7 @@ pub(super) mod zkn {
                 round!("0", "1"),
                 "xor {s0l}, {s0l}, {rl}\n",
                 "xor {s0h}, {s0h}, {rh}\n",
-                "addi {data}, {data}, 16\n",
+                "add {data}, {data}, {step}\n",
                 "addi {n}, {n}, -1\n",
                 "bnez {n}, 2b\n",
             )
@@ -876,20 +897,19 @@ pub(super) mod zkn {
 
     /// Defines an AEGIS-256 kernel over `$body`.
     macro_rules! kernel256 {
-        ($(#[$doc:meta])* $name:ident, $data:ty, $pointer:ident,
-         $body:ident) => {
+        ($(#[$doc:meta])* $name:ident, $data:ty, $body:ident) => {
             $(#[$doc])*
             ///
-            /// The processor must have Zkne.
-            pub(in super::super) fn $name(state: &mut State, data: $data) {
-                let blocks = data.len() / 16;
-                if blocks == 0 {
-                    return;
-                }
-                // SAFETY: the loop reads and writes `blocks` whole
-                // blocks at `data`, which is that long, and the
-                // first six blocks of the state, which is eight; the
-                // instructions are the caller's word.
+            /// # Safety
+            /// Requires Zkne; `data` must point at `blocks` blocks of
+            /// input, each `step` bytes on from the last, and
+            /// `blocks >= 1`.
+            unsafe fn $name(
+                state: &mut State,
+                data: $data,
+                step: usize,
+                blocks: usize,
+            ) {
                 unsafe {
                     core::arch::asm!(
                         ".option push",
@@ -910,7 +930,8 @@ pub(super) mod zkn {
                         put!("5", "80", "88"),
                         ".option pop",
                         state = in(reg) state.as_mut_ptr(),
-                        data = inout(reg) data.$pointer() => _,
+                        data = inout(reg) data => _,
+                        step = in(reg) step,
                         n = inout(reg) blocks => _,
                         s0l = out(reg) _, s0h = out(reg) _,
                         s1l = out(reg) _, s1h = out(reg) _,
@@ -928,24 +949,32 @@ pub(super) mod zkn {
     }
 
     kernel256!(
-        /// The AEGIS-256 `Absorb`, over each block of `data`.
-        absorb256,
-        &[u8],
-        as_ptr,
+        /// The AEGIS-256 `Absorb`.
+        run_absorb256,
+        *const u8,
         absorb256
     );
     kernel256!(
-        /// The AEGIS-256 `Enc`, over each block of `data` in place.
-        encrypt256,
-        &mut [u8],
-        as_mut_ptr,
+        /// The AEGIS-256 `Enc`, in place.
+        run_encrypt256,
+        *mut u8,
         encrypt256
     );
     kernel256!(
-        /// The AEGIS-256 `Dec`, over each block of `data` in place.
-        decrypt256,
-        &mut [u8],
-        as_mut_ptr,
+        /// The AEGIS-256 `Dec`, in place.
+        run_decrypt256,
+        *mut u8,
+        decrypt256
+    );
+
+    entries!(
+        16,
+        run_absorb256,
+        run_encrypt256,
+        run_decrypt256,
+        absorb256,
+        stir256,
+        encrypt256,
         decrypt256
     );
 }
