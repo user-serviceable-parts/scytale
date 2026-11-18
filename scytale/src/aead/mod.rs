@@ -93,7 +93,7 @@ pub(crate) mod polyval;
 pub mod xchacha20_poly1305;
 pub mod xpn;
 
-pub use aegis::Aegis128L;
+pub use aegis::{Aegis128L, Aegis256};
 pub use ccm::Ccm;
 pub use chacha20_poly1305::ChaCha20Poly1305;
 pub use gcm::Gcm;

@@ -11,13 +11,19 @@ use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
 use super::super::hex;
 use super::load;
-use crate::aead::{Aead, Aegis128L};
+use crate::aead::{Aead, Aegis128L, Aegis256};
 use crate::{Error, Key};
 
 /// Runs every AEGIS-128L case through the AEAD `new` makes; a no-op
 /// without the vendored vectors.
 pub fn aegis128l(new: &dyn Fn(&Key<[u8; 16]>) -> Aegis128L) {
     run("wycheproof/aegis128L_test.json", "AEGIS128L", 367, 112, new);
+}
+
+/// Runs every AEGIS-256 case through the AEAD `new` makes; a no-op
+/// without the vendored vectors.
+pub fn aegis256(new: &dyn Fn(&Key<[u8; 32]>) -> Aegis256) {
+    run("wycheproof/aegis256_test.json", "AEGIS256", 360, 112, new);
 }
 
 /// Runs every case of `file`, which holds at least `valid` cases
