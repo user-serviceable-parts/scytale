@@ -164,18 +164,79 @@ macro_rules! encrypt128l {
     };
 }
 
-/// As encryption, but the state is updated with what comes out
-/// rather than with what went in.
+/// On to the next block of input, leaving through the store at
+/// `$label` if that was the last.
+macro_rules! next {
+    ($label:literal) => {
+        concat!("subs {n}, {n}, #1\n", "b.eq ", $label, "f\n")
+    };
+}
+
+/// Decryption, which updates the state with what comes out, and what
+/// comes out is made from the state. S1 and S5 are the blocks of the
+/// keystream that arrive last, being the two the update before has
+/// just written, so each goes in as its round's key and everything
+/// else is gathered beside the round and xored in after it: the
+/// next update then waits on two xors of them and not four.
 macro_rules! decrypt128l {
     ($label:literal, $s0:literal, $s1:literal, $s2:literal, $s3:literal,
      $s4:literal, $s5:literal, $s6:literal, $s7:literal) => {
         concat!(
             "ld1 {{v17.16b, v18.16b}}, [{data}]\n",
-            keystream128l!($s1, $s2, $s3, $s5, $s6, $s7),
-            "eor v17.16b, v17.16b, v19.16b\n",
-            "eor v18.16b, v18.16b, v20.16b\n",
+            "and v19.16b, v",
+            $s2,
+            ".16b, v",
+            $s3,
+            ".16b\n",
+            "and v20.16b, v",
+            $s6,
+            ".16b, v",
+            $s7,
+            ".16b\n",
+            "eor v19.16b, v19.16b, v",
+            $s6,
+            ".16b\n",
+            "eor v20.16b, v20.16b, v",
+            $s2,
+            ".16b\n",
+            "eor v19.16b, v19.16b, v17.16b\n",
+            "eor v20.16b, v20.16b, v18.16b\n",
+            "mov v21.16b, v",
+            $s1,
+            ".16b\n",
+            // The message, for the output alone.
+            "eor v17.16b, v19.16b, v",
+            $s1,
+            ".16b\n",
+            "eor v18.16b, v20.16b, v",
+            $s5,
+            ".16b\n",
             "st1 {{v17.16b, v18.16b}}, [{data}], {step}\n",
-            update128l!($label, $s0, $s1, $s2, $s3, $s4, $s5, $s6, $s7),
+            "eor v19.16b, v19.16b, v",
+            $s0,
+            ".16b\n",
+            "eor v20.16b, v20.16b, v",
+            $s4,
+            ".16b\n",
+            round!($s0, $s1),
+            round!($s1, $s2),
+            round!($s2, $s3),
+            round!($s3, $s5),
+            "eor v",
+            $s3,
+            ".16b, v",
+            $s3,
+            ".16b, v20.16b\n",
+            round!($s4, $s5),
+            round!($s5, $s6),
+            round!($s6, $s7),
+            round!($s7, "21"),
+            "eor v",
+            $s7,
+            ".16b, v",
+            $s7,
+            ".16b, v19.16b\n",
+            next!($label),
         )
     };
 }
@@ -305,15 +366,47 @@ macro_rules! encrypt256 {
     };
 }
 
+/// Decryption; see [`decrypt128l`]. S1 is the block that arrives
+/// last, and is kept in `v21` to be the round's key.
 macro_rules! decrypt256 {
     ($label:literal, $s0:literal, $s1:literal, $s2:literal, $s3:literal,
      $s4:literal, $s5:literal) => {
         concat!(
             "ld1 {{v17.16b}}, [{data}]\n",
-            keystream256!($s1, $s2, $s3, $s4, $s5),
-            "eor v17.16b, v17.16b, v19.16b\n",
+            "and v19.16b, v",
+            $s2,
+            ".16b, v",
+            $s3,
+            ".16b\n",
+            "eor v20.16b, v",
+            $s4,
+            ".16b, v",
+            $s5,
+            ".16b\n",
+            "mov v21.16b, v",
+            $s1,
+            ".16b\n",
+            "eor v19.16b, v19.16b, v17.16b\n",
+            "eor v19.16b, v19.16b, v20.16b\n",
+            "eor v17.16b, v19.16b, v",
+            $s1,
+            ".16b\n",
             "st1 {{v17.16b}}, [{data}], {step}\n",
-            update256!($label, $s0, $s1, $s2, $s3, $s4, $s5),
+            "eor v19.16b, v19.16b, v",
+            $s0,
+            ".16b\n",
+            round!($s0, $s1),
+            round!($s1, $s2),
+            round!($s2, $s3),
+            round!($s3, $s4),
+            round!($s4, $s5),
+            round!($s5, "21"),
+            "eor v",
+            $s5,
+            ".16b, v",
+            $s5,
+            ".16b, v19.16b\n",
+            next!($label),
         )
     };
 }
@@ -388,7 +481,7 @@ macro_rules! kernel {
                     out("v3") _, out("v4") _, out("v5") _,
                     out("v6") _, out("v7") _, out("v16") _,
                     out("v17") _, out("v18") _, out("v19") _,
-                    out("v20") _,
+                    out("v20") _, out("v21") _,
                     options(nostack),
                 );
             }

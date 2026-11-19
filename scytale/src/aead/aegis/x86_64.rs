@@ -20,9 +20,22 @@
 //! A message that ends part of the way down leaves through the store
 //! for the place it had reached.
 //!
-//! The one copy an update would otherwise need, of the block that is
-//! overwritten first and read last, is the xor of that block with the
-//! message, which has to be formed anyway.
+//! One block is still copied in each update: the one whose register
+//! is written first and whose old value is wanted last. A register
+//! move costs nothing to wait for.
+//!
+//! # Where the message goes in
+//!
+//! The draft gives a block that takes message the round of its
+//! neighbour with `block ^ message` as the key. Here the round takes
+//! the message alone as its key and the block is xored in after it,
+//! which is the same value. The difference is in what the next
+//! update waits for: a block's old value reaches its new one through
+//! one xor, and not through an xor and then a round. Measured on a
+//! Raptor Lake core, where an xor between two rounds costs as much
+//! as a round, that took the AEGIS-256 update from 6.4 cycles to 4.7.
+//! Decryption goes a step further for the same reason; see
+//! `decrypt128l` below.
 //!
 //! # Availability
 //!
@@ -79,19 +92,32 @@ macro_rules! rotations128l {
     };
 }
 
-/// The AEGIS-128L update, for M0 in `xmm8` and M1 in `xmm9`, then on
-/// to the next block of input, leaving through the store at `$label`
-/// if that was the last. The new S0 is left where S7 was, and every
-/// other block where the one before it was.
+/// On to the next block of input, leaving through the store at
+/// `$label` if that was the last.
+macro_rules! next {
+    ($label:literal) => {
+        concat!("add {data}, {step}\n", "dec {n}\n", "jz ", $label, "f\n")
+    };
+}
+
+/// The AEGIS-128L update, for M0 in `xmm8` and M1 in `xmm9`. The new
+/// S0 is left where S7 was, and every other block where the one
+/// before it was.
+///
+/// The two blocks that take a block of message take it as the
+/// round's key and have their own old value xored in afterwards,
+/// rather than the two xored first and given to the round together.
+/// The answer is the same and the wait is not: a block's old value
+/// then reaches its new one through an xor alone, where the other
+/// way round it goes through the xor and then the round, every
+/// update. S0 is kept in `xmm12` for that, since its register is
+/// the first written and it is wanted last.
 macro_rules! update128l {
     ($label:literal, $s0:literal, $s1:literal, $s2:literal, $s3:literal,
      $s4:literal, $s5:literal, $s6:literal, $s7:literal) => {
         concat!(
-            "pxor xmm8, ",
+            "movdqa xmm12, ",
             $s0,
-            "\n",
-            "pxor xmm9, ",
-            $s4,
             "\n",
             "aesenc ",
             $s0,
@@ -111,6 +137,11 @@ macro_rules! update128l {
             "aesenc ",
             $s3,
             ", xmm9\n",
+            "pxor ",
+            $s3,
+            ", ",
+            $s4,
+            "\n",
             "aesenc ",
             $s4,
             ", ",
@@ -129,11 +160,10 @@ macro_rules! update128l {
             "aesenc ",
             $s7,
             ", xmm8\n",
-            "add {data}, {step}\n",
-            "dec {n}\n",
-            "jz ",
-            $label,
-            "f\n",
+            "pxor ",
+            $s7,
+            ", xmm12\n",
+            next!($label),
         )
     };
 }
@@ -203,19 +233,105 @@ macro_rules! encrypt128l {
     };
 }
 
-/// As encryption, but the state is updated with what comes out
-/// rather than with what went in.
+/// Decryption, which updates the state with what comes out rather
+/// than with what went in, and what comes out is made from the
+/// state. Of the blocks the keystream is made from, S1 and S5 were
+/// the two written by the update before, from the blocks that took
+/// its message, so they are the last to arrive; each is given to the
+/// round as its key and everything else is xored in afterwards,
+/// which keeps them off the path the next update waits on.
 macro_rules! decrypt128l {
     ($label:literal, $s0:literal, $s1:literal, $s2:literal, $s3:literal,
      $s4:literal, $s5:literal, $s6:literal, $s7:literal) => {
         concat!(
             input128l!(),
-            keystream128l!($s1, $s2, $s3, $s5, $s6, $s7),
-            "pxor xmm8, xmm10\n",
-            "pxor xmm9, xmm11\n",
+            // All of each block but its late one: the ciphertext
+            // with the rest of the keystream.
+            "movdqa xmm10, ",
+            $s2,
+            "\n",
+            "movdqa xmm11, ",
+            $s6,
+            "\n",
+            "pand xmm10, ",
+            $s3,
+            "\n",
+            "pand xmm11, ",
+            $s7,
+            "\n",
+            "pxor xmm10, ",
+            $s6,
+            "\n",
+            "pxor xmm11, ",
+            $s2,
+            "\n",
+            "pxor xmm10, xmm8\n",
+            "pxor xmm11, xmm9\n",
+            "movdqa xmm12, ",
+            $s1,
+            "\n",
+            // The message, for the output alone.
+            "movdqa xmm8, xmm10\n",
+            "movdqa xmm9, xmm11\n",
+            "pxor xmm8, ",
+            $s1,
+            "\n",
+            "pxor xmm9, ",
+            $s5,
+            "\n",
             "movdqu [{data}], xmm8\n",
             "movdqu [{data} + 16], xmm9\n",
-            update128l!($label, $s0, $s1, $s2, $s3, $s4, $s5, $s6, $s7),
+            "pxor xmm10, ",
+            $s0,
+            "\n",
+            "pxor xmm11, ",
+            $s4,
+            "\n",
+            "aesenc ",
+            $s0,
+            ", ",
+            $s1,
+            "\n",
+            "aesenc ",
+            $s1,
+            ", ",
+            $s2,
+            "\n",
+            "aesenc ",
+            $s2,
+            ", ",
+            $s3,
+            "\n",
+            "aesenc ",
+            $s3,
+            ", ",
+            $s5,
+            "\n",
+            "pxor ",
+            $s3,
+            ", xmm11\n",
+            "aesenc ",
+            $s4,
+            ", ",
+            $s5,
+            "\n",
+            "aesenc ",
+            $s5,
+            ", ",
+            $s6,
+            "\n",
+            "aesenc ",
+            $s6,
+            ", ",
+            $s7,
+            "\n",
+            "aesenc ",
+            $s7,
+            ", xmm12\n",
+            "pxor ",
+            $s7,
+            ", xmm10\n",
+            next!($label),
         )
     };
 }
@@ -286,12 +402,13 @@ macro_rules! rotations256 {
     };
 }
 
-/// The AEGIS-256 update, for M in `xmm8`; see [`update128l`].
+/// The AEGIS-256 update, for M in `xmm8`; see [`update128l`]. S0 is
+/// kept in `xmm9`.
 macro_rules! update256 {
     ($label:literal, $s0:literal, $s1:literal, $s2:literal, $s3:literal,
      $s4:literal, $s5:literal) => {
         concat!(
-            "pxor xmm8, ",
+            "movdqa xmm9, ",
             $s0,
             "\n",
             "aesenc ",
@@ -322,11 +439,10 @@ macro_rules! update256 {
             "aesenc ",
             $s5,
             ", xmm8\n",
-            "add {data}, {step}\n",
-            "dec {n}\n",
-            "jz ",
-            $label,
-            "f\n",
+            "pxor ",
+            $s5,
+            ", xmm9\n",
+            next!($label),
         )
     };
 }
@@ -377,15 +493,69 @@ macro_rules! encrypt256 {
     };
 }
 
+/// Decryption; see [`decrypt128l`]. S1 is the block that arrives
+/// last, and is kept in `xmm9` to be the round's key.
 macro_rules! decrypt256 {
     ($label:literal, $s0:literal, $s1:literal, $s2:literal, $s3:literal,
      $s4:literal, $s5:literal) => {
         concat!(
             "movdqu xmm8, [{data}]\n",
-            keystream256!($s1, $s2, $s3, $s4, $s5),
-            "pxor xmm8, xmm10\n",
-            "movdqu [{data}], xmm8\n",
-            update256!($label, $s0, $s1, $s2, $s3, $s4, $s5),
+            "movdqa xmm10, ",
+            $s2,
+            "\n",
+            "movdqa xmm9, ",
+            $s1,
+            "\n",
+            "pand xmm10, ",
+            $s3,
+            "\n",
+            "pxor xmm8, ",
+            $s4,
+            "\n",
+            "pxor xmm10, ",
+            $s5,
+            "\n",
+            "pxor xmm10, xmm8\n",
+            "movdqa xmm11, xmm10\n",
+            "pxor xmm11, ",
+            $s1,
+            "\n",
+            "movdqu [{data}], xmm11\n",
+            "pxor xmm10, ",
+            $s0,
+            "\n",
+            "aesenc ",
+            $s0,
+            ", ",
+            $s1,
+            "\n",
+            "aesenc ",
+            $s1,
+            ", ",
+            $s2,
+            "\n",
+            "aesenc ",
+            $s2,
+            ", ",
+            $s3,
+            "\n",
+            "aesenc ",
+            $s3,
+            ", ",
+            $s4,
+            "\n",
+            "aesenc ",
+            $s4,
+            ", ",
+            $s5,
+            "\n",
+            "aesenc ",
+            $s5,
+            ", xmm9\n",
+            "pxor ",
+            $s5,
+            ", xmm10\n",
+            next!($label),
         )
     };
 }
@@ -464,6 +634,7 @@ macro_rules! kernel {
                     out("xmm3") _, out("xmm4") _, out("xmm5") _,
                     out("xmm6") _, out("xmm7") _, out("xmm8") _,
                     out("xmm9") _, out("xmm10") _, out("xmm11") _,
+                    out("xmm12") _,
                     options(nostack),
                 );
             }
