@@ -322,8 +322,8 @@ Authenticated encryption. Encryption writes the ciphertext and then the
 tag; decryption reads ciphertext and tag as one input, checks the tag,
 and writes the plaintext only if it checked. A message that fails
 leaves standard output empty and exits with status 1. Encryption with
-GCM, ChaCha20-Poly1305 and XChaCha20-Poly1305 streams; decryption
-reads the whole input first, since plaintext handed out before the
+GCM, ChaCha20-Poly1305, XChaCha20-Poly1305 and AEGIS streams;
+decryption reads the whole input first, since plaintext handed out before the
 tag is checked is plaintext an attacker chose.
 .TP
 .I algorithm
@@ -340,16 +340,20 @@ One of
 .BR aes\-192\-xpn ,
 .BR aes\-256\-xpn ,
 .BR chacha20\-poly1305 ,
-.BR xchacha20\-poly1305 .
+.BR xchacha20\-poly1305 ,
+.BR aegis\-128l ,
+.BR aegis\-256 .
 .TP
 .BI \-k,\ \-\-key\  value
 The key, of the width the name says: 16, 24 or 32 bytes for AES, 32
-for ChaCha20-Poly1305 and XChaCha20-Poly1305.
+for ChaCha20-Poly1305 and XChaCha20-Poly1305, 16 for AEGIS-128L and
+32 for AEGIS-256.
 .TP
 .BI \-n,\ \-\-nonce\  value
 The nonce. Twelve bytes, except that GCM takes any length, CCM takes 7
 to 13, XPN takes 24: the 12-byte salt followed by the 12-byte frame,
-and XChaCha20-Poly1305 takes 24 that may be drawn at random. A nonce
+XChaCha20-Poly1305 takes 24 that may be drawn at random, AEGIS-128L
+takes 16, and AEGIS-256 takes 32 that may be drawn at random. A nonce
 must never repeat under one key.
 .TP
 .BI \-\-aad\  value
@@ -358,8 +362,8 @@ be given to decrypt. Empty without it.
 .TP
 .BI \-\-tag\-length\  bytes
 The tag length, 16 by default. GCM and XPN take 4 to 16, CCM an even
-number from 4 to 16; GCM-SIV, ChaCha20-Poly1305 and XChaCha20-Poly1305
-take 16 only.
+number from 4 to 16; GCM-SIV, ChaCha20-Poly1305, XChaCha20-Poly1305
+and AEGIS take 16 only.
 .SS cipher encrypt, cipher decrypt
 .B scytale cipher
 .RB { encrypt | decrypt }

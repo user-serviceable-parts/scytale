@@ -23,7 +23,8 @@ use std::path::{Path, PathBuf};
 
 use common::*;
 use scytale::aead::{
-    Aead, Ccm, ChaCha20Poly1305, Gcm, GcmSiv, XChaCha20Poly1305, Xpn,
+    Aead, Aegis128L, Aegis256, Ccm, ChaCha20Poly1305, Gcm, GcmSiv,
+    XChaCha20Poly1305, Xpn,
 };
 use scytale::cipher::BlockCipher;
 use scytale::cipher::aes::{Aes128, Aes192, Aes256};
@@ -338,6 +339,14 @@ fn library_aead(name: &str, key: &[u8], nonce: &[u8], aad: &[u8]) -> Vec<u8> {
         let aead = XChaCha20Poly1305::new(&key_of::<XChaCha20Poly1305>(key));
         aead.encrypt(nonce.try_into().unwrap(), aad, &mut data, &mut tag)
             .unwrap();
+    } else if name == "aegis-128l" {
+        let aead = Aegis128L::new(&key_of::<Aegis128L>(key));
+        aead.encrypt(nonce.try_into().unwrap(), aad, &mut data, &mut tag)
+            .unwrap();
+    } else if name == "aegis-256" {
+        let aead = Aegis256::new(&key_of::<Aegis256>(key));
+        aead.encrypt(nonce.try_into().unwrap(), aad, &mut data, &mut tag)
+            .unwrap();
     } else {
         let rest = name.strip_prefix("aes-").unwrap();
         let (bits, mode) = rest.split_once('-').unwrap();
@@ -392,13 +401,16 @@ fn aeads_match_the_library() {
     for name in names("aead") {
         let name = name.as_str();
         let width = match name {
-            "chacha20-poly1305" | "xchacha20-poly1305" => 32,
+            "chacha20-poly1305" | "xchacha20-poly1305" | "aegis-256" => 32,
+            "aegis-128l" => 16,
             _ => name[4..7].parse::<usize>().unwrap() / 8,
         };
         let nonce_len = if name.ends_with("-ccm") {
             13
         } else if name.ends_with("-xpn") || name.starts_with("xchacha") {
             24
+        } else if name.starts_with("aegis") {
+            width
         } else {
             12
         };

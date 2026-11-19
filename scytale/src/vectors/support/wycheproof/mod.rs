@@ -5,6 +5,7 @@
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
+pub mod aegis;
 pub mod chacha20_poly1305;
 pub mod ecdh;
 pub mod ecdsa;

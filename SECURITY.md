@@ -61,6 +61,7 @@ excluded.
 | AES, table-driven | `cipher/aes/portable/ttable.rs` | **not constant time**; compiled and tested, never selected by any construction; there is currently no way to ask for it |
 | ChaCha20, all | add-rotate-xor only | no tables, no data-dependent branches, on every backend |
 | HChaCha20, XChaCha20 | `cipher/chacha20/portable.rs`, over ChaCha20 | the same rounds; the subkey is wiped with the message |
+| AEGIS round | the AES round of the same instructions on each architecture, else `cipher/aes/portable/bitsliced.rs` | as AES; the table-driven round only where `Isolated` is in force |
 | GHASH, portable | 128 masked shift-and-add steps per block | no tables; slow on purpose |
 | GHASH, accelerated | `pclmulqdq`, `pmull`, Zvbc/Zbc/Zvkg | carry-less multiply instructions are data-independent |
 | POLYVAL (GCM-SIV) | over the GHASH multiply | same |
@@ -75,7 +76,7 @@ excluded.
 | hex, base64, PEM | `codec/` | each character computed from its value with masks, no table indexed by a secret; a bad character is recorded and reported after the whole string is read |
 | CMAC | over the cipher | as the cipher; subkey doubling masks rather than branches; `Mac::verify` compares with `constant_time::equal` |
 | KW, KWP | over the cipher | the integrity check value is compared with `constant_time::equal` |
-| GCM, GCM-SIV, XPN, CCM, ChaCha20-Poly1305, XChaCha20-Poly1305 | over the above | tag compared whole with `constant_time::equal`; plaintext never released on failure |
+| GCM, GCM-SIV, XPN, CCM, ChaCha20-Poly1305, XChaCha20-Poly1305, AEGIS-128L, AEGIS-256 | over the above | tag compared whole with `constant_time::equal`; plaintext never released on failure |
 | CTR_DRBG | AES-256 | as AES; the state is a `Key` |
 | Hash_DRBG, HMAC_DRBG | over the hashes | as the hash; the state is wiped on drop, and Hash_DRBG's additions carry through every byte |
 | `constant_time::equal` | `constant_time.rs` | reads every byte of both operands; the accumulator goes through `black_box` so the compiler cannot reintroduce an early exit; a length mismatch returns early, since lengths are not secret |
@@ -371,13 +372,14 @@ and this is what it promises about them.
 ## What scytale does not protect against
 
 - **Nonce reuse.** GCM, XPN, CCM, ChaCha20-Poly1305,
-  XChaCha20-Poly1305 and CTR lose confidentiality when a nonce
+  XChaCha20-Poly1305, AEGIS and CTR lose confidentiality when a nonce
   repeats under one key, and all but CCM give up the authentication
-  key with it. The library counts nonces for you when asked
-  (`cipher::Nonces`) but cannot stop a caller supplying its own.
-  XChaCha20-Poly1305's 192-bit nonce is the one wide enough to draw
-  at random. GCM-SIV survives a repeated nonce at the cost of
-  revealing that two messages were equal.
+  key, or for AEGIS the state, with it. The library counts nonces for
+  you when asked (`cipher::Nonces`) but cannot stop a caller
+  supplying its own. XChaCha20-Poly1305's 192-bit nonce and
+  AEGIS-256's 256-bit one are the ones wide enough to draw at random.
+  GCM-SIV survives a repeated nonce at the cost of revealing that two
+  messages were equal.
 - **Weak or reused keys.** A Poly1305 key used for two messages
   gives away `r`. An RSA key below 2048 bits, or SHA-1 anywhere but
   a legacy HMAC, is accepted where a standard still names it, and is

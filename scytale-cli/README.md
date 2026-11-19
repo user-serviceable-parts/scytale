@@ -20,7 +20,7 @@ and back.
 | --- | --- | --- |
 | `scytale hash` | a digest of each input, `sha256sum` style, or of a tuple of strings | SHA-1, SHA-2, SHA-3, BLAKE2b, SHAKE, cSHAKE, TupleHash |
 | `scytale mac tag` / `verify` | a tag over the input, or a check of one | HMAC, CMAC, KMAC, Poly1305 |
-| `scytale aead encrypt` / `decrypt` | authenticated encryption, tag after the ciphertext | AES-GCM, AES-GCM-SIV, AES-CCM, AES-XPN, ChaCha20-Poly1305, XChaCha20-Poly1305 |
+| `scytale aead encrypt` / `decrypt` | authenticated encryption, tag after the ciphertext | AES-GCM, AES-GCM-SIV, AES-CCM, AES-XPN, ChaCha20-Poly1305, XChaCha20-Poly1305, AEGIS-128L, AEGIS-256 |
 | `scytale cipher encrypt` / `decrypt` | the unauthenticated modes | AES-ECB, -CBC, -CTR, -CFB, -OFB, -XTS, ChaCha20, XChaCha20, FF1, FF3-1 |
 | `scytale cipher wrap` / `unwrap` | key wrapping | AES-KW, AES-KWP |
 | `scytale kdf hkdf` / `pbkdf2` / `argon2id` / `tls12` / `sp800-108` / `one-step` / `x963` | keys from keying material, from a password, from a key-derivation key, from a shared secret, or as TLS 1.2 derives them | HKDF, PBKDF2, Argon2id, TLS 1.2 PRF, SP 800-108 KBKDF and KDF-KMAC, SP 800-56C one-step, X9.63 |
@@ -135,8 +135,8 @@ file a secret is written to with `-o`.
   allows. Decryption reads the whole input and writes nothing until
   the tag has checked; a message that fails leaves standard output
   empty.
-- The stream modes, and GCM, ChaCha20-Poly1305 and XChaCha20-Poly1305
-  encryption, run a chunk at a time, so a pipe of any length goes through in fixed
+- The stream modes, and GCM, ChaCha20-Poly1305, XChaCha20-Poly1305 and
+  AEGIS encryption, run a chunk at a time, so a pipe of any length goes through in fixed
   memory. The block modes take `--padding pkcs7` or `--padding
   none`, and say so if neither is given.
 - ECDSA signatures are DER, as `openssl dgst` writes them, or
