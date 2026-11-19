@@ -11,7 +11,8 @@
 use std::sync::{Mutex, MutexGuard};
 
 use scytale::aead::{
-    Ccm, ChaCha20Poly1305, Gcm, GcmSiv, XChaCha20Poly1305, Xpn,
+    Aegis128L, Aegis256, Ccm, ChaCha20Poly1305, Gcm, GcmSiv, XChaCha20Poly1305,
+    Xpn,
 };
 use scytale::cipher::aes::Aes128;
 use scytale::cipher::chacha20::ChaCha20;
@@ -147,6 +148,8 @@ fn profiles_end_in_nothing_and_are_each_reachable() {
     check::<Poly1305>();
     check::<ChaCha20Poly1305>();
     check::<XChaCha20Poly1305>();
+    check::<Aegis128L>();
+    check::<Aegis256>();
     check::<ecdh::p256::PrivateKey>();
     check::<ecdh::p384::PublicKey>();
     check::<ecdsa::p256::PrivateKey>();

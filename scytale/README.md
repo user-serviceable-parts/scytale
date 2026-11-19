@@ -145,7 +145,7 @@ the machinery behind it:
 
 | Module | Job | Algorithms |
 | --- | --- | --- |
-| `aead` | authenticated encryption | GCM, GCM-SIV, XPN, CCM, ChaCha20-Poly1305, XChaCha20-Poly1305 |
+| `aead` | authenticated encryption | GCM, GCM-SIV, XPN, CCM, ChaCha20-Poly1305, XChaCha20-Poly1305, AEGIS-128L, AEGIS-256 |
 | `cipher` | encryption | AES, ChaCha20, XChaCha20, and the modes built on them |
 | `hash` | digests | SHA-2, SHA-3, SHAKE, cSHAKE, TupleHash; SHA-1 for what still names it |
 | `mac` | message authentication | HMAC, CMAC, KMAC, Poly1305 |
@@ -180,10 +180,14 @@ dictates otherwise, start here.
 | CCM | counter mode with CBC-MAC (SP 800-38C); Bluetooth, 802.15.4, CCMP |
 | ChaCha20-Poly1305 (RFC 8439) | GCM's equal; faster without AES hardware |
 | XChaCha20-Poly1305 (draft-irtf-cfrg-xchacha) | the same with a 192-bit nonce, wide enough to draw at random |
+| AEGIS-128L (draft-irtf-cfrg-aegis-aead) | built on the AES round; 128-bit key, nonce and tag |
+| AEGIS-256 (draft-irtf-cfrg-aegis-aead) | the same with a 256-bit key and nonce, wide enough to draw at random |
 
 The first four are modes of operation of a block cipher and are
-generic over it; the last two are a stream cipher and a MAC designed
-together, with no block cipher underneath. They share a module because
+generic over it; the next two are a stream cipher and a MAC designed
+together, with no block cipher underneath; and the last two are built
+on the AES round alone, with no key schedule and no separate MAC.
+They share a module because
 what a caller wants is authenticated encryption, not a particular way
 of building it, and they share a trait for the same reason.
 
@@ -497,8 +501,8 @@ gcm.encrypt(&nonce, associated_data, &mut buffer, &mut tag)?;
 gcm.decrypt(&nonce, associated_data, &mut buffer, &tag)?;
 ```
 
-GCM, GCM-SIV, CCM, ChaCha20-Poly1305 and XChaCha20-Poly1305 share an
-`Aead` trait, so code
+GCM, GCM-SIV, CCM, ChaCha20-Poly1305, XChaCha20-Poly1305, AEGIS-128L
+and AEGIS-256 share an `Aead` trait, so code
 that does not care which one it was handed -- a protocol that
 negotiated it, a format that records it -- can hold any of them behind
 one type. XPN stays out of it: its nonce is two separate halves, a
@@ -627,8 +631,8 @@ above, the library is run against NIST's demonstration server, and
 [`ACVP.md`][acvp-results], which ships with the crate, records the
 latest run: what passed, on what date and on what operating
 environment. ACVP tests only the algorithms NIST specifies, so
-ChaCha20, XChaCha20, Poly1305, the AEADs built on them, BLAKE2b,
-Argon2id and HPKE are outside it; those are checked against their
+ChaCha20, XChaCha20, Poly1305, the AEADs built on them, AEGIS,
+BLAKE2b, Argon2id and HPKE are outside it; those are checked against their
 own standards' vectors and the other suites named here.
 
 The public-key algorithms and the KDFs run against both: the ACVP sample

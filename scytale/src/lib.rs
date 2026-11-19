@@ -11,7 +11,7 @@
 //!
 //! | Module | What is in it |
 //! | --- | --- |
-//! | [`aead`] | GCM, GCM-SIV, XPN, CCM, (X)ChaCha20-Poly1305 |
+//! | [`aead`] | GCM, GCM-SIV, XPN, CCM, (X)ChaCha20-Poly1305, AEGIS |
 //! | [`cipher`] | AES, ChaCha20, XChaCha20, and the modes built on them |
 //! | [`hash`] | SHA-2, SHA-3, SHAKE, cSHAKE, TupleHash, BLAKE2b, legacy SHA-1 |
 //! | [`mac`] | HMAC, CMAC, KMAC and Poly1305 |
