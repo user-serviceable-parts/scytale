@@ -51,20 +51,38 @@ pub(super) mod zvkned {
         };
     }
 
-    /// The AEGIS-128L update, for M0 in `v8` and M1 in `v9`, then on
-    /// to the next block of input, leaving through the store at
-    /// `$label` if that was the last. The new S0 is left where S7
-    /// was, and every other block where the one before it was.
+    /// On to the next block of input, leaving through the store at
+    /// `$label` if that was the last.
+    macro_rules! next {
+        ($label:literal) => {
+            concat!(
+                "add {data}, {data}, {step}\n",
+                "addi {n}, {n}, -1\n",
+                "beqz {n}, ",
+                $label,
+                "f\n",
+            )
+        };
+    }
+
+    /// The AEGIS-128L update, for M0 in `v8` and M1 in `v9`. The new
+    /// S0 is left where S7 was, and every other block where the one
+    /// before it was.
+    ///
+    /// The two blocks that take a block of message take it as the
+    /// round's key and have their own old value xored in afterwards,
+    /// rather than the two xored first and given to the round
+    /// together: a block's old value then reaches its new one
+    /// through an xor alone and not through the round as well. S0 is
+    /// kept in `v12` for that, since its register is the first
+    /// written and it is wanted last.
     macro_rules! update128l {
         ($label:literal, $s0:literal, $s1:literal, $s2:literal,
          $s3:literal, $s4:literal, $s5:literal, $s6:literal,
          $s7:literal) => {
             concat!(
-                "vxor.vv v8, v8, ",
+                "vmv.v.v v12, ",
                 $s0,
-                "\n",
-                "vxor.vv v9, v9, ",
-                $s4,
                 "\n",
                 "vaesem.vv ",
                 $s0,
@@ -84,6 +102,13 @@ pub(super) mod zvkned {
                 "vaesem.vv ",
                 $s3,
                 ", v9\n",
+                "vxor.vv ",
+                $s3,
+                ", ",
+                $s3,
+                ", ",
+                $s4,
+                "\n",
                 "vaesem.vv ",
                 $s4,
                 ", ",
@@ -102,11 +127,12 @@ pub(super) mod zvkned {
                 "vaesem.vv ",
                 $s7,
                 ", v8\n",
-                "add {data}, {data}, {step}\n",
-                "addi {n}, {n}, -1\n",
-                "beqz {n}, ",
-                $label,
-                "f\n",
+                "vxor.vv ",
+                $s7,
+                ", ",
+                $s7,
+                ", v12\n",
+                next!($label),
             )
         };
     }
@@ -179,20 +205,103 @@ pub(super) mod zvkned {
         };
     }
 
-    /// As encryption, but the state is updated with what comes out
-    /// rather than with what went in.
+    /// Decryption, which updates the state with what comes out, and
+    /// what comes out is made from the state. S1 and S5 are the
+    /// blocks of the keystream that arrive last, so each is given to
+    /// the round as its key and everything else is xored in
+    /// afterwards, which keeps them off the path the next update
+    /// waits on.
     macro_rules! decrypt128l {
         ($label:literal, $s0:literal, $s1:literal, $s2:literal,
          $s3:literal, $s4:literal, $s5:literal, $s6:literal,
          $s7:literal) => {
             concat!(
                 input128l!(),
-                keystream128l!($s1, $s2, $s3, $s5, $s6, $s7),
-                "vxor.vv v8, v8, v10\n",
-                "vxor.vv v9, v9, v11\n",
+                "vand.vv v10, ",
+                $s2,
+                ", ",
+                $s3,
+                "\n",
+                "vand.vv v11, ",
+                $s6,
+                ", ",
+                $s7,
+                "\n",
+                "vxor.vv v10, v10, ",
+                $s6,
+                "\n",
+                "vxor.vv v11, v11, ",
+                $s2,
+                "\n",
+                "vxor.vv v10, v10, v8\n",
+                "vxor.vv v11, v11, v9\n",
+                "vmv.v.v v12, ",
+                $s1,
+                "\n",
+                // The message, for the output alone.
+                "vxor.vv v8, v10, ",
+                $s1,
+                "\n",
+                "vxor.vv v9, v11, ",
+                $s5,
+                "\n",
                 "vse32.v v8, ({data})\n",
                 "vse32.v v9, ({t})\n",
-                update128l!($label, $s0, $s1, $s2, $s3, $s4, $s5, $s6, $s7),
+                "vxor.vv v10, v10, ",
+                $s0,
+                "\n",
+                "vxor.vv v11, v11, ",
+                $s4,
+                "\n",
+                "vaesem.vv ",
+                $s0,
+                ", ",
+                $s1,
+                "\n",
+                "vaesem.vv ",
+                $s1,
+                ", ",
+                $s2,
+                "\n",
+                "vaesem.vv ",
+                $s2,
+                ", ",
+                $s3,
+                "\n",
+                "vaesem.vv ",
+                $s3,
+                ", ",
+                $s5,
+                "\n",
+                "vxor.vv ",
+                $s3,
+                ", ",
+                $s3,
+                ", v11\n",
+                "vaesem.vv ",
+                $s4,
+                ", ",
+                $s5,
+                "\n",
+                "vaesem.vv ",
+                $s5,
+                ", ",
+                $s6,
+                "\n",
+                "vaesem.vv ",
+                $s6,
+                ", ",
+                $s7,
+                "\n",
+                "vaesem.vv ",
+                $s7,
+                ", v12\n",
+                "vxor.vv ",
+                $s7,
+                ", ",
+                $s7,
+                ", v10\n",
+                next!($label),
             )
         };
     }
@@ -268,12 +377,13 @@ pub(super) mod zvkned {
         };
     }
 
-    /// The AEGIS-256 update, for M in `v8`; see [`update128l`].
+    /// The AEGIS-256 update, for M in `v8`; see [`update128l`]. S0
+    /// is kept in `v9`.
     macro_rules! update256 {
         ($label:literal, $s0:literal, $s1:literal, $s2:literal,
          $s3:literal, $s4:literal, $s5:literal) => {
             concat!(
-                "vxor.vv v8, v8, ",
+                "vmv.v.v v9, ",
                 $s0,
                 "\n",
                 "vaesem.vv ",
@@ -304,11 +414,12 @@ pub(super) mod zvkned {
                 "vaesem.vv ",
                 $s5,
                 ", v8\n",
-                "add {data}, {data}, {step}\n",
-                "addi {n}, {n}, -1\n",
-                "beqz {n}, ",
-                $label,
-                "f\n",
+                "vxor.vv ",
+                $s5,
+                ", ",
+                $s5,
+                ", v9\n",
+                next!($label),
             )
         };
     }
@@ -359,15 +470,69 @@ pub(super) mod zvkned {
         };
     }
 
+    /// Decryption; see [`decrypt128l`]. S1 is the block that
+    /// arrives last, and is kept in `v9` to be the round's key.
     macro_rules! decrypt256 {
         ($label:literal, $s0:literal, $s1:literal, $s2:literal,
          $s3:literal, $s4:literal, $s5:literal) => {
             concat!(
                 "vle32.v v8, ({data})\n",
-                keystream256!($s1, $s2, $s3, $s4, $s5),
-                "vxor.vv v8, v8, v10\n",
+                "vand.vv v10, ",
+                $s2,
+                ", ",
+                $s3,
+                "\n",
+                "vxor.vv v11, ",
+                $s4,
+                ", ",
+                $s5,
+                "\n",
+                "vmv.v.v v9, ",
+                $s1,
+                "\n",
+                "vxor.vv v10, v10, v8\n",
+                "vxor.vv v10, v10, v11\n",
+                "vxor.vv v8, v10, ",
+                $s1,
+                "\n",
                 "vse32.v v8, ({data})\n",
-                update256!($label, $s0, $s1, $s2, $s3, $s4, $s5),
+                "vxor.vv v10, v10, ",
+                $s0,
+                "\n",
+                "vaesem.vv ",
+                $s0,
+                ", ",
+                $s1,
+                "\n",
+                "vaesem.vv ",
+                $s1,
+                ", ",
+                $s2,
+                "\n",
+                "vaesem.vv ",
+                $s2,
+                ", ",
+                $s3,
+                "\n",
+                "vaesem.vv ",
+                $s3,
+                ", ",
+                $s4,
+                "\n",
+                "vaesem.vv ",
+                $s4,
+                ", ",
+                $s5,
+                "\n",
+                "vaesem.vv ",
+                $s5,
+                ", v9\n",
+                "vxor.vv ",
+                $s5,
+                ", ",
+                $s5,
+                ", v10\n",
+                next!($label),
             )
         };
     }
@@ -443,6 +608,7 @@ pub(super) mod zvkned {
                         out("v3") _, out("v4") _, out("v5") _,
                         out("v6") _, out("v7") _, out("v8") _,
                         out("v9") _, out("v10") _, out("v11") _,
+                        out("v12") _,
                         options(nostack),
                     );
                 }
@@ -672,7 +838,10 @@ pub(super) mod zkn {
     }
 
     /// One half of the AEGIS-128L keystream into `$out`: `$x ^ $y ^
-    /// ($p & $q)`.
+    /// ($p & $q)`, with `$y` going in last. The callers give the
+    /// block the update before has just written as `$y`, so that
+    /// decryption, whose next update waits on this, waits on one xor
+    /// of it and no more.
     macro_rules! keystream {
         ($out:literal, $x:literal, $y:literal, $p:literal, $q:literal) => {
             concat!(
@@ -697,8 +866,8 @@ pub(super) mod zkn {
         () => {
             concat!(
                 input!("rl", "rh", "0", "8"),
-                keystream!("a", "s1l", "s6l", "s2l", "s3l"),
-                keystream!("b", "s1h", "s6h", "s2h", "s3h"),
+                keystream!("a", "s6l", "s1l", "s2l", "s3l"),
+                keystream!("b", "s6h", "s1h", "s2h", "s3h"),
                 "xor {a}, {a}, {rl}\n",
                 "xor {b}, {b}, {rh}\n",
                 output!("a", "b", "0", "8"),
@@ -719,8 +888,8 @@ pub(super) mod zkn {
         () => {
             concat!(
                 input!("rl", "rh", "0", "8"),
-                keystream!("a", "s1l", "s6l", "s2l", "s3l"),
-                keystream!("b", "s1h", "s6h", "s2h", "s3h"),
+                keystream!("a", "s6l", "s1l", "s2l", "s3l"),
+                keystream!("b", "s6h", "s1h", "s2h", "s3h"),
                 "xor {rl}, {rl}, {a}\n",
                 "xor {rh}, {rh}, {b}\n",
                 output!("rl", "rh", "0", "8"),
@@ -849,14 +1018,15 @@ pub(super) mod zkn {
     }
 
     /// One half of the AEGIS-256 keystream into `$out`, for the half
-    /// `$half` of each block.
+    /// `$half` of each block; S1, the block the update before has
+    /// just written, goes in last.
     macro_rules! keystream256 {
         ($out:literal, $half:literal) => {
             concat!(
                 "and {", $out, "}, {s2", $half, "}, {s3", $half, "}\n",
-                "xor {", $out, "}, {", $out, "}, {s1", $half, "}\n", "xor {",
-                $out, "}, {", $out, "}, {s4", $half, "}\n", "xor {", $out,
-                "}, {", $out, "}, {s5", $half, "}\n",
+                "xor {", $out, "}, {", $out, "}, {s4", $half, "}\n", "xor {",
+                $out, "}, {", $out, "}, {s5", $half, "}\n", "xor {", $out,
+                "}, {", $out, "}, {s1", $half, "}\n",
             )
         };
     }
