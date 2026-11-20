@@ -3,21 +3,22 @@
 //! for AES-CCM).
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use rustls::ConnectionTrafficSecrets;
 use rustls::Error;
 use rustls::Tls12CipherSuite;
 use rustls::crypto::cipher::{
-    AeadKey, EncryptBuffer, InboundOpaque, Iv, KeyBlockShape, Nonce,
-    OutboundPlain, Record, RecordDecrypter, RecordEncrypter,
-    Tls12AeadAlgorithm, UnsupportedOperationError, make_tls12_aad,
+    AeadKey, InboundOpaque, Iv, KeyBlockShape, Nonce, OutboundPlain, Record,
+    RecordDecrypter, RecordEncrypter, Tls12AeadAlgorithm,
+    UnsupportedOperationError, make_tls12_aad,
 };
 use rustls::crypto::kx::KeyExchangeAlgorithm;
 use rustls::crypto::{CipherSuite, CipherSuiteCommon, SignatureScheme};
 use rustls::version::TLS12_VERSION;
 
 use crate::aead::{Algorithm, NONCE_LEN, SealingKey, TAG_LEN};
-use crate::{hash, prf};
+use crate::{hash, prf, record};
 
 /// The most plaintext a record may carry (RFC 5246 section 6.2.1).
 /// rustls checks this for TLS 1.3 itself; for 1.2 it is the
@@ -281,15 +282,14 @@ struct SaltedEncrypter {
 }
 
 impl RecordEncrypter for SaltedEncrypter {
-    fn encrypt<'a>(
+    fn encrypt(
         &mut self,
         msg: Record<OutboundPlain<'_>>,
         seq: u64,
-        out: &'a mut [u8],
-    ) -> Result<Record<&'a [u8]>, Error> {
+        out: &mut Vec<u8>,
+    ) -> Result<(), Error> {
         let key = self.key.as_ref().ok_or(Error::EncryptError)?;
         let total = self.encrypted_payload_len(msg.payload.len());
-        let mut buf = EncryptBuffer::new(out, total)?;
         let nonce: [u8; NONCE_LEN] = Nonce::new(&self.iv, seq).to_array()?;
         let aad = make_tls12_aad(
             seq,
@@ -297,15 +297,18 @@ impl RecordEncrypter for SaltedEncrypter {
             msg.version.encode(),
             msg.payload.len(),
         );
+        let start = record::start(out, msg.typ, msg.version, total)?;
         // The explicit part of the nonce, then the ciphertext, then
         // the tag.
-        buf.extend_from_slice(&nonce[SALT_LEN..]);
-        buf.extend_from_chunks(&msg.payload);
-        let tag = key
-            .seal(&nonce, &aad, &mut buf.as_mut()[EXPLICIT_LEN..])
-            .map_err(|_| Error::EncryptError)?;
-        buf.extend_from_slice(tag.as_ref());
-        Ok(Record::new(msg.typ, msg.version, buf.into_written()))
+        out.extend_from_slice(&nonce[SALT_LEN..]);
+        msg.payload.copy_to_vec(out);
+        match key.seal(&nonce, &aad, &mut out[start + EXPLICIT_LEN..]) {
+            Ok(tag) => {
+                out.extend_from_slice(tag.as_ref());
+                Ok(())
+            }
+            Err(_) => Err(record::abandon(out, start)),
+        }
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
@@ -407,15 +410,14 @@ impl ChaChaProtection {
 }
 
 impl RecordEncrypter for ChaChaProtection {
-    fn encrypt<'a>(
+    fn encrypt(
         &mut self,
         msg: Record<OutboundPlain<'_>>,
         seq: u64,
-        out: &'a mut [u8],
-    ) -> Result<Record<&'a [u8]>, Error> {
+        out: &mut Vec<u8>,
+    ) -> Result<(), Error> {
         let key = self.key.as_ref().ok_or(Error::EncryptError)?;
         let total = self.encrypted_payload_len(msg.payload.len());
-        let mut buf = EncryptBuffer::new(out, total)?;
         let nonce = Nonce::new(&self.iv, seq).to_array()?;
         let aad = make_tls12_aad(
             seq,
@@ -423,12 +425,15 @@ impl RecordEncrypter for ChaChaProtection {
             msg.version.encode(),
             msg.payload.len(),
         );
-        buf.extend_from_chunks(&msg.payload);
-        let tag = key
-            .seal(&nonce, &aad, buf.as_mut())
-            .map_err(|_| Error::EncryptError)?;
-        buf.extend_from_slice(tag.as_ref());
-        Ok(Record::new(msg.typ, msg.version, buf.into_written()))
+        let start = record::start(out, msg.typ, msg.version, total)?;
+        msg.payload.copy_to_vec(out);
+        match key.seal(&nonce, &aad, &mut out[start..]) {
+            Ok(tag) => {
+                out.extend_from_slice(tag.as_ref());
+                Ok(())
+            }
+            Err(_) => Err(record::abandon(out, start)),
+        }
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {

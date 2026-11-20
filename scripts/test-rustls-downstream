@@ -35,8 +35,8 @@
 
 set -eu
 
-# rustls 0.24.0-dev.2.
-RUSTLS_COMMIT=8a1f33461e8230f5adea6bb44cd8c6885ea26581
+# rustls 0.24.0-dev.3.
+RUSTLS_COMMIT=2cd8d27ab9910da1c72a3e30ec2982c750da043a
 
 cd "$(dirname "$0")/.."
 repo=$(pwd)
