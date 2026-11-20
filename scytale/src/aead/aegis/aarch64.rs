@@ -144,7 +144,9 @@ macro_rules! absorb128l {
     ($label:literal, $s0:literal, $s1:literal, $s2:literal, $s3:literal,
      $s4:literal, $s5:literal, $s6:literal, $s7:literal) => {
         concat!(
-            "ld1 {{v17.16b, v18.16b}}, [{data}], {step}\n",
+            "ldr q17, [{data}]\n",
+            "ldr q18, [{data}, {second}]\n",
+            "add {data}, {data}, {step}\n",
             update128l!($label, $s0, $s1, $s2, $s3, $s4, $s5, $s6, $s7),
         )
     };
@@ -154,11 +156,14 @@ macro_rules! encrypt128l {
     ($label:literal, $s0:literal, $s1:literal, $s2:literal, $s3:literal,
      $s4:literal, $s5:literal, $s6:literal, $s7:literal) => {
         concat!(
-            "ld1 {{v17.16b, v18.16b}}, [{data}]\n",
+            "ldr q17, [{data}]\n",
+            "ldr q18, [{data}, {second}]\n",
             keystream128l!($s1, $s2, $s3, $s5, $s6, $s7),
             "eor v19.16b, v19.16b, v17.16b\n",
             "eor v20.16b, v20.16b, v18.16b\n",
-            "st1 {{v19.16b, v20.16b}}, [{data}], {step}\n",
+            "str q19, [{data}]\n",
+            "str q20, [{data}, {second}]\n",
+            "add {data}, {data}, {step}\n",
             update128l!($label, $s0, $s1, $s2, $s3, $s4, $s5, $s6, $s7),
         )
     };
@@ -182,7 +187,8 @@ macro_rules! decrypt128l {
     ($label:literal, $s0:literal, $s1:literal, $s2:literal, $s3:literal,
      $s4:literal, $s5:literal, $s6:literal, $s7:literal) => {
         concat!(
-            "ld1 {{v17.16b, v18.16b}}, [{data}]\n",
+            "ldr q17, [{data}]\n",
+            "ldr q18, [{data}, {second}]\n",
             "and v19.16b, v",
             $s2,
             ".16b, v",
@@ -211,7 +217,9 @@ macro_rules! decrypt128l {
             "eor v18.16b, v20.16b, v",
             $s5,
             ".16b\n",
-            "st1 {{v17.16b, v18.16b}}, [{data}], {step}\n",
+            "str q17, [{data}]\n",
+            "str q18, [{data}, {second}]\n",
+            "add {data}, {data}, {step}\n",
             "eor v19.16b, v19.16b, v",
             $s0,
             ".16b\n",
@@ -447,9 +455,53 @@ macro_rules! load256 {
 
 /// Defines a kernel: the state into the registers, `$body` for each
 /// block of input round the places the state can lie, and the state
-/// back from wherever the input ended.
+/// back from wherever the input ended. A `halves` kernel takes its
+/// block in two pieces `second` bytes apart, and a `whole` one in
+/// one.
 macro_rules! kernel {
-    ($(#[$doc:meta])* $name:ident, $data:ty, $load:ident,
+    (halves, $(#[$doc:meta])* $name:ident, $data:ty, $load:ident,
+     $rotations:ident, $body:ident, $store:ident) => {
+        $(#[$doc])*
+        ///
+        /// # Safety
+        /// Requires the AES instructions; `data` must point at
+        /// `blocks` blocks of input, each `step` bytes on from the
+        /// last
+        /// and each with a second piece `second` bytes on from its
+        /// first, and `blocks >= 1`.
+        #[target_feature(enable = "aes")]
+        unsafe fn $name(
+            state: &mut State,
+            data: $data,
+            second: usize,
+            step: usize,
+            blocks: usize,
+        ) {
+            unsafe {
+                core::arch::asm!(
+                    "movi v16.16b, #0",
+                    $load!(),
+                    "2:",
+                    $rotations!($body),
+                    "b 2b",
+                    $rotations!($store),
+                    "4:",
+                    state = in(reg) state.as_mut_ptr(),
+                    data = inout(reg) data => _,
+                    second = in(reg) second,
+                    step = in(reg) step,
+                    n = inout(reg) blocks => _,
+                    out("v0") _, out("v1") _, out("v2") _,
+                    out("v3") _, out("v4") _, out("v5") _,
+                    out("v6") _, out("v7") _, out("v16") _,
+                    out("v17") _, out("v18") _, out("v19") _,
+                    out("v20") _, out("v21") _,
+                    options(nostack),
+                );
+            }
+        }
+    };
+    (whole, $(#[$doc:meta])* $name:ident, $data:ty, $load:ident,
      $rotations:ident, $body:ident, $store:ident) => {
         $(#[$doc])*
         ///
@@ -490,6 +542,7 @@ macro_rules! kernel {
 }
 
 kernel!(
+    halves,
     /// The AEGIS-128L `Absorb`.
     run_absorb128l,
     *const u8,
@@ -499,6 +552,7 @@ kernel!(
     store128l
 );
 kernel!(
+    halves,
     /// The AEGIS-128L `Enc`, in place.
     run_encrypt128l,
     *mut u8,
@@ -508,6 +562,7 @@ kernel!(
     store128l
 );
 kernel!(
+    halves,
     /// The AEGIS-128L `Dec`, in place.
     run_decrypt128l,
     *mut u8,
@@ -517,6 +572,7 @@ kernel!(
     store128l
 );
 kernel!(
+    whole,
     /// The AEGIS-256 `Absorb`.
     run_absorb256,
     *const u8,
@@ -526,6 +582,7 @@ kernel!(
     store256
 );
 kernel!(
+    whole,
     /// The AEGIS-256 `Enc`, in place.
     run_encrypt256,
     *mut u8,
@@ -535,6 +592,7 @@ kernel!(
     store256
 );
 kernel!(
+    whole,
     /// The AEGIS-256 `Dec`, in place.
     run_decrypt256,
     *mut u8,
@@ -545,6 +603,7 @@ kernel!(
 );
 
 entries!(
+    halves,
     32,
     run_absorb128l,
     run_encrypt128l,
@@ -552,9 +611,13 @@ entries!(
     absorb128l,
     stir128l,
     encrypt128l,
-    decrypt128l
+    decrypt128l,
+    absorb128l_lane,
+    encrypt128l_lane,
+    decrypt128l_lane
 );
 entries!(
+    whole,
     16,
     run_absorb256,
     run_encrypt256,
@@ -562,5 +625,8 @@ entries!(
     absorb256,
     stir256,
     encrypt256,
-    decrypt256
+    decrypt256,
+    absorb256_lane,
+    encrypt256_lane,
+    decrypt256_lane
 );

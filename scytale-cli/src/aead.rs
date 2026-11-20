@@ -13,8 +13,8 @@ use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
 use scytale::aead::{
-    Aead, Aegis128L, Aegis256, Ccm, ChaCha20Poly1305, Gcm, GcmSiv, SivKey,
-    XChaCha20Poly1305, Xpn,
+    Aead, Aegis128L, Aegis128X2, Aegis128X4, Aegis256, Aegis256X2, Aegis256X4,
+    Ccm, ChaCha20Poly1305, Gcm, GcmSiv, SivKey, XChaCha20Poly1305, Xpn,
 };
 use scytale::cipher::BlockCipher;
 use scytale::cipher::aes::{Aes128, Aes192, Aes256};
@@ -87,11 +87,14 @@ pub fn run(op: AeadOp) -> Result<()> {
     if name == "xchacha20-poly1305" {
         return xchacha20_poly1305(entry, &args, encrypt);
     }
-    if name == "aegis-128l" {
-        return aegis128l(entry, &args, encrypt);
-    }
-    if name == "aegis-256" {
-        return aegis256(entry, &args, encrypt);
+    match name {
+        "aegis-128l" => return aegis128l(entry, &args, encrypt),
+        "aegis-128x2" => return aegis128x2(entry, &args, encrypt),
+        "aegis-128x4" => return aegis128x4(entry, &args, encrypt),
+        "aegis-256" => return aegis256(entry, &args, encrypt),
+        "aegis-256x2" => return aegis256x2(entry, &args, encrypt),
+        "aegis-256x4" => return aegis256x4(entry, &args, encrypt),
+        _ => {}
     }
     let Some((bits, mode)) =
         name.strip_prefix("aes-").and_then(|r| r.split_once('-'))
@@ -232,59 +235,47 @@ fn xchacha20_poly1305(
     }
 }
 
-fn aegis128l(entry: &Entry, args: &AeadArgs, encrypt: bool) -> Result<()> {
-    let key = value::key::<Aegis128L>(&args.key, "--key", entry.name)?;
-    let nonce = value::array::<16>(&args.nonce, "--nonce", entry.name)?;
-    let aad = value::text(args.aad.as_deref(), "--aad")?;
-    let aead = Aegis128L::new(&key);
-    let mut out = io::output(args.out.as_deref(), false)?;
-    if encrypt {
-        let mut input = io::input(args.file.as_deref())?;
-        let mut e = aead.encryptor(&nonce);
-        e.aad(&aad)?;
-        io::stream(&mut *input, &mut *out, |c| Ok(e.update(c)?))?;
-        io::write(&mut *out, &e.finalize(), false)
-    } else {
-        let (mut data, tag) = read_sealed(entry, args)?;
-        let tag: [u8; 16] =
-            tag.as_slice().try_into().map_err(|_| not_authentic())?;
-        let mut d = aead.decryptor(&nonce);
-        d.aad(&aad)?;
-        d.update(&mut data)?;
-        if d.verify(&tag).is_err() {
-            data.zeroize();
-            return Err(not_authentic());
+/// Defines the command for one member of the AEGIS family, which
+/// differ in their types and the width of their nonce and in nothing
+/// the tool does with them.
+macro_rules! aegis {
+    ($name:ident, $aead:ty, $nonce:literal) => {
+        fn $name(entry: &Entry, args: &AeadArgs, encrypt: bool) -> Result<()> {
+            let key = value::key::<$aead>(&args.key, "--key", entry.name)?;
+            let nonce =
+                value::array::<$nonce>(&args.nonce, "--nonce", entry.name)?;
+            let aad = value::text(args.aad.as_deref(), "--aad")?;
+            let aead = <$aead>::new(&key);
+            let mut out = io::output(args.out.as_deref(), false)?;
+            if encrypt {
+                let mut input = io::input(args.file.as_deref())?;
+                let mut e = aead.encryptor(&nonce);
+                e.aad(&aad)?;
+                io::stream(&mut *input, &mut *out, |c| Ok(e.update(c)?))?;
+                io::write(&mut *out, &e.finalize(), false)
+            } else {
+                let (mut data, tag) = read_sealed(entry, args)?;
+                let tag: [u8; 16] =
+                    tag.as_slice().try_into().map_err(|_| not_authentic())?;
+                let mut d = aead.decryptor(&nonce);
+                d.aad(&aad)?;
+                d.update(&mut data)?;
+                if d.verify(&tag).is_err() {
+                    data.zeroize();
+                    return Err(not_authentic());
+                }
+                io::write(&mut *out, &data, false)
+            }
         }
-        io::write(&mut *out, &data, false)
-    }
+    };
 }
 
-fn aegis256(entry: &Entry, args: &AeadArgs, encrypt: bool) -> Result<()> {
-    let key = value::key::<Aegis256>(&args.key, "--key", entry.name)?;
-    let nonce = value::array::<32>(&args.nonce, "--nonce", entry.name)?;
-    let aad = value::text(args.aad.as_deref(), "--aad")?;
-    let aead = Aegis256::new(&key);
-    let mut out = io::output(args.out.as_deref(), false)?;
-    if encrypt {
-        let mut input = io::input(args.file.as_deref())?;
-        let mut e = aead.encryptor(&nonce);
-        e.aad(&aad)?;
-        io::stream(&mut *input, &mut *out, |c| Ok(e.update(c)?))?;
-        io::write(&mut *out, &e.finalize(), false)
-    } else {
-        let (mut data, tag) = read_sealed(entry, args)?;
-        let tag: [u8; 16] =
-            tag.as_slice().try_into().map_err(|_| not_authentic())?;
-        let mut d = aead.decryptor(&nonce);
-        d.aad(&aad)?;
-        d.update(&mut data)?;
-        if d.verify(&tag).is_err() {
-            data.zeroize();
-            return Err(not_authentic());
-        }
-        io::write(&mut *out, &data, false)
-    }
-}
+aegis!(aegis128l, Aegis128L, 16);
+aegis!(aegis128x2, Aegis128X2, 16);
+aegis!(aegis128x4, Aegis128X4, 16);
+aegis!(aegis256, Aegis256, 32);
+aegis!(aegis256x2, Aegis256X2, 32);
+aegis!(aegis256x4, Aegis256X4, 32);
 
 /// The one-shot constructions: the whole input in memory, the tag
 /// made or checked in the same call as the transform.
@@ -385,9 +376,9 @@ mod tests {
             let key = |key: &dyn AsRef<[u8]>| key.as_ref().len();
             let n = if entry.name.ends_with("chacha20-poly1305") {
                 32
-            } else if entry.name == "aegis-128l" {
+            } else if entry.name.starts_with("aegis-128") {
                 key(&<Aegis128L as scytale::KeyType>::zero_key())
-            } else if entry.name == "aegis-256" {
+            } else if entry.name.starts_with("aegis-256") {
                 key(&<Aegis256 as scytale::KeyType>::zero_key())
             } else {
                 let bits = &entry.name[4..7];

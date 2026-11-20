@@ -493,13 +493,23 @@ mod inventory {
             chacha20::ChaCha20::with_kernel(&key, k).is_some()
         });
 
-        use crate::aead::aegis::{aegis128l, aegis256};
+        use crate::aead::aegis::{aegis128l, aegis128x, aegis256, aegis256x};
         kernels(&audit, "AEGIS-128L", aegis128l::KERNELS, &|k| {
             aegis128l::Aegis128L::with_kernel(&crate::Key::zeroed(), k)
                 .is_some()
         });
         kernels(&audit, "AEGIS-256", aegis256::KERNELS, &|k| {
             aegis256::Aegis256::with_kernel(&crate::Key::zeroed(), k).is_some()
+        });
+        // The parallel variants share a list between two lanes and
+        // four, and a kernel that runs the one runs the other.
+        kernels(&audit, "AEGIS-128X", aegis128x::KERNELS, &|k| {
+            aegis128x::Aegis128X2::with_kernel(&crate::Key::zeroed(), k)
+                .is_some()
+        });
+        kernels(&audit, "AEGIS-256X", aegis256x::KERNELS, &|k| {
+            aegis256x::Aegis256X2::with_kernel(&crate::Key::zeroed(), k)
+                .is_some()
         });
 
         // The kernels no dispatching type stands over: a hash with

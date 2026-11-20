@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 
 use common::*;
 use scytale::aead::{
-    Aead, Aegis128L, Aegis256, Ccm, ChaCha20Poly1305, Gcm, GcmSiv,
-    XChaCha20Poly1305, Xpn,
+    Aead, Aegis128L, Aegis128X2, Aegis128X4, Aegis256, Aegis256X2, Aegis256X4,
+    Ccm, ChaCha20Poly1305, Gcm, GcmSiv, XChaCha20Poly1305, Xpn,
 };
 use scytale::cipher::BlockCipher;
 use scytale::cipher::aes::{Aes128, Aes192, Aes256};
@@ -343,8 +343,24 @@ fn library_aead(name: &str, key: &[u8], nonce: &[u8], aad: &[u8]) -> Vec<u8> {
         let aead = Aegis128L::new(&key_of::<Aegis128L>(key));
         aead.encrypt(nonce.try_into().unwrap(), aad, &mut data, &mut tag)
             .unwrap();
+    } else if name == "aegis-128x2" {
+        let aead = Aegis128X2::new(&key_of::<Aegis128X2>(key));
+        aead.encrypt(nonce.try_into().unwrap(), aad, &mut data, &mut tag)
+            .unwrap();
+    } else if name == "aegis-128x4" {
+        let aead = Aegis128X4::new(&key_of::<Aegis128X4>(key));
+        aead.encrypt(nonce.try_into().unwrap(), aad, &mut data, &mut tag)
+            .unwrap();
     } else if name == "aegis-256" {
         let aead = Aegis256::new(&key_of::<Aegis256>(key));
+        aead.encrypt(nonce.try_into().unwrap(), aad, &mut data, &mut tag)
+            .unwrap();
+    } else if name == "aegis-256x2" {
+        let aead = Aegis256X2::new(&key_of::<Aegis256X2>(key));
+        aead.encrypt(nonce.try_into().unwrap(), aad, &mut data, &mut tag)
+            .unwrap();
+    } else if name == "aegis-256x4" {
+        let aead = Aegis256X4::new(&key_of::<Aegis256X4>(key));
         aead.encrypt(nonce.try_into().unwrap(), aad, &mut data, &mut tag)
             .unwrap();
     } else {
@@ -401,8 +417,9 @@ fn aeads_match_the_library() {
     for name in names("aead") {
         let name = name.as_str();
         let width = match name {
-            "chacha20-poly1305" | "xchacha20-poly1305" | "aegis-256" => 32,
-            "aegis-128l" => 16,
+            "chacha20-poly1305" | "xchacha20-poly1305" => 32,
+            _ if name.starts_with("aegis-256") => 32,
+            _ if name.starts_with("aegis-128") => 16,
             _ => name[4..7].parse::<usize>().unwrap() / 8,
         };
         let nonce_len = if name.ends_with("-ccm") {

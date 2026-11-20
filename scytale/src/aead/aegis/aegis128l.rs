@@ -7,8 +7,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::sealed::{Chosen, Variant};
 use super::{
-    C0, C1, Decryptor, Encryptor, MAX_RATE, State, TAG, and, lengths, open,
-    portable, seal, xor,
+    C0, C1, Decryptor, Encryptor, Lane, State, TAG, and, gathered,
+    gathered_mut, lengths, open, portable, seal, xor,
 };
 use crate::aead::Aead;
 use crate::cipher::aes::{BLOCK_SIZE, ISOLATED, Kernel};
@@ -159,10 +159,10 @@ impl Aead for Aegis128L {
 }
 
 /// The keystream for the next block: z0 then z1.
-pub(super) fn keystream(s: &State) -> [u8; MAX_RATE] {
+pub(super) fn keystream(s: &State) -> [u8; 2 * BLOCK_SIZE] {
     let z0 = xor(&xor(&s[1], &s[6]), &and(&s[2], &s[3]));
     let z1 = xor(&xor(&s[2], &s[5]), &and(&s[6], &s[7]));
-    let mut z = [0u8; MAX_RATE];
+    let mut z = [0u8; 2 * BLOCK_SIZE];
     z[..BLOCK_SIZE].copy_from_slice(&z0);
     z[BLOCK_SIZE..].copy_from_slice(&z1);
     z
@@ -172,15 +172,17 @@ pub(super) fn keystream(s: &State) -> [u8; MAX_RATE] {
 /// `Finalize` are made of. A kernel does this without the block
 /// being written out that many times, which would be a secret that
 /// many times as long to wipe.
-fn stir(
+pub(super) fn stir(
     kernel: Chosen,
     state: &mut State,
     block: &[u8; 2 * BLOCK_SIZE],
     times: usize,
 ) {
     match kernel.0 {
+        // The parallel variants stir a lane at a time, whichever
+        // kernel takes their input two lanes at a time.
         #[cfg(target_arch = "x86_64")]
-        Kernel::AesNi => x86_64::stir128l(state, block, times),
+        Kernel::AesNi | Kernel::Vaes => x86_64::stir128l(state, block, times),
         #[cfg(target_arch = "aarch64")]
         Kernel::Armv8 => aarch64::stir128l(state, block, times),
         #[cfg(target_arch = "riscv64")]
@@ -192,23 +194,128 @@ fn stir(
     }
 }
 
+/// The state `Init` starts from, before the key and nonce are
+/// stirred in.
+pub(super) fn start(key: &[u8; KEY_SIZE], nonce: &[u8; NONCE_SIZE]) -> State {
+    [
+        xor(key, nonce),
+        C1,
+        C0,
+        C1,
+        xor(key, nonce),
+        xor(key, &C0),
+        xor(key, &C1),
+        xor(key, &C0),
+    ]
+}
+
+/// `Finalize` from the lengths on: the seven updates and the fold
+/// that is the 128-bit tag. `lengths` is the block of them.
+pub(super) fn finish(
+    kernel: Chosen,
+    state: &mut State,
+    lengths: &[u8; BLOCK_SIZE],
+) -> [u8; TAG] {
+    let mut t = xor(&state[2], lengths);
+    // Seven updates with that block in both halves.
+    let mut block = [0u8; 2 * BLOCK_SIZE];
+    let (m0, m1) = block.split_at_mut(BLOCK_SIZE);
+    m0.copy_from_slice(&t);
+    m1.copy_from_slice(&t);
+    stir(kernel, state, &block, 7);
+    block.zeroize();
+    t.zeroize();
+    fold(state)
+}
+
+/// The 128-bit tag of a state that has had `Finalize`'s updates.
+pub(super) fn fold(state: &State) -> [u8; TAG] {
+    state[1..7].iter().fold(state[0], |tag, s| xor(&tag, s))
+}
+
+/// Where a lane's two pieces lie in a block of a parallel variant's
+/// input.
+fn pieces(lane: Lane) -> [usize; 2] {
+    [lane.offset, lane.offset + lane.width / 2]
+}
+
+/// `Absorb`, for one lane of a parallel variant: this state takes
+/// its share of each block of `data`.
+pub(super) fn absorb_lane(
+    kernel: Chosen,
+    state: &mut State,
+    data: &[u8],
+    lane: Lane,
+) {
+    match kernel.0 {
+        #[cfg(target_arch = "x86_64")]
+        Kernel::AesNi | Kernel::Vaes => {
+            x86_64::absorb128l_lane(state, data, lane)
+        }
+        #[cfg(target_arch = "aarch64")]
+        Kernel::Armv8 => aarch64::absorb128l_lane(state, data, lane),
+        #[cfg(target_arch = "riscv64")]
+        Kernel::Zvkned => riscv64::zvkned::absorb128l_lane(state, data, lane),
+        _ => gathered(data, lane.width, pieces(lane), |blocks| {
+            <Aegis128L as Variant>::absorb(kernel, state, blocks)
+        }),
+    }
+}
+
+/// `Enc`, for one lane of a parallel variant.
+pub(super) fn encrypt_lane(
+    kernel: Chosen,
+    state: &mut State,
+    data: &mut [u8],
+    lane: Lane,
+) {
+    match kernel.0 {
+        #[cfg(target_arch = "x86_64")]
+        Kernel::AesNi | Kernel::Vaes => {
+            x86_64::encrypt128l_lane(state, data, lane)
+        }
+        #[cfg(target_arch = "aarch64")]
+        Kernel::Armv8 => aarch64::encrypt128l_lane(state, data, lane),
+        #[cfg(target_arch = "riscv64")]
+        Kernel::Zvkned => riscv64::zvkned::encrypt128l_lane(state, data, lane),
+        _ => gathered_mut(data, lane.width, pieces(lane), |blocks| {
+            <Aegis128L as Variant>::encrypt(kernel, state, blocks)
+        }),
+    }
+}
+
+/// `Dec`, for one lane of a parallel variant.
+pub(super) fn decrypt_lane(
+    kernel: Chosen,
+    state: &mut State,
+    data: &mut [u8],
+    lane: Lane,
+) {
+    match kernel.0 {
+        #[cfg(target_arch = "x86_64")]
+        Kernel::AesNi | Kernel::Vaes => {
+            x86_64::decrypt128l_lane(state, data, lane)
+        }
+        #[cfg(target_arch = "aarch64")]
+        Kernel::Armv8 => aarch64::decrypt128l_lane(state, data, lane),
+        #[cfg(target_arch = "riscv64")]
+        Kernel::Zvkned => riscv64::zvkned::decrypt128l_lane(state, data, lane),
+        _ => gathered_mut(data, lane.width, pieces(lane), |blocks| {
+            <Aegis128L as Variant>::decrypt(kernel, state, blocks)
+        }),
+    }
+}
+
 impl Variant for Aegis128L {
     type Nonce = [u8; NONCE_SIZE];
+    type State = State;
+    type Block = [u8; 2 * BLOCK_SIZE];
 
     const RATE: usize = 2 * BLOCK_SIZE;
 
     fn init(kernel: Chosen, key: &Self::Key, nonce: &Self::Nonce) -> State {
         let key = key.array();
-        let mut state = [
-            xor(key, nonce),
-            C1,
-            C0,
-            C1,
-            xor(key, nonce),
-            xor(key, &C0),
-            xor(key, &C1),
-            xor(key, &C0),
-        ];
+        let mut state = start(key, nonce);
         // Ten updates with the nonce and the key.
         let mut block = [0u8; 2 * BLOCK_SIZE];
         let (m0, m1) = block.split_at_mut(BLOCK_SIZE);
@@ -264,7 +371,7 @@ impl Variant for Aegis128L {
         }
     }
 
-    fn keystream(state: &State) -> [u8; MAX_RATE] {
+    fn keystream(state: &State) -> [u8; 2 * BLOCK_SIZE] {
         keystream(state)
     }
 
@@ -274,16 +381,7 @@ impl Variant for Aegis128L {
         aad_bits: u64,
         message_bits: u64,
     ) -> [u8; TAG] {
-        let mut t = xor(&state[2], &lengths(aad_bits, message_bits));
-        // Seven updates with that block in both halves.
-        let mut block = [0u8; 2 * BLOCK_SIZE];
-        let (m0, m1) = block.split_at_mut(BLOCK_SIZE);
-        m0.copy_from_slice(&t);
-        m1.copy_from_slice(&t);
-        stir(kernel, state, &block, 7);
-        block.zeroize();
-        t.zeroize();
-        state[1..7].iter().fold(state[0], |tag, s| xor(&tag, s))
+        finish(kernel, state, &lengths(aad_bits, message_bits))
     }
 }
 

@@ -204,7 +204,7 @@ macro_rules! keystream128l {
 /// The two blocks of input, into `xmm8` and `xmm9`.
 macro_rules! input128l {
     () => {
-        "movdqu xmm8, [{data}]\nmovdqu xmm9, [{data} + 16]\n"
+        "movdqu xmm8, [{data}]\nmovdqu xmm9, [{data} + {second}]\n"
     };
 }
 
@@ -227,7 +227,7 @@ macro_rules! encrypt128l {
             "pxor xmm10, xmm8\n",
             "pxor xmm11, xmm9\n",
             "movdqu [{data}], xmm10\n",
-            "movdqu [{data} + 16], xmm11\n",
+            "movdqu [{data} + {second}], xmm11\n",
             update128l!($label, $s0, $s1, $s2, $s3, $s4, $s5, $s6, $s7),
         )
     };
@@ -280,7 +280,7 @@ macro_rules! decrypt128l {
             $s5,
             "\n",
             "movdqu [{data}], xmm8\n",
-            "movdqu [{data} + 16], xmm9\n",
+            "movdqu [{data} + {second}], xmm9\n",
             "pxor xmm10, ",
             $s0,
             "\n",
@@ -602,9 +602,50 @@ macro_rules! load256 {
 
 /// Defines a kernel: the state into the registers, `$body` for each
 /// block of input round the places the state can lie, and the state
-/// back from wherever the input ended.
+/// back from wherever the input ended. A `halves` kernel takes its
+/// block in two pieces `second` bytes apart, and a `whole` one in
+/// one.
 macro_rules! kernel {
-    ($(#[$doc:meta])* $name:ident, $data:ty, $load:ident,
+    (halves, $(#[$doc:meta])* $name:ident, $data:ty, $load:ident,
+     $rotations:ident, $body:ident, $store:ident) => {
+        $(#[$doc])*
+        ///
+        /// # Safety
+        /// Requires the AES instructions; `data` must point at
+        /// `blocks` blocks of input, each `step` bytes on from the
+        /// last and each with a second piece `second` bytes on from
+        /// its first, and `blocks >= 1`.
+        unsafe fn $name(
+            state: &mut State,
+            data: $data,
+            second: usize,
+            step: usize,
+            blocks: usize,
+        ) {
+            unsafe {
+                core::arch::asm!(
+                    $load!(),
+                    "2:",
+                    $rotations!($body),
+                    "jmp 2b",
+                    $rotations!($store),
+                    "4:",
+                    state = in(reg) state.as_mut_ptr(),
+                    data = inout(reg) data => _,
+                    second = in(reg) second,
+                    step = in(reg) step,
+                    n = inout(reg) blocks => _,
+                    out("xmm0") _, out("xmm1") _, out("xmm2") _,
+                    out("xmm3") _, out("xmm4") _, out("xmm5") _,
+                    out("xmm6") _, out("xmm7") _, out("xmm8") _,
+                    out("xmm9") _, out("xmm10") _, out("xmm11") _,
+                    out("xmm12") _,
+                    options(nostack),
+                );
+            }
+        }
+    };
+    (whole, $(#[$doc:meta])* $name:ident, $data:ty, $load:ident,
      $rotations:ident, $body:ident, $store:ident) => {
         $(#[$doc])*
         ///
@@ -634,7 +675,6 @@ macro_rules! kernel {
                     out("xmm3") _, out("xmm4") _, out("xmm5") _,
                     out("xmm6") _, out("xmm7") _, out("xmm8") _,
                     out("xmm9") _, out("xmm10") _, out("xmm11") _,
-                    out("xmm12") _,
                     options(nostack),
                 );
             }
@@ -643,6 +683,7 @@ macro_rules! kernel {
 }
 
 kernel!(
+    halves,
     /// The AEGIS-128L `Absorb`.
     run_absorb128l,
     *const u8,
@@ -652,6 +693,7 @@ kernel!(
     store128l
 );
 kernel!(
+    halves,
     /// The AEGIS-128L `Enc`, in place.
     run_encrypt128l,
     *mut u8,
@@ -661,6 +703,7 @@ kernel!(
     store128l
 );
 kernel!(
+    halves,
     /// The AEGIS-128L `Dec`, in place.
     run_decrypt128l,
     *mut u8,
@@ -670,6 +713,7 @@ kernel!(
     store128l
 );
 kernel!(
+    whole,
     /// The AEGIS-256 `Absorb`.
     run_absorb256,
     *const u8,
@@ -679,6 +723,7 @@ kernel!(
     store256
 );
 kernel!(
+    whole,
     /// The AEGIS-256 `Enc`, in place.
     run_encrypt256,
     *mut u8,
@@ -688,6 +733,7 @@ kernel!(
     store256
 );
 kernel!(
+    whole,
     /// The AEGIS-256 `Dec`, in place.
     run_decrypt256,
     *mut u8,
@@ -698,6 +744,7 @@ kernel!(
 );
 
 entries!(
+    halves,
     32,
     run_absorb128l,
     run_encrypt128l,
@@ -705,9 +752,13 @@ entries!(
     absorb128l,
     stir128l,
     encrypt128l,
-    decrypt128l
+    decrypt128l,
+    absorb128l_lane,
+    encrypt128l_lane,
+    decrypt128l_lane
 );
 entries!(
+    whole,
     16,
     run_absorb256,
     run_encrypt256,
@@ -715,5 +766,548 @@ entries!(
     absorb256,
     stir256,
     encrypt256,
-    decrypt256
+    decrypt256,
+    absorb256_lane,
+    encrypt256_lane,
+    decrypt256_lane
 );
+
+/// The parallel variants on VAES, two lanes to a 256-bit register.
+///
+/// Each lane is a state of its own, kept apart in memory as the
+/// narrow kernels want it, and a pair of them is brought into the
+/// halves of eight registers, or six, for the length of a call. The
+/// input needs no such gathering: the two lanes' pieces of a block
+/// lie side by side in it, which is the reason the draft deals a
+/// block out the way it does.
+///
+/// These are in the VEX encoding, whose three-operand `vaesenc` does
+/// not write over its input, so the state stays where it is and the
+/// loop is written once. The update is arranged as the narrow one is:
+/// the message is the round's key and the block's old value is xored
+/// in after, and decryption gives the round the keystream block that
+/// arrives last.
+///
+/// The callers name this kernel only where its row of their list is
+/// in force, which is VAES on 256-bit registers with the operating
+/// system saving them.
+pub(super) mod vaes {
+    use super::State;
+    use crate::aead::aegis::Lane;
+
+    /// A pair of states into `ymm0` on, `$n` blocks of them.
+    macro_rules! load {
+        ($($r:literal, $at:literal),+) => {
+            concat!($(
+                "vmovdqu xmm", $r, ", [{state} + ", $at, "]\n",
+                "vinserti128 ymm", $r, ", ymm", $r,
+                ", [{state} + 128 + ", $at, "], 1\n",
+            )+)
+        };
+    }
+
+    /// The pair back to memory.
+    macro_rules! store {
+        ($($r:literal, $at:literal),+) => {
+            concat!($(
+                "vmovdqu [{state} + ", $at, "], xmm", $r, "\n",
+                "vextracti128 [{state} + 128 + ", $at, "], ymm", $r,
+                ", 1\n",
+            )+)
+        };
+    }
+
+    /// The AEGIS-128 update, for M0 in `ymm8` and M1 in `ymm9`.
+    macro_rules! update128 {
+        () => {
+            "vaesenc ymm10, ymm7, ymm8\n\
+             vaesenc ymm11, ymm3, ymm9\n\
+             vaesenc ymm7, ymm6, ymm7\n\
+             vaesenc ymm6, ymm5, ymm6\n\
+             vaesenc ymm5, ymm4, ymm5\n\
+             vpxor ymm4, ymm4, ymm11\n\
+             vaesenc ymm3, ymm2, ymm3\n\
+             vaesenc ymm2, ymm1, ymm2\n\
+             vaesenc ymm1, ymm0, ymm1\n\
+             vpxor ymm0, ymm0, ymm10\n"
+        };
+    }
+
+    macro_rules! absorb128 {
+        () => {
+            concat!(
+                "vmovdqu ymm8, [{data}]\n",
+                "vmovdqu ymm9, [{data} + {second}]\n",
+                update128!(),
+            )
+        };
+    }
+
+    macro_rules! encrypt128 {
+        () => {
+            concat!(
+                "vmovdqu ymm8, [{data}]\n",
+                "vmovdqu ymm9, [{data} + {second}]\n",
+                "vpand ymm12, ymm2, ymm3\n",
+                "vpand ymm13, ymm6, ymm7\n",
+                "vpxor ymm12, ymm12, ymm1\n",
+                "vpxor ymm13, ymm13, ymm2\n",
+                "vpxor ymm12, ymm12, ymm6\n",
+                "vpxor ymm13, ymm13, ymm5\n",
+                "vpxor ymm12, ymm12, ymm8\n",
+                "vpxor ymm13, ymm13, ymm9\n",
+                "vmovdqu [{data}], ymm12\n",
+                "vmovdqu [{data} + {second}], ymm13\n",
+                update128!(),
+            )
+        };
+    }
+
+    /// Decryption: all of each block of message but the keystream
+    /// block that arrives last, S1 for the first and S5 for the
+    /// second, is gathered beside the rounds, and that last block is
+    /// the round's key.
+    macro_rules! decrypt128 {
+        () => {
+            "vmovdqu ymm8, [{data}]\n\
+             vmovdqu ymm9, [{data} + {second}]\n\
+             vpand ymm12, ymm2, ymm3\n\
+             vpand ymm13, ymm6, ymm7\n\
+             vpxor ymm12, ymm12, ymm6\n\
+             vpxor ymm13, ymm13, ymm2\n\
+             vpxor ymm12, ymm12, ymm8\n\
+             vpxor ymm13, ymm13, ymm9\n\
+             vpxor ymm8, ymm12, ymm1\n\
+             vpxor ymm9, ymm13, ymm5\n\
+             vmovdqu [{data}], ymm8\n\
+             vmovdqu [{data} + {second}], ymm9\n\
+             vpxor ymm12, ymm12, ymm0\n\
+             vpxor ymm13, ymm13, ymm4\n\
+             vaesenc ymm10, ymm7, ymm1\n\
+             vaesenc ymm11, ymm3, ymm5\n\
+             vaesenc ymm7, ymm6, ymm7\n\
+             vaesenc ymm6, ymm5, ymm6\n\
+             vaesenc ymm5, ymm4, ymm5\n\
+             vpxor ymm4, ymm11, ymm13\n\
+             vaesenc ymm3, ymm2, ymm3\n\
+             vaesenc ymm2, ymm1, ymm2\n\
+             vaesenc ymm1, ymm0, ymm1\n\
+             vpxor ymm0, ymm10, ymm12\n"
+        };
+    }
+
+    /// The AEGIS-256 update, for M in the register `$m`.
+    macro_rules! update256 {
+        ($m:literal) => {
+            concat!(
+                "vaesenc ymm10, ymm5, ",
+                $m,
+                "\n",
+                "vaesenc ymm5, ymm4, ymm5\n",
+                "vaesenc ymm4, ymm3, ymm4\n",
+                "vaesenc ymm3, ymm2, ymm3\n",
+                "vaesenc ymm2, ymm1, ymm2\n",
+                "vaesenc ymm1, ymm0, ymm1\n",
+                "vpxor ymm0, ymm0, ymm10\n",
+            )
+        };
+    }
+
+    macro_rules! absorb256 {
+        () => {
+            concat!("vmovdqu ymm8, [{data}]\n", update256!("ymm8"))
+        };
+    }
+
+    macro_rules! encrypt256 {
+        () => {
+            concat!(
+                "vmovdqu ymm8, [{data}]\n",
+                "vpand ymm12, ymm2, ymm3\n",
+                "vpxor ymm13, ymm4, ymm5\n",
+                "vpxor ymm12, ymm12, ymm1\n",
+                "vpxor ymm13, ymm13, ymm8\n",
+                "vpxor ymm12, ymm12, ymm13\n",
+                "vmovdqu [{data}], ymm12\n",
+                update256!("ymm8"),
+            )
+        };
+    }
+
+    /// Decryption; see [`decrypt128`]. S1 is the block that arrives
+    /// last.
+    macro_rules! decrypt256 {
+        () => {
+            "vmovdqu ymm8, [{data}]\n\
+             vpand ymm12, ymm2, ymm3\n\
+             vpxor ymm13, ymm4, ymm5\n\
+             vpxor ymm12, ymm12, ymm8\n\
+             vpxor ymm12, ymm12, ymm13\n\
+             vpxor ymm8, ymm12, ymm1\n\
+             vmovdqu [{data}], ymm8\n\
+             vpxor ymm12, ymm12, ymm0\n\
+             vaesenc ymm10, ymm5, ymm1\n\
+             vaesenc ymm5, ymm4, ymm5\n\
+             vaesenc ymm4, ymm3, ymm4\n\
+             vaesenc ymm3, ymm2, ymm3\n\
+             vaesenc ymm2, ymm1, ymm2\n\
+             vaesenc ymm1, ymm0, ymm1\n\
+             vpxor ymm0, ymm10, ymm12\n"
+        };
+    }
+
+    macro_rules! load128 {
+        () => {
+            load!(
+                "0", "0", "1", "16", "2", "32", "3", "48", "4", "64", "5",
+                "80", "6", "96", "7", "112"
+            )
+        };
+    }
+
+    macro_rules! store128 {
+        () => {
+            store!(
+                "0", "0", "1", "16", "2", "32", "3", "48", "4", "64", "5",
+                "80", "6", "96", "7", "112"
+            )
+        };
+    }
+
+    macro_rules! load256 {
+        () => {
+            load!(
+                "0", "0", "1", "16", "2", "32", "3", "48", "4", "64", "5", "80"
+            )
+        };
+    }
+
+    macro_rules! store256 {
+        () => {
+            store!(
+                "0", "0", "1", "16", "2", "32", "3", "48", "4", "64", "5", "80"
+            )
+        };
+    }
+
+    /// Defines a kernel over a pair of lanes: the two states into the
+    /// registers, `$body` for each block of input, and the states
+    /// back. A `halves` kernel takes its block in two pieces, and a
+    /// `whole` one in one.
+    macro_rules! kernel {
+        (halves, $(#[$doc:meta])* $name:ident, $data:ty, $pointer:ident,
+         $load:ident, $body:ident, $store:ident) => {
+            $(#[$doc])*
+            ///
+            /// `lane` is the first of the two, which are side by side
+            /// in the input. The processor must have VAES on 256-bit
+            /// registers.
+            pub(in crate::aead::aegis) fn $name(
+                states: &mut [State; 2],
+                data: $data,
+                lane: Lane,
+            ) {
+                // What is checked for the further lane holds for the
+                // nearer.
+                let further = Lane {
+                    offset: lane.offset + 16,
+                    width: lane.width,
+                };
+                let (blocks, second) = further.halves(data.len());
+                if blocks == 0 {
+                    return;
+                }
+                // SAFETY: both lanes' pieces lie inside every one of
+                // those blocks, and the two states are side by side;
+                // the instructions are the caller's word.
+                unsafe {
+                    core::arch::asm!(
+                        $load!(),
+                        "2:",
+                        $body!(),
+                        "add {data}, {step}",
+                        "dec {n}",
+                        "jnz 2b",
+                        $store!(),
+                        "vzeroupper",
+                        state = in(reg) states.as_mut_ptr(),
+                        data = inout(reg)
+                            data.$pointer().add(lane.offset) => _,
+                        second = in(reg) second,
+                        step = in(reg) lane.width,
+                        n = inout(reg) blocks => _,
+                        out("ymm0") _, out("ymm1") _, out("ymm2") _,
+                        out("ymm3") _, out("ymm4") _, out("ymm5") _,
+                        out("ymm6") _, out("ymm7") _, out("ymm8") _,
+                        out("ymm9") _, out("ymm10") _, out("ymm11") _,
+                        out("ymm12") _, out("ymm13") _,
+                        options(nostack),
+                    );
+                }
+            }
+        };
+        (whole, $(#[$doc:meta])* $name:ident, $data:ty, $pointer:ident,
+         $load:ident, $body:ident, $store:ident) => {
+            $(#[$doc])*
+            ///
+            /// `lane` is the first of the two, which are side by side
+            /// in the input. The processor must have VAES on 256-bit
+            /// registers.
+            pub(in crate::aead::aegis) fn $name(
+                states: &mut [State; 2],
+                data: $data,
+                lane: Lane,
+            ) {
+                // What is checked for the further lane holds for the
+                // nearer.
+                let further = Lane {
+                    offset: lane.offset + 16,
+                    width: lane.width,
+                };
+                let blocks = further.piece(data.len());
+                if blocks == 0 {
+                    return;
+                }
+                // SAFETY: both lanes' pieces lie inside every one of
+                // those blocks, and the two states are side by side;
+                // the instructions are the caller's word.
+                unsafe {
+                    core::arch::asm!(
+                        $load!(),
+                        "2:",
+                        $body!(),
+                        "add {data}, {step}",
+                        "dec {n}",
+                        "jnz 2b",
+                        $store!(),
+                        "vzeroupper",
+                        state = in(reg) states.as_mut_ptr(),
+                        data = inout(reg)
+                            data.$pointer().add(lane.offset) => _,
+                        step = in(reg) lane.width,
+                        n = inout(reg) blocks => _,
+                        out("ymm0") _, out("ymm1") _, out("ymm2") _,
+                        out("ymm3") _, out("ymm4") _, out("ymm5") _,
+                        out("ymm6") _, out("ymm7") _, out("ymm8") _,
+                        out("ymm9") _, out("ymm10") _, out("ymm11") _,
+                        out("ymm12") _, out("ymm13") _,
+                        options(nostack),
+                    );
+                }
+            }
+        };
+    }
+
+    kernel!(
+        halves,
+        /// The AEGIS-128 `Absorb`, over two lanes of each whole block.
+        absorb128,
+        &[u8],
+        as_ptr,
+        load128,
+        absorb128,
+        store128
+    );
+    kernel!(
+        halves,
+        /// The AEGIS-128 `Enc`, over two lanes of each whole block.
+        encrypt128,
+        &mut [u8],
+        as_mut_ptr,
+        load128,
+        encrypt128,
+        store128
+    );
+    kernel!(
+        halves,
+        /// The AEGIS-128 `Dec`, over two lanes of each whole block.
+        decrypt128,
+        &mut [u8],
+        as_mut_ptr,
+        load128,
+        decrypt128,
+        store128
+    );
+    kernel!(
+        whole,
+        /// The AEGIS-256 `Absorb`, over two lanes of each whole block.
+        absorb256,
+        &[u8],
+        as_ptr,
+        load256,
+        absorb256,
+        store256
+    );
+    kernel!(
+        whole,
+        /// The AEGIS-256 `Enc`, over two lanes of each whole block.
+        encrypt256,
+        &mut [u8],
+        as_mut_ptr,
+        load256,
+        encrypt256,
+        store256
+    );
+    kernel!(
+        whole,
+        /// The AEGIS-256 `Dec`, over two lanes of each whole block.
+        decrypt256,
+        &mut [u8],
+        as_mut_ptr,
+        load256,
+        decrypt256,
+        store256
+    );
+
+    /// What every one of the loops below writes.
+    macro_rules! seeded {
+        ($($body:tt)*) => {
+            core::arch::asm!(
+                $($body)*
+                out("ymm0") _, out("ymm1") _, out("ymm2") _,
+                out("ymm3") _, out("ymm4") _, out("ymm5") _,
+                out("ymm6") _, out("ymm7") _, out("ymm8") _,
+                out("ymm9") _, out("ymm10") _, out("ymm11") _,
+                out("ymm12") _, out("ymm13") _, out("ymm14") _,
+                options(nostack),
+            )
+        };
+    }
+
+    /// The updates of the AEGIS-128 `Init`, for a pair of lanes that
+    /// hold the state it starts from: ten with the nonce and the
+    /// key, which are `block`, each lane's mark going into its
+    /// fourth and eighth blocks before every one. Both lanes take
+    /// the same message, so it is read once and stays in registers.
+    ///
+    /// The processor must have VAES on 256-bit registers.
+    pub(in crate::aead::aegis) fn init128(
+        states: &mut [State; 2],
+        block: &[u8; 32],
+        marks: &[[u8; 16]; 2],
+    ) {
+        // SAFETY: every pointer is to as many bytes as are read or
+        // written through it; the instructions are the caller's word.
+        unsafe {
+            seeded!(
+                load128!(),
+                "vbroadcasti128 ymm8, [{block}]",
+                "vbroadcasti128 ymm9, [{block} + 16]",
+                "vmovdqu ymm14, [{marks}]",
+                "2:",
+                "vpxor ymm3, ymm3, ymm14",
+                "vpxor ymm7, ymm7, ymm14",
+                update128!(),
+                "dec {n}",
+                "jnz 2b",
+                store128!(),
+                "vzeroupper",
+                state = in(reg) states.as_mut_ptr(),
+                block = in(reg) block.as_ptr(),
+                marks = in(reg) marks.as_ptr(),
+                n = inout(reg) 10usize => _,
+            );
+        }
+    }
+
+    /// The updates of the AEGIS-128 `Finalize`, for a pair of lanes:
+    /// seven with each lane's third block xored with `lengths`, in
+    /// both halves of the input.
+    ///
+    /// The processor must have VAES on 256-bit registers.
+    pub(in crate::aead::aegis) fn finish128(
+        states: &mut [State; 2],
+        lengths: &[u8; 16],
+    ) {
+        // SAFETY: as for `init128`.
+        unsafe {
+            seeded!(
+                load128!(),
+                "vbroadcasti128 ymm8, [{lengths}]",
+                "vpxor ymm8, ymm8, ymm2",
+                "vmovdqa ymm9, ymm8",
+                "2:",
+                update128!(),
+                "dec {n}",
+                "jnz 2b",
+                store128!(),
+                "vzeroupper",
+                state = in(reg) states.as_mut_ptr(),
+                lengths = in(reg) lengths.as_ptr(),
+                n = inout(reg) 7usize => _,
+            );
+        }
+    }
+
+    /// The updates of the AEGIS-256 `Init`, for a pair of lanes that
+    /// hold the state it starts from: the four blocks of `inputs` in
+    /// turn, four times over, each lane's mark going into its fourth
+    /// and sixth blocks before every one.
+    ///
+    /// The processor must have VAES on 256-bit registers.
+    pub(in crate::aead::aegis) fn init256(
+        states: &mut [State; 2],
+        inputs: &[[u8; 16]; 4],
+        marks: &[[u8; 16]; 2],
+    ) {
+        // SAFETY: as for `init128`.
+        unsafe {
+            seeded!(
+                load256!(),
+                "vbroadcasti128 ymm8, [{inputs}]",
+                "vbroadcasti128 ymm9, [{inputs} + 16]",
+                "vbroadcasti128 ymm12, [{inputs} + 32]",
+                "vbroadcasti128 ymm13, [{inputs} + 48]",
+                "vmovdqu ymm14, [{marks}]",
+                "2:",
+                "vpxor ymm3, ymm3, ymm14",
+                "vpxor ymm5, ymm5, ymm14",
+                update256!("ymm8"),
+                "vpxor ymm3, ymm3, ymm14",
+                "vpxor ymm5, ymm5, ymm14",
+                update256!("ymm9"),
+                "vpxor ymm3, ymm3, ymm14",
+                "vpxor ymm5, ymm5, ymm14",
+                update256!("ymm12"),
+                "vpxor ymm3, ymm3, ymm14",
+                "vpxor ymm5, ymm5, ymm14",
+                update256!("ymm13"),
+                "dec {n}",
+                "jnz 2b",
+                store256!(),
+                "vzeroupper",
+                state = in(reg) states.as_mut_ptr(),
+                inputs = in(reg) inputs.as_ptr(),
+                marks = in(reg) marks.as_ptr(),
+                n = inout(reg) 4usize => _,
+            );
+        }
+    }
+
+    /// The updates of the AEGIS-256 `Finalize`, for a pair of lanes:
+    /// seven with each lane's fourth block xored with `lengths`.
+    ///
+    /// The processor must have VAES on 256-bit registers.
+    pub(in crate::aead::aegis) fn finish256(
+        states: &mut [State; 2],
+        lengths: &[u8; 16],
+    ) {
+        // SAFETY: as for `init128`.
+        unsafe {
+            seeded!(
+                load256!(),
+                "vbroadcasti128 ymm8, [{lengths}]",
+                "vpxor ymm8, ymm8, ymm3",
+                "2:",
+                update256!("ymm8"),
+                "dec {n}",
+                "jnz 2b",
+                store256!(),
+                "vzeroupper",
+                state = in(reg) states.as_mut_ptr(),
+                lengths = in(reg) lengths.as_ptr(),
+                n = inout(reg) 7usize => _,
+            );
+        }
+    }
+}

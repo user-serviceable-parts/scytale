@@ -342,19 +342,28 @@ One of
 .BR chacha20\-poly1305 ,
 .BR xchacha20\-poly1305 ,
 .BR aegis\-128l ,
-.BR aegis\-256 .
+.BR aegis\-128x2 ,
+.BR aegis\-128x4 ,
+.BR aegis\-256 ,
+.BR aegis\-256x2 ,
+.BR aegis\-256x4 .
 .TP
 .BI \-k,\ \-\-key\  value
 The key, of the width the name says: 16, 24 or 32 bytes for AES, 32
-for ChaCha20-Poly1305 and XChaCha20-Poly1305, 16 for AEGIS-128L and
-32 for AEGIS-256.
+for ChaCha20-Poly1305 and XChaCha20-Poly1305, 16 for the AEGIS-128
+names and 32 for the AEGIS-256 ones.
 .TP
 .BI \-n,\ \-\-nonce\  value
 The nonce. Twelve bytes, except that GCM takes any length, CCM takes 7
 to 13, XPN takes 24: the 12-byte salt followed by the 12-byte frame,
-XChaCha20-Poly1305 takes 24 that may be drawn at random, AEGIS-128L
-takes 16, and AEGIS-256 takes 32 that may be drawn at random. A nonce
-must never repeat under one key.
+XChaCha20-Poly1305 takes 24 that may be drawn at random, the
+AEGIS-128 names take 16, and the AEGIS-256 ones take 32 that may be
+drawn at random. A nonce must never repeat under one key. The
+.B x2
+and
+.B x4
+names are AEGIS on two and four lanes: other ciphers than the plain
+ones, for both ends to have agreed on.
 .TP
 .BI \-\-aad\  value
 Additional data, authenticated but not encrypted; the same value must
