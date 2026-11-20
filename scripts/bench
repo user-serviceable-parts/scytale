@@ -1,37 +1,59 @@
 #!/bin/sh
-# Measures throughput and operation costs, the way `openssl speed`
-# does. The measuring code lives inside the crate, where it can see
-# the implementations behind the public types, so it runs as an
-# ignored test rather than as a `cargo bench` target.
+# An official benchmark run: one to keep, or to compare against one
+# that was kept. Linux only, and as root through sudo.
 #
-# Usage: scripts/bench [word ...] [options]
-#   Words filter the rows: a row runs when every word appears in its
-#   section or its name, and a word may offer alternatives separated
-#   by commas. With no words, everything runs.
+# Measuring needs none of this. `cargo bench -p scytale` runs the
+# benchmark on any platform cargo does, and BENCHMARKING.md says how
+# to use it and how to read what it prints. This script is for the
+# figures that are published: it settles one core so that the rates
+# repeat between runs as well as the cycle counts do, runs the
+# benchmark pinned to that core as the user who called sudo, records
+# what the machine was doing, and puts the machine back when the run
+# ends, however it ends.
 #
-#   --cpu N             pin the run to CPU N (default: the fastest core)
-#   --save NAME         also keep scytale/benchmarks/NAME.md and NAME.json
-#   --compare OLD NEW   compare two JSON documents instead of measuring
-#   Every other option goes to the harness: --seconds N, --json PATH,
-#   --self-test and --help.
+# Usage: sudo scripts/bench [--cpu N] [--save NAME] [bench arguments]
+#        sudo scripts/bench --restore
+#
+#   --cpu N       the CPU to settle and pin to (default: the fastest,
+#                 and the lowest numbered among equals, so a hybrid
+#                 processor is measured on a performance core)
+#   --save NAME   keep scytale/benchmarks/NAME.md and NAME.json: the
+#                 table as printed under a header saying what the
+#                 machine was doing, and every figure with its spread
+#   --restore     put back a machine left settled by a run that could
+#                 not do it itself, one cut off by a power failure, say
+#
+# Everything else goes to the benchmark: filter words, --seconds N,
+# --json PATH; see `cargo bench -p scytale -- --help`.
 #
 # Examples:
-#   scripts/bench                    # everything
-#   scripts/bench gcm none           # rows matching both
-#   scripts/bench --seconds 0.25     # a quicker sweep
-#   scripts/bench --save i7-1355u    # a pass to keep, as this machine
-#   scripts/bench --compare a.json b.json
-#   scripts/bench --self-test        # check the harness
+#   sudo scripts/bench --save i7-1355u     # the pass that is published
+#   sudo scripts/bench aegis --seconds 3   # some rows, on a settled core
 #
-# The run is pinned to one CPU, so that two runs measure the same core
-# and not wherever the scheduler put each row, and the header of a
-# saved file records what else the machine was doing: the governor and
-# turbo, how busy the core's other thread was, power, load and
-# throttling. scripts/bench-quiet, under sudo, settles those, runs
-# this and puts the machine back.
+# What settling does, each step only where the kernel offers the file,
+# and each written to target/bench.state before it is made, which is
+# what is put back:
+#
+#   - turbo off, through intel_pstate/no_turbo or cpufreq/boost, so
+#     the clock is the base clock and not whatever thermal headroom
+#     the last minute left;
+#   - the CPU's minimum clock raised to its maximum, so the governor
+#     has no range left to move in;
+#   - the other thread of the core taken offline, so nothing shares
+#     the core's units with the run;
+#   - every interrupt that may land on the CPU moved to the others;
+#   - kernel.perf_event_paranoid lowered to 2, so the cycle counter
+#     opens for an unprivileged run.
+#
+# A settled machine is not the machine as it is normally used; it is
+# the same machine every time, which is the point. Only the settling
+# is done as root: the build and the measuring run as the caller, so
+# what they leave in target/ and scytale/benchmarks/ is the caller's.
 
 set -eu
 cd "$(dirname "$0")/.."
+
+state=target/bench.state
 
 die() {
     echo "bench: $*" >&2
@@ -42,76 +64,116 @@ warn() {
     echo "bench: $*" >&2
 }
 
-# A path as given, made absolute from this directory.
+# The comment at the top of this file, which is the usage.
+usage() {
+    sed -n '2,/^$/s/^# \{0,1\}//p' "$0"
+}
+
+# A path as given, made absolute from the directory the script was
+# called in: cargo runs the benchmark inside the crate's directory, so
+# a relative path would land there.
+called_from=${OLDPWD:-$PWD}
 absolute() {
     case $1 in
         /*) echo "$1" ;;
-        *) echo "$PWD/$1" ;;
+        *) echo "$called_from/$1" ;;
     esac
 }
 
+# The options that are this script's are taken out; the rest are the
+# benchmark's and are handed on as they came.
 cpu=
 save=
-# Options that measure nothing need no pinning and no header.
-passive=
-rest=
-while [ $# -gt 0 ]; do
-    case $1 in
+only_restore=
+n=$#
+while [ "$n" -gt 0 ]; do
+    arg=$1
+    shift
+    n=$((n - 1))
+    case $arg in
         --cpu)
-            [ $# -ge 2 ] || die "--cpu wants a CPU number"
-            cpu=$2
-            shift 2
+            [ "$n" -ge 1 ] || die "--cpu wants a CPU number"
+            cpu=$1
+            shift
+            n=$((n - 1))
             ;;
         --save)
-            [ $# -ge 2 ] || die "--save wants a name for the files"
-            save=$2
-            shift 2
-            ;;
-        --compare)
-            [ $# -ge 3 ] || die "--compare wants two JSON paths"
-            rest="$rest $1 $2 $3"
-            passive=yes
-            shift 3
-            ;;
-        --self-test | --help | -h)
-            rest="$rest $1"
-            passive=yes
+            [ "$n" -ge 1 ] || die "--save wants a name for the files"
+            save=$1
             shift
+            n=$((n - 1))
             ;;
         --json)
-            # Cargo runs the harness inside the crate's directory, so
-            # a relative path would land there rather than here.
-            [ $# -ge 2 ] || die "--json wants a path"
-            rest="$rest $1 $(absolute "$2")"
-            shift 2
-            ;;
-        *)
-            rest="$rest $1"
+            [ "$n" -ge 1 ] || die "--json wants a path"
+            set -- "$@" "$arg" "$(absolute "$1")"
             shift
+            n=$((n - 1))
             ;;
+        --restore) only_restore=yes ;;
+        --help | -h)
+            usage
+            exit
+            ;;
+        *) set -- "$@" "$arg" ;;
     esac
 done
 
-harness() {
-    SCYTALE_BENCH="$rest" cargo test --release --lib -p scytale -- \
-        --ignored --nocapture --exact bench::speed
+[ "$(uname -s)" = Linux ] ||
+    die "Linux only; 'cargo bench -p scytale' measures anywhere"
+[ "$(id -u)" = 0 ] || die "needs root; run it with sudo"
+
+# Each line of the state file is a path and the value it held, so
+# restoring is writing the lines back, last change first.
+restore() {
+    [ -f "$state" ] || return 0
+    sed '1!G;h;$!d' "$state" | while read -r path value; do
+        if ! echo "$value" > "$path" 2> /dev/null; then
+            warn "could not restore $path to $value"
+        fi
+    done
+    rm -f "$state"
+    warn "restored"
 }
 
-if [ -n "$passive" ]; then
-    harness
+if [ -n "$only_restore" ]; then
+    [ -f "$state" ] || die "nothing to restore: no $state"
+    restore
     exit
 fi
 
-# The CPU with the highest clock, and the lowest number among equals,
-# so a hybrid processor is measured on a performance core and every
-# other processor on CPU 0. scripts/bench-quiet chooses the same way.
+# The benchmark runs as whoever called sudo, with that user's
+# toolchain, which root's PATH does not hold.
+user=${SUDO_USER:-}
+[ -n "$user" ] && [ "$user" != root ] ||
+    die "run it with sudo from your own account, not as root"
+home=$(getent passwd "$user" | cut -d: -f6)
+[ -d "$home" ] || die "no home directory for $user"
+
+# By setpriv and not `sudo -u`, which opens a login session for the
+# user: on an encrypted home that prints a complaint about the
+# keyring at every call, and nothing here needs a session.
+group=$(id -g "$user")
+as_user() {
+    setpriv --reuid "$user" --regid "$group" --init-groups \
+        env "HOME=$home" "USER=$user" "LOGNAME=$user" \
+        "PATH=$home/.cargo/bin:$PATH" "$@"
+}
+
+[ -f "$state" ] && die "already settled; --restore first"
+
+# A sysfs or procfs value, or the given default where there is none.
+read_or() {
+    cat "$1" 2> /dev/null || echo "$2"
+}
+
+# The CPU with the highest clock, and the lowest number among equals.
 fastest_cpu() {
     best=
     best_freq=-1
     for dir in /sys/devices/system/cpu/cpu[0-9]*; do
         n=${dir##*cpu}
-        [ "$(cat "$dir/online" 2> /dev/null || echo 1)" = 1 ] || continue
-        freq=$(cat "$dir/cpufreq/cpuinfo_max_freq" 2> /dev/null || echo 0)
+        [ "$(read_or "$dir/online" 1)" = 1 ] || continue
+        freq=$(read_or "$dir/cpufreq/cpuinfo_max_freq" 0)
         if [ "$freq" -gt "$best_freq" ] ||
             { [ "$freq" -eq "$best_freq" ] && [ "$n" -lt "$best" ]; }; then
             best=$n
@@ -119,17 +181,6 @@ fastest_cpu() {
         fi
     done
     echo "${best:-0}"
-}
-
-# A sysfs or procfs value, or the given default where there is none.
-read_or() {
-    cat "$1" 2> /dev/null || echo "$2"
-}
-
-# The other CPU sharing this core, if the core has two threads.
-sibling_of() {
-    read_or "/sys/devices/system/cpu/cpu$1/topology/thread_siblings_list" "" |
-        tr ',-' '\n\n' | grep -vx "$1" | head -n 1
 }
 
 # Percent of the interval two /proc/stat lines span that the CPU was
@@ -150,8 +201,9 @@ stat_of() {
 }
 
 [ -n "$cpu" ] || cpu=$(fastest_cpu)
-sibling=$(sibling_of "$cpu")
 cpu_sys=/sys/devices/system/cpu/cpu$cpu
+[ -d "$cpu_sys" ] || die "no CPU $cpu"
+
 pin=
 if command -v taskset > /dev/null; then
     pin="taskset -c $cpu"
@@ -159,52 +211,97 @@ else
     warn "taskset is not installed, so the run is not pinned"
 fi
 
-# What would spoil the figures, said before the minutes are spent.
-paranoid=$(read_or /proc/sys/kernel/perf_event_paranoid 0)
-if [ "$paranoid" -gt 2 ]; then
-    warn "kernel.perf_event_paranoid is $paranoid, so the cycle counter" \
-        "cannot be opened and only rates will be measured;" \
-        "'sudo sysctl kernel.perf_event_paranoid=2' allows it"
+json=
+md=
+if [ -n "$save" ]; then
+    json=$PWD/scytale/benchmarks/$save.json
+    md=$PWD/scytale/benchmarks/$save.md
+    as_user mkdir -p scytale/benchmarks
+    set -- "$@" --json "$json"
 fi
-if [ -n "$sibling" ]; then
-    before=$(stat_of "$sibling")
-    sleep 1
-    busy=$(busy_percent "$before" "$(stat_of "$sibling")")
-    if [ "$busy" -gt 5 ]; then
-        warn "CPU $sibling, the other thread of this core, is $busy% busy;" \
-            "it shares the core's units with the run"
+
+# Built before anything is settled, on the whole machine at its
+# usual speed, and so that the build is not what the header
+# describes.
+as_user cargo bench -p scytale --no-run
+
+commit=$(as_user git rev-parse HEAD 2> /dev/null || echo unknown)
+if [ -n "$(as_user git status --porcelain --untracked-files=no \
+    2> /dev/null)" ]; then
+    commit="$commit-dirty"
+fi
+
+# Changes a file, remembering what it held so it can be put back. A
+# file the kernel does not offer is skipped, and one it refuses to
+# change is left out of the state, since there is nothing to undo;
+# interrupts the kernel manages itself refuse, and that is fine.
+set_value() {
+    [ -f "$1" ] || return 0
+    was=$(cat "$1")
+    if echo "$2" > "$1" 2> /dev/null; then
+        printf '%s %s\n' "$1" "$was" >> "$state"
     fi
+}
+
+# Made by the caller, so that the build can write to it afterwards.
+as_user mkdir -p "$(dirname "$state")"
+: > "$state"
+
+# From here on the machine is put back whenever the script ends: at
+# the end of the run, on a failure, and on an interrupt.
+text=$(mktemp)
+trap 'rm -f "$text"; restore' EXIT
+trap 'exit 130' INT TERM
+
+set_value /sys/devices/system/cpu/intel_pstate/no_turbo 1
+set_value /sys/devices/system/cpu/cpufreq/boost 0
+
+# After turbo is off, the maximum the governor may ask for is the base
+# clock; pinning the minimum to it leaves one speed.
+if [ -f "$cpu_sys/cpufreq/scaling_max_freq" ]; then
+    set_value "$cpu_sys/cpufreq/scaling_min_freq" \
+        "$(cat "$cpu_sys/cpufreq/scaling_max_freq")"
 fi
+
+siblings=$(read_or "$cpu_sys/topology/thread_siblings_list" "" |
+    tr ',-' '\n\n' | grep -vx "$cpu" || true)
+for other in $siblings; do
+    set_value "/sys/devices/system/cpu/cpu$other/online" 0
+done
+
+# The CPUs that may take the interrupts: every online one but ours.
+others=
+for dir in /sys/devices/system/cpu/cpu[0-9]*; do
+    n=${dir##*cpu}
+    [ "$n" != "$cpu" ] || continue
+    [ "$(read_or "$dir/online" 1)" = 1 ] || continue
+    others="$others${others:+,}$n"
+done
+if [ -n "$others" ]; then
+    for irq in /proc/irq/[0-9]*; do
+        set_value "$irq/smp_affinity_list" "$others"
+    done
+fi
+
+set_value /proc/sys/kernel/perf_event_paranoid 2
+
+# A thread of the core the kernel would not take offline still shares
+# the core's units with the run, so how busy it was is recorded.
+sibling=
+for other in $siblings; do
+    [ "$(read_or "/sys/devices/system/cpu/cpu$other/online" 1)" = 1 ] &&
+        sibling=$other
+done
+
 governor=$(read_or "$cpu_sys/cpufreq/scaling_governor" unknown)
-if [ -n "$save" ] && [ -f "scytale/benchmarks/$save.json" ]; then
-    was=$(sed -n 's/.*"governor": *"\([^"]*\)".*/\1/p' \
-        "scytale/benchmarks/$save.json" | head -n 1)
+if [ -n "$json" ] && [ -f "$json" ]; then
+    was=$(sed -n 's/.*"governor": *"\([^"]*\)".*/\1/p' "$json" | head -n 1)
     if [ -n "$was" ] && [ "$was" != "$governor" ]; then
         warn "the governor is $governor; the saved run used $was"
     fi
 fi
 
-commit=$(git rev-parse HEAD 2> /dev/null || echo unknown)
-if [ -n "$(git status --porcelain --untracked-files=no 2> /dev/null)" ]; then
-    commit="$commit-dirty"
-fi
-export SCYTALE_BENCH_COMMIT="$commit"
-
-if [ -z "$save" ]; then
-    SCYTALE_BENCH="$rest" exec $pin cargo test --release --lib -p scytale -- \
-        --ignored --nocapture --exact bench::speed
-fi
-
-# A pass to keep: the figures as JSON beside the table as printed,
-# under a header saying what the machine was doing at the time. Built
-# first, so that the build is not what the header describes.
-cargo test --release --lib -p scytale --no-run
-mkdir -p scytale/benchmarks
-json=scytale/benchmarks/$save.json
-md=scytale/benchmarks/$save.md
-rest="$rest --json $(absolute "$json")"
-text=$(mktemp)
-trap 'rm -f "$text"' EXIT
+warn "CPU $cpu settled; measuring as $user"
 
 throttle_file=$cpu_sys/thermal_throttle/core_throttle_count
 started=$(date -Iseconds)
@@ -214,22 +311,29 @@ throttles_before=$(read_or "$throttle_file" 0)
 
 # `set -e` would stop here on a failed run, before the header; the
 # status is kept and the files are written either way, since a partial
-# table is still worth seeing.
+# table is still worth seeing. Not exec: the trap has the machine to
+# put back afterwards.
 status=0
-SCYTALE_BENCH="$rest" $pin cargo test --release --lib -p scytale -- \
-    --ignored --nocapture --exact bench::speed 2>&1 | tee "$text" || status=$?
+as_user env "SCYTALE_BENCH_COMMIT=$commit" $pin \
+    cargo bench -p scytale -- "$@" 2>&1 | tee "$text" || status=$?
+
+[ -n "$save" ] || exit $status
 
 finished=$(date -Iseconds)
 throttles=$(($(read_or "$throttle_file" 0) - throttles_before))
 if [ -n "$sibling" ]; then
     busy=$(busy_percent "$sibling_before" "$(stat_of "$sibling")")
     other="CPU $sibling, $busy% busy during the run"
+elif [ -n "$siblings" ]; then
+    other="offline for the run"
 else
     other="none"
 fi
+
 processor=$(sed -n 's/^\(model name\|uarch\|Model\|Hardware\)[ \t]*: *//p' \
     /proc/cpuinfo | head -n 1)
 processor=$(echo "${processor:-unknown}" | sed 's/(R)//g; s/(TM)//g')
+
 if [ -f /sys/devices/system/cpu/intel_pstate/no_turbo ]; then
     case $(cat /sys/devices/system/cpu/intel_pstate/no_turbo) in
         1) turbo=off ;;
@@ -242,7 +346,9 @@ else
         *) turbo=unknown ;;
     esac
 fi
+
 preference=$(read_or "$cpu_sys/cpufreq/energy_performance_preference" none)
+
 power=mains
 for supply in /sys/class/power_supply/*; do
     [ "$(read_or "$supply/type" "")" = Battery ] || continue
@@ -250,16 +356,19 @@ for supply in /sys/class/power_supply/*; do
         Discharging) power=battery ;;
     esac
 done
+
 clock=$(sed -n 's/.*"clock": *"\([^"]*\)".*/\1/p' "$json" 2> /dev/null |
     head -n 1)
 
+# Written as the caller, so that the file is the caller's.
 {
     echo "# Benchmarks: $processor"
     echo
-    echo "One pass of \`scripts/bench --save $save\`, saved as it was printed."
-    echo "Rerunning replaces it, so the header says which commit and what"
-    echo "state of the machine these numbers belong to. \`$save.json\` beside"
-    echo "it holds every figure with its spread, for \`scripts/bench --compare\`."
+    echo "One pass of \`sudo scripts/bench --save $save\`, saved as it was"
+    echo "printed. Rerunning replaces it, so the header says which commit"
+    echo "and what state of the machine these numbers belong to."
+    echo "\`$save.json\` beside it holds every figure with its spread, for"
+    echo "\`cargo bench -p scytale -- --compare\`."
     echo
     echo "| | |"
     echo "| --- | --- |"
@@ -276,17 +385,18 @@ clock=$(sed -n 's/.*"clock": *"\([^"]*\)".*/\1/p' "$json" 2> /dev/null |
     echo "| Load average at start | $load |"
     echo "| Throttle events during the run | $throttles |"
     echo "| Kernel | $(uname -r) |"
-    echo "| Toolchain | $(rustc --version), release profile |"
+    echo "| Toolchain | $(as_user rustc --version), bench profile |"
     echo "| Clock | ${clock:-unknown} |"
     echo
     echo "Cycles a byte is the figure to compare between commits; the rates"
     echo "depend on the clock the run saw, which the JSON records cell by"
-    echo "cell. The module documentation at the top of \`scytale/src/bench.rs\`"
-    echo "says how to read the table."
+    echo "cell. \`BENCHMARKING.md\` at the top of the repository says how to"
+    echo "read the table."
     echo
     echo '```text'
     cat "$text"
     echo '```'
-} > "$md"
-echo "bench: kept $md and $json" >&2
+} | as_user tee "$md" > /dev/null
+
+warn "kept $md and $json"
 exit $status

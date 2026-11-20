@@ -131,12 +131,6 @@ extern crate std;
 #[cfg(test)]
 mod vectors;
 
-// The benchmark times a thread by its processor clock, and wasm has
-// no such clock to read. It measures rather than checks, so the
-// tests there lose nothing by its absence.
-#[cfg(all(test, not(target_family = "wasm")))]
-mod bench;
-
 pub mod aead;
 mod align;
 mod arch;
