@@ -310,12 +310,14 @@ throttles_before=$(read_or "$throttle_file" 0)
 [ -n "$sibling" ] && sibling_before=$(stat_of "$sibling")
 
 # `set -e` would stop here on a failed run, before the header; the
-# status is kept and the files are written either way, since a partial
-# table is still worth seeing. Not exec: the trap has the machine to
-# put back afterwards.
+# status is kept and the files are written either way. Not exec: the
+# trap has the machine to put back afterwards. The report is what
+# comes out on standard output, at the end; what the benchmark says
+# while it measures, and what cargo says, go to standard error and
+# stay out of the file.
 status=0
 as_user env "SCYTALE_BENCH_COMMIT=$commit" $pin \
-    cargo bench -p scytale -- "$@" 2>&1 | tee "$text" || status=$?
+    cargo bench -p scytale -- "$@" | tee "$text" || status=$?
 
 [ -n "$save" ] || exit $status
 
