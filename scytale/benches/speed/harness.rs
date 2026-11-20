@@ -1,105 +1,39 @@
-//! Throughput of the primitives, in the manner of `openssl speed`,
-//! and the cost of the operations that have no throughput to
-//! measure.
+//! The measuring: what is measured, how a figure is made of samples,
+//! the table and the JSON document, and the comparison of two of
+//! those. `BENCHMARKING.md` at the top of the repository says how to
+//! run it and how to read what it prints; this says how it works.
 //!
-//! Everything the library implements is here. A primitive that runs
-//! over a buffer is reported at six sizes, from one block to sixteen
-//! kilobytes: the small end shows what a call costs before any data
-//! moves, the large end the steady state, and the distance between
-//! them is what says whether a faster bulk path would need a
-//! short-message fallback beside it. A primitive whose cost is the
-//! call rather than the data, which is every key operation, both key
-//! derivations and the two format-preserving modes, is reported
-//! instead as operations a second and the time one takes.
+//! A primitive that runs over a buffer is reported at six sizes, from
+//! one block to sixteen kilobytes. One whose cost is the call rather
+//! than the data, which is every key operation, both key derivations
+//! and the two format-preserving modes, is reported as operations a
+//! second and the time one takes.
 //!
-//! Every figure comes in two units. Cycles a byte, or an operation,
-//! is what the code costs: it barely moves between runs, between a
-//! fast core and a slow one, or as a laptop warms up and its clock
-//! falls, so it is the figure to compare across commits. Megabytes
-//! a second, or operations a second, is what a caller feels on this
-//! machine as it stood. The two are read around the same work, so the
-//! document also records the clock rate each cell saw. The cycle
-//! counter is the kernel's, through `perf_event_open`; where it
-//! cannot be opened, as in a virtual machine or with
-//! `kernel.perf_event_paranoid` above 2, the rates stand alone.
-//!
-//! A figure is the median of thirty-one samples, not a mean over one
-//! long run, since an interrupt, a migration, or a neighbour on the
-//! other thread of the core only ever slows a sample and never speeds
-//! one. The spread of the middle half of the samples is kept with
-//! each figure, and a figure whose spread passes five percent of its
-//! median is marked `*` in the table: the number is still the best
-//! there is, but the run was not quiet. Within a section the cells
-//! are sampled in rounds, one sample of every cell and then the next,
-//! so that a clock drifting over the minutes lands on every row of
-//! the section alike instead of on whichever rows came last.
-//!
-//! `scripts/bench` pins the run to one CPU, the fastest, so that two
-//! runs measure the same core and not wherever the scheduler put each
-//! row, and `--save NAME` keeps a pass under a header recording what
-//! else the machine was doing: governor, turbo, the other thread of
-//! the core, power, load and throttling. `scripts/bench-quiet`, as
-//! root, settles those so that the rates repeat as the cycles do.
-//!
-//! `--json PATH` writes every figure with its spread, the clock, the
-//! sample count and what the machine said about itself, and
-//! `--compare OLD NEW` sets two such documents side by side: a figure
-//! counts as changed only when it moved by more than both spreads
-//! together, and the run fails when any figure is worse by that much,
-//! so a check before a push has a yes or no.
+//! Every figure comes in two units read around the same work: cycles,
+//! from the kernel's counter through `perf_event_open` where there is
+//! one, and CPU time on this thread. A figure is the median of
+//! thirty-one samples, not a mean over one long run, since an
+//! interrupt, a migration, or a neighbour on the other thread of the
+//! core only ever slows a sample and never speeds one; the spread of
+//! the middle half is kept with it. Within a section the cells are
+//! sampled in rounds, one sample of every cell and then the next, so
+//! that a clock drifting over the minutes lands on every row of the
+//! section alike instead of on whichever rows came last.
 //!
 //! Everything is built from the public types, and what chooses the
 //! code under them is the feature set in force, as it is for any
 //! caller. The throughput rows are measured once per feature profile
-//! the types publish (see [`crate::features`]), each set in force
+//! the types publish (see [`scytale::features`]), each set in force
 //! while its values are built and measured, since some choose their
-//! code per call and not once when built, and the section named for
-//! it. The first section is the set the processor reports, so it is
-//! what a caller on this machine gets; the same set with `isolated`
-//! follows, then each published profile, then `none`, the empty set,
-//! which is the portable code throughout. A row appears under a later
-//! profile only when that profile moves it onto code no earlier
-//! section measured, so nothing is measured twice and every
-//! combination a caller can reach is measured once. BLAKE2b, with
-//! nothing to choose, appears once. The operation groups are measured
-//! under the reported set alone and named for the module they come
-//! from: `kdf`, `kex`, `sig`, `sig-pq`, `kem`, `pke` and `fpe`.
-//!
-//! ```text
-//! scripts/bench                    # everything
-//! scripts/bench gcm none           # rows matching both
-//! scripts/bench sha                # the hashes only
-//! scripts/bench sig                # signatures, both kinds
-//! scripts/bench --seconds 0.25     # a quicker sweep
-//! scripts/bench --json out.json    # keep every figure
-//! scripts/bench --compare a.json b.json   # what changed, beyond noise
-//! scripts/bench --self-test        # check the harness
-//! ```
-//!
-//! # Reading the numbers
-//!
-//! Counter mode and GMAC are the two halves of GCM measured apart:
-//! the keystream without the hash, and the hash without the
-//! keystream. If the reciprocal of the GCM rate is close to the sum
-//! of their reciprocals, the two halves are running one after the
-//! other and a single loop that interleaved them would have the whole
-//! of that difference to win. If GCM already beats that sum, the
-//! processor is overlapping them on its own.
-//!
-//! Key wrapping is six passes over its input by construction, so it
-//! reads an order of magnitude below the mode rows above it. CFB1 is
-//! a block operation per bit, and reads as such.
-//!
-//! ML-DSA signing repeats until a candidate passes, so its cost
-//! depends on the message and not only on the parameter set; a
-//! stronger set is not reliably slower. Both key generation figures
-//! for RSA and the signature figures for SLH-DSA vary for the same
-//! kind of reason.
-//!
-//! A laptop measured on battery reports about half the rates, evenly
-//! across every row, and nearly the same cycles a byte: that is the
-//! clock and not the code, and the recorded clock rate says so.
-//!
+//! code per call and not once when built, and the section is named
+//! for it. The first section is the set the processor reports; the
+//! same set with `isolated` follows, then each published profile,
+//! then `none`. A row appears under a later profile only when that
+//! profile moves it onto code no earlier section measured, so nothing
+//! is measured twice and every combination a caller can reach is
+//! measured once. The operation groups are measured under the
+//! reported set alone and named for the module they come from.
+
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::collections::BTreeMap;
 use std::env;
@@ -107,47 +41,43 @@ use std::fmt::Write as _;
 use std::fs;
 use std::hint::black_box;
 use std::ops::{Deref, DerefMut};
+use std::process::ExitCode;
 use std::ptr::NonNull;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cpu_time::ThreadTime;
 use serde_json::{Value, json};
 
-use crate::Key;
-use crate::aead::{
+use scytale::Key;
+use scytale::aead::{
     Aead, Aegis128L, Aegis128X2, Aegis128X4, Aegis256, Aegis256X2, Aegis256X4,
     Ccm, ChaCha20Poly1305, Gcm, GcmSiv, XChaCha20Poly1305, Xpn,
 };
-use crate::cipher::aes::{Aes128, Aes256};
-use crate::cipher::chacha20;
-use crate::cipher::mode::{Cbc, Cfb1, Cfb8, Cfb128, Ctr, Kw, Kwp, Ofb, Xts};
-use crate::cipher::mode::{Ff1, Ff3_1};
-use crate::cipher::{BlockCipher, aes};
-#[allow(unused_imports)]
-use std::{
-    boxed::Box, eprintln, format, print, println, string::String,
-    string::ToString, vec, vec::Vec,
-};
+use scytale::cipher::aes::{Aes128, Aes256};
+use scytale::cipher::chacha20;
+use scytale::cipher::mode::{Cbc, Cfb1, Cfb8, Cfb128, Ctr, Kw, Kwp, Ofb, Xts};
+use scytale::cipher::mode::{Ff1, Ff3_1};
+use scytale::cipher::{BlockCipher, aes};
 
-use crate::Error;
-use crate::Random;
-use crate::features::{self, Dispatcher, Feature, Features};
-use crate::hash::blake2::{Blake2b256, Blake2b512};
-use crate::hash::sha1::Sha1;
-use crate::hash::sha3::TupleHash128;
-use crate::hash::{Hash, Xof, XofReader};
-use crate::hash::{sha2, sha3};
-use crate::kdf::{argon2, hkdf, one_step, pbkdf2, sp800_108, tls12, x963};
-use crate::kex::{ecdh, x448, x25519};
-use crate::mac::Mac;
-use crate::mac::cmac::Cmac;
-use crate::mac::hmac::Hmac;
-use crate::mac::kmac::Kmac128;
-use crate::mac::poly1305::Poly1305;
-use crate::pke::hpke;
-use crate::pke::rsa as oaep;
-use crate::random::{CtrDrbg, HashDrbg, HmacDrbg};
-use crate::sig::{ecdsa, ed448, ed25519, rsa};
+use scytale::Error;
+use scytale::Random;
+use scytale::features::{self, Dispatcher, Feature, Features};
+use scytale::hash::blake2::{Blake2b256, Blake2b512};
+use scytale::hash::sha1::Sha1;
+use scytale::hash::sha3::TupleHash128;
+use scytale::hash::{Hash, Xof, XofReader};
+use scytale::hash::{sha2, sha3};
+use scytale::kdf::{argon2, hkdf, one_step, pbkdf2, sp800_108, tls12, x963};
+use scytale::kex::{ecdh, x448, x25519};
+use scytale::mac::Mac;
+use scytale::mac::cmac::Cmac;
+use scytale::mac::hmac::Hmac;
+use scytale::mac::kmac::Kmac128;
+use scytale::mac::poly1305::Poly1305;
+use scytale::pke::hpke;
+use scytale::pke::rsa as oaep;
+use scytale::random::{CtrDrbg, Entropy, HashDrbg, HmacDrbg};
+use scytale::sig::{ecdsa, ed448, ed25519, rsa};
 
 /// Buffer sizes reported, the ones `openssl speed` uses.
 const SIZES: [usize; 6] = [16, 64, 256, 1024, 8192, 16384];
@@ -186,53 +116,61 @@ type Operation<'a> = Box<dyn FnMut(&mut [u8]) + 'a>;
 /// A named operation.
 type Task<'a> = (&'static str, Operation<'a>);
 
-/// Measures. Ignored by default, since a sweep takes minutes and a
-/// test run should not; `scripts/bench` runs it.
+/// Does what the command line asks: measures, or compares two saved
+/// documents, or checks the harness.
 ///
-/// The arguments are in `SCYTALE_BENCH`, since the test harness owns
-/// the command line.
-#[test]
-#[ignore = "measures; run it with scripts/bench"]
-fn speed() {
-    let arguments = env::var("SCYTALE_BENCH").unwrap_or_default();
-    let words = arguments.split_whitespace().map(String::from);
-    let options = match Options::parse(words) {
-        Ok(Some(options)) => options,
+/// With no arguments at all it checks the harness and measures
+/// nothing. That is how cargo runs a bench target for `cargo test
+/// --benches` or `--all-targets`, where a sweep of minutes is not
+/// what was asked for; `cargo bench` always passes `--bench`.
+pub fn main() -> ExitCode {
+    let arguments: Vec<String> = env::args().skip(1).collect();
+    let as_a_test = arguments.is_empty();
+    match run(arguments.into_iter(), as_a_test) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("speed: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// [`main`], with its failures as what went wrong.
+fn run(
+    arguments: impl Iterator<Item = String>,
+    as_a_test: bool,
+) -> Result<(), String> {
+    let Some(mut options) = Options::parse(arguments)? else {
         // `--help`, which has printed itself.
-        Ok(None) => return,
-        Err(message) => panic!("speed: {message}"),
+        return Ok(());
     };
+    options.self_test |= as_a_test;
     if options.self_test {
-        assert!(self_test(), "self-test");
-        return;
+        return self_test()
+            .then_some(())
+            .ok_or_else(|| String::from("the self-test failed"));
     }
     // Comparing measures nothing, so the profile does not matter.
     if let Some((old, new)) = &options.compare {
-        let comparison = match compare_files(old, new) {
-            Ok(comparison) => comparison,
-            Err(message) => panic!("speed: {message}"),
-        };
+        let comparison = compare_files(old, new)?;
         print!("{}", comparison.text);
-        assert!(
-            comparison.worse == 0,
-            "{} figures are worse beyond the noise",
-            comparison.worse
-        );
-        return;
+        return match comparison.worse {
+            0 => Ok(()),
+            worse => Err(format!("{worse} figures are worse beyond the noise")),
+        };
     }
-    // A build with debug assertions left on is not the release
-    // profile that `scripts/bench` uses, so any figure it produced
-    // would describe the unoptimised code rather than the shipped
-    // code. That is also how `cargo test --benches` arrives here, and
-    // a five minute sweep is not what asking for tests means.
+    // A build with debug assertions left on is not the profile
+    // `cargo bench` uses, so any figure it produced would describe
+    // unoptimised code rather than the code that ships.
     if cfg!(debug_assertions) {
         println!(
             "speed: this build has debug assertions on, so any figure\n\
              would describe unoptimised code. Checking the harness\n\
-             instead; `scripts/bench` measures."
+             instead; `cargo bench -p scytale` measures."
         );
-        assert!(self_test(), "self-test");
-        return;
+        return self_test()
+            .then_some(())
+            .ok_or_else(|| String::from("the self-test failed"));
     }
     let started = unix_seconds();
     let mut run = Run::new(options);
@@ -240,20 +178,16 @@ fn speed() {
     let finished = unix_seconds();
     if let Some(path) = &run.options.json {
         let document = document(&run, started, finished);
-        if let Err(e) = write_json(path, &document) {
-            panic!("speed: {path}: {e}");
-        }
+        write_json(path, &document).map_err(|e| format!("{path}: {e}"))?;
     }
-    if !ran {
-        // Nothing ran. With filters that is a request for rows which
-        // do not exist, which `report` has just explained; there is
-        // nothing to measure and nothing wrong. With no filters it
-        // means the harness itself measured nothing, which is a fault.
-        assert!(
-            !run.options.filters.is_empty(),
-            "no filters, and still nothing measured"
-        );
+    // Nothing ran. With filters that is a request for rows which do
+    // not exist, which `report` has just explained; there is nothing
+    // to measure and nothing wrong. With no filters it means the
+    // harness itself measured nothing, which is a fault.
+    if !ran && run.options.filters.is_empty() {
+        return Err(String::from("no filters, and still nothing measured"));
     }
+    Ok(())
 }
 
 /// Seconds since the Unix epoch, for the document's timestamps.
@@ -363,7 +297,7 @@ impl Options {
 }
 
 const USAGE: &str = "\
-usage: scripts/bench [options] [filter...]
+usage: cargo bench -p scytale -- [options] [filter...]
 
   --seconds N   CPU time to spend on each measurement (default 1)
   --json PATH   also write every figure, with its spread, as JSON
@@ -751,8 +685,8 @@ fn hash_section(under: &mut Under<'_>, run: &mut Run) -> bool {
         under.build(|| {
             let sha256 = sha2::Sha256::new();
             let sha512 = sha2::Sha512::new();
-            let hmac256 = Hmac::with(sha256.clone(), &KEY128);
-            let hmac512 = Hmac::with(sha512.clone(), &KEY128);
+            let hmac256 = Hmac::<sha2::Sha256>::new(&KEY128);
+            let hmac512 = Hmac::<sha2::Sha512>::new(&KEY128);
             (sha256, sha512, hmac256, hmac512)
         })
     else {
@@ -778,17 +712,17 @@ fn hash_section(under: &mut Under<'_>, run: &mut Run) -> bool {
         (
             "hmac-sha-256",
             Box::new(|d: &mut [u8]| {
-                hmac256.restart();
-                hmac256.append(d);
-                black_box(hmac256.tag());
+                Mac::reset(&mut hmac256);
+                Mac::update(&mut hmac256, d);
+                black_box(Mac::finalize(&mut hmac256));
             }),
         ),
         (
             "hmac-sha-512",
             Box::new(|d: &mut [u8]| {
-                hmac512.restart();
-                hmac512.append(d);
-                black_box(hmac512.tag());
+                Mac::reset(&mut hmac512);
+                Mac::update(&mut hmac512, d);
+                black_box(Mac::finalize(&mut hmac512));
             }),
         ),
     ];
@@ -952,9 +886,15 @@ fn other_section(under: &mut Under<'_>, run: &mut Run) -> bool {
     // and no entropy source is needed for a measurement.
     let Some((generators, macs)) = under.build(|| {
         let generators = (
-            CtrDrbg::from_seed(&[0x5au8; 64]),
-            HashDrbg::<sha2::Sha256, _>::from_seed(&[0x5au8; 64]),
-            HmacDrbg::<sha2::Sha256, _>::from_seed(&[0x5au8; 64]),
+            CtrDrbg::try_new_seeded(&[0x5au8; 64], NoEntropy),
+            HashDrbg::<sha2::Sha256, _>::try_new_seeded(
+                &[0x5au8; 64],
+                NoEntropy,
+            ),
+            HmacDrbg::<sha2::Sha256, _>::try_new_seeded(
+                &[0x5au8; 64],
+                NoEntropy,
+            ),
         );
         let macs = (
             Sha1::new(),
@@ -1207,8 +1147,20 @@ const FF3_TWEAK: [u8; 7] = [0x3c; 7];
 
 /// A generator seeded rather than drawn, so that every key below is
 /// the same one on every run.
-fn seeded() -> Result<CtrDrbg<crate::random::entropy::External>, Error> {
-    CtrDrbg::from_seed(&[0x5au8; 64])
+fn seeded() -> Result<CtrDrbg<NoEntropy>, Error> {
+    CtrDrbg::try_new_seeded(&[0x5au8; 64], NoEntropy)
+}
+
+/// An entropy source with nothing to give, for a generator that is
+/// seeded once and never again: a measurement has to repeat, and
+/// drawing from the system would be measuring the system.
+#[derive(Clone, Copy, Debug, Default)]
+struct NoEntropy;
+
+impl Entropy for NoEntropy {
+    fn fill(&mut self, _out: &mut [u8]) -> Result<(), Error> {
+        Err(Error::ReseedRequired)
+    }
 }
 
 /// Measures one group of operations, returning whether it ran any.
@@ -1940,19 +1892,19 @@ const PQ_SIG_JOBS: [&str; 9] = [
 /// again, which only a benchmark may do, at the cost of a copy of a
 /// few kilobytes once a tree.
 struct HssBench<const L: usize> {
-    sets: [(crate::sig::lms::Lms, crate::sig::lms::Lmots); L],
+    sets: [(scytale::sig::lms::Lms, scytale::sig::lms::Lmots); L],
     der: Vec<u8>,
-    signer: crate::sig::lms::hss::PrivateKey<L>,
-    public: crate::sig::lms::hss::PublicKey,
+    signer: scytale::sig::lms::hss::PrivateKey<L>,
+    public: scytale::sig::lms::hss::PublicKey,
     signature: Vec<u8>,
 }
 
 impl<const L: usize> HssBench<L> {
     fn new<R: Random>(
         rng: &mut R,
-        sets: [(crate::sig::lms::Lms, crate::sig::lms::Lmots); L],
+        sets: [(scytale::sig::lms::Lms, scytale::sig::lms::Lmots); L],
     ) -> Option<Self> {
-        use crate::sig::lms::hss::{PrivateKey, der_max};
+        use scytale::sig::lms::hss::{PrivateKey, der_max};
         let key = PrivateKey::<L>::generate(rng, &sets).ok()?;
         let mut der = vec![0u8; der_max(L)];
         let n = key.der_bytes(&mut der).ok()?;
@@ -1977,7 +1929,7 @@ impl<const L: usize> HssBench<L> {
         sign_rng: &'a mut R,
         names: [&'static str; 3],
     ) {
-        use crate::sig::lms::hss::PrivateKey;
+        use scytale::sig::lms::hss::PrivateKey;
         let HssBench {
             sets,
             der,
@@ -1995,7 +1947,7 @@ impl<const L: usize> HssBench<L> {
         jobs.push((
             sign,
             Box::new(|| {
-                let mut out = [0u8; crate::sig::lms::hss::signature_max(2)];
+                let mut out = [0u8; scytale::sig::lms::hss::signature_max(2)];
                 if signer.remaining() == 0
                     && let Ok(fresh) = PrivateKey::<L>::try_from_der(der)
                 {
@@ -2023,7 +1975,7 @@ impl<const L: usize> HssBench<L> {
 /// whose signing cost includes a fresh lower tree every 32
 /// signatures.
 fn pq_sig_ops(run: &mut Run) -> bool {
-    use crate::sig::lms::{Lmots, Lms};
+    use scytale::sig::lms::{Lmots, Lms};
     if !PQ_SIG_JOBS
         .iter()
         .any(|name| any_wanted("sig-pq", &[name], &run.options))
@@ -2057,43 +2009,43 @@ fn pq_sig_ops(run: &mut Run) -> bool {
         mldsa44,
         mldsa44_sig,
         &mut build,
-        crate::sig::ml_dsa::ml_dsa_44::PrivateKey
+        scytale::sig::ml_dsa::ml_dsa_44::PrivateKey
     );
     pq_sig_key!(
         mldsa65,
         mldsa65_sig,
         &mut build,
-        crate::sig::ml_dsa::ml_dsa_65::PrivateKey
+        scytale::sig::ml_dsa::ml_dsa_65::PrivateKey
     );
     pq_sig_key!(
         mldsa87,
         mldsa87_sig,
         &mut build,
-        crate::sig::ml_dsa::ml_dsa_87::PrivateKey
+        scytale::sig::ml_dsa::ml_dsa_87::PrivateKey
     );
     pq_sig_key!(
         slh128s,
         slh128s_sig,
         &mut build,
-        crate::sig::slh_dsa::sha2_128s::PrivateKey
+        scytale::sig::slh_dsa::sha2_128s::PrivateKey
     );
     pq_sig_key!(
         slh128f,
         slh128f_sig,
         &mut build,
-        crate::sig::slh_dsa::sha2_128f::PrivateKey
+        scytale::sig::slh_dsa::sha2_128f::PrivateKey
     );
     pq_sig_key!(
         shake128s,
         shake128s_sig,
         &mut build,
-        crate::sig::slh_dsa::shake_128s::PrivateKey
+        scytale::sig::slh_dsa::shake_128s::PrivateKey
     );
     pq_sig_key!(
         shake128f,
         shake128f_sig,
         &mut build,
-        crate::sig::slh_dsa::shake_128f::PrivateKey
+        scytale::sig::slh_dsa::shake_128f::PrivateKey
     );
     let mut jobs: Vec<Job<'_>> = Vec::new();
     pq_sig_rows!(
@@ -2101,7 +2053,7 @@ fn pq_sig_ops(run: &mut Run) -> bool {
         mldsa44,
         mldsa44_sig,
         &mut r1,
-        crate::sig::ml_dsa::ml_dsa_44::PrivateKey,
+        scytale::sig::ml_dsa::ml_dsa_44::PrivateKey,
         "ml-dsa-44"
     );
     pq_sig_rows!(
@@ -2109,7 +2061,7 @@ fn pq_sig_ops(run: &mut Run) -> bool {
         mldsa65,
         mldsa65_sig,
         &mut r2,
-        crate::sig::ml_dsa::ml_dsa_65::PrivateKey,
+        scytale::sig::ml_dsa::ml_dsa_65::PrivateKey,
         "ml-dsa-65"
     );
     pq_sig_rows!(
@@ -2117,7 +2069,7 @@ fn pq_sig_ops(run: &mut Run) -> bool {
         mldsa87,
         mldsa87_sig,
         &mut r3,
-        crate::sig::ml_dsa::ml_dsa_87::PrivateKey,
+        scytale::sig::ml_dsa::ml_dsa_87::PrivateKey,
         "ml-dsa-87"
     );
     pq_sig_rows!(
@@ -2125,7 +2077,7 @@ fn pq_sig_ops(run: &mut Run) -> bool {
         slh128s,
         slh128s_sig,
         &mut r4,
-        crate::sig::slh_dsa::sha2_128s::PrivateKey,
+        scytale::sig::slh_dsa::sha2_128s::PrivateKey,
         "slh-dsa-sha2-128s"
     );
     pq_sig_rows!(
@@ -2133,7 +2085,7 @@ fn pq_sig_ops(run: &mut Run) -> bool {
         slh128f,
         slh128f_sig,
         &mut r5,
-        crate::sig::slh_dsa::sha2_128f::PrivateKey,
+        scytale::sig::slh_dsa::sha2_128f::PrivateKey,
         "slh-dsa-sha2-128f"
     );
     pq_sig_rows!(
@@ -2141,7 +2093,7 @@ fn pq_sig_ops(run: &mut Run) -> bool {
         shake128s,
         shake128s_sig,
         &mut r6,
-        crate::sig::slh_dsa::shake_128s::PrivateKey,
+        scytale::sig::slh_dsa::shake_128s::PrivateKey,
         "slh-dsa-shake-128s"
     );
     pq_sig_rows!(
@@ -2149,7 +2101,7 @@ fn pq_sig_ops(run: &mut Run) -> bool {
         shake128f,
         shake128f_sig,
         &mut r7,
-        crate::sig::slh_dsa::shake_128f::PrivateKey,
+        scytale::sig::slh_dsa::shake_128f::PrivateKey,
         "slh-dsa-shake-128f"
     );
     hss_h10.rows(
@@ -2246,19 +2198,19 @@ fn kem_ops(run: &mut Run) -> bool {
         kem512,
         kem512_ct,
         &mut build,
-        crate::kem::ml_kem::ml_kem_512::PrivateKey
+        scytale::kem::ml_kem::ml_kem_512::PrivateKey
     );
     kem_key!(
         kem768,
         kem768_ct,
         &mut build,
-        crate::kem::ml_kem::ml_kem_768::PrivateKey
+        scytale::kem::ml_kem::ml_kem_768::PrivateKey
     );
     kem_key!(
         kem1024,
         kem1024_ct,
         &mut build,
-        crate::kem::ml_kem::ml_kem_1024::PrivateKey
+        scytale::kem::ml_kem::ml_kem_1024::PrivateKey
     );
     let mut jobs: Vec<Job<'_>> = Vec::new();
     kem_rows!(
@@ -2267,8 +2219,8 @@ fn kem_ops(run: &mut Run) -> bool {
         kem512_ct,
         &mut k1,
         &mut e1,
-        crate::kem::ml_kem::ml_kem_512::PrivateKey,
-        crate::kem::ml_kem::ml_kem_512::PublicKey,
+        scytale::kem::ml_kem::ml_kem_512::PrivateKey,
+        scytale::kem::ml_kem::ml_kem_512::PublicKey,
         "ml-kem-512"
     );
     kem_rows!(
@@ -2277,8 +2229,8 @@ fn kem_ops(run: &mut Run) -> bool {
         kem768_ct,
         &mut k2,
         &mut e2,
-        crate::kem::ml_kem::ml_kem_768::PrivateKey,
-        crate::kem::ml_kem::ml_kem_768::PublicKey,
+        scytale::kem::ml_kem::ml_kem_768::PrivateKey,
+        scytale::kem::ml_kem::ml_kem_768::PublicKey,
         "ml-kem-768"
     );
     kem_rows!(
@@ -2287,8 +2239,8 @@ fn kem_ops(run: &mut Run) -> bool {
         kem1024_ct,
         &mut k3,
         &mut e3,
-        crate::kem::ml_kem::ml_kem_1024::PrivateKey,
-        crate::kem::ml_kem::ml_kem_1024::PublicKey,
+        scytale::kem::ml_kem::ml_kem_1024::PrivateKey,
+        scytale::kem::ml_kem::ml_kem_1024::PublicKey,
         "ml-kem-1024"
     );
     ops_section(run, "kem", jobs)
@@ -2408,8 +2360,8 @@ fn fpe_ops(run: &mut Run) -> bool {
         return false;
     }
     let (Ok(ff1), Ok(ff3)) = (
-        Ff1::<aes::Aes<16>>::try_new(&Key::from(KEY128), 10),
-        Ff3_1::<aes::Aes<16>>::try_new(&Key::from(KEY128), 10),
+        Ff1::<Aes128>::try_new(&Key::from(KEY128), 10),
+        Ff3_1::<Aes128>::try_new(&Key::from(KEY128), 10),
     ) else {
         return false;
     };
