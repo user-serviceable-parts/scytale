@@ -58,7 +58,9 @@
 //! - Private keys: RSA in PKCS#1 or PKCS#8; ECDSA in SEC 1 or
 //!   PKCS#8; Ed25519 and ML-DSA in PKCS#8.
 //! - Session tickets: sealed with ChaCha20-Poly1305, under a key
-//!   rotated every six hours.
+//!   rotated every six hours. These need the `std` feature, which is
+//!   on by default: rustls rotates ticket keys behind a lock it has
+//!   only with the standard library.
 //!
 //! # AES-CCM
 //!
@@ -83,7 +85,7 @@
 #![warn(missing_docs)]
 
 extern crate alloc;
-#[cfg(test)]
+#[cfg(any(feature = "std", test))]
 extern crate std;
 
 use alloc::borrow::Cow;
@@ -100,8 +102,43 @@ mod kx;
 mod prf;
 mod quic;
 mod random;
+mod record;
 mod sign;
+#[cfg(feature = "std")]
 mod ticketer;
+/// Session tickets without `std`: there are none. rustls rotates
+/// ticket keys behind a lock that it has only with the standard
+/// library, so a server built without it resumes nothing by ticket,
+/// and says why when asked for a ticketer.
+#[cfg(not(feature = "std"))]
+mod ticketer {
+    use alloc::sync::Arc;
+
+    use rustls::Error;
+    use rustls::crypto::{TicketProducer, TicketerFactory};
+
+    /// The ticketer factory.
+    #[derive(Debug)]
+    pub(crate) struct Tickets;
+
+    impl TicketerFactory for Tickets {
+        fn ticketer(&self) -> Result<Arc<dyn TicketProducer>, Error> {
+            Err(Error::General(
+                "session tickets need rustls-scytale's `std` feature".into(),
+            ))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn there_is_no_ticketer() {
+            assert!(Tickets.ticketer().is_err());
+        }
+    }
+}
 mod tls12;
 mod tls13;
 mod verify;

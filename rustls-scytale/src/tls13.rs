@@ -2,6 +2,7 @@
 //! (RFC 8446 section 5.2).
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use rustls::ConnectionTrafficSecrets;
 use rustls::Error;
@@ -9,15 +10,15 @@ use rustls::Tls13CipherSuite;
 use rustls::crypto::CipherSuite;
 use rustls::crypto::CipherSuiteCommon;
 use rustls::crypto::cipher::{
-    AeadKey, EncryptBuffer, InboundOpaque, Iv, Nonce, OutboundPlain, Record,
-    RecordDecrypter, RecordEncrypter, Tls13AeadAlgorithm,
-    UnsupportedOperationError, make_tls13_aad,
+    AeadKey, InboundOpaque, Iv, Nonce, OutboundPlain, Record, RecordDecrypter,
+    RecordEncrypter, Tls13AeadAlgorithm, UnsupportedOperationError,
+    make_tls13_aad,
 };
 use rustls::enums::ContentType;
 use rustls::version::TLS13_VERSION;
 
 use crate::aead::{Algorithm, SealingKey};
-use crate::{hash, hkdf, quic};
+use crate::{hash, hkdf, quic, record};
 
 /// TLS13_AES_128_GCM_SHA256.
 pub static TLS13_AES_128_GCM_SHA256: &Tls13CipherSuite = &Tls13CipherSuite {
@@ -163,30 +164,32 @@ impl Protection {
 }
 
 impl RecordEncrypter for Protection {
-    fn encrypt<'a>(
+    fn encrypt(
         &mut self,
         msg: Record<OutboundPlain<'_>>,
         seq: u64,
-        out: &'a mut [u8],
-    ) -> Result<Record<&'a [u8]>, Error> {
+        out: &mut Vec<u8>,
+    ) -> Result<(), Error> {
         let key = self.key.as_ref().ok_or(Error::EncryptError)?;
-        // TLSInnerPlaintext: the content, then its real type, with no
-        // padding; then the tag.
         let total = self.encrypted_payload_len(msg.payload.len());
-        let mut buf = EncryptBuffer::new(out, total)?;
-        buf.extend_from_chunks(&msg.payload);
-        buf.extend_from_slice(&msg.typ.to_array());
         // Every protected record claims to be application data (RFC
         // 8446 section 5.1), and the header it goes out under is the
         // AAD.
         let typ = ContentType::ApplicationData;
         let nonce = Nonce::new(&self.iv, seq).to_array()?;
         let aad = make_tls13_aad(typ, msg.version.encode(), total);
-        let tag = key
-            .seal(&nonce, &aad, buf.as_mut())
-            .map_err(|_| Error::EncryptError)?;
-        buf.extend_from_slice(tag.as_ref());
-        Ok(Record::new(typ, msg.version, buf.into_written()))
+        let start = record::start(out, typ, msg.version, total)?;
+        // TLSInnerPlaintext: the content, then its real type, with no
+        // padding; then the tag.
+        msg.payload.copy_to_vec(out);
+        out.extend_from_slice(&msg.typ.to_array());
+        match key.seal(&nonce, &aad, &mut out[start..]) {
+            Ok(tag) => {
+                out.extend_from_slice(tag.as_ref());
+                Ok(())
+            }
+            Err(_) => Err(record::abandon(out, start)),
+        }
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
