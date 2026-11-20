@@ -25,16 +25,21 @@
 //! caller. The throughput rows are measured once per feature profile
 //! the types publish (see [`scytale::features`]), each set in force
 //! while its values are built and measured, since some choose their
-//! code per call and not once when built, and the section is named
-//! for it. The first section is the set the processor reports; the
-//! same set with `isolated` follows, then each published profile,
-//! then `none`. A row appears under a later profile only when that
-//! profile moves it onto code no earlier section measured, so nothing
-//! is measured twice and every combination a caller can reach is
-//! measured once. The operation groups are measured under the
-//! reported set alone and named for the module they come from.
+//! code per call and not once when built. The first is the set the
+//! processor reports; the same set with `isolated` follows, then each
+//! published profile, then `none`. A row is measured under a later
+//! profile only when that profile moves it onto code no earlier one
+//! measured, so nothing is measured twice and every combination a
+//! caller can reach is measured once. The operations are measured
+//! under the reported set alone.
+//!
+//! That is the order of measuring, and not of reading. The rows are
+//! kept and the report is written at the end, an algorithm at a
+//! time: by group, by name, and under a name every kernel it was
+//! measured on, each named by the features that select it.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc};
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt::Write as _;
@@ -279,20 +284,20 @@ impl Options {
     }
 
     /// Whether a row belongs in this run. Every filter word must
-    /// appear somewhere in the section or row name, so `gcm none`
-    /// narrows to the GCM rows of the portable code. A word
-    /// may offer alternatives separated by commas, so `ctr,ecb-enc`
-    /// keeps rows matching either.
+    /// appear somewhere in what `describes` it: its group, its name,
+    /// the kernel it runs, and `default` where that is the kernel the
+    /// library picks here. So `gcm none` narrows to the GCM rows of
+    /// the portable code. A word may offer alternatives separated by
+    /// commas, so `ctr,ecb-enc` keeps rows matching either.
     ///
     /// The two go together: a comparison between rows only means
     /// anything when they were measured in the same run, since the
     /// clock and which core the thread lands on both move between
     /// runs, and a conjunction alone cannot ask for two rows.
-    fn wants(&self, section: &str, algorithm: &str) -> bool {
-        let name = format!("{section} {algorithm}");
-        self.filters
-            .iter()
-            .all(|filter| filter.split(',').any(|word| name.contains(word)))
+    fn wants(&self, describes: &str) -> bool {
+        self.filters.iter().all(|filter| {
+            filter.split(',').any(|word| describes.contains(word))
+        })
     }
 }
 
@@ -307,10 +312,11 @@ usage: cargo bench -p scytale -- [options] [filter...]
   --self-test   check the harness instead of benchmarking
   --help        this text
 
-A filter is a bare word; a row runs when its profile and row names
-together contain every filter given. Commas inside a word offer
-alternatives, so `none ctr,ecb-enc` keeps both of those
-rows, measured in the one run and so comparable.
+A filter is a bare word; a row runs when its group, its name and the
+features that select its kernel together contain every filter given.
+Commas inside a word offer alternatives, so `none ctr,ecb-enc` keeps
+both of those rows, measured in the one run and so comparable. The
+word `default` picks the kernel the library chooses on this machine.
 ";
 
 /// One run: what was asked for, the clocks, and every row measured
@@ -319,11 +325,6 @@ struct Run {
     options: Options,
     clock: Clock,
     rows: Vec<Row>,
-    /// Whether the heading over the operation groups has been
-    /// printed; the first group to run prints it, so a run filtered
-    /// down to the throughput rows does not carry a heading over
-    /// nothing.
-    ops_heading: bool,
 }
 
 impl Run {
@@ -332,7 +333,6 @@ impl Run {
             options,
             clock: Clock::open(),
             rows: Vec::new(),
-            ops_heading: false,
         }
     }
 }
@@ -340,33 +340,16 @@ impl Run {
 /// Measures every section the filters allow, and says whether any
 /// row ran.
 fn report(run: &mut Run) -> bool {
-    println!(
-        "Throughput by buffer size in bytes: cycles a byte (cpb) and \
-         megabytes a\nsecond (10^6, MB/s). Each figure is the median \
-         of {} samples, each over\n{:.3} seconds of CPU time on this \
-         thread; `*` marks a figure whose middle half\nof samples \
-         spread more than {:.0}% of the median.",
-        SAMPLES,
-        sample_budget(run.options.budget).as_secs_f64(),
-        NOISY * 100.0
-    );
-    if let Some(reason) = &run.clock.unavailable {
-        println!(
-            "The cycle counter could not be opened, so only the rates \
-             are shown:\n{reason}."
-        );
-    }
-
-    // One set of sections per feature profile, the set in force while
-    // their values are built and measured, and named for it. The
-    // first is the set the processor reports, which is what a caller
-    // gets; each later one measures only the rows it moves onto other
-    // code.
+    // One pass of every family per feature profile, the set in force
+    // while its values are built and measured. The first is the set
+    // the processor reports, which is what a caller gets; each later
+    // one measures only the rows it moves onto other code.
     let mut ran = false;
     let mut seen = Vec::new();
-    for profile in profiles() {
+    for (index, profile) in profiles().into_iter().enumerate() {
         let mut under = Under {
             profile,
+            index,
             name: profile.to_string(),
             seen: &mut seen,
         };
@@ -386,10 +369,195 @@ fn report(run: &mut Run) -> bool {
     ran |= pke_ops(run);
     ran |= fpe_ops(run);
 
-    if !ran {
+    if ran {
+        // Measured a profile at a time; read an algorithm at a time.
+        run.rows.sort_by(Row::in_order);
+        print!("{}", report_text(run));
+    } else {
         explain(&run.options.filters);
     }
     ran
+}
+
+/// The groups of the report, in the order they are printed: the
+/// library's own modules, each named for what its contents are for.
+const GROUPS: [&str; 10] = [
+    "aead", "cipher", "hash", "kdf", "kem", "kex", "mac", "pke", "random",
+    "sig",
+];
+
+/// Which group a row is printed under, or `None` for a name nothing
+/// here knows. This is the one place a row is classified.
+fn group(row: &str) -> Option<&'static str> {
+    // A list names a row, or the algorithm several rows are the
+    // operations of.
+    let listed = |rows: &[&str]| {
+        rows.iter().any(|name| {
+            row.strip_prefix(name)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+        })
+    };
+    let group = if listed(&KDF_JOBS) {
+        "kdf"
+    } else if listed(&KEX_JOBS) {
+        "kex"
+    } else if listed(&SIG_JOBS) || listed(&PQ_SIG_JOBS) {
+        "sig"
+    } else if listed(&KEM_JOBS) {
+        "kem"
+    } else if listed(&PKE_JOBS) {
+        "pke"
+    } else if listed(&FPE_JOBS) {
+        // Modes of a block cipher, though they work on digits.
+        "cipher"
+    } else if row.contains("drbg") {
+        "random"
+    } else if row.starts_with("aegis-")
+        || row.contains("poly1305-")
+        || ["-gcm-", "-xpn-", "-ccm-"]
+            .iter()
+            .any(|mode| row.contains(mode))
+    {
+        "aead"
+    } else if row.ends_with("gmac")
+        || row.ends_with("cmac")
+        || row.starts_with("hmac-")
+        || row.starts_with("kmac")
+        || row == "poly1305"
+    {
+        "mac"
+    } else if row.starts_with("sha")
+        || row.starts_with("blake2b")
+        || row.starts_with("tuplehash")
+    {
+        "hash"
+    } else if row.starts_with("aes-") || row.starts_with("chacha20") {
+        "cipher"
+    } else {
+        return None;
+    };
+    Some(group)
+}
+
+/// What a row's name ends with when it names one operation of
+/// several an algorithm has, and where that operation comes among
+/// them: the order they are done in, so that encryption is read
+/// before decryption and a key is made before it signs.
+const OPERATIONS: [(&str, usize); 16] = [
+    ("-keygen", 0),
+    ("-public-key", 1),
+    ("-encapsulate", 2),
+    ("-decapsulate", 4),
+    ("-enc", 2),
+    ("-encrypt", 2),
+    ("-seal", 2),
+    ("-wrap", 2),
+    ("-sign", 2),
+    ("-agree", 2),
+    ("-sign-hedged", 3),
+    ("-dec", 4),
+    ("-decrypt", 4),
+    ("-open", 4),
+    ("-unwrap", 4),
+    ("-verify", 4),
+];
+
+/// A row's name as the algorithm and the place of its operation.
+fn operation(row: &str) -> (&str, usize) {
+    OPERATIONS
+        .iter()
+        .find_map(|(suffix, place)| {
+            row.strip_suffix(suffix)
+                .map(|algorithm| (algorithm, *place))
+        })
+        .unwrap_or((row, 0))
+}
+
+/// Alphabetical order, but with a run of digits read as the number
+/// it is, so that `ml-kem-512` comes before `ml-kem-1024` and `sha-1`
+/// before `sha-256`.
+fn natural(a: &str, b: &str) -> Ordering {
+    let (mut a, mut b) = (a.as_bytes(), b.as_bytes());
+    loop {
+        let digits =
+            |s: &[u8]| s.iter().take_while(|c| c.is_ascii_digit()).count();
+        match (a.first(), b.first()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let (m, n) = (digits(a), digits(b));
+                if m > 0 && n > 0 {
+                    // Neither run is long enough to overflow: a row
+                    // name has a handful of digits at most.
+                    let number = |s: &[u8]| {
+                        s.iter().fold(0u64, |v, c| {
+                            v.saturating_mul(10)
+                                .saturating_add(u64::from(c - b'0'))
+                        })
+                    };
+                    match number(&a[..m]).cmp(&number(&b[..n])) {
+                        Ordering::Equal => {
+                            a = &a[m..];
+                            b = &b[n..];
+                        }
+                        other => return other,
+                    }
+                } else if x == y {
+                    a = &a[1..];
+                    b = &b[1..];
+                } else {
+                    return x.cmp(y);
+                }
+            }
+        }
+    }
+}
+
+/// Where what `row` runs under the profile numbered `index` comes
+/// among the row's kernels: the one the reported set picks first,
+/// whatever it is, and the rest as the library prefers them. That
+/// preference is the published order of the types that decide the
+/// row, the last of them counting most, since that is the
+/// construction itself and the ones before it are what it is built
+/// on.
+fn standing(row: &str, profile: Features, index: usize) -> Vec<usize> {
+    let mut place = vec![usize::from(index != 0)];
+    place.extend(choice(row, profile).into_iter().rev());
+    place
+}
+
+/// The least set of features that selects what `row` runs under
+/// `profile`: what each type deciding the row asks for, together.
+/// This is what names a kernel, since the kernels themselves have no
+/// public names. Empty for a row with nothing to choose.
+fn kernel(row: &str, profile: Features) -> String {
+    let chosen: Vec<Features> = deciders(row)
+        .iter()
+        .filter_map(|profiles| {
+            profiles().iter().find(|p| p.is_subset(profile)).copied()
+        })
+        .collect();
+    if chosen.is_empty() {
+        return String::new();
+    }
+    let needs = chosen
+        .into_iter()
+        .fold(Features::new(), |all, one| all.union(one));
+    let text = needs.to_string();
+    // The architecture is the same for every row and is said once,
+    // at the top.
+    match text.split_once('/') {
+        Some((_, features)) => features.to_string(),
+        None => text,
+    }
+}
+
+/// How a row is described to the filters; see [`Options::wants`].
+fn describe(row: &str, kernel: &str, default: bool) -> String {
+    let group = group(row).unwrap_or_default();
+    let default = if default { " default" } else { "" };
+    format!("{group} {row} {kernel}{default}")
 }
 
 /// Every row name the harness knows, for saying what a filter could
@@ -431,14 +599,14 @@ fn explain(filters: &[String]) {
         if matched.is_empty() {
             eprintln!(
                 "  {filter:<16} no row name holds this; \
-                 a feature, perhaps?"
+                 a group or a feature, perhaps?"
             );
         } else {
             eprintln!("  {filter:<16} {}", matched.join(" "));
         }
     }
     eprintln!(
-        "A row runs when its profile and row names \
+        "A row runs when its group, its name and its kernel \
          together hold\nevery word given. Commas inside a word offer \
          alternatives; see --help."
     );
@@ -502,18 +670,18 @@ fn deciders(row: &str) -> &'static [Profiles] {
             <Aes128 as Dispatcher>::profiles,
             <Gcm<Aes128> as Dispatcher>::profiles,
         ],
-        "aes-256-gcm-enc" => &[
+        "aes-256-gcm-enc" | "aes-256-gcm-dec" => &[
             <Aes256 as Dispatcher>::profiles,
             <Gcm<Aes256> as Dispatcher>::profiles,
         ],
-        "aes-128-gcm-siv-enc" => {
+        "aes-128-gcm-siv-enc" | "aes-128-gcm-siv-dec" => {
             &[<Aes128 as Dispatcher>::profiles, GcmSiv::<Aes128>::profiles]
         }
-        "aes-128-xpn-enc" => &[
+        "aes-128-xpn-enc" | "aes-128-xpn-dec" => &[
             <Aes128 as Dispatcher>::profiles,
             <Xpn<Aes128> as Dispatcher>::profiles,
         ],
-        "aes-128-ccm-enc" => &[
+        "aes-128-ccm-enc" | "aes-128-ccm-dec" => &[
             <Aes128 as Dispatcher>::profiles,
             <Ccm<Aes128> as Dispatcher>::profiles,
         ],
@@ -521,7 +689,7 @@ fn deciders(row: &str) -> &'static [Profiles] {
             <Aes128 as Dispatcher>::profiles,
             <Xts<Aes128> as Dispatcher>::profiles,
         ],
-        "aes-256-ecb-enc" => AES256,
+        "aes-256-ecb-enc" | "aes-256-ecb-dec" => AES256,
         _ if row.starts_with("aes-128-") => AES128,
         "sha-256" | "hmac-sha-256" | "hash-drbg-sha-256"
         | "hmac-drbg-sha-256" => SHA256,
@@ -604,6 +772,9 @@ fn profiles() -> Vec<Features> {
 /// twice.
 struct Under<'a> {
     profile: Features,
+    /// Where the profile comes among those measured; the first is
+    /// the set the processor reports.
+    index: usize,
     name: String,
     seen: &'a mut Vec<(&'static str, Vec<usize>)>,
 }
@@ -618,7 +789,10 @@ impl Under<'_> {
     ) -> Vec<&'static str> {
         rows.iter()
             .copied()
-            .filter(|row| options.wants(&self.name, row))
+            .filter(|row| {
+                let kernel = kernel(row, self.profile);
+                options.wants(&describe(row, &kernel, self.index == 0))
+            })
             .filter(|row| {
                 !self.seen.contains(&(*row, choice(row, self.profile)))
             })
@@ -645,7 +819,8 @@ impl Under<'_> {
         for (row, _) in tasks.iter() {
             self.seen.push((row, choice(row, self.profile)));
         }
-        throughput_table(run, &self.name, tasks);
+        eprintln!("speed: measuring {} rows under {}", tasks.len(), self.name);
+        throughput_table(run, self.profile, self.index, tasks);
         features::reset();
         true
     }
@@ -884,7 +1059,7 @@ fn other_section(under: &mut Under<'_>, run: &mut Run) -> bool {
     }
     // The generators are seeded rather than drawn, so a run repeats
     // and no entropy source is needed for a measurement.
-    let Some((generators, macs)) = under.build(|| {
+    let Some((generators, macs, lanes)) = under.build(|| {
         let generators = (
             CtrDrbg::try_new_seeded(&[0x5au8; 64], NoEntropy),
             HashDrbg::<sha2::Sha256, _>::try_new_seeded(
@@ -906,7 +1081,16 @@ fn other_section(under: &mut Under<'_>, run: &mut Run) -> bool {
             Aegis128L::new(&Key::from(KEY128)),
             Aegis256::new(&Key::from(KEY256)),
         );
-        (generators, macs)
+        // Built here with the rest, under the profile: a value keeps
+        // the kernel it was built with, so one built outside would
+        // be the reported set's under every profile.
+        let lanes = (
+            Aegis128X2::new(&Key::from(KEY128)),
+            Aegis128X4::new(&Key::from(KEY128)),
+            Aegis256X2::new(&Key::from(KEY256)),
+            Aegis256X4::new(&Key::from(KEY256)),
+        );
+        (generators, macs, lanes)
     }) else {
         return false;
     };
@@ -924,10 +1108,7 @@ fn other_section(under: &mut Under<'_>, run: &mut Run) -> bool {
     let (aegis_enc_tag, rest) = rest.split_at_mut(1);
     let (aegis_dec_tag, rest) = rest.split_at_mut(1);
     let (aegis256_enc_tag, aegis256_dec_tag) = rest.split_at_mut(1);
-    let x2 = Aegis128X2::new(&Key::from(KEY128));
-    let x4 = Aegis128X4::new(&Key::from(KEY128));
-    let y2 = Aegis256X2::new(&Key::from(KEY256));
-    let y4 = Aegis256X4::new(&Key::from(KEY256));
+    let (x2, x4, y2, y4) = lanes;
     let mut tasks: Vec<Task<'_>> = vec![
         (
             "sha-1",
@@ -1168,22 +1349,16 @@ impl Entropy for NoEntropy {
 /// they close over. Sampled in rounds across the group, as
 /// [`throughput_table`] does.
 fn ops_section(run: &mut Run, title: &str, jobs: Vec<Job<'_>>) -> bool {
+    // Measured under the set the processor reports alone, which is
+    // the kernel the library picks.
     let mut jobs: Vec<Job<'_>> = jobs
         .into_iter()
-        .filter(|(name, _)| run.options.wants(title, name))
+        .filter(|(name, _)| run.options.wants(&describe(name, "", true)))
         .collect();
     if jobs.is_empty() {
         return false;
     }
-    if !run.ops_heading {
-        run.ops_heading = true;
-        println!(
-            "\nOperations a second, the time one takes, and the cycles \
-             it costs."
-        );
-        println!("{:30}{:>12}{:>10}{:>14}", "", "ops/s", "each", "cycles");
-    }
-    println!("\n{title}");
+    eprintln!("speed: measuring {} operations of {title}", jobs.len());
 
     let budget = sample_budget(run.options.budget);
     let clock = &run.clock;
@@ -1201,13 +1376,13 @@ fn ops_section(run: &mut Run, title: &str, jobs: Vec<Job<'_>>) -> bool {
         }
     }
     for ((name, _), samples) in jobs.iter().zip(samples) {
-        let cell = samples.cell();
-        println!("{}", ops_line(name, cell.as_ref()));
         run.rows.push(Row {
-            section: title.to_string(),
+            group: group(name).unwrap_or_default(),
             name,
+            kernel: String::new(),
+            place: vec![0],
             kind: Kind::Ops,
-            cells: vec![(None, cell)],
+            cells: vec![(None, samples.cell())],
         });
     }
     true
@@ -1215,8 +1390,10 @@ fn ops_section(run: &mut Run, title: &str, jobs: Vec<Job<'_>>) -> bool {
 
 /// Whether any of `names` is wanted, so that a group can be skipped
 /// before its keys are made.
-fn any_wanted(title: &str, names: &[&str], options: &Options) -> bool {
-    names.iter().any(|name| options.wants(title, name))
+fn any_wanted(names: &[&str], options: &Options) -> bool {
+    names
+        .iter()
+        .any(|name| options.wants(&describe(name, "", true)))
 }
 
 /// One row: the name, how many of the operation run in a second, how
@@ -1291,7 +1468,7 @@ const KDF_JOBS: [&str; 10] = [
 /// lane. The TLS 1.2 PRF is measured making a master secret, 48 bytes
 /// from two randoms.
 fn kdf_ops(run: &mut Run) -> bool {
-    if !any_wanted("kdf", &KDF_JOBS, &run.options) {
+    if !any_wanted(&KDF_JOBS, &run.options) {
         return false;
     }
     let params = argon2::Params {
@@ -1440,7 +1617,7 @@ const KEX_JOBS: [&str; 10] = [
 /// Key agreement: deriving a public key from a secret, and the
 /// shared secret from a peer's.
 fn kex_ops(run: &mut Run) -> bool {
-    if !any_wanted("kex", &KEX_JOBS, &run.options) {
+    if !any_wanted(&KEX_JOBS, &run.options) {
         return false;
     }
     // A generator each, since two rows draw at once and one
@@ -1574,7 +1751,7 @@ const SIG_JOBS: [&str; 29] = [
 /// rows are the deterministic form; the `hedged` rows add the draw
 /// from the generator that `sign` makes, which is what a caller pays.
 fn sig_ops(run: &mut Run) -> bool {
-    if !any_wanted("sig", &SIG_JOBS, &run.options) {
+    if !any_wanted(&SIG_JOBS, &run.options) {
         return false;
     }
     let (Ok(mut build), Ok(mut rng256), Ok(mut rng384), Ok(mut rng521)) =
@@ -1621,7 +1798,7 @@ fn sig_ops(run: &mut Run) -> bool {
     for bits in [2048, 3072, 4096] {
         if !SIG_JOBS.iter().any(|name| {
             name.starts_with(&format!("rsa-{bits}-"))
-                && run.options.wants("sig", name)
+                && run.options.wants(&describe(name, "", true))
         }) {
             continue;
         }
@@ -1978,7 +2155,7 @@ fn pq_sig_ops(run: &mut Run) -> bool {
     use scytale::sig::lms::{Lmots, Lms};
     if !PQ_SIG_JOBS
         .iter()
-        .any(|name| any_wanted("sig-pq", &[name], &run.options))
+        .any(|name| any_wanted(&[name], &run.options))
     {
         return false;
     }
@@ -2181,7 +2358,7 @@ const KEM_JOBS: [&str; 3] = ["ml-kem-512", "ml-kem-768", "ml-kem-1024"];
 fn kem_ops(run: &mut Run) -> bool {
     if !KEM_JOBS
         .iter()
-        .any(|name| any_wanted("kem", &[name], &run.options))
+        .any(|name| any_wanted(&[name], &run.options))
     {
         return false;
     }
@@ -2261,7 +2438,7 @@ type HpkeContext = hpke::Context<sha2::Sha256, Gcm<aes::Aes128>>;
 /// whole single-shot message: setting up the context, which is the
 /// key agreement and the schedule, then one short message through it.
 fn pke_ops(run: &mut Run) -> bool {
-    if !any_wanted("pke", &PKE_JOBS, &run.options) {
+    if !any_wanted(&PKE_JOBS, &run.options) {
         return false;
     }
     let (Ok(mut build), Ok(mut rng), Ok(mut ephemeral)) =
@@ -2356,7 +2533,7 @@ const FPE_JOBS: [&str; 2] = ["ff1-radix10", "ff3-1-radix10"];
 /// rather than on bytes: sixteen decimal digits, a card number's
 /// worth, which is what they exist for.
 fn fpe_ops(run: &mut Run) -> bool {
-    if !any_wanted("fpe", &FPE_JOBS, &run.options) {
+    if !any_wanted(&FPE_JOBS, &run.options) {
         return false;
     }
     let (Ok(ff1), Ok(ff3)) = (
@@ -2393,15 +2570,19 @@ fn fpe_ops(run: &mut Run) -> bool {
 /// The rows, in the order they are printed. Kept beside the tasks
 /// they name so that a filter can be applied before any key is
 /// expanded.
-const ALGORITHMS: [&str; 23] = [
+const ALGORITHMS: [&str; 33] = [
     "aes-128-ecb-enc",
     "aes-128-ecb-dec",
     "aes-256-ecb-enc",
+    "aes-256-ecb-dec",
     "aes-128-cbc-enc",
     "aes-128-cbc-dec",
     "aes-128-cfb1-enc",
+    "aes-128-cfb1-dec",
     "aes-128-cfb8-enc",
+    "aes-128-cfb8-dec",
     "aes-128-cfb128-enc",
+    "aes-128-cfb128-dec",
     "aes-128-ofb",
     "aes-128-ctr",
     "aes-256-ctr",
@@ -2409,13 +2590,19 @@ const ALGORITHMS: [&str; 23] = [
     "aes-128-gcm-enc",
     "aes-128-gcm-dec",
     "aes-256-gcm-enc",
+    "aes-256-gcm-dec",
     "aes-128-gcm-siv-enc",
+    "aes-128-gcm-siv-dec",
     "aes-128-xpn-enc",
+    "aes-128-xpn-dec",
     "aes-128-ccm-enc",
+    "aes-128-ccm-dec",
     "aes-128-xts-enc",
     "aes-128-xts-dec",
     "aes-128-kw-wrap",
+    "aes-128-kw-unwrap",
     "aes-128-kwp-wrap",
+    "aes-128-kwp-unwrap",
     "aes-128-cmac",
 ];
 
@@ -2447,6 +2634,11 @@ struct Keys<
     /// that writes one: the largest input and the eight bytes of
     /// check value that go on the end of it.
     wrapped: [Vec<u8>; 2],
+    /// Something to unwrap, one buffer for each of the two rows that
+    /// reads one. It is not a wrapped key, which costs nothing: the
+    /// six passes are made before the check value is looked at, so a
+    /// refusal is the whole of the work.
+    to_unwrap: [Vec<u8>; 2],
     /// A tag buffer for each row that writes one; separate buffers so
     /// the rows borrow disjointly.
     tags: [[u8; 16]; 6],
@@ -2515,6 +2707,10 @@ where
                 vec![0u8; SIZES[SIZES.len() - 1] + 8],
                 vec![0u8; SIZES[SIZES.len() - 1] + 8],
             ],
+            to_unwrap: [
+                vec![0x5au8; SIZES[SIZES.len() - 1] + 8],
+                vec![0x5au8; SIZES[SIZES.len() - 1] + 8],
+            ],
             tags: [[0u8; 16]; 6],
         })
     }
@@ -2543,6 +2739,7 @@ where
             kwp,
             cmac,
             wrapped,
+            to_unwrap,
             tags,
         } = self;
         // Split so that each row that writes a tag borrows its own.
@@ -2554,6 +2751,7 @@ where
         let (ccm_tag, _) = tags.split_first_mut().expect("one tag");
         let (kw_out, wrapped) = wrapped.split_first_mut().expect("two buffers");
         let (kwp_out, _) = wrapped.split_first_mut().expect("one buffer");
+        let [kw_in, kwp_in] = to_unwrap;
         let mut tasks: Vec<Task<'_>> = Vec::new();
         tasks.push((
             "aes-128-ecb-enc",
@@ -2571,6 +2769,12 @@ where
             "aes-256-ecb-enc",
             Box::new(|d: &mut [u8]| {
                 ecb256.encrypt(blocks_of(d));
+            }),
+        ));
+        tasks.push((
+            "aes-256-ecb-dec",
+            Box::new(|d: &mut [u8]| {
+                ecb256.decrypt(blocks_of(d));
             }),
         ));
         {
@@ -2597,15 +2801,34 @@ where
             }),
         ));
         tasks.push((
+            "aes-128-cfb1-dec",
+            Box::new(|d: &mut [u8]| {
+                let bits = d.len() * 8;
+                let _ = cfb1.decrypt(&IV, d, bits);
+            }),
+        ));
+        tasks.push((
             "aes-128-cfb8-enc",
             Box::new(|d: &mut [u8]| {
                 cfb8.encrypt(&IV, d);
             }),
         ));
         tasks.push((
+            "aes-128-cfb8-dec",
+            Box::new(|d: &mut [u8]| {
+                cfb8.decrypt(&IV, d);
+            }),
+        ));
+        tasks.push((
             "aes-128-cfb128-enc",
             Box::new(|d: &mut [u8]| {
                 let _ = cfb128.encrypt(&IV, d);
+            }),
+        ));
+        tasks.push((
+            "aes-128-cfb128-dec",
+            Box::new(|d: &mut [u8]| {
+                let _ = cfb128.decrypt(&IV, d);
             }),
         ));
         tasks.push((
@@ -2663,12 +2886,34 @@ where
                     let _ = gcm256.encrypt(&NONCE, &[], d, gcm256_tag);
                 }),
             ));
+            tasks.push((
+                "aes-256-gcm-dec",
+                Box::new(|d: &mut [u8]| {
+                    let Ok(mut state) = gcm256.decryptor(&NONCE) else {
+                        return;
+                    };
+                    let _ = state.update(d);
+                    let _ = state.verify(&CHECKED_TAG);
+                }),
+            ));
         }
+        // The three below have no form that takes a message in
+        // pieces, so their decryption is the one call, and the tag
+        // it is given never matches. All three do the whole of the
+        // work before they look at the tag, so the figure is the
+        // decryption, with the wipe of the refused buffer on top:
+        // one more pass that writes and reads nothing.
         {
             tasks.push((
                 "aes-128-gcm-siv-enc",
                 Box::new(|d: &mut [u8]| {
                     let _ = siv.encrypt(&NONCE, &[], d, siv_tag);
+                }),
+            ));
+            tasks.push((
+                "aes-128-gcm-siv-dec",
+                Box::new(|d: &mut [u8]| {
+                    let _ = siv.decrypt(&NONCE, &[], d, &CHECKED_TAG);
                 }),
             ));
         }
@@ -2679,12 +2924,24 @@ where
                     let _ = xpn.encrypt(&SALT, &NONCE, &[], d, xpn_tag);
                 }),
             ));
+            tasks.push((
+                "aes-128-xpn-dec",
+                Box::new(|d: &mut [u8]| {
+                    let _ = xpn.decrypt(&SALT, &NONCE, &[], d, &CHECKED_TAG);
+                }),
+            ));
         }
         {
             tasks.push((
                 "aes-128-ccm-enc",
                 Box::new(|d: &mut [u8]| {
                     let _ = ccm.encrypt(&NONCE, &[], d, ccm_tag);
+                }),
+            ));
+            tasks.push((
+                "aes-128-ccm-dec",
+                Box::new(|d: &mut [u8]| {
+                    let _ = ccm.decrypt(&NONCE, &[], d, &CHECKED_TAG);
                 }),
             ));
         }
@@ -2711,9 +2968,21 @@ where
             }),
         ));
         tasks.push((
+            "aes-128-kw-unwrap",
+            Box::new(|d: &mut [u8]| {
+                let _ = kw.unwrap(&kw_in[..d.len() + 8], d);
+            }),
+        ));
+        tasks.push((
             "aes-128-kwp-wrap",
             Box::new(|d: &mut [u8]| {
                 let _ = kwp.wrap(d, &mut kwp_out[..d.len() + 8]);
+            }),
+        ));
+        tasks.push((
+            "aes-128-kwp-unwrap",
+            Box::new(|d: &mut [u8]| {
+                let _ = kwp.unwrap(&kwp_in[..d.len() + 8], d);
             }),
         ));
         tasks.push((
@@ -2735,8 +3004,9 @@ fn blocks_of(data: &mut [u8]) -> &mut [[u8; 16]] {
     blocks
 }
 
-/// The column headings, the buffer sizes. Each sits over the digits
-/// below it, which leave their last column to the noise mark.
+/// The column headings, the buffer sizes, after `label` columns of
+/// label. Each sits over the digits below it, which leave their last
+/// column to the noise mark.
 fn heading() -> String {
     let mut line = format!("{:24}", "");
     for size in SIZES {
@@ -2745,18 +3015,20 @@ fn heading() -> String {
     line
 }
 
-/// Measures every task of one section at every size, prints the
-/// table and keeps the rows.
+/// Measures every task of one section at every size and keeps the
+/// rows, each under the kernel `profile` gives it.
 ///
 /// The cells are calibrated first, then sampled in rounds: one sample
 /// of every cell, then another, until each has [`SAMPLES`]. A row
 /// measured whole before the next would carry whatever the clock was
 /// doing during its own second; spread across the section, the drift
 /// lands on every row alike.
-fn throughput_table(run: &mut Run, section: &str, tasks: &mut [Task<'_>]) {
-    println!("\n{section}");
-    println!("{}", heading());
-
+fn throughput_table(
+    run: &mut Run,
+    profile: Features,
+    index: usize,
+    tasks: &mut [Task<'_>],
+) {
     let budget = sample_budget(run.options.budget);
     let clock = &run.clock;
     let mut grid: Vec<Vec<Option<Measured>>> = tasks
@@ -2785,10 +3057,11 @@ fn throughput_table(run: &mut Run, section: &str, tasks: &mut [Task<'_>]) {
                 (Some(size), measured.and_then(|m| m.samples.cell()))
             })
             .collect();
-        print!("{}", throughput_lines(name, &cells));
         run.rows.push(Row {
-            section: section.to_string(),
+            group: group(name).unwrap_or_default(),
             name,
+            kernel: kernel(name, profile),
+            place: standing(name, profile, index),
             kind: Kind::Throughput,
             cells,
         });
@@ -2824,10 +3097,11 @@ impl Measured {
     }
 }
 
-/// The lines of one row: cycles a byte where the counter is open, and
-/// megabytes a second beneath, under the same columns.
+/// The lines of one row under `label`: cycles a byte where the
+/// counter is open, and megabytes a second beneath, under the same
+/// columns.
 fn throughput_lines(
-    name: &str,
+    label: &str,
     cells: &[(Option<usize>, Option<Cell>)],
 ) -> String {
     let mut text = String::new();
@@ -2835,7 +3109,7 @@ fn throughput_lines(
         .iter()
         .map(|(_, cell)| cell.as_ref().and_then(|cell| cell.cycles))
         .collect();
-    let mut label = format!("  {name:20}");
+    let mut label = format!("  {label:20}");
     if cycles.iter().any(Option::is_some) {
         let _ = write!(text, "{label}{:>4}", "cpb");
         for summary in &cycles {
@@ -3382,15 +3656,133 @@ enum Kind {
 /// One row as measured, kept for the document. A throughput row has a
 /// cell per size; an operation row has one cell and no size.
 struct Row {
-    section: String,
+    /// The group of the report it is printed under.
+    group: &'static str,
     name: &'static str,
+    /// The least set of features that selects the code measured, or
+    /// empty where there was nothing to choose; see [`kernel`].
+    kernel: String,
+    /// Where this kernel comes among those measured for the row; see
+    /// [`standing`]. The least is the one the library picks on this
+    /// machine.
+    place: Vec<usize>,
     kind: Kind,
     cells: Vec<(Option<usize>, Option<Cell>)>,
 }
 
+impl Row {
+    /// The order of the report: by group; in a group the throughput
+    /// rows and then the operations; among those by algorithm, as
+    /// the alphabet has them; under an algorithm its operations in
+    /// the order they are done; and under a row its kernels as the
+    /// library prefers them.
+    fn in_order(&self, other: &Row) -> Ordering {
+        let key = |row: &Row| {
+            let group = GROUPS.iter().position(|g| *g == row.group);
+            let ops = matches!(row.kind, Kind::Ops);
+            (group.unwrap_or(GROUPS.len()), ops)
+        };
+        let (algorithm, done) = operation(self.name);
+        let (their_algorithm, their_done) = operation(other.name);
+        key(self)
+            .cmp(&key(other))
+            .then_with(|| natural(algorithm, their_algorithm))
+            .then(done.cmp(&their_done))
+            .then_with(|| natural(self.name, other.name))
+            .then(self.place.cmp(&other.place))
+    }
+}
+
+/// The report: every row measured, in [`Row::in_order`], which the
+/// rows are in already.
+///
+/// A row measured under one kernel is its name and its figures. One
+/// measured under several is its name and then each kernel beneath
+/// it, named by the features that select it, the one the library
+/// picks on this machine first.
+fn report_text(run: &Run) -> String {
+    let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "Throughput by buffer size in bytes: cycles a byte (cpb) and \
+         megabytes a\nsecond (10^6, MB/s); operations as how many run in \
+         a second, the time one\ntakes and the cycles it costs. Each \
+         figure is the median of {} samples, each\nover {:.3} seconds of \
+         CPU time on this thread; `*` marks a figure whose middle\nhalf \
+         of samples spread more than {:.0}% of the median.",
+        SAMPLES,
+        sample_budget(run.options.budget).as_secs_f64(),
+        NOISY * 100.0
+    );
+    let _ = writeln!(
+        text,
+        "Where an algorithm has more than one kernel on this processor \
+         ({}), each is\nlisted under it by the features that select it, \
+         the one the library picks here\nfirst and `none`, the portable \
+         code, last.",
+        env::consts::ARCH
+    );
+    if let Some(reason) = &run.clock.unavailable {
+        let _ = writeln!(
+            text,
+            "The cycle counter could not be opened, so only the rates \
+             are shown:\n{reason}."
+        );
+    }
+
+    let mut rows = run.rows.iter().peekable();
+    let mut heading = None;
+    while let Some(row) = rows.next() {
+        let ops = matches!(row.kind, Kind::Ops);
+        if heading != Some((row.group, ops)) {
+            if heading.map(|(group, _)| group) != Some(row.group) {
+                let _ = writeln!(text, "\n{}", row.group);
+            }
+            heading = Some((row.group, ops));
+            if ops {
+                let _ = writeln!(
+                    text,
+                    "{:30}{:>12}{:>10}{:>14}",
+                    "", "ops/s", "each", "cycles"
+                );
+            } else {
+                let _ = writeln!(text, "{}", self::heading());
+            }
+        }
+        if ops {
+            let cell = row.cells.first().and_then(|(_, cell)| cell.as_ref());
+            let _ = writeln!(text, "{}", ops_line(row.name, cell));
+            continue;
+        }
+        // The rest of this row's kernels follow it.
+        let mut kernels = vec![row];
+        while let Some(next) = rows.next_if(|next| next.name == row.name) {
+            kernels.push(next);
+        }
+        // One kernel, and it is the one a caller gets or the only
+        // one there is: nothing to tell apart, so nothing is named.
+        // A filter that leaves some other kernel alone still has it
+        // named, or the figure would pass for the default's.
+        if let [only] = kernels[..]
+            && (only.kernel.is_empty() || only.place.first() == Some(&0))
+        {
+            text.push_str(&throughput_lines(only.name, &only.cells));
+            continue;
+        }
+        let _ = writeln!(text, "  {}", row.name);
+        for kernel in kernels {
+            let _ = writeln!(text, "    {}", kernel.kernel);
+            text.push_str(&throughput_lines("", &kernel.cells));
+        }
+    }
+    text
+}
+
 /// The run as a JSON document.
 ///
-/// Schema 1: `started` and `finished` are Unix seconds; `clock` says
+/// Schema 2, which says of each row its group and its kernel where
+/// schema 1 said the section it was printed in: `started` and
+/// `finished` are Unix seconds; `clock` says
 /// whether the cycle figures exist; `samples` and `sample_seconds`
 /// say what each figure is the median of; `commit` is present when
 /// `SCYTALE_BENCH_COMMIT` was set; `environment` has whatever the
@@ -3400,7 +3792,7 @@ struct Row {
 fn document(run: &Run, started: u64, finished: u64) -> Value {
     let rows: Vec<Value> = run.rows.iter().map(row_json).collect();
     let mut document = json!({
-        "schema": 1,
+        "schema": SCHEMA,
         "started": started,
         "finished": finished,
         "clock": if run.clock.cycles.is_some() {
@@ -3419,6 +3811,9 @@ fn document(run: &Run, started: u64, finished: u64) -> Value {
     }
     document
 }
+
+/// The schema of the document; see [`document`].
+const SCHEMA: u64 = 2;
 
 /// One row of the document.
 fn row_json(row: &Row) -> Value {
@@ -3454,8 +3849,10 @@ fn row_json(row: &Row) -> Value {
         })
         .collect();
     json!({
-        "section": row.section,
+        "group": row.group,
         "name": row.name,
+        "kernel": row.kernel,
+        "default": row.place.first() == Some(&0),
         "kind": kind,
         "cells": cells,
     })
@@ -3571,7 +3968,18 @@ fn compare_files(old: &str, new: &str) -> Result<Comparison, String> {
             fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
         serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))
     };
-    Ok(compare(&read(old)?, &read(new)?))
+    let (old_document, new_document) = (read(old)?, read(new)?);
+    for (path, document) in [(old, &old_document), (new, &new_document)] {
+        if document["schema"] != SCHEMA {
+            return Err(format!(
+                "{path}: schema {} and not {SCHEMA}; it was written \
+                 before the rows carried their group and kernel, and \
+                 has to be measured again to be compared",
+                document["schema"]
+            ));
+        }
+    }
+    Ok(compare(&old_document, &new_document))
 }
 
 /// One figure of a cell, as a document has it, in the unit compared.
@@ -3605,7 +4013,7 @@ impl Figure {
 }
 
 /// Compares every cell of `new` with the same cell of `old`: same
-/// section, row and size. A change counts only when it is larger than
+/// row, kernel and size. A change counts only when it is larger than
 /// the two spreads together, so a figure that moved within its own
 /// noise is reported as such and not as a change.
 fn compare(old: &Value, new: &Value) -> Comparison {
@@ -3636,17 +4044,22 @@ fn compare(old: &Value, new: &Value) -> Comparison {
         within: 0,
         unmatched: 0,
     };
-    let mut section = String::new();
+    let mut group = String::new();
     for row in rows(new) {
         let kind = row["kind"].as_str().unwrap_or_default();
-        if row["section"] != section {
-            section = row["section"].as_str().unwrap_or_default().to_string();
-            let _ = writeln!(comparison.text, "\n{section}");
+        if row["group"] != group {
+            group = row["group"].as_str().unwrap_or_default().to_string();
+            let _ = writeln!(comparison.text, "\n{group}");
+        }
+        let (name, kernel, _) = place(&row, &Value::Null);
+        let _ = writeln!(comparison.text, "  {name}");
+        if !kernel.is_empty() {
+            let _ = writeln!(comparison.text, "    {kernel}");
         }
         for cell in row["cells"].as_array().unwrap_or(&empty) {
-            let (_, name, size) = place(&row, cell);
+            let (_, _, size) = place(&row, cell);
             let size = size.map_or(String::new(), |size| size.to_string());
-            let _ = write!(comparison.text, "  {name:22}{size:>6}");
+            let _ = write!(comparison.text, "{size:>30}");
             let pair = Figure::of(cell, kind, cycles)
                 .and_then(|now| Some((before.get(&place(&row, cell))?, now)));
             let Some((then, now)) = pair else {
@@ -3686,11 +4099,11 @@ fn compare(old: &Value, new: &Value) -> Comparison {
     comparison
 }
 
-/// Where a cell sits: its section, row and size.
+/// Where a cell sits: its row, kernel and size.
 fn place(row: &Value, cell: &Value) -> (String, String, Option<u64>) {
     (
-        row["section"].as_str().unwrap_or_default().to_string(),
         row["name"].as_str().unwrap_or_default().to_string(),
+        row["kernel"].as_str().unwrap_or_default().to_string(),
         cell["size"].as_u64(),
     )
 }
@@ -3891,8 +4304,10 @@ fn self_test() -> bool {
     // The document round-trips through text, and says what each
     // figure was.
     let row = Row {
-        section: "test".to_string(),
+        group: "aead",
         name: "aes-128-gcm-siv-enc",
+        kernel: "aes+pclmulqdq".to_string(),
+        place: vec![0],
         kind: Kind::Throughput,
         cells: vec![
             (
@@ -3916,7 +4331,13 @@ fn self_test() -> bool {
     let text = serde_json::to_string(&document(&run, 1, 2))
         .expect("a document serialises");
     let parsed: Value = serde_json::from_str(&text).expect("and parses");
-    check("document has its schema", parsed["schema"] == 1);
+    check("document has its schema", parsed["schema"] == SCHEMA);
+    check(
+        "document says where the row belongs",
+        parsed["rows"][0]["group"] == "aead"
+            && parsed["rows"][0]["kernel"] == "aes+pclmulqdq"
+            && parsed["rows"][0]["default"] == true,
+    );
     check(
         "document has its times",
         parsed["started"] == 1 && parsed["finished"] == 2,
@@ -4002,15 +4423,15 @@ fn self_test() -> bool {
             .expect("filters parse");
     check(
         "both filters match",
-        options.wants("aesni", "aes-128-gcm-enc"),
+        options.wants("aead aes-128-gcm-enc aesni"),
     );
     check(
         "one filter is not enough",
-        !options.wants("vaes", "aes-128-gcm-enc"),
+        !options.wants("aead aes-128-gcm-enc vaes"),
     );
     check(
         "a filter must appear",
-        !options.wants("aesni", "aes-128-ctr"),
+        !options.wants("cipher aes-128-ctr aesni"),
     );
 
     // Commas inside a word offer alternatives, so that two rows can
@@ -4022,19 +4443,173 @@ fn self_test() -> bool {
             .expect("filters parse");
     check(
         "the first alternative matches",
-        options.wants("aesni", "aes-128-ctr"),
+        options.wants("cipher aes-128-ctr aesni"),
     );
     check(
         "the second alternative matches",
-        options.wants("aesni", "aes-128-ecb-enc"),
+        options.wants("cipher aes-128-ecb-enc aesni"),
     );
     check(
         "neither alternative matches",
-        !options.wants("aesni", "aes-128-ofb"),
+        !options.wants("cipher aes-128-ofb aesni"),
     );
     check(
         "the other words still have to match",
-        !options.wants("vaes", "aes-128-ctr"),
+        !options.wants("cipher aes-128-ctr vaes"),
+    );
+
+    // A row is described to the filters by its group, its name, its
+    // kernel and whether that is the one the library picks.
+    let options =
+        Options::parse(["aead", "default"].into_iter().map(String::from))
+            .ok()
+            .flatten()
+            .expect("filters parse");
+    check(
+        "the group and the default kernel can be asked for",
+        options.wants(&describe("aes-128-gcm-enc", "aes", true)),
+    );
+    check(
+        "another kernel is not the default",
+        !options.wants(&describe("aes-128-gcm-enc", "none", false)),
+    );
+    check(
+        "another group is not asked for",
+        !options.wants(&describe("aes-128-ctr", "aes", true)),
+    );
+
+    // Every row has a group, and the ones that could be taken for
+    // another's are in their own.
+    check(
+        "every row has a group",
+        every_row_name()
+            .all(|row| group(row).is_some_and(|g| GROUPS.contains(&g))),
+    );
+    for (row, expected) in [
+        ("aes-128-gcm-enc", "aead"),
+        ("chacha20-poly1305-dec", "aead"),
+        ("aes-128-gmac", "mac"),
+        ("poly1305", "mac"),
+        ("hmac-drbg-sha-256", "random"),
+        ("sp800-108-hmac-sha-256", "kdf"),
+        ("ff1-radix10", "cipher"),
+        ("aes-128-kw-wrap", "cipher"),
+        ("chacha20", "cipher"),
+        ("tuplehash128", "hash"),
+        ("ml-kem-768-encapsulate", "kem"),
+        ("ml-dsa-44-sign", "sig"),
+        ("hss-sha256-h10-w8-verify", "sig"),
+        ("ecdsa-p256-sign-hedged", "sig"),
+        ("hpke-x25519-open", "pke"),
+        ("x25519-agree", "kex"),
+    ] {
+        check(row, group(row) == Some(expected));
+    }
+    check("no group for a row nobody has", group("rot13").is_none());
+
+    // The order of the report.
+    check(
+        "an operation is taken off the name",
+        operation("aes-128-gcm-enc") == ("aes-128-gcm", 2)
+            && operation("aes-128-kw-unwrap") == ("aes-128-kw", 4)
+            && operation("ed25519-sign-hedged") == ("ed25519", 3)
+            && operation("ml-kem-768-public-key") == ("ml-kem-768", 1)
+            && operation("aes-128-ofb") == ("aes-128-ofb", 0),
+    );
+    check(
+        "digits are read as numbers",
+        natural("ml-kem-512", "ml-kem-1024") == Ordering::Less
+            && natural("sha-1", "sha-256") == Ordering::Less
+            && natural("aegis-128x2", "aegis-128l") == Ordering::Greater
+            && natural("aes-128-gcm", "aes-128-gcm-siv") == Ordering::Less
+            && natural("x25519", "x25519") == Ordering::Equal,
+    );
+    let named = |name, place, kind| Row {
+        group: group(name).unwrap_or_default(),
+        name,
+        kernel: if place == 0 { "aes" } else { "none" }.to_string(),
+        place: vec![place],
+        kind,
+        cells: vec![(Some(16), None)],
+    };
+    let mut ordered = vec![
+        named("sha-256", 0, Kind::Throughput),
+        named("ff1-radix10", 0, Kind::Ops),
+        named("aes-128-gcm-dec", 1, Kind::Throughput),
+        named("aes-256-gcm-enc", 0, Kind::Throughput),
+        named("aes-128-gcm-dec", 0, Kind::Throughput),
+        named("aes-128-ctr", 0, Kind::Throughput),
+        named("aes-128-gcm-enc", 0, Kind::Throughput),
+    ];
+    ordered.sort_by(Row::in_order);
+    check(
+        "rows are in the order of the report",
+        ordered.iter().map(|row| (row.name, row.place[0])).eq([
+            ("aes-128-gcm-enc", 0),
+            ("aes-128-gcm-dec", 0),
+            ("aes-128-gcm-dec", 1),
+            ("aes-256-gcm-enc", 0),
+            ("aes-128-ctr", 0),
+            ("ff1-radix10", 0),
+            ("sha-256", 0),
+        ]),
+    );
+    let mut laid_out = Run::new(options.clone());
+    laid_out.rows = ordered;
+    let text = report_text(&laid_out);
+    let at = |needle: &str| text.find(needle);
+    check(
+        "the report names each group once, in order",
+        at("\naead\n") < at("\ncipher\n")
+            && at("\ncipher\n") < at("\nhash\n")
+            && text.matches("\ncipher\n").count() == 1,
+    );
+    check(
+        "a row with two kernels lists them beneath it",
+        text.contains("  aes-128-gcm-dec\n    aes\n")
+            && at("    aes\n") < at("    none\n"),
+    );
+    let mut alone = Run::new(options.clone());
+    alone.rows = vec![named("aes-128-gcm-enc", 1, Kind::Throughput)];
+    check(
+        "a kernel that is not the default is named even when alone",
+        report_text(&alone).contains("  aes-128-gcm-enc\n    none\n"),
+    );
+    check(
+        "a row with one kernel is its name and its figures",
+        text.contains("  aes-128-gcm-enc ") && !text.contains("aes-128-ctr\n"),
+    );
+    check(
+        "the report fits 80 columns",
+        text.lines().all(|line| line.len() <= 80),
+    );
+
+    // A row's kernels: the reported set's first, then by the types
+    // that decide the row, the construction before what it is on.
+    let reported = features::detected();
+    check(
+        "the reported set's kernel comes first",
+        standing("aes-128-gcm-enc", reported, 0)
+            < standing("aes-128-gcm-enc", reported, 1),
+    );
+    check(
+        "the portable code comes last",
+        standing("aes-128-gcm-enc", Features::new(), 9)
+            >= standing("aes-128-gcm-enc", reported, 1),
+    );
+
+    // A kernel is named by the features that select it.
+    check(
+        "a row with nothing to choose has no kernel to name",
+        kernel("blake2b-256", features::detected()).is_empty(),
+    );
+    check(
+        "the portable code is `none`",
+        kernel("aes-128-ecb-enc", Features::new()) == "none",
+    );
+    check(
+        "the architecture is left off a kernel's name",
+        !kernel("aes-128-gcm-enc", features::detected()).contains('/'),
     );
 
     check(
@@ -4077,6 +4652,7 @@ fn self_test() -> bool {
     let mut seen = Vec::new();
     let under = Under {
         profile: walk[0],
+        index: 0,
         name: walk[0].to_string(),
         seen: &mut seen,
     };
@@ -4099,7 +4675,7 @@ fn self_test() -> bool {
 
     // Every named row is built, or a filter would silently drop it.
     let mut keys = Keys::<Aes128, Aes256>::try_new().expect("AES keys");
-    let built = keys.tasks();
+    let mut built = keys.tasks();
     check(
         "every algorithm has a task",
         built.len() == ALGORITHMS.len(),
@@ -4108,6 +4684,28 @@ fn self_test() -> bool {
         "the tasks are the algorithms, in order",
         built.iter().map(|(name, _)| *name).eq(ALGORITHMS),
     );
+
+    // What a new row decrypts is what the row beside it encrypted,
+    // for the rows whose decryption does not turn on a tag.
+    for (seal, open) in [
+        ("aes-256-ecb-enc", "aes-256-ecb-dec"),
+        ("aes-128-cfb1-enc", "aes-128-cfb1-dec"),
+        ("aes-128-cfb8-enc", "aes-128-cfb8-dec"),
+        ("aes-128-cfb128-enc", "aes-128-cfb128-dec"),
+        ("aes-256-gcm-enc", "aes-256-gcm-dec"),
+    ] {
+        let message: [u8; 64] = core::array::from_fn(|i| i as u8);
+        let mut data = message;
+        for row in [seal, open] {
+            if let Some((_, task)) =
+                built.iter_mut().find(|(name, _)| *name == row)
+            {
+                task(&mut data);
+            }
+        }
+        check(open, data == message);
+    }
+    drop(built);
 
     // The layout has to hold: the checks above are worthless if the
     // table is unreadable.
@@ -4131,8 +4729,10 @@ fn self_test() -> bool {
     };
     let rows = |cells: Vec<(Option<usize>, Option<Cell>)>| {
         vec![Row {
-            section: "aesni".to_string(),
+            group: "aead",
             name: "aes-128-gcm-enc",
+            kernel: "aes+pclmulqdq".to_string(),
+            place: vec![0],
             kind: Kind::Throughput,
             cells,
         }]

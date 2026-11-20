@@ -11,10 +11,11 @@ Linux machine for the runs whose figures are published.
 
 ```sh
 cargo bench -p scytale                       # everything
-cargo bench -p scytale -- gcm                # the GCM rows
+cargo bench -p scytale -- aes-256-gcm        # one algorithm, every kernel
+cargo bench -p scytale -- aes-256-gcm default  # what this machine runs
 cargo bench -p scytale -- gcm none           # rows matching both words
 cargo bench -p scytale -- sha,blake2         # either word
-cargo bench -p scytale -- sig                # signatures, both kinds
+cargo bench -p scytale -- sig                # a whole group
 cargo bench -p scytale -- --seconds 0.25     # a quicker sweep
 cargo bench -p scytale -- --help
 ```
@@ -23,12 +24,12 @@ A full sweep at the default second for each figure takes about half
 an hour. From the published crate the commands are the same,
 without `-p scytale`, run in the crate's directory.
 
-A filter is a bare word. A row runs when its section heading and its
-own name together contain every word given; commas inside a word
-offer alternatives, so `none ctr,ecb-enc` keeps both of those rows,
-measured in the one run and so comparable. The section headings are
-feature profiles and module names, described below, so a word such
-as `none` or `kem` picks a section.
+A filter is a bare word. A row runs when its group, its name and the
+features that select its kernel together contain every word given;
+commas inside a word offer alternatives, so `none ctr,ecb-enc` keeps
+both of those rows, measured in the one run and so comparable. The
+word `default` picks the kernel the library chooses on this machine,
+so `aes-256-gcm default` is what a caller here gets and nothing else.
 
 | Option | What it does |
 | --- | --- |
@@ -77,28 +78,59 @@ but the run was not quiet. Within a section the cells are sampled in
 rounds, one sample of every cell and then the next, so that a clock
 drifting over the minutes lands on every row of the section alike.
 
-### The sections
+### How the report is laid out
+
+The benchmark measures a feature profile at a time and says so on
+standard error as it goes. The report is written once, at the end,
+on standard output, and is arranged for looking an algorithm up.
+
+```text
+aead
+                              16       64      256     1024     8192    16384
+  aes-256-gcm-enc
+    aes+ssse3+avx+avx2+vaes+pclmulqdq+vpclmulqdq
+                       cpb   20.54     5.51     1.74     0.62     0.42     0.39
+                      MB/s   106.8    397.7   1259.5   3530.6   5170.3   5621.5
+    aes+ssse3+avx+pclmulqdq
+                       cpb   20.45     5.51     1.74     0.89     0.67     0.65
+                      MB/s   107.2    397.7   1257.1   2458.9   3283.8   3398.1
+    none
+                       cpb  264.00    98.05    71.53    64.94    63.02    62.91
+                      MB/s     8.3     22.4     30.7     33.8     34.8     34.9
+  aes-256-gcm-dec
+    ...
+```
+
+- **Groups** are the library's modules, in this order: `aead`,
+  `cipher`, `hash`, `kdf`, `kem`, `kex`, `mac`, `pke`, `random`,
+  `sig`.
+- **Algorithms** are in alphabetical order within a group, with a
+  run of digits read as the number it is, so `ml-kem-512` comes
+  before `ml-kem-1024`. The operations of one algorithm are in the
+  order they are done: `enc` before `dec`, `wrap` before `unwrap`,
+  `keygen`, `sign`, `verify`.
+- **Kernels** are listed under an algorithm, every one this
+  processor can run. The first is the one the library picks on this
+  machine, which is what a caller gets. The rest follow in the
+  library's own order of preference, down to `none`, which is the
+  portable code.
+
+A kernel is named by the features that select it: the least set a
+processor must have for the library to choose that code. So
+`aes+ssse3+avx+pclmulqdq` is what a processor with those and no
+VAES would run. `isolated` is not a processor feature but a promise
+by the program that nothing untrusted shares its caches, which
+admits the table-driven AES.
+
+An algorithm with one kernel is its name and its figures on the same
+lines, with nothing to list. The operations, which are measured
+under the reported set alone, are always so.
 
 Everything is built from the public types, and what chooses the code
-under them is the feature set in force, as it is for any caller. The
-throughput rows are measured once for each feature profile the types
-publish, and the section is headed by that profile:
-
-1. the set the processor reports, which is what a caller on this
-   machine gets;
-2. the same set with `isolated`;
-3. each published profile in turn;
-4. `none`, the empty set, which is the portable code throughout.
-
-A row appears under a later profile only when that profile moves it
-onto code no earlier section measured, so nothing is measured twice
-and every combination a caller can reach is measured once. To see
-only what this machine runs by default, add a word that appears in
-the first heading alone, the name of its newest feature, say.
-
-The operation groups are measured under the reported set alone and
-headed by the module they come from: `kdf`, `kex`, `sig`, `sig-pq`,
-`kem`, `pke` and `fpe`.
+under them is the feature set in force, as it is for any caller. A
+row is measured again under another profile only when that profile
+moves it onto code not measured yet, so nothing is measured twice
+and every combination a caller can reach is measured once.
 
 ## Off Linux
 
@@ -123,11 +155,15 @@ cargo bench -p scytale -- gcm --json /tmp/after.json
 cargo bench -p scytale -- --compare /tmp/before.json /tmp/after.json
 ```
 
-The comparison sets the two documents side by side, in cycles where
-both have them. A figure counts as changed only when it moved by
-more than both spreads together, and the command fails when any
-figure is worse by that much, so a check before a push has a yes or
-a no.
+The comparison sets the two documents side by side, row by row and
+kernel by kernel, in cycles where both have them. A figure counts as
+changed only when it moved by more than both spreads together, and
+the command fails when any figure is worse by that much, so a check
+before a push has a yes or a no.
+
+A document written before the rows carried their group and kernel
+cannot be matched against one written since, and is refused with a
+message saying so; measure again.
 
 ## Official runs: `scripts/bench`
 
@@ -188,7 +224,7 @@ back from it. The script refuses to start while that file exists.
 - `NAME.json`: every figure with its spread, the clock, the sample
   count and what the machine said about itself. It is what
   `--compare` reads.
-- `NAME.md`: the table as it was printed, under a header saying
+- `NAME.md`: the report as it was printed, under a header saying
   which commit it measured and what the machine was doing: the
   processor, the CPU it was pinned to, the other thread of the core,
   the governor, turbo, the energy preference, mains or battery, the
@@ -220,6 +256,14 @@ signature figures for SLH-DSA vary for the same kind of reason.
 A laptop measured on battery reports about half the rates, evenly
 across every row, and nearly the same cycles a byte: that is the
 clock and not the code, and the recorded clock rate says so.
+
+GCM-SIV, XPN and CCM have no form that takes a message in pieces, so
+their decryption rows are the one call with a tag that does not
+match. All three do the whole of the work before they look at the
+tag, so the figure is the decryption, with the wipe of the refused
+buffer on top. Unwrapping is measured the same way, on input that is
+not a wrapped key: the six passes are made before the check value is
+looked at.
 
 AEGIS and the other constructions with a fixed cost for each message
 read very differently at the two ends of the table. The sixteen-byte
