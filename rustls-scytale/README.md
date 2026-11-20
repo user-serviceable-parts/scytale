@@ -3,7 +3,7 @@
 A cryptography provider for [rustls](https://github.com/rustls/rustls)
 that uses the [scytale][scytale] library.
 
-This provider is built against rustls 0.24.0-dev.2, the current
+This provider is built against rustls 0.24.0-dev.3, the current
 development release, and will move to 0.24.0 when that is released.
 
 This crate is not part of the rustls project, nor endorsed by it in any way.
@@ -85,7 +85,9 @@ localhost.
 - **Private keys:** RSA in PKCS#1 or PKCS#8; ECDSA in SEC 1 or
   PKCS#8; Ed25519 and ML-DSA in PKCS#8.
 - **Session tickets:** sealed with ChaCha20-Poly1305, under a key
-  rotated every six hours.
+  rotated every six hours. These need the `std` feature, which is on
+  by default: rustls rotates ticket keys behind a lock it has only
+  with the standard library.
 
 ## AES-CCM
 
