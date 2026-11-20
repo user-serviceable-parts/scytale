@@ -14,6 +14,28 @@
 //! [`Aegis256`] takes a 256-bit key and a 256-bit nonce, wide enough
 //! to draw at random, and one block to each stir of its six.
 //!
+//! # The parallel variants
+//!
+//! Each stir waits for the one before it, so the pace of either is
+//! one stir's wait for every block or two of message, however many
+//! rounds the processor could have run in that time. [`Aegis128X2`]
+//! and [`Aegis128X4`] are two and four states of AEGIS-128L side by
+//! side, and [`Aegis256X2`] and [`Aegis256X4`] the same of AEGIS-256:
+//! every state is started with a mark of its own, a block of input
+//! is dealt out across them, and the tag is all of theirs together.
+//! Where a register holds two blocks, the two states go through
+//! their rounds in it at once, and a stir's wait buys twice the
+//! message.
+//!
+//! They are other ciphers, not faster forms of the first two: the
+//! ciphertext and the tag differ, and both ends have to have agreed
+//! on which is in use. On a processor whose AES instructions take
+//! one block at a time they give the same answers at about the pace
+//! of the plain variant, with more to set up for each message. The
+//! four-lane ones run as two pairs here, since nothing in this
+//! library uses 512-bit registers, and so gain nothing over two
+//! lanes.
+//!
 //! ```
 //! use scytale::Key;
 //! use scytale::aead::{Aead, Aegis128L};
@@ -59,10 +81,17 @@
 //! the one every protocol speaks; AEGIS is still an Internet-Draft,
 //! and is for both ends being yours.
 
-/// Defines the four ways into a hardware kernel for one variant,
-/// over the three loops the architecture's file has written: a run of
-/// blocks absorbed, one block absorbed `times` over, and a run
-/// encrypted or decrypted in place. `$rate` is the bytes to a block.
+/// Defines the ways into a hardware kernel for one variant, over the
+/// three loops the architecture's file has written: a run of blocks
+/// absorbed, one block absorbed `times` over, and a run encrypted or
+/// decrypted in place, each of the runs also for one lane of a
+/// parallel variant's input. `$rate` is the bytes to a block.
+///
+/// The first word says how a lane's input lies. `halves` is the
+/// AEGIS-128 family, whose loops take a block in two pieces and are
+/// told how far apart they are; `whole` is the AEGIS-256 family,
+/// whose loops take one piece; `contiguous` is a loop that takes its
+/// two pieces side by side and so gets no lane entries.
 ///
 /// Here rather than once in each file, since what they say is the
 /// same on every architecture. Each is safe to call only in the
@@ -74,11 +103,158 @@
     target_arch = "x86_64"
 ))]
 macro_rules! entries {
-    ($rate:literal, $run_absorb:ident, $run_encrypt:ident,
+    (halves, $rate:literal, $run_absorb:ident, $run_encrypt:ident,
+     $run_decrypt:ident, $absorb:ident, $stir:ident, $encrypt:ident,
+     $decrypt:ident, $absorb_lane:ident, $encrypt_lane:ident,
+     $decrypt_lane:ident) => {
+        entries!(
+            @whole $rate, $absorb, $encrypt, $decrypt, $absorb_lane,
+            $encrypt_lane, $decrypt_lane
+        );
+
+        /// `Absorb`, of `block` `times` over.
+        pub(in crate::aead::aegis) fn $stir(
+            state: &mut State,
+            block: &[u8; $rate],
+            times: usize,
+        ) {
+            if times != 0 {
+                // SAFETY: a step of nothing reads the one block
+                // every time.
+                unsafe {
+                    $run_absorb(state, block.as_ptr(), $rate / 2, 0, times)
+                }
+            }
+        }
+
+        /// `Absorb`, over one lane of each whole block of `data`.
+        pub(in crate::aead::aegis) fn $absorb_lane(
+            state: &mut State,
+            data: &[u8],
+            lane: crate::aead::aegis::Lane,
+        ) {
+            let (blocks, half) = lane.halves(data.len());
+            if blocks != 0 {
+                // SAFETY: `halves` has checked that both pieces of
+                // the lane lie inside every one of those blocks.
+                unsafe {
+                    let at = data.as_ptr().add(lane.offset);
+                    $run_absorb(state, at, half, lane.width, blocks)
+                }
+            }
+        }
+
+        /// `Enc`, over one lane of each whole block of `data`.
+        pub(in crate::aead::aegis) fn $encrypt_lane(
+            state: &mut State,
+            data: &mut [u8],
+            lane: crate::aead::aegis::Lane,
+        ) {
+            let (blocks, half) = lane.halves(data.len());
+            if blocks != 0 {
+                // SAFETY: as for absorbing.
+                unsafe {
+                    let at = data.as_mut_ptr().add(lane.offset);
+                    $run_encrypt(state, at, half, lane.width, blocks)
+                }
+            }
+        }
+
+        /// `Dec`, over one lane of each whole block of `data`.
+        pub(in crate::aead::aegis) fn $decrypt_lane(
+            state: &mut State,
+            data: &mut [u8],
+            lane: crate::aead::aegis::Lane,
+        ) {
+            let (blocks, half) = lane.halves(data.len());
+            if blocks != 0 {
+                // SAFETY: as for absorbing.
+                unsafe {
+                    let at = data.as_mut_ptr().add(lane.offset);
+                    $run_decrypt(state, at, half, lane.width, blocks)
+                }
+            }
+        }
+    };
+    (whole, $rate:literal, $run_absorb:ident, $run_encrypt:ident,
+     $run_decrypt:ident, $absorb:ident, $stir:ident, $encrypt:ident,
+     $decrypt:ident, $absorb_lane:ident, $encrypt_lane:ident,
+     $decrypt_lane:ident) => {
+        entries!(
+            @whole $rate, $absorb, $encrypt, $decrypt, $absorb_lane,
+            $encrypt_lane, $decrypt_lane
+        );
+
+        /// `Absorb`, of `block` `times` over.
+        pub(in crate::aead::aegis) fn $stir(
+            state: &mut State,
+            block: &[u8; $rate],
+            times: usize,
+        ) {
+            if times != 0 {
+                // SAFETY: a step of nothing reads the one block
+                // every time.
+                unsafe { $run_absorb(state, block.as_ptr(), 0, times) }
+            }
+        }
+
+        /// `Absorb`, over one lane of each whole block of `data`.
+        pub(in crate::aead::aegis) fn $absorb_lane(
+            state: &mut State,
+            data: &[u8],
+            lane: crate::aead::aegis::Lane,
+        ) {
+            let blocks = lane.piece(data.len());
+            if blocks != 0 {
+                // SAFETY: `piece` has checked that the lane lies
+                // inside every one of those blocks.
+                unsafe {
+                    let at = data.as_ptr().add(lane.offset);
+                    $run_absorb(state, at, lane.width, blocks)
+                }
+            }
+        }
+
+        /// `Enc`, over one lane of each whole block of `data`.
+        pub(in crate::aead::aegis) fn $encrypt_lane(
+            state: &mut State,
+            data: &mut [u8],
+            lane: crate::aead::aegis::Lane,
+        ) {
+            let blocks = lane.piece(data.len());
+            if blocks != 0 {
+                // SAFETY: as for absorbing.
+                unsafe {
+                    let at = data.as_mut_ptr().add(lane.offset);
+                    $run_encrypt(state, at, lane.width, blocks)
+                }
+            }
+        }
+
+        /// `Dec`, over one lane of each whole block of `data`.
+        pub(in crate::aead::aegis) fn $decrypt_lane(
+            state: &mut State,
+            data: &mut [u8],
+            lane: crate::aead::aegis::Lane,
+        ) {
+            let blocks = lane.piece(data.len());
+            if blocks != 0 {
+                // SAFETY: as for absorbing.
+                unsafe {
+                    let at = data.as_mut_ptr().add(lane.offset);
+                    $run_decrypt(state, at, lane.width, blocks)
+                }
+            }
+        }
+    };
+    (contiguous, $rate:literal, $run_absorb:ident, $run_encrypt:ident,
      $run_decrypt:ident, $absorb:ident, $stir:ident, $encrypt:ident,
      $decrypt:ident) => {
         /// `Absorb`, over each whole block of `data`.
-        pub(in crate::aead::aegis) fn $absorb(state: &mut State, data: &[u8]) {
+        pub(in crate::aead::aegis) fn $absorb(
+            state: &mut State,
+            data: &[u8],
+        ) {
             let blocks = data.len() / $rate;
             if blocks != 0 {
                 // SAFETY: `data` holds that many blocks end to end.
@@ -107,7 +283,9 @@ macro_rules! entries {
             let blocks = data.len() / $rate;
             if blocks != 0 {
                 // SAFETY: `data` holds that many blocks end to end.
-                unsafe { $run_encrypt(state, data.as_mut_ptr(), $rate, blocks) }
+                unsafe {
+                    $run_encrypt(state, data.as_mut_ptr(), $rate, blocks)
+                }
             }
         }
 
@@ -119,8 +297,38 @@ macro_rules! entries {
             let blocks = data.len() / $rate;
             if blocks != 0 {
                 // SAFETY: `data` holds that many blocks end to end.
-                unsafe { $run_decrypt(state, data.as_mut_ptr(), $rate, blocks) }
+                unsafe {
+                    $run_decrypt(state, data.as_mut_ptr(), $rate, blocks)
+                }
             }
+        }
+    };
+    // The entries for a variant on its own, which is one lane as
+    // wide as the block.
+    (@whole $rate:literal, $absorb:ident, $encrypt:ident, $decrypt:ident,
+     $absorb_lane:ident, $encrypt_lane:ident, $decrypt_lane:ident) => {
+        /// `Absorb`, over each whole block of `data`.
+        pub(in crate::aead::aegis) fn $absorb(
+            state: &mut State,
+            data: &[u8],
+        ) {
+            $absorb_lane(state, data, crate::aead::aegis::Lane::only($rate))
+        }
+
+        /// `Enc`, over each whole block of `data` in place.
+        pub(in crate::aead::aegis) fn $encrypt(
+            state: &mut State,
+            data: &mut [u8],
+        ) {
+            $encrypt_lane(state, data, crate::aead::aegis::Lane::only($rate))
+        }
+
+        /// `Dec`, over each whole block of `data` in place.
+        pub(in crate::aead::aegis) fn $decrypt(
+            state: &mut State,
+            data: &mut [u8],
+        ) {
+            $decrypt_lane(state, data, crate::aead::aegis::Lane::only($rate))
         }
     };
 }
@@ -128,7 +336,9 @@ macro_rules! entries {
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
 pub(crate) mod aegis128l;
+pub(crate) mod aegis128x;
 pub(crate) mod aegis256;
+pub(crate) mod aegis256x;
 mod portable;
 #[cfg(target_arch = "riscv64")]
 mod riscv64;
@@ -141,10 +351,13 @@ use core::marker::PhantomData;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub use aegis128l::Aegis128L;
+pub use aegis128x::{Aegis128X, Aegis128X2, Aegis128X4};
 pub use aegis256::Aegis256;
+pub use aegis256x::{Aegis256X, Aegis256X2, Aegis256X4};
 
 use crate::Error;
 use crate::cipher::aes::{BLOCK_SIZE, Kernel};
+use crate::traits::ByteArray;
 
 /// What the scalar kernels need: the AES encryption instructions
 /// alone, since nothing in AEGIS runs the cipher backwards.
@@ -155,18 +368,138 @@ const ZKNE: crate::features::Features =
 /// The tag length, in bytes.
 const TAG: usize = 16;
 
-/// The most bytes any variant takes in at a time: AEGIS-128L's two
-/// blocks.
-const MAX_RATE: usize = 2 * BLOCK_SIZE;
-
 /// The longest message, and the longest additional data, in bytes:
 /// the draft's P_MAX and A_MAX, set by a length that goes into the
 /// tag as a 64-bit count of bits.
 const MAX_BYTES: u64 = (1 << 61) - 1;
 
-/// The state, as the blocks the draft names S0 on. A variant with
-/// fewer than eight leaves the rest zero.
+/// One state, as the blocks the draft names S0 on. A variant with
+/// fewer than eight leaves the rest zero, and a parallel variant has
+/// several of these, one to a lane.
 type State = [[u8; BLOCK_SIZE]; 8];
+
+/// Where one lane's input lies in a run of blocks. A parallel
+/// variant deals each block of input out across its states, a block
+/// of the cipher at a time, and a kernel that holds one state takes
+/// its share by this.
+#[derive(Clone, Copy)]
+struct Lane {
+    /// Bytes from the start of a block of input to this lane's.
+    offset: usize,
+    /// Bytes to a block of input: the variant's rate.
+    width: usize,
+}
+
+impl Lane {
+    /// The one lane of a variant that is not parallel.
+    #[cfg_attr(
+        not(any(
+            target_arch = "aarch64",
+            target_arch = "riscv64",
+            target_arch = "x86_64"
+        )),
+        allow(dead_code)
+    )]
+    const fn only(width: usize) -> Self {
+        Lane { offset: 0, width }
+    }
+
+    /// For the AEGIS-128 family, whose block is two halves with a
+    /// piece of each lane in both: how many whole blocks `len` bytes
+    /// hold, and how far apart a lane's two pieces are.
+    ///
+    /// # Panics
+    /// If the lane's pieces would not lie inside a block, which is
+    /// what the kernels rely on to stay inside the input.
+    #[cfg_attr(
+        not(any(
+            target_arch = "aarch64",
+            target_arch = "riscv64",
+            target_arch = "x86_64"
+        )),
+        allow(dead_code)
+    )]
+    fn halves(self, len: usize) -> (usize, usize) {
+        let half = self.width / 2;
+        assert!(self.width.is_multiple_of(2));
+        assert!(self.offset + BLOCK_SIZE <= half);
+        (len / self.width, half)
+    }
+
+    /// For the AEGIS-256 family, whose block has one piece of each
+    /// lane: how many whole blocks `len` bytes hold.
+    ///
+    /// # Panics
+    /// If the lane's piece would not lie inside a block.
+    #[cfg_attr(
+        not(any(
+            target_arch = "aarch64",
+            target_arch = "riscv64",
+            target_arch = "x86_64"
+        )),
+        allow(dead_code)
+    )]
+    fn piece(self, len: usize) -> usize {
+        assert!(self.offset + BLOCK_SIZE <= self.width);
+        len / self.width
+    }
+}
+
+/// How many blocks of a lane [`gathered`] and [`gathered_mut`] bring
+/// together at a time.
+const GATHER: usize = 8;
+
+/// Runs `f` over one lane of `data`, which lies in the pieces of
+/// `BLOCK_SIZE` bytes at `pieces` in every block of `width` bytes, by
+/// copying the lane's pieces together. For the kernels that take
+/// their input side by side and have no way to be told otherwise:
+/// the portable ones, where the copy is small beside the round.
+fn gathered<const P: usize>(
+    data: &[u8],
+    width: usize,
+    pieces: [usize; P],
+    mut f: impl FnMut(&[u8]),
+) {
+    let mut scratch = [[0u8; BLOCK_SIZE]; 2 * GATHER];
+    for run in data.chunks(GATHER * width) {
+        let blocks = run.len() / width;
+        let lane = &mut scratch[..blocks * P];
+        for (block, lane) in run.chunks_exact(width).zip(lane.chunks_mut(P)) {
+            for (piece, at) in lane.iter_mut().zip(pieces) {
+                piece.copy_from_slice(&block[at..at + BLOCK_SIZE]);
+            }
+        }
+        f(lane.as_flattened());
+    }
+    scratch.zeroize();
+}
+
+/// As [`gathered`], for a kernel that writes: the lane's pieces go
+/// back where they came from afterwards.
+fn gathered_mut<const P: usize>(
+    data: &mut [u8],
+    width: usize,
+    pieces: [usize; P],
+    mut f: impl FnMut(&mut [u8]),
+) {
+    let mut scratch = [[0u8; BLOCK_SIZE]; 2 * GATHER];
+    for run in data.chunks_mut(GATHER * width) {
+        let blocks = run.len() / width;
+        let lane = &mut scratch[..blocks * P];
+        for (block, lane) in run.chunks_exact(width).zip(lane.chunks_mut(P)) {
+            for (piece, at) in lane.iter_mut().zip(pieces) {
+                piece.copy_from_slice(&block[at..at + BLOCK_SIZE]);
+            }
+        }
+        f(lane.as_flattened_mut());
+        for (block, lane) in run.chunks_exact_mut(width).zip(lane.chunks(P)) {
+            for (piece, at) in lane.iter().zip(pieces) {
+                block[at..at + BLOCK_SIZE].copy_from_slice(piece);
+            }
+        }
+    }
+    scratch.zeroize();
+}
 
 /// The constants the state starts from: the Fibonacci numbers modulo
 /// 256, in two halves.
@@ -199,9 +532,10 @@ fn lengths(aad_bits: u64, message_bits: u64) -> [u8; BLOCK_SIZE] {
 }
 
 mod sealed {
-    use super::{Kernel, MAX_RATE, State, TAG};
+    use super::{Kernel, TAG};
     use crate::KeyType;
     use crate::traits::ByteArray;
+    use zeroize::Zeroize;
 
     /// The kernel a key was taken for, as [`Variant`] may name it.
     /// The trait is public in name, so that the incremental types
@@ -222,31 +556,43 @@ mod sealed {
         /// The nonce.
         type Nonce: ByteArray;
 
-        /// Bytes taken in by one update of the state.
+        /// The state: one of the family's, or one to a lane. Each
+        /// variant has its own so that a message under a narrow one
+        /// does not carry, and wipe, the widest.
+        type State: Zeroize;
+
+        /// What one update of the state takes in.
+        type Block: ByteArray;
+
+        /// Bytes taken in by one update of the state: the length of
+        /// a [`Block`](Variant::Block).
         const RATE: usize;
 
         /// The draft's `Init`.
-        fn init(kernel: Chosen, key: &Self::Key, nonce: &Self::Nonce) -> State;
+        fn init(
+            kernel: Chosen,
+            key: &Self::Key,
+            nonce: &Self::Nonce,
+        ) -> Self::State;
 
         /// The draft's `Absorb`, over each block of `blocks`.
-        fn absorb(kernel: Chosen, state: &mut State, blocks: &[u8]);
+        fn absorb(kernel: Chosen, state: &mut Self::State, blocks: &[u8]);
 
         /// The draft's `Enc`, over each block of `data` in place.
-        fn encrypt(kernel: Chosen, state: &mut State, data: &mut [u8]);
+        fn encrypt(kernel: Chosen, state: &mut Self::State, data: &mut [u8]);
 
         /// The draft's `Dec`, over each block of `data` in place.
-        fn decrypt(kernel: Chosen, state: &mut State, data: &mut [u8]);
+        fn decrypt(kernel: Chosen, state: &mut Self::State, data: &mut [u8]);
 
-        /// What `Enc` would xor into the next block: the first
-        /// [`RATE`](Variant::RATE) bytes are the keystream, which
-        /// depends on the state alone, so a block that arrives in
-        /// pieces can be encrypted as it comes.
-        fn keystream(state: &State) -> [u8; MAX_RATE];
+        /// What `Enc` would xor into the next block: the keystream,
+        /// which depends on the state alone, so a block that arrives
+        /// in pieces can be encrypted as it comes.
+        fn keystream(state: &Self::State) -> Self::Block;
 
         /// The draft's `Finalize`, for lengths in bits.
         fn tag(
             kernel: Chosen,
-            state: &mut State,
+            state: &mut Self::State,
             aad_bits: u64,
             message_bits: u64,
         ) -> [u8; TAG];
@@ -258,11 +604,11 @@ use sealed::{Chosen, Variant};
 /// One message in progress: the state, and the block that is still
 /// arriving.
 struct Core<A: Variant> {
-    state: State,
+    state: A::State,
     /// The plaintext, or the additional data, of the block in
     /// progress. The state is updated with it once it is whole, or
     /// zero padded at the end.
-    buffer: [u8; MAX_RATE],
+    buffer: A::Block,
     filled: usize,
     aad_bytes: u64,
     message_bytes: u64,
@@ -277,7 +623,7 @@ impl<A: Variant> Core<A> {
     fn new(kernel: Chosen, key: &A::Key, nonce: &A::Nonce) -> Self {
         Core {
             state: A::init(kernel, key, nonce),
-            buffer: [0; MAX_RATE],
+            buffer: A::Block::zeroed(),
             filled: 0,
             aad_bytes: 0,
             message_bytes: 0,
@@ -305,7 +651,7 @@ impl<A: Variant> Core<A> {
 
         let room = (A::RATE - self.filled) % A::RATE;
         let (head, data) = data.split_at(room.min(data.len()));
-        self.buffer[self.filled..self.filled + head.len()]
+        self.buffer.as_mut()[self.filled..self.filled + head.len()]
             .copy_from_slice(head);
         self.filled += head.len();
         if self.filled == A::RATE {
@@ -316,7 +662,7 @@ impl<A: Variant> Core<A> {
         A::absorb(self.kernel, &mut self.state, blocks);
         // Empty unless the buffer was, since a head that did not fill
         // the block took all there was.
-        self.buffer[self.filled..self.filled + tail.len()]
+        self.buffer.as_mut()[self.filled..self.filled + tail.len()]
             .copy_from_slice(tail);
         self.filled += tail.len();
         Ok(())
@@ -326,8 +672,8 @@ impl<A: Variant> Core<A> {
     /// if there is any of one.
     fn flush(&mut self) {
         if self.filled != 0 {
-            self.buffer[self.filled..].fill(0);
-            A::absorb(self.kernel, &mut self.state, &self.buffer[..A::RATE]);
+            self.buffer.as_mut()[self.filled..].fill(0);
+            A::absorb(self.kernel, &mut self.state, self.buffer.as_ref());
             self.filled = 0;
         }
     }
@@ -374,9 +720,9 @@ impl<A: Variant> Core<A> {
         }
         let mut keystream = A::keystream(&self.state);
         let at = self.filled;
-        let kept = &mut self.buffer[at..at + piece.len()];
+        let kept = &mut self.buffer.as_mut()[at..at + piece.len()];
         for ((byte, kept), z) in
-            piece.iter_mut().zip(kept).zip(&keystream[at..])
+            piece.iter_mut().zip(kept).zip(&keystream.as_ref()[at..])
         {
             let out = *byte ^ z;
             *kept = if decrypt { out } else { *byte };
@@ -422,7 +768,7 @@ impl<A: Variant> Drop for Core<A> {
 impl<A: Variant> ZeroizeOnDrop for Core<A> {}
 
 /// Encryption of a message that arrives in pieces, under `A`:
-/// [`Aegis128L`] or [`Aegis256`].
+/// any of the AEGIS family.
 ///
 /// Additional data first, then the message, then the tag; the
 /// ciphertext is in place as each piece is given.
@@ -456,7 +802,7 @@ impl<A: Variant> Encryptor<A> {
 }
 
 /// Decryption of a message that arrives in pieces, under `A`:
-/// [`Aegis128L`] or [`Aegis256`].
+/// any of the AEGIS family.
 ///
 /// **The pieces this hands back are not yet authenticated.** Nothing
 /// can vouch for any of the message until [`verify`](Self::verify)

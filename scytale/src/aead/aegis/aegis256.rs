@@ -7,8 +7,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::sealed::{Chosen, Variant};
 use super::{
-    C0, C1, Decryptor, Encryptor, MAX_RATE, State, TAG, and, lengths, open,
-    portable, seal, xor,
+    C0, C1, Decryptor, Encryptor, Lane, State, TAG, and, gathered,
+    gathered_mut, lengths, open, portable, seal, xor,
 };
 use crate::aead::Aead;
 use crate::cipher::aes::{BLOCK_SIZE, ISOLATED, Kernel};
@@ -158,12 +158,9 @@ impl Aead for Aegis256 {
     }
 }
 
-/// The keystream for the next block, and zeros after it.
-pub(super) fn keystream(s: &State) -> [u8; MAX_RATE] {
-    let z = xor(&xor(&xor(&s[1], &s[4]), &s[5]), &and(&s[2], &s[3]));
-    let mut out = [0u8; MAX_RATE];
-    out[..BLOCK_SIZE].copy_from_slice(&z);
-    out
+/// The keystream for the next block.
+pub(super) fn keystream(s: &State) -> [u8; BLOCK_SIZE] {
+    xor(&xor(&xor(&s[1], &s[4]), &s[5]), &and(&s[2], &s[3]))
 }
 
 /// The two halves of a key or a nonce.
@@ -180,7 +177,7 @@ fn halves(bytes: &[u8; 32]) -> ([u8; BLOCK_SIZE], [u8; BLOCK_SIZE]) {
 /// `Finalize` are made of. A kernel does this without the block
 /// being written out that many times, which would be a secret that
 /// many times as long to wipe.
-fn stir(
+pub(super) fn stir(
     kernel: Chosen,
     state: &mut State,
     block: &[u8; BLOCK_SIZE],
@@ -188,7 +185,7 @@ fn stir(
 ) {
     match kernel.0 {
         #[cfg(target_arch = "x86_64")]
-        Kernel::AesNi => x86_64::stir256(state, block, times),
+        Kernel::AesNi | Kernel::Vaes => x86_64::stir256(state, block, times),
         #[cfg(target_arch = "aarch64")]
         Kernel::Armv8 => aarch64::stir256(state, block, times),
         #[cfg(target_arch = "riscv64")]
@@ -200,31 +197,133 @@ fn stir(
     }
 }
 
+/// The state `Init` starts from, and the four blocks it then takes
+/// in, four times over: the two halves of the key, then each with
+/// its half of the nonce. Those last two are the first two blocks
+/// of the state as it starts.
+pub(super) fn start(
+    key: &[u8; KEY_SIZE],
+    nonce: &[u8; NONCE_SIZE],
+) -> (State, [[u8; BLOCK_SIZE]; 4]) {
+    let (mut k0, mut k1) = halves(key);
+    let (n0, n1) = halves(nonce);
+    let state = [
+        xor(&k0, &n0),
+        xor(&k1, &n1),
+        C1,
+        C0,
+        xor(&k0, &C0),
+        xor(&k1, &C1),
+        [0; BLOCK_SIZE],
+        [0; BLOCK_SIZE],
+    ];
+    let inputs = [k0, k1, state[0], state[1]];
+    k0.zeroize();
+    k1.zeroize();
+    (state, inputs)
+}
+
+/// `Finalize` from the lengths on: the seven updates and the fold
+/// that is the 128-bit tag. `lengths` is the block of them.
+pub(super) fn finish(
+    kernel: Chosen,
+    state: &mut State,
+    lengths: &[u8; BLOCK_SIZE],
+) -> [u8; TAG] {
+    let mut t = xor(&state[3], lengths);
+    // Seven updates with that block.
+    stir(kernel, state, &t, 7);
+    t.zeroize();
+    fold(state)
+}
+
+/// The 128-bit tag of a state that has had `Finalize`'s updates.
+pub(super) fn fold(state: &State) -> [u8; TAG] {
+    state[1..6].iter().fold(state[0], |tag, s| xor(&tag, s))
+}
+
+/// `Absorb`, for one lane of a parallel variant: this state takes
+/// its share of each block of `data`.
+pub(super) fn absorb_lane(
+    kernel: Chosen,
+    state: &mut State,
+    data: &[u8],
+    lane: Lane,
+) {
+    match kernel.0 {
+        #[cfg(target_arch = "x86_64")]
+        Kernel::AesNi | Kernel::Vaes => {
+            x86_64::absorb256_lane(state, data, lane)
+        }
+        #[cfg(target_arch = "aarch64")]
+        Kernel::Armv8 => aarch64::absorb256_lane(state, data, lane),
+        #[cfg(target_arch = "riscv64")]
+        Kernel::Zvkned => riscv64::zvkned::absorb256_lane(state, data, lane),
+        #[cfg(target_arch = "riscv64")]
+        Kernel::Zkn => riscv64::zkn::absorb256_lane(state, data, lane),
+        _ => gathered(data, lane.width, [lane.offset], |blocks| {
+            <Aegis256 as Variant>::absorb(kernel, state, blocks)
+        }),
+    }
+}
+
+/// `Enc`, for one lane of a parallel variant.
+pub(super) fn encrypt_lane(
+    kernel: Chosen,
+    state: &mut State,
+    data: &mut [u8],
+    lane: Lane,
+) {
+    match kernel.0 {
+        #[cfg(target_arch = "x86_64")]
+        Kernel::AesNi | Kernel::Vaes => {
+            x86_64::encrypt256_lane(state, data, lane)
+        }
+        #[cfg(target_arch = "aarch64")]
+        Kernel::Armv8 => aarch64::encrypt256_lane(state, data, lane),
+        #[cfg(target_arch = "riscv64")]
+        Kernel::Zvkned => riscv64::zvkned::encrypt256_lane(state, data, lane),
+        #[cfg(target_arch = "riscv64")]
+        Kernel::Zkn => riscv64::zkn::encrypt256_lane(state, data, lane),
+        _ => gathered_mut(data, lane.width, [lane.offset], |blocks| {
+            <Aegis256 as Variant>::encrypt(kernel, state, blocks)
+        }),
+    }
+}
+
+/// `Dec`, for one lane of a parallel variant.
+pub(super) fn decrypt_lane(
+    kernel: Chosen,
+    state: &mut State,
+    data: &mut [u8],
+    lane: Lane,
+) {
+    match kernel.0 {
+        #[cfg(target_arch = "x86_64")]
+        Kernel::AesNi | Kernel::Vaes => {
+            x86_64::decrypt256_lane(state, data, lane)
+        }
+        #[cfg(target_arch = "aarch64")]
+        Kernel::Armv8 => aarch64::decrypt256_lane(state, data, lane),
+        #[cfg(target_arch = "riscv64")]
+        Kernel::Zvkned => riscv64::zvkned::decrypt256_lane(state, data, lane),
+        #[cfg(target_arch = "riscv64")]
+        Kernel::Zkn => riscv64::zkn::decrypt256_lane(state, data, lane),
+        _ => gathered_mut(data, lane.width, [lane.offset], |blocks| {
+            <Aegis256 as Variant>::decrypt(kernel, state, blocks)
+        }),
+    }
+}
+
 impl Variant for Aegis256 {
     type Nonce = [u8; NONCE_SIZE];
+    type State = State;
+    type Block = [u8; BLOCK_SIZE];
 
     const RATE: usize = BLOCK_SIZE;
 
     fn init(kernel: Chosen, key: &Self::Key, nonce: &Self::Nonce) -> State {
-        let (mut k0, mut k1) = halves(key.array());
-        let (n0, n1) = halves(nonce);
-        let mut state = [
-            xor(&k0, &n0),
-            xor(&k1, &n1),
-            C1,
-            C0,
-            xor(&k0, &C0),
-            xor(&k1, &C1),
-            [0; BLOCK_SIZE],
-            [0; BLOCK_SIZE],
-        ];
-        // Four times over: the two halves of the key, then each with
-        // its half of the nonce. Those last two are the first two
-        // blocks of the state as it starts, which the updates
-        // change, so they are copied before any.
-        let mut inputs = [k0, k1, state[0], state[1]];
-        k0.zeroize();
-        k1.zeroize();
+        let (mut state, mut inputs) = start(key.array(), nonce);
         for _ in 0..4 {
             Self::absorb(kernel, &mut state, inputs.as_flattened());
         }
@@ -235,7 +334,7 @@ impl Variant for Aegis256 {
     fn absorb(kernel: Chosen, state: &mut State, blocks: &[u8]) {
         match kernel.0 {
             #[cfg(target_arch = "x86_64")]
-            Kernel::AesNi => x86_64::absorb256(state, blocks),
+            Kernel::AesNi | Kernel::Vaes => x86_64::absorb256(state, blocks),
             #[cfg(target_arch = "aarch64")]
             Kernel::Armv8 => aarch64::absorb256(state, blocks),
             #[cfg(target_arch = "riscv64")]
@@ -250,7 +349,7 @@ impl Variant for Aegis256 {
     fn encrypt(kernel: Chosen, state: &mut State, data: &mut [u8]) {
         match kernel.0 {
             #[cfg(target_arch = "x86_64")]
-            Kernel::AesNi => x86_64::encrypt256(state, data),
+            Kernel::AesNi | Kernel::Vaes => x86_64::encrypt256(state, data),
             #[cfg(target_arch = "aarch64")]
             Kernel::Armv8 => aarch64::encrypt256(state, data),
             #[cfg(target_arch = "riscv64")]
@@ -265,7 +364,7 @@ impl Variant for Aegis256 {
     fn decrypt(kernel: Chosen, state: &mut State, data: &mut [u8]) {
         match kernel.0 {
             #[cfg(target_arch = "x86_64")]
-            Kernel::AesNi => x86_64::decrypt256(state, data),
+            Kernel::AesNi | Kernel::Vaes => x86_64::decrypt256(state, data),
             #[cfg(target_arch = "aarch64")]
             Kernel::Armv8 => aarch64::decrypt256(state, data),
             #[cfg(target_arch = "riscv64")]
@@ -277,7 +376,7 @@ impl Variant for Aegis256 {
         }
     }
 
-    fn keystream(state: &State) -> [u8; MAX_RATE] {
+    fn keystream(state: &State) -> [u8; BLOCK_SIZE] {
         keystream(state)
     }
 
@@ -287,11 +386,7 @@ impl Variant for Aegis256 {
         aad_bits: u64,
         message_bits: u64,
     ) -> [u8; TAG] {
-        let mut t = xor(&state[3], &lengths(aad_bits, message_bits));
-        // Seven updates with that block.
-        stir(kernel, state, &t, 7);
-        t.zeroize();
-        state[1..6].iter().fold(state[0], |tag, s| xor(&tag, s))
+        finish(kernel, state, &lengths(aad_bits, message_bits))
     }
 }
 
