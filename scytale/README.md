@@ -576,36 +576,38 @@ which is what it is for.
 
 Every construction, every implementation of each, and the key
 agreement, signature and post-quantum operations can be measured.
-The benchmark ships with the crate, so it runs on your own machine,
-from the crate's directory:
+The benchmark ships with the crate, as an ordinary bench target, so
+it runs on your own machine, from the crate's directory:
 
 ```sh
-cargo test --release --lib -- --ignored --nocapture --exact bench::speed
+cargo bench
 ```
 
-Its options go in `SCYTALE_BENCH`: words that pick rows by name,
-`--seconds N` for the time spent on each measurement, `--json PATH`
-to keep every figure, and `--help` for the rest. The GCM rows at a
-quarter of a second each:
+Its options follow `--`: words that pick rows by name, `--seconds N`
+for the time spent on each measurement, `--json PATH` to keep every
+figure, and `--help` for the rest. The GCM rows at a quarter of a
+second each:
 
 ```sh
-SCYTALE_BENCH="gcm --seconds 0.25" cargo test --release --lib -- \
-    --ignored --nocapture --exact bench::speed
+cargo bench -- gcm --seconds 0.25
 ```
 
-Put `taskset -c 0` in front to pin the run to one core. The pin
-matters on a hybrid processor: unpinned, a row records which core
-the scheduler picked rather than how fast the code is. On a laptop
-running on battery, expect about half the speed.
+It reports megabytes a second everywhere, and cycles a byte as well
+on Linux, where the kernel has a counter to read. Pin the run to one
+core with whatever your system offers, `taskset -c 0` on Linux: on a
+hybrid processor an unpinned row records which core the scheduler
+picked rather than how fast the code is. On a laptop running on
+battery, expect about half the speed.
 
-From a checkout of the [repository][repo], `scripts/bench` is the
-same run with the pinning done, and `sudo scripts/bench-quiet --save
-NAME` runs it on a settled core and keeps the result.
+[`BENCHMARKING.md`][benchmarking] in the [repository][repo] is the
+guide: how to read the figures, how to compare two runs, and the
+script that settles a Linux machine for the results that are kept.
 
 Benchmark results ship with the crate, in [`benchmarks/`][bench],
 one file per machine.
 
 [bench]: https://github.com/user-serviceable-parts/scytale/tree/main/scytale/benchmarks
+[benchmarking]: https://github.com/user-serviceable-parts/scytale/blob/main/BENCHMARKING.md
 
 ## How it is tested
 

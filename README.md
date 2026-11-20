@@ -74,9 +74,11 @@ scripts/test-all-arches        # every architecture, foreign ones emulated
 scripts/test-ring-downstream   # rustls and rustls-webpki on scytale-ring
 scripts/test-rustls-downstream # rustls's tests and BoGo on rustls-scytale
 scripts/test-openssl-interop   # every rustls-scytale suite against OpenSSL
-scripts/bench                  # measures rather than checks
-sudo scripts/bench-quiet       # the same on a settled core
+cargo bench -p scytale         # measures rather than checks
+sudo scripts/bench             # the same on a settled core, on Linux
 ```
+
+[BENCHMARKING.md](BENCHMARKING.md) is the guide to those last two.
 
 In the library's own test build, `SCYTALE_FEATURES` names the set of
 features in force, so `SCYTALE_FEATURES=none cargo test -p scytale
