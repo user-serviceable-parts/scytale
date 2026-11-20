@@ -115,8 +115,8 @@ use serde_json::{Value, json};
 
 use crate::Key;
 use crate::aead::{
-    Aead, Aegis128L, Aegis256, Ccm, ChaCha20Poly1305, Gcm, GcmSiv,
-    XChaCha20Poly1305, Xpn,
+    Aead, Aegis128L, Aegis128X2, Aegis128X4, Aegis256, Aegis256X2, Aegis256X4,
+    Ccm, ChaCha20Poly1305, Gcm, GcmSiv, XChaCha20Poly1305, Xpn,
 };
 use crate::cipher::aes::{Aes128, Aes256};
 use crate::cipher::chacha20;
@@ -536,6 +536,10 @@ const TYPES: &[Profiles] = &[
     <XChaCha20Poly1305 as Dispatcher>::profiles,
     <Aegis128L as Dispatcher>::profiles,
     <Aegis256 as Dispatcher>::profiles,
+    <Aegis128X2 as Dispatcher>::profiles,
+    <Aegis128X4 as Dispatcher>::profiles,
+    <Aegis256X2 as Dispatcher>::profiles,
+    <Aegis256X4 as Dispatcher>::profiles,
 ];
 
 const AES128: &[Profiles] = &[<Aes128 as Dispatcher>::profiles];
@@ -606,6 +610,18 @@ fn deciders(row: &str) -> &'static [Profiles] {
         }
         "aegis-256-enc" | "aegis-256-dec" => {
             &[<Aegis256 as Dispatcher>::profiles]
+        }
+        "aegis-128x2-enc" | "aegis-128x2-dec" => {
+            &[<Aegis128X2 as Dispatcher>::profiles]
+        }
+        "aegis-128x4-enc" | "aegis-128x4-dec" => {
+            &[<Aegis128X4 as Dispatcher>::profiles]
+        }
+        "aegis-256x2-enc" | "aegis-256x2-dec" => {
+            &[<Aegis256X2 as Dispatcher>::profiles]
+        }
+        "aegis-256x4-enc" | "aegis-256x4-dec" => {
+            &[<Aegis256X4 as Dispatcher>::profiles]
         }
         _ => &[],
     }
@@ -900,7 +916,7 @@ fn sha3_section(under: &mut Under<'_>, run: &mut Run) -> bool {
 }
 
 /// The rows that belong to no family above.
-const OTHER: [&str; 15] = [
+const OTHER: [&str; 23] = [
     "sha-1",
     "ctr-drbg",
     "hash-drbg-sha-256",
@@ -916,6 +932,14 @@ const OTHER: [&str; 15] = [
     "aegis-128l-dec",
     "aegis-256-enc",
     "aegis-256-dec",
+    "aegis-128x2-enc",
+    "aegis-128x2-dec",
+    "aegis-128x4-enc",
+    "aegis-128x4-dec",
+    "aegis-256x2-enc",
+    "aegis-256x2-dec",
+    "aegis-256x4-enc",
+    "aegis-256x4-dec",
 ];
 
 /// Measures them, returning whether it ran anything.
@@ -960,6 +984,10 @@ fn other_section(under: &mut Under<'_>, run: &mut Run) -> bool {
     let (aegis_enc_tag, rest) = rest.split_at_mut(1);
     let (aegis_dec_tag, rest) = rest.split_at_mut(1);
     let (aegis256_enc_tag, aegis256_dec_tag) = rest.split_at_mut(1);
+    let x2 = Aegis128X2::new(&Key::from(KEY128));
+    let x4 = Aegis128X4::new(&Key::from(KEY128));
+    let y2 = Aegis256X2::new(&Key::from(KEY256));
+    let y4 = Aegis256X4::new(&Key::from(KEY256));
     let mut tasks: Vec<Task<'_>> = vec![
         (
             "sha-1",
@@ -1079,6 +1107,70 @@ fn other_section(under: &mut Under<'_>, run: &mut Run) -> bool {
                 let mut state = aegis256.decryptor(&[0x24; 32]);
                 let _ = state.update(d);
                 let _ = state.verify(&aegis256_dec_tag[0]);
+            }),
+        ),
+        (
+            "aegis-128x2-enc",
+            Box::new(|d: &mut [u8]| {
+                let mut state = x2.encryptor(&[0x24; 16]);
+                let _ = state.update(d);
+                black_box(state.finalize());
+            }),
+        ),
+        (
+            "aegis-128x2-dec",
+            Box::new(|d: &mut [u8]| {
+                let mut state = x2.decryptor(&[0x24; 16]);
+                let _ = state.update(d);
+                let _ = state.verify(&[0; 16]);
+            }),
+        ),
+        (
+            "aegis-128x4-enc",
+            Box::new(|d: &mut [u8]| {
+                let mut state = x4.encryptor(&[0x24; 16]);
+                let _ = state.update(d);
+                black_box(state.finalize());
+            }),
+        ),
+        (
+            "aegis-128x4-dec",
+            Box::new(|d: &mut [u8]| {
+                let mut state = x4.decryptor(&[0x24; 16]);
+                let _ = state.update(d);
+                let _ = state.verify(&[0; 16]);
+            }),
+        ),
+        (
+            "aegis-256x2-enc",
+            Box::new(|d: &mut [u8]| {
+                let mut state = y2.encryptor(&[0x24; 32]);
+                let _ = state.update(d);
+                black_box(state.finalize());
+            }),
+        ),
+        (
+            "aegis-256x2-dec",
+            Box::new(|d: &mut [u8]| {
+                let mut state = y2.decryptor(&[0x24; 32]);
+                let _ = state.update(d);
+                let _ = state.verify(&[0; 16]);
+            }),
+        ),
+        (
+            "aegis-256x4-enc",
+            Box::new(|d: &mut [u8]| {
+                let mut state = y4.encryptor(&[0x24; 32]);
+                let _ = state.update(d);
+                black_box(state.finalize());
+            }),
+        ),
+        (
+            "aegis-256x4-dec",
+            Box::new(|d: &mut [u8]| {
+                let mut state = y4.decryptor(&[0x24; 32]);
+                let _ = state.update(d);
+                let _ = state.verify(&[0; 16]);
             }),
         ),
     ];

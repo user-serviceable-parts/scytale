@@ -244,7 +244,7 @@ pub static MAC: Family = Family {
     entries: &[&HMAC, &OTHER_MACS],
 };
 
-static AEADS: [Entry; 15] = [
+static AEADS: [Entry; 19] = [
     e(
         "aes-128-gcm",
         Exact(16),
@@ -323,12 +323,44 @@ static AEADS: [Entry; 15] = [
     ),
     e("aegis-128l", Exact(16), Exact(16), Exact(16), No, ""),
     e(
+        "aegis-128x2",
+        Exact(16),
+        Exact(16),
+        Exact(16),
+        No,
+        "two lanes",
+    ),
+    e(
+        "aegis-128x4",
+        Exact(16),
+        Exact(16),
+        Exact(16),
+        No,
+        "four lanes",
+    ),
+    e(
         "aegis-256",
         Exact(32),
         Exact(32),
         Exact(16),
         No,
         "nonce wide enough to draw at random",
+    ),
+    e(
+        "aegis-256x2",
+        Exact(32),
+        Exact(32),
+        Exact(16),
+        No,
+        "two lanes",
+    ),
+    e(
+        "aegis-256x4",
+        Exact(32),
+        Exact(32),
+        Exact(16),
+        No,
+        "four lanes",
     ),
 ];
 

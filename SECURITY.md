@@ -76,7 +76,7 @@ excluded.
 | hex, base64, PEM | `codec/` | each character computed from its value with masks, no table indexed by a secret; a bad character is recorded and reported after the whole string is read |
 | CMAC | over the cipher | as the cipher; subkey doubling masks rather than branches; `Mac::verify` compares with `constant_time::equal` |
 | KW, KWP | over the cipher | the integrity check value is compared with `constant_time::equal` |
-| GCM, GCM-SIV, XPN, CCM, ChaCha20-Poly1305, XChaCha20-Poly1305, AEGIS-128L, AEGIS-256 | over the above | tag compared whole with `constant_time::equal`; plaintext never released on failure |
+| GCM, GCM-SIV, XPN, CCM, ChaCha20-Poly1305, XChaCha20-Poly1305, AEGIS-128L, AEGIS-256 and their parallel forms | over the above | tag compared whole with `constant_time::equal`; plaintext never released on failure |
 | CTR_DRBG | AES-256 | as AES; the state is a `Key` |
 | Hash_DRBG, HMAC_DRBG | over the hashes | as the hash; the state is wiped on drop, and Hash_DRBG's additions carry through every byte |
 | `constant_time::equal` | `constant_time.rs` | reads every byte of both operands; the accumulator goes through `black_box` so the compiler cannot reintroduce an early exit; a length mismatch returns early, since lengths are not secret |
@@ -377,7 +377,8 @@ and this is what it promises about them.
   key, or for AEGIS the state, with it. The library counts nonces for
   you when asked (`cipher::Nonces`) but cannot stop a caller
   supplying its own. XChaCha20-Poly1305's 192-bit nonce and
-  AEGIS-256's 256-bit one are the ones wide enough to draw at random.
+  the 256-bit one of AEGIS-256 and its parallel forms are the ones
+  wide enough to draw at random.
   GCM-SIV survives a repeated nonce at the cost of revealing that two
   messages were equal.
 - **Weak or reused keys.** A Poly1305 key used for two messages
