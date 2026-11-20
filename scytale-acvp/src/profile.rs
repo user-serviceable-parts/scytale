@@ -17,8 +17,8 @@ use crate::suite::Suite;
 use crate::support::{Error, FixedEntropy};
 use scytale::Random;
 use scytale::aead::{
-    Aegis128L, Aegis256, Ccm, ChaCha20Poly1305, Gcm, GcmSiv, XChaCha20Poly1305,
-    Xpn,
+    Aegis128L, Aegis128X2, Aegis128X4, Aegis256, Aegis256X2, Aegis256X4, Ccm,
+    ChaCha20Poly1305, Gcm, GcmSiv, XChaCha20Poly1305, Xpn,
 };
 use scytale::cipher::aes::{Aes128, Aes192, Aes256};
 use scytale::cipher::chacha20::ChaCha20;
@@ -105,6 +105,10 @@ pub(crate) fn candidates() -> Vec<Features> {
         XChaCha20Poly1305::profiles(),
         Aegis128L::profiles(),
         Aegis256::profiles(),
+        Aegis128X2::profiles(),
+        Aegis128X4::profiles(),
+        Aegis256X2::profiles(),
+        Aegis256X4::profiles(),
         <ecdh::p256::PrivateKey as Dispatcher>::profiles(),
         <ecdh::p384::PrivateKey as Dispatcher>::profiles(),
         <ecdh::p521::PrivateKey as Dispatcher>::profiles(),

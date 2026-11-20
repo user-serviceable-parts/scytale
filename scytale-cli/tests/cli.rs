@@ -53,18 +53,20 @@ fn aead_round_trips_and_detects_tampering() {
         "chacha20-poly1305",
         "xchacha20-poly1305",
         "aegis-128l",
+        "aegis-128x2",
+        "aegis-128x4",
         "aegis-256",
+        "aegis-256x2",
+        "aegis-256x4",
     ] {
-        let key = if alg.ends_with("chacha20-poly1305") || alg == "aegis-256" {
-            KEY32
-        } else {
-            KEY16
-        };
+        let wide =
+            alg.ends_with("chacha20-poly1305") || alg.starts_with("aegis-256");
+        let key = if wide { KEY32 } else { KEY16 };
         // The keys are hex of the right width, and a nonce is too.
         let nonce = match alg {
             "xchacha20-poly1305" => NONCE24,
-            "aegis-128l" => KEY16,
-            "aegis-256" => KEY32,
+            _ if alg.starts_with("aegis-128") => KEY16,
+            _ if alg.starts_with("aegis-256") => KEY32,
             _ => NONCE,
         };
         let message = b"the quick brown fox".repeat(1000);

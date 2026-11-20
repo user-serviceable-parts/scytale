@@ -20,7 +20,7 @@ and back.
 | --- | --- | --- |
 | `scytale hash` | a digest of each input, `sha256sum` style, or of a tuple of strings | SHA-1, SHA-2, SHA-3, BLAKE2b, SHAKE, cSHAKE, TupleHash |
 | `scytale mac tag` / `verify` | a tag over the input, or a check of one | HMAC, CMAC, KMAC, Poly1305 |
-| `scytale aead encrypt` / `decrypt` | authenticated encryption, tag after the ciphertext | AES-GCM, AES-GCM-SIV, AES-CCM, AES-XPN, ChaCha20-Poly1305, XChaCha20-Poly1305, AEGIS-128L, AEGIS-256 |
+| `scytale aead encrypt` / `decrypt` | authenticated encryption, tag after the ciphertext | AES-GCM, AES-GCM-SIV, AES-CCM, AES-XPN, ChaCha20-Poly1305, XChaCha20-Poly1305, AEGIS-128L, -128X2, -128X4, AEGIS-256, -256X2, -256X4 |
 | `scytale cipher encrypt` / `decrypt` | the unauthenticated modes | AES-ECB, -CBC, -CTR, -CFB, -OFB, -XTS, ChaCha20, XChaCha20, FF1, FF3-1 |
 | `scytale cipher wrap` / `unwrap` | key wrapping | AES-KW, AES-KWP |
 | `scytale kdf hkdf` / `pbkdf2` / `argon2id` / `tls12` / `sp800-108` / `one-step` / `x963` | keys from keying material, from a password, from a key-derivation key, from a shared secret, or as TLS 1.2 derives them | HKDF, PBKDF2, Argon2id, TLS 1.2 PRF, SP 800-108 KBKDF and KDF-KMAC, SP 800-56C one-step, X9.63 |

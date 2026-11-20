@@ -173,7 +173,7 @@ pub(super) mod zvkned {
     macro_rules! input128l {
         () => {
             "vle32.v v8, ({data})\n\
-             addi {t}, {data}, 16\n\
+             add {t}, {data}, {second}\n\
              vle32.v v9, ({t})\n"
         };
     }
@@ -571,9 +571,56 @@ pub(super) mod zvkned {
 
     /// Defines a kernel: the state into the registers, `$body` for
     /// each block of input round the places the state can lie, and
-    /// the state back from wherever the input ended.
+    /// the state back from wherever the input ended. A `halves`
+    /// kernel takes its block in two pieces `second` bytes apart,
+    /// and a `whole` one in one.
     macro_rules! kernel {
-        ($(#[$doc:meta])* $name:ident, $data:ty, $load:ident,
+        (halves, $(#[$doc:meta])* $name:ident, $data:ty, $load:ident,
+         $rotations:ident, $body:ident, $store:ident) => {
+            $(#[$doc])*
+            ///
+            /// # Safety
+            /// Requires the vector extension and Zvkned; `data` must
+            /// point at `blocks` blocks of input, each `step` bytes
+            /// on from the last
+            /// and each with a second piece `second` bytes on from
+            /// its first, and `blocks >= 1`.
+            unsafe fn $name(
+                state: &mut State,
+                data: $data,
+                second: usize,
+                step: usize,
+                blocks: usize,
+            ) {
+                unsafe {
+                    core::arch::asm!(
+                        ".option push",
+                        ".option arch, +v, +zvkned",
+                        "vsetivli zero, 4, e32, m1, ta, ma",
+                        $load!(),
+                        "2:",
+                        $rotations!($body),
+                        "j 2b",
+                        $rotations!($store),
+                        "4:",
+                        ".option pop",
+                        state = in(reg) state.as_mut_ptr(),
+                        data = inout(reg) data => _,
+                        second = in(reg) second,
+                        step = in(reg) step,
+                        n = inout(reg) blocks => _,
+                        t = out(reg) _,
+                        out("v0") _, out("v1") _, out("v2") _,
+                        out("v3") _, out("v4") _, out("v5") _,
+                        out("v6") _, out("v7") _, out("v8") _,
+                        out("v9") _, out("v10") _, out("v11") _,
+                        out("v12") _,
+                        options(nostack),
+                    );
+                }
+            }
+        };
+        (whole, $(#[$doc:meta])* $name:ident, $data:ty, $load:ident,
          $rotations:ident, $body:ident, $store:ident) => {
             $(#[$doc])*
             ///
@@ -617,6 +664,7 @@ pub(super) mod zvkned {
     }
 
     kernel!(
+        halves,
         /// The AEGIS-128L `Absorb`.
         run_absorb128l,
         *const u8,
@@ -626,6 +674,7 @@ pub(super) mod zvkned {
         store128l
     );
     kernel!(
+        halves,
         /// The AEGIS-128L `Enc`, in place.
         run_encrypt128l,
         *mut u8,
@@ -635,6 +684,7 @@ pub(super) mod zvkned {
         store128l
     );
     kernel!(
+        halves,
         /// The AEGIS-128L `Dec`, in place.
         run_decrypt128l,
         *mut u8,
@@ -644,6 +694,7 @@ pub(super) mod zvkned {
         store128l
     );
     kernel!(
+        whole,
         /// The AEGIS-256 `Absorb`.
         run_absorb256,
         *const u8,
@@ -653,6 +704,7 @@ pub(super) mod zvkned {
         store256
     );
     kernel!(
+        whole,
         /// The AEGIS-256 `Enc`, in place.
         run_encrypt256,
         *mut u8,
@@ -662,6 +714,7 @@ pub(super) mod zvkned {
         store256
     );
     kernel!(
+        whole,
         /// The AEGIS-256 `Dec`, in place.
         run_decrypt256,
         *mut u8,
@@ -672,6 +725,7 @@ pub(super) mod zvkned {
     );
 
     entries!(
+        halves,
         32,
         run_absorb128l,
         run_encrypt128l,
@@ -679,9 +733,13 @@ pub(super) mod zvkned {
         absorb128l,
         stir128l,
         encrypt128l,
-        decrypt128l
+        decrypt128l,
+        absorb128l_lane,
+        encrypt128l_lane,
+        decrypt128l_lane
     );
     entries!(
+        whole,
         16,
         run_absorb256,
         run_encrypt256,
@@ -689,7 +747,10 @@ pub(super) mod zvkned {
         absorb256,
         stir256,
         encrypt256,
-        decrypt256
+        decrypt256,
+        absorb256_lane,
+        encrypt256_lane,
+        decrypt256_lane
     );
 }
 
@@ -983,7 +1044,11 @@ pub(super) mod zkn {
         decrypt128l
     );
 
+    // Sixteen halves of state and everything else take every register
+    // there is, so this loop cannot also be told where a lane's second
+    // piece lies; the parallel variants bring a lane together first.
     entries!(
+        contiguous,
         32,
         run_absorb128l,
         run_encrypt128l,
@@ -1138,6 +1203,7 @@ pub(super) mod zkn {
     );
 
     entries!(
+        whole,
         16,
         run_absorb256,
         run_encrypt256,
@@ -1145,6 +1211,9 @@ pub(super) mod zkn {
         absorb256,
         stir256,
         encrypt256,
-        decrypt256
+        decrypt256,
+        absorb256_lane,
+        encrypt256_lane,
+        decrypt256_lane
     );
 }
