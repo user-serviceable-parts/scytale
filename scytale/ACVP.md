@@ -20,10 +20,10 @@ are tested.
 
 | | |
 | --- | --- |
-| Date | 2026-11-14 |
-| Server | `demo.acvts.nist.gov`, session 788120 |
+| Date | 2026-11-21 |
+| Server | `demo.acvts.nist.gov`, session 789470 |
 | Result | 88 vector sets, 88 passed |
-| Commit | `ea15cb3` |
+| Commit | `7fc20b7` |
 
 ## Operating environment
 
@@ -31,7 +31,7 @@ are tested.
 | --- | --- |
 | Processor | 13th Gen Intel Core i7-1355U, x86-64 |
 | Operating system | Debian GNU/Linux 13, Linux 6.12 |
-| Compiler | rustc 1.99.1, release build |
+| Compiler | rustc 1.100.0, release build |
 | Dispatch | the implementations the library picks on this processor |
 
 ## What passed
