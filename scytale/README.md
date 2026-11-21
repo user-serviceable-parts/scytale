@@ -539,11 +539,12 @@ Which implementation that is is not a choice a caller makes. The
 implementations are private: hardware instructions where the processor
 has them, otherwise constant-time portable code. There is a
 table-driven AES in the crate that is about seventy percent faster
-than the constant-time portable one, and it is never chosen, because
-it indexes tables with bytes derived from the key and so leaks the key
-to an attacker who can measure cache timing. A way for an application
-that runs nothing untrusted to ask for it by name is still to be
-designed.
+than the constant-time portable one, and it is not chosen unless the
+program asks, because it indexes tables with bytes derived from the
+key and so leaks the key to an attacker who can measure cache timing.
+An application that runs nothing untrusted beside it may put
+`Feature::Isolated` in force, which admits it below any AES
+instructions the processor has; see the `features` module.
 
 ### Keys wipe themselves
 
