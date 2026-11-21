@@ -23,7 +23,7 @@ are tested.
 | Date | 2026-11-21 |
 | Server | `demo.acvts.nist.gov`, session 789470 |
 | Result | 88 vector sets, 88 passed |
-| Commit | `7fc20b7` |
+| Commit | `c863290` |
 
 ## Operating environment
 
