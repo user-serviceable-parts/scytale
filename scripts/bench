@@ -226,10 +226,6 @@ fi
 as_user cargo bench -p scytale --no-run
 
 commit=$(as_user git rev-parse HEAD 2> /dev/null || echo unknown)
-if [ -n "$(as_user git status --porcelain --untracked-files=no \
-    2> /dev/null)" ]; then
-    commit="$commit-dirty"
-fi
 
 # Changes a file, remembering what it held so it can be put back. A
 # file the kernel does not offer is skipped, and one it refuses to
