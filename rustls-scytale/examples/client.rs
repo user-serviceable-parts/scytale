@@ -11,9 +11,8 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 
-use rustls::{ClientConfig, RootCertStore};
-
-mod blocking;
+use rustls::{ClientConfig, RootCertStore, VecInput};
+use rustls_util::Stream;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let host = std::env::args()
@@ -28,12 +27,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             .with_root_certificates(roots)
             .with_no_client_auth()?;
 
-    let mut hello = Vec::new();
+    let mut output = Vec::new();
     let mut conn = Arc::new(config)
         .connect(host.clone().try_into()?)
-        .build(&mut hello)?;
+        .build(&mut output)?;
     let mut sock = TcpStream::connect((host.as_str(), 443))?;
-    let mut tls = blocking::Tls::new(&mut conn, &mut sock, hello);
+    let (mut input, mut plain) = (VecInput::default(), Vec::new());
+    let mut tls =
+        Stream::new(&mut input, &mut plain, &mut output, &mut conn, &mut sock);
 
     let request = format!(
         "GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\
@@ -53,7 +54,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     // The server may already have gone; there is nothing to do if so.
-    let _ = tls.close();
+    let _ = tls.conn.send_close_notify(tls.output);
+    let _ = tls.flush();
 
     eprintln!("protocol:     {:?}", conn.protocol_version());
     eprintln!(

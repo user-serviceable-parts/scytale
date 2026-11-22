@@ -22,9 +22,8 @@ use std::sync::Arc;
 
 use rustls::crypto::Identity;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use rustls::{Connection, ServerConfig};
-
-mod blocking;
+use rustls::{Connection, ServerConfig, VecInput};
+use rustls_util::Stream;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let data = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/ecdsa-p256");
@@ -48,13 +47,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     eprintln!("listening on {}", listener.local_addr()?);
     let (mut sock, peer) = listener.accept()?;
     let mut conn = Connection::new(Arc::new(config))?;
-    let mut tls = blocking::Tls::new(&mut conn, &mut sock, Vec::new());
+    let (mut input, mut plain, mut output) =
+        (VecInput::default(), Vec::new(), Vec::new());
+    let mut tls =
+        Stream::new(&mut input, &mut plain, &mut output, &mut conn, &mut sock);
 
     tls.write_all(b"hello from rustls-scytale\n")?;
     tls.flush()?;
     let mut buf = [0u8; 256];
     let n = tls.read(&mut buf)?;
-    tls.close()?;
+    // close_notify, so the peer can tell the end of the data from a
+    // connection cut short.
+    tls.conn.send_close_notify(tls.output)?;
+    tls.flush()?;
     eprintln!(
         "{peer}: {:?}, {:?}, {:?}, sent {:?}",
         conn.protocol_version(),
