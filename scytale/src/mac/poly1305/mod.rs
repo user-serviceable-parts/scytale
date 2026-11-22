@@ -38,6 +38,10 @@ pub const KEY_SIZE: usize = 32;
 /// The block, and tag, length in bytes.
 const BLOCK: usize = 16;
 
+/// The most a message can leave waiting between calls: one group of
+/// the vector loop, which takes nothing smaller.
+const BUFFER: usize = 4 * BLOCK;
+
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod x86_64;
 
@@ -64,9 +68,15 @@ pub struct Poly1305 {
     s: [u64; 2],
     /// The running polynomial value.
     h: [u64; 3],
-    /// Bytes of a block not yet complete.
-    block: [u8; BLOCK],
+    /// Bytes waiting for the rest of their block, or of their group
+    /// when the vector loop is taking the message.
+    buffer: [u8; BUFFER],
     used: usize,
+    /// How far into `buffer` this message has written: what a reset
+    /// has to wipe. A message whose pieces are whole groups writes
+    /// none of it, and a wipe of all of it, a byte at a time, cost
+    /// more than one of those groups takes.
+    dirty: usize,
     /// Whether this processor has the loop written out for it. Asked
     /// once, here, rather than on the way past for every run of
     /// blocks.
@@ -77,6 +87,12 @@ pub struct Poly1305 {
     /// pays for them.
     #[cfg(target_arch = "x86_64")]
     powers: Option<x86_64::Powers>,
+    /// The vector loop's four chains, from its first group until the
+    /// message ends, when they become `h`. Until then nothing else
+    /// touches `h`: every block goes through them, the last ones
+    /// waiting in `buffer`.
+    #[cfg(target_arch = "x86_64")]
+    lanes: x86_64::Lanes,
 }
 
 impl Poly1305 {
@@ -106,12 +122,47 @@ impl Poly1305 {
             r20: [r[1] * 20, r[2] * 20],
             s: [word(16), word(24)],
             h: [0; 3],
-            block: [0; BLOCK],
+            buffer: [0; BUFFER],
             used: 0,
+            dirty: 0,
             #[cfg(target_arch = "x86_64")]
             fast: x86_64::supported(),
             #[cfg(target_arch = "x86_64")]
             powers: None,
+            #[cfg(target_arch = "x86_64")]
+            lanes: x86_64::Lanes::new(),
+        }
+    }
+
+    /// What `update` hands on at once: a group for the vector loop,
+    /// a block for the chain.
+    fn unit(&self) -> usize {
+        #[cfg(target_arch = "x86_64")]
+        if self.fast {
+            return x86_64::SPAN;
+        }
+        BLOCK
+    }
+
+    /// Takes `data`, a whole number of units, into the message.
+    fn run(&mut self, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        // The powers of `r` are left until a group arrives, and are
+        // borrowed where they lie, field by field, so that no copy of
+        // them is made for the `Drop` to miss.
+        #[cfg(target_arch = "x86_64")]
+        if self.fast {
+            let r = &self.r;
+            let powers =
+                self.powers.get_or_insert_with(|| x86_64::Powers::new(r));
+            x86_64::bulk(&mut self.lanes, powers, data);
+            return;
+        }
+        let (blocks, _) = data.as_chunks::<BLOCK>();
+        for block in blocks {
+            self.absorb(block, 1);
         }
     }
 
@@ -122,19 +173,31 @@ impl Poly1305 {
     /// its one written as a byte in the buffer instead, and passes
     /// zero here.
     fn absorb(&mut self, block: &[u8; BLOCK], high: u64) {
+        Self::chain(&mut self.h, &self.r, &self.r20, block, high);
+    }
+
+    /// `absorb` on the fields it uses, so that a block can be read
+    /// where it lies in the buffer rather than copied out of it first.
+    fn chain(
+        h: &mut [u64; 3],
+        r: &[u64; 3],
+        r20: &[u64; 2],
+        block: &[u8; BLOCK],
+        high: u64,
+    ) {
         let mut lo = [0u8; 8];
         let mut hi = [0u8; 8];
         lo.copy_from_slice(&block[..8]);
         hi.copy_from_slice(&block[8..]);
         let t0 = u64::from_le_bytes(lo);
         let t1 = u64::from_le_bytes(hi);
-        let [mut h0, mut h1, mut h2] = self.h;
+        let [mut h0, mut h1, mut h2] = *h;
         h0 += t0 & MASK44;
         h1 += ((t0 >> 44) | (t1 << 20)) & MASK44;
         h2 += ((t1 >> 24) & MASK42) | (high << 40);
 
-        let [r0, r1, r2] = self.r;
-        let [s1, s2] = self.r20;
+        let [r0, r1, r2] = *r;
+        let [s1, s2] = *r20;
         let wide = |a: u64, b: u64| u128::from(a) * u128::from(b);
         // Schoolbook product, with the limbs that pass 2^132 wrapped
         // round through the twenty-fold values.
@@ -156,7 +219,7 @@ impl Poly1305 {
         let c = h0 >> 44;
         h0 &= MASK44;
         h1 += c;
-        self.h = [h0, h1, h2];
+        *h = [h0, h1, h2];
     }
 
     /// Fully reduces the accumulator, adds `s`, and returns the tag.
@@ -243,60 +306,55 @@ impl Mac for Poly1305 {
 
     fn reset(&mut self) {
         self.h = [0; 3];
-        self.block.zeroize();
+        self.buffer[..self.dirty].zeroize();
         self.used = 0;
+        self.dirty = 0;
+        #[cfg(target_arch = "x86_64")]
+        self.lanes.clear();
     }
 
     fn update(&mut self, mut data: &[u8]) {
+        let unit = self.unit();
         if self.used > 0 {
-            let take = (BLOCK - self.used).min(data.len());
-            self.block[self.used..self.used + take]
+            let take = (unit - self.used).min(data.len());
+            self.buffer[self.used..self.used + take]
                 .copy_from_slice(&data[..take]);
             self.used += take;
+            self.dirty = self.dirty.max(self.used);
             data = &data[take..];
-            if self.used < BLOCK {
+            if self.used < unit {
                 return;
             }
-            let block = self.block;
-            self.absorb(&block, 1);
+            let buffer = self.buffer;
+            self.run(&buffer[..unit]);
             self.used = 0;
         }
-        #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
-        let mut data = data;
-
-        // Whole groups through the loop written out for this
-        // processor, where there is one, and the odd blocks after.
-        // What the processor has was settled when the authenticator
-        // was made; only the powers of `r` are left until a run
-        // arrives that is worth them. They are borrowed where they
-        // lie, field by field, so that no copy of them is made for
-        // the `Drop` to miss.
-        #[cfg(target_arch = "x86_64")]
-        if self.fast && data.len() >= x86_64::SPAN {
-            let r = &self.r;
-            let powers =
-                self.powers.get_or_insert_with(|| x86_64::Powers::new(r));
-            let groups = data.len() / x86_64::SPAN;
-            let (whole, rest) = data.split_at(groups * x86_64::SPAN);
-            x86_64::bulk(&mut self.h, powers, whole);
-            data = rest;
-        }
-
-        let (blocks, rest) = data.as_chunks::<BLOCK>();
-        for block in blocks {
-            self.absorb(block, 1);
-        }
-        self.block[..rest.len()].copy_from_slice(rest);
+        let (whole, rest) = data.split_at(data.len() - data.len() % unit);
+        self.run(whole);
+        self.buffer[..rest.len()].copy_from_slice(rest);
         self.used = rest.len();
+        self.dirty = self.dirty.max(self.used);
     }
 
     fn finalize(&mut self) -> Self::Tag {
-        if self.used > 0 {
+        // A message shorter than a group never started the chains,
+        // and is the chain's alone.
+        #[cfg(target_arch = "x86_64")]
+        if self.lanes.started()
+            && let Some(powers) = &self.powers
+        {
+            self.h = x86_64::collapse(&self.lanes, powers);
+        }
+        let (blocks, rest) = self.buffer[..self.used].as_chunks::<BLOCK>();
+        for block in blocks {
+            Self::chain(&mut self.h, &self.r, &self.r20, block, 1);
+        }
+        if !rest.is_empty() {
             // The one that marks the end goes just past the message;
             // the standard's 2^128 for a whole block is the same rule.
-            let mut block = self.block;
-            block[self.used] = 1;
-            block[self.used + 1..].fill(0);
+            let mut block = [0u8; BLOCK];
+            block[..rest.len()].copy_from_slice(rest);
+            block[rest.len()] = 1;
             self.absorb(&block, 0);
         }
         let tag = self.tag();
@@ -312,12 +370,15 @@ impl Clone for Poly1305 {
             r20: self.r20,
             s: self.s,
             h: self.h,
-            block: self.block,
+            buffer: self.buffer,
             used: self.used,
+            dirty: self.dirty,
             #[cfg(target_arch = "x86_64")]
             fast: self.fast,
             #[cfg(target_arch = "x86_64")]
             powers: self.powers.clone(),
+            #[cfg(target_arch = "x86_64")]
+            lanes: self.lanes.clone(),
         }
     }
 }
@@ -329,7 +390,7 @@ impl Drop for Poly1305 {
         self.r20.zeroize();
         self.s.zeroize();
         self.h.zeroize();
-        self.block.zeroize();
+        self.buffer.zeroize();
         self.used.zeroize();
     }
 }
@@ -382,13 +443,20 @@ mod tests {
     #[test]
     fn four_at_once_agrees_with_one() {
         const MAX: usize = 17 * BLOCK + 7;
-        let key = [0x2bu8; KEY_SIZE];
         let mut data = [0u8; MAX];
         for (i, b) in data.iter_mut().enumerate() {
             *b = (i * 7 + 1) as u8;
         }
+        agrees(&[0x2bu8; KEY_SIZE], &data);
+        // Every bit set, in the key and the message: the limbs as
+        // large as they come, which is what the bounds in the vector
+        // code are about.
+        agrees(&[0xffu8; KEY_SIZE], &[0xffu8; MAX]);
+    }
 
-        for len in 0..MAX {
+    fn agrees(key: &[u8; KEY_SIZE], data: &[u8]) {
+        let key = *key;
+        for len in 0..data.len() {
             let want = one_at_a_time(&key, &data[..len]);
 
             let mut p = Poly1305::new(&Key::from(key));
@@ -555,6 +623,22 @@ mod tests {
         let mut mac = Poly1305::new(&Key::from(*key));
         mac.update(b"not this");
         mac.reset();
+        mac.update(&message);
+        assert_eq!(mac.finalize(), expected);
+    }
+
+    /// A reset forgets a message the vector loop had already started
+    /// on, chains and buffer both, and so does a finalize.
+    #[test]
+    fn reset_forgets_the_chains() {
+        let key = [0x3cu8; KEY_SIZE];
+        let message: [u8; 101] = core::array::from_fn(|i| (i * 5) as u8);
+        let expected = tag_of(&key, &message);
+        let mut mac = Poly1305::new(&Key::from(key));
+        mac.update(&[0xa5; 3 * BUFFER + 9]);
+        mac.reset();
+        mac.update(&message);
+        assert_eq!(mac.finalize(), expected);
         mac.update(&message);
         assert_eq!(mac.finalize(), expected);
     }

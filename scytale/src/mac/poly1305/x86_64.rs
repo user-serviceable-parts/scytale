@@ -33,12 +33,22 @@
 //! lane, so 26 is as wide as a limb can be and still leave room for
 //! a product and the sum of five of them.
 //!
+//! # Between calls
+//!
+//! The four chains stay in their lanes from one call to the next, and
+//! become one value only when the message ends. Turning them into the
+//! portable code's three limbs and back on every call cost more than
+//! the multiply itself for a short run, and nothing needs them as one
+//! value before the end.
+//!
 //! # What is left to the caller
 //!
-//! The first group, the weights at the end, and the key's powers.
-//! Each happens once for a message rather than once for a group, so
-//! none of them is worth the assembly, and the arithmetic that is
-//! easiest to get wrong stays where it can be read.
+//! The key's powers and the last carries. Each happens once for a
+//! message rather than once for a group, so neither is worth the
+//! assembly, and the arithmetic that is easiest to get wrong stays
+//! where it can be read. The weights at the end are in the assembly
+//! after all: done as four scalar products they were two thirds of
+//! the cost of a 64-byte message.
 
 #![allow(unsafe_code)]
 
@@ -75,10 +85,11 @@ struct Tables([[u64; LANES]; 11]);
 #[derive(Clone)]
 pub(super) struct Powers {
     tables: Tables,
-    /// The weight each lane's chain is multiplied by at the end:
+    /// The weight each lane's chain is multiplied by at the end,
+    /// laid out as `tables` is but a different value in each lane:
     /// `r^4`, `r^3`, `r^2` and `r`, in the order the loads below
-    /// leave the lanes.
-    weights: [[u64; LIMBS]; LANES],
+    /// leave the lanes. The last two of the eleven rows are unused.
+    weights: Tables,
 }
 
 // Every word here is worked out from `r`, and the last weight is `r`
@@ -88,7 +99,7 @@ pub(super) struct Powers {
 impl Drop for Powers {
     fn drop(&mut self) {
         self.tables.0.zeroize();
-        self.weights.zeroize();
+        self.weights.0.zeroize();
     }
 }
 
@@ -155,23 +166,6 @@ fn carry(d: [u128; LIMBS]) -> [u64; LIMBS] {
     out
 }
 
-/// The limbs of one block, with the bit that sits above it.
-fn block_limbs(block: &[u8; BLOCK], high: u64) -> [u64; LIMBS] {
-    let word = |at: usize| {
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(&block[at..at + 8]);
-        u64::from_le_bytes(bytes)
-    };
-    let (lo, hi) = (word(0), word(8));
-    [
-        lo & MASK,
-        (lo >> 26) & MASK,
-        ((lo >> 52) | (hi << 12)) & MASK,
-        (hi >> 14) & MASK,
-        (hi >> 40) | (high << 24),
-    ]
-}
-
 impl Powers {
     /// The powers of `r`, which arrives as the three limbs the
     /// portable code clamped it into.
@@ -193,71 +187,127 @@ impl Powers {
 
         // The loads in the loop leave the group's blocks in the lane
         // order 0, 2, 1, 3, so the weights take that order too.
-        Powers {
-            tables,
-            weights: [r4, r2, r3, *r],
+        let lanes = [&r4, &r2, &r3, r];
+        let mut weights = Tables([[0u64; LANES]; 11]);
+        for k in 0..LIMBS {
+            weights.0[k] = core::array::from_fn(|lane| lanes[lane][k]);
+        }
+        for k in 1..LIMBS {
+            weights.0[4 + k] = core::array::from_fn(|lane| 5 * lanes[lane][k]);
+        }
+        Powers { tables, weights }
+    }
+}
+
+/// Five limbs in each lane, aligned as the tables are.
+#[repr(align(32))]
+#[derive(Clone)]
+struct Limbs([[u64; LANES]; LIMBS]);
+
+/// The four chains of a message under way.
+#[derive(Clone)]
+pub(super) struct Lanes {
+    limbs: Limbs,
+    /// Whether a group has gone in since the message began. Until one
+    /// has, the limbs hold nothing of this message, and the loop
+    /// starts from registers it clears rather than from memory: zeros
+    /// written here and read straight back as whole registers stall
+    /// the load for longer than the rest of a group takes.
+    started: bool,
+}
+
+impl Lanes {
+    pub(super) fn new() -> Self {
+        Lanes {
+            limbs: Limbs([[0; LANES]; LIMBS]),
+            started: false,
+        }
+    }
+
+    /// Whether any of the message is in the chains.
+    pub(super) fn started(&self) -> bool {
+        self.started
+    }
+
+    /// Forgets the message, wiping what it left.
+    pub(super) fn clear(&mut self) {
+        if self.started {
+            self.limbs.0.zeroize();
+            self.started = false;
         }
     }
 }
 
-/// Adds `data`, a whole number of groups, to the running value `h`.
+// A function of the key and the message, like the running value.
+impl Drop for Lanes {
+    fn drop(&mut self) {
+        self.limbs.0.zeroize();
+    }
+}
+
+/// Runs `data`, a whole number of groups, through the four chains.
 ///
-/// `h` arrives and leaves as the three limbs of 44, 44 and 42 bits
-/// the portable code keeps, so nothing outside this file has to know
-/// about the five.
-///
-/// `data` must be a whole number of groups, and at least one; the
-/// caller splits it so, and this is a debug check on that rather
-/// than a branch on every call.
-pub(super) fn bulk(h: &mut [u64; 3], powers: &Powers, data: &[u8]) {
+/// `data` must be at least one group; the caller splits it so, and
+/// this is a debug check on that rather than a branch on every call.
+pub(super) fn bulk(lanes: &mut Lanes, powers: &Powers, data: &[u8]) {
     debug_assert!(!data.is_empty() && data.len().is_multiple_of(SPAN));
-    let groups = data.len() / SPAN;
-
-    // The first group is added here rather than in the loop, because
-    // the running value joins the first block of it and a test for
-    // that inside the loop would cost more than doing it outside.
-    let (first, rest) = data.split_at(SPAN);
-    let (first, _) = first.as_chunks::<BLOCK>();
-    let mut lanes = [[0u64; LANES]; LIMBS];
-    for (lane, &block) in ORDER.iter().enumerate() {
-        let limbs = block_limbs(&first[block], 1);
-        for (limb, &value) in lanes.iter_mut().zip(&limbs) {
-            limb[lane] = value;
-        }
+    // SAFETY: `supported` was confirmed before these powers were
+    // built, `lanes` is the five limbs the loop expects, the tables
+    // are the ones built beside them, and `data` is whole groups.
+    unsafe {
+        multiply_groups(
+            lanes.limbs.0.as_mut_ptr().cast::<u64>(),
+            usize::from(lanes.started),
+            powers.tables.0.as_ptr().cast::<u64>(),
+            data.as_ptr(),
+            data.len() / SPAN,
+        );
     }
-    for (limb, value) in lanes.iter_mut().zip(from_thirds(h)) {
-        limb[0] += value;
-    }
-
-    if groups > 1 {
-        // SAFETY: `supported` was confirmed before these powers were
-        // built, `lanes` is the five limbs the loop expects, the
-        // tables are the ones built beside them, and `rest` is
-        // `groups - 1` whole groups.
-        unsafe {
-            multiply_groups(
-                lanes.as_mut_ptr().cast::<u64>(),
-                powers.tables.0.as_ptr().cast::<u64>(),
-                rest.as_ptr(),
-                groups - 1,
-            );
-        }
-    }
-
-    // Each lane's chain carries the weight of its place in the group.
-    let mut total = [0u128; LIMBS];
-    for (lane, weight) in powers.weights.iter().enumerate() {
-        let value: [u64; LIMBS] =
-            core::array::from_fn(|limb| lanes[limb][lane]);
-        for (total, limb) in total.iter_mut().zip(multiply(&value, weight)) {
-            *total += u128::from(limb);
-        }
-    }
-    *h = into_thirds(&carry(total));
+    lanes.started = true;
 }
 
-/// The lanes in the order the loop's loads leave them.
-const ORDER: [usize; LANES] = [0, 2, 1, 3];
+/// The four chains as one value: the running value of the message so
+/// far, as the three limbs of 44, 44 and 42 bits the portable code
+/// keeps, so that it can take the last blocks on from here.
+///
+/// The chains must have started; a message with nothing in them has
+/// nothing to collapse.
+pub(super) fn collapse(lanes: &Lanes, powers: &Powers) -> [u64; 3] {
+    debug_assert!(lanes.started);
+    let mut sums = [0u64; LIMBS];
+    // SAFETY: as for `bulk`, with the weights built beside the tables
+    // and `sums` room for five limbs.
+    unsafe {
+        weigh(
+            lanes.limbs.0.as_ptr().cast::<u64>(),
+            powers.weights.0.as_ptr().cast::<u64>(),
+            sums.as_mut_ptr(),
+        );
+    }
+    into_thirds(&reduce(sums))
+}
+
+/// Carries five limbs down to 26 bits each, all the way.
+///
+/// `into_thirds` joins the limbs with OR, which is right only when no
+/// limb has a bit above its 26: a single pass of carries can leave
+/// one limb at exactly `2^26`, when the fold from the top tips the
+/// bottom over and that carry lands on a limb already full. Three
+/// passes cannot: the second leaves a carry of at most one from the
+/// top, and the third can only fold that into a bottom limb it has
+/// just emptied.
+fn reduce(mut limbs: [u64; LIMBS]) -> [u64; LIMBS] {
+    for _ in 0..3 {
+        let mut c = 0;
+        for limb in limbs.iter_mut() {
+            let v = *limb + c;
+            *limb = v & MASK;
+            c = v >> 26;
+        }
+        limbs[0] += 5 * c;
+    }
+    limbs
+}
 
 /// The five limbs of a value kept as three.
 fn from_thirds(h: &[u64; 3]) -> [u64; LIMBS] {
@@ -289,10 +339,15 @@ fn into_thirds(limbs: &[u64; LIMBS]) -> [u64; 3] {
 /// of the running value times the table entry `$t`.
 macro_rules! term {
     ($k:literal, $i:literal, $t:literal) => {
+        term!("r", $k, $i, $t)
+    };
+    ($base:literal, $k:literal, $i:literal, $t:literal) => {
         concat!(
             "vpmuludq ymm15, ymm",
             $i,
-            ", [{r} + ",
+            ", [{",
+            $base,
+            "} + ",
             $t,
             "*32]\n",
             "vpaddq ymm",
@@ -307,7 +362,50 @@ macro_rules! term {
 /// The first term of a limb, which starts it rather than adding to it.
 macro_rules! first {
     ($k:literal, $i:literal, $t:literal) => {
-        concat!("vpmuludq ymm", $k, ", ymm", $i, ", [{r} + ", $t, "*32]\n")
+        first!("r", $k, $i, $t)
+    };
+    ($base:literal, $k:literal, $i:literal, $t:literal) => {
+        concat!(
+            "vpmuludq ymm",
+            $k,
+            ", ymm",
+            $i,
+            ", [{",
+            $base,
+            "} + ",
+            $t,
+            "*32]\n"
+        )
+    };
+}
+
+/// The four lanes of `ymm$k` added together, stored as limb `$k - 5`
+/// of the result.
+macro_rules! fold {
+    ($k:literal, $at:literal) => {
+        concat!(
+            "vextracti128 xmm15, ymm",
+            $k,
+            ", 1\n",
+            "vpaddq xmm",
+            $k,
+            ", xmm",
+            $k,
+            ", xmm15\n",
+            "vpshufd xmm15, xmm",
+            $k,
+            ", 0x4e\n",
+            "vpaddq xmm",
+            $k,
+            ", xmm",
+            $k,
+            ", xmm15\n",
+            "vmovq [{out} + ",
+            $at,
+            "], xmm",
+            $k,
+            "\n",
+        )
     };
 }
 
@@ -332,25 +430,37 @@ macro_rules! step {
     };
 }
 
-/// Runs `groups` groups of four blocks through the loop.
+/// Runs `groups` groups of four blocks through the four chains held
+/// at `a`, and leaves them there. When `started` is zero the chains
+/// begin at zero and what is at `a` is not read.
 ///
 /// # Safety
 /// Requires AVX2. `a` must point at five lanes-wide limbs of the
-/// running value, `r` at the tables, and `data` at `groups * 64`
-/// bytes, with `groups >= 1`.
+/// chains, aligned to 32 bytes, `r` at the tables, and `data` at
+/// `groups * 64` bytes. `groups` must not be zero.
 unsafe fn multiply_groups(
     a: *mut u64,
+    started: usize,
     r: *const u64,
     data: *const u8,
     groups: usize,
 ) {
     unsafe {
         core::arch::asm!(
-            "vmovdqu ymm0, [{a} + 0*32]",
-            "vmovdqu ymm1, [{a} + 1*32]",
-            "vmovdqu ymm2, [{a} + 2*32]",
-            "vmovdqu ymm3, [{a} + 3*32]",
-            "vmovdqu ymm4, [{a} + 4*32]",
+            "test {started}, {started}",
+            "jz 3f",
+            "vmovdqa ymm0, [{a} + 0*32]",
+            "vmovdqa ymm1, [{a} + 1*32]",
+            "vmovdqa ymm2, [{a} + 2*32]",
+            "vmovdqa ymm3, [{a} + 3*32]",
+            "vmovdqa ymm4, [{a} + 4*32]",
+            "jmp 2f",
+            "3:",
+            "vpxor xmm0, xmm0, xmm0",
+            "vpxor xmm1, xmm1, xmm1",
+            "vpxor xmm2, xmm2, xmm2",
+            "vpxor xmm3, xmm3, xmm3",
+            "vpxor xmm4, xmm4, xmm4",
 
             "2:",
             // Four blocks. The unpacks put the four low words of the
@@ -434,15 +544,16 @@ unsafe fn multiply_groups(
             "dec {groups}",
             "jnz 2b",
 
-            "vmovdqu [{a} + 0*32], ymm0",
-            "vmovdqu [{a} + 1*32], ymm1",
-            "vmovdqu [{a} + 2*32], ymm2",
-            "vmovdqu [{a} + 3*32], ymm3",
-            "vmovdqu [{a} + 4*32], ymm4",
+            "vmovdqa [{a} + 0*32], ymm0",
+            "vmovdqa [{a} + 1*32], ymm1",
+            "vmovdqa [{a} + 2*32], ymm2",
+            "vmovdqa [{a} + 3*32], ymm3",
+            "vmovdqa [{a} + 4*32], ymm4",
             // Leaving the upper halves dirty would slow down whatever
             // plain SSE code runs next.
             "vzeroupper",
             a = in(reg) a,
+            started = in(reg) started,
             r = in(reg) r,
             data = inout(reg) data => _,
             groups = inout(reg) groups => _,
@@ -452,5 +563,95 @@ unsafe fn multiply_groups(
             out("ymm12") _, out("ymm13") _, out("ymm14") _, out("ymm15") _,
             options(nostack),
         );
+    }
+}
+
+/// Weighs each of the four chains at `a` by its place and adds the
+/// lanes together into `out`, as five limbs not yet carried.
+///
+/// # Safety
+/// Requires AVX2. `a` must point at five lanes-wide limbs of the
+/// chains, aligned to 32 bytes, `w` at the weights, and `out` at room
+/// for five limbs.
+unsafe fn weigh(a: *const u64, w: *const u64, out: *mut u64) {
+    unsafe {
+        core::arch::asm!(
+            "vmovdqa ymm0, [{a} + 0*32]",
+            "vmovdqa ymm1, [{a} + 1*32]",
+            "vmovdqa ymm2, [{a} + 2*32]",
+            "vmovdqa ymm3, [{a} + 3*32]",
+            "vmovdqa ymm4, [{a} + 4*32]",
+            // Each lane times its weight, the same product as the
+            // loop's with a different multiplier in every lane. The
+            // limbs are below 2^28 and the weights' below 2^29, so a
+            // term is below 2^57, a limb of five terms below 2^60,
+            // and the four lanes of one below 2^62: no carry is needed
+            // before the lanes are added.
+            first!("w", 5, 0, 0),
+            term!("w", 5, 1, 8),
+            term!("w", 5, 2, 7),
+            term!("w", 5, 3, 6),
+            term!("w", 5, 4, 5),
+            first!("w", 6, 0, 1),
+            term!("w", 6, 1, 0),
+            term!("w", 6, 2, 8),
+            term!("w", 6, 3, 7),
+            term!("w", 6, 4, 6),
+            first!("w", 7, 0, 2),
+            term!("w", 7, 1, 1),
+            term!("w", 7, 2, 0),
+            term!("w", 7, 3, 8),
+            term!("w", 7, 4, 7),
+            first!("w", 8, 0, 3),
+            term!("w", 8, 1, 2),
+            term!("w", 8, 2, 1),
+            term!("w", 8, 3, 0),
+            term!("w", 8, 4, 8),
+            first!("w", 9, 0, 4),
+            term!("w", 9, 1, 3),
+            term!("w", 9, 2, 2),
+            term!("w", 9, 3, 1),
+            term!("w", 9, 4, 0),
+            fold!(5, "0"),
+            fold!(6, "8"),
+            fold!(7, "16"),
+            fold!(8, "24"),
+            fold!(9, "32"),
+            "vzeroupper",
+            a = in(reg) a,
+            w = in(reg) w,
+            out = in(reg) out,
+            out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
+            out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
+            out("ymm8") _, out("ymm9") _, out("ymm10") _, out("ymm11") _,
+            out("ymm12") _, out("ymm13") _, out("ymm14") _, out("ymm15") _,
+            options(nostack),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The case one pass of carries gets wrong: the fold from the top
+    /// tips the bottom limb over, and its carry lands on a full limb.
+    /// The value is `2^52 - 1 + 2^130`, which is `2^52 + 4` in the
+    /// field.
+    #[test]
+    fn reduce_carries_all_the_way() {
+        let full = MASK;
+        let got = reduce([full, full, 0, 0, 1 << 26]);
+        assert_eq!(got, [4, 0, 1, 0, 0]);
+    }
+
+    /// Limbs as large as the vector code can hand over come back
+    /// within 26 bits, so that `into_thirds` may join them with OR.
+    #[test]
+    fn reduce_leaves_every_limb_within_its_bits() {
+        for top in [0, 1, u64::MAX >> 2] {
+            let got = reduce([u64::MAX >> 2, top, top, u64::MAX >> 3, top]);
+            assert!(got.iter().all(|&limb| limb <= MASK), "{got:?}");
+        }
     }
 }
