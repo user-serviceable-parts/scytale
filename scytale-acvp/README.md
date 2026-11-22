@@ -41,8 +41,9 @@ reached through the feature profiles the library's types publish. A
 vector tests the kernels of one type: a hash suite the hash's,
 AES-ECB the cipher's, a mode's suite the mode's, an ECDSA group its
 curve's, the RSA suites RSA's. It is answered under a profile only
-when that type takes a kernel there it has not yet taken, so SHA-2
-on x86-64 runs twice, SHA-NI and portable. A kernel that has passed
+when that type takes a kernel there it has not yet taken, so on
+x86-64 SHA-256 runs twice, SHA-NI and portable, and SHA-512 twice,
+AVX2 and portable. A kernel that has passed
 its own vectors is taken as good wherever else it is used, so a
 suite with no kernel of its own, HMAC or LMS or a KDF, is answered
 once. The work is cut into test groups and spread over the cores,
