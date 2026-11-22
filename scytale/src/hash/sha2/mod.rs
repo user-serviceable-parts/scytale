@@ -229,6 +229,10 @@ pub(crate) enum Kernel {
     /// The SHA extensions on x86-64.
     #[cfg(target_arch = "x86_64")]
     ShaNi,
+    /// SHA-512's message schedule in AVX2, its rounds in BMI1 and
+    /// BMI2, on x86-64.
+    #[cfg(target_arch = "x86_64")]
+    Avx2,
     /// The ARMv8 cryptography extension.
     #[cfg(target_arch = "aarch64")]
     Armv8,
@@ -250,6 +254,11 @@ pub(crate) enum Kernel {
 #[cfg(target_arch = "x86_64")]
 pub(crate) const SHA_NI: Features =
     features::x86(&[X::Sha, X::Ssse3, X::Sse41]);
+/// What the AVX2 SHA-512 loop needs: the schedule is AVX2, and the
+/// rounds use `andn` (BMI1) and `rorx` (BMI2).
+#[cfg(target_arch = "x86_64")]
+pub(crate) const AVX2_512: Features =
+    features::x86(&[X::Avx2, X::Bmi1, X::Bmi2]);
 /// The ARMv8 SHA-256 instructions.
 #[cfg(target_arch = "aarch64")]
 pub(crate) const ARMV8_256: Features = features::arm(&[A::Sha2]);
@@ -288,6 +297,8 @@ pub(crate) const KERNELS32: &[(Kernel, Features)] = &[
 /// processor may have the SHA-256 instructions and not these, which
 /// is why the two families are listed apart.
 pub(crate) const KERNELS64: &[(Kernel, Features)] = &[
+    #[cfg(target_arch = "x86_64")]
+    (Kernel::Avx2, AVX2_512),
     #[cfg(target_arch = "aarch64")]
     (Kernel::Armv8, ARMV8_512),
     #[cfg(target_arch = "riscv64")]
@@ -513,6 +524,7 @@ automatic!(
     PROFILES64,
     128,
     [
+        ("x86_64", Avx2, x86_64::Avx2),
         ("aarch64", Armv8, aarch64::Armv8),
         ("riscv64", Zvknh, riscv64::Zvknh),
         ("riscv64", Zknh, riscv64::Zknh)
@@ -856,6 +868,8 @@ pub(crate) mod tests {
         {
             wipes::<x86_64::Sha224>();
             wipes::<x86_64::Sha256>();
+            wipes::<x86_64::Sha384>();
+            wipes::<x86_64::Sha512>();
         }
         #[cfg(target_arch = "aarch64")]
         {
