@@ -622,9 +622,20 @@ version = "0.10.0-dev.3"
 dependencies = [
  "rustls",
  "rustls-pki-types",
+ "rustls-util",
  "scytale",
  "webpki-roots",
  "zeroize",
+]
+
+[[package]]
+name = "rustls-util"
+version = "0.24.0-dev.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4532520efc9a88fc91751b2259569d5e4b1c80b276657bbb45103b1530fcb430"
+dependencies = [
+ "rustls",
+ "tracing",
 ]
 
 [[package]]

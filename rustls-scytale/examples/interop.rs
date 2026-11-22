@@ -25,11 +25,10 @@ use rustls::crypto::{CryptoProvider, Identity};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::{
     ClientConfig, Connection, RootCertStore, ServerConfig, SideData,
-    SupportedCipherSuite, Tcp,
+    SupportedCipherSuite, Tcp, VecInput,
 };
 use rustls_scytale::cipher_suite as cs;
-
-mod blocking;
+use rustls_util::Stream;
 
 const USAGE: &str = "usage: interop client|server PORT SUITE FILE...";
 
@@ -95,12 +94,13 @@ fn provider(
 fn talk<S: SideData>(
     conn: &mut Connection<S, Tcp>,
     sock: &mut TcpStream,
-    queued: Vec<u8>,
+    mut queued: Vec<u8>,
     suite: SupportedCipherSuite,
     group: Option<&'static dyn SupportedKxGroup>,
     line: &str,
 ) -> Result<String, Box<dyn Error>> {
-    let mut tls = blocking::Tls::new(conn, sock, queued);
+    let (mut input, mut plain) = (VecInput::default(), Vec::new());
+    let mut tls = Stream::new(&mut input, &mut plain, &mut queued, conn, sock);
     tls.write_all(line.as_bytes())?;
     tls.flush()?;
     let mut reply = String::new();
@@ -116,7 +116,8 @@ fn talk<S: SideData>(
             return Err(format!("negotiated {got:?}").into());
         }
     }
-    tls.close()?;
+    tls.conn.send_close_notify(tls.output)?;
+    tls.flush()?;
     Ok(reply)
 }
 

@@ -34,5 +34,7 @@ zeroize = { version = "1", default-features = false }
 # The certificate verifier the handshake tests need, from rustls's
 # own webpki feature.
 rustls = { version = "=0.24.0-dev.3", features = ["webpki"] }
+# The examples' TLS stream over a blocking socket.
+rustls-util = "=0.24.0-dev.3"
 # The client example's root certificates.
 webpki-roots = "1"
