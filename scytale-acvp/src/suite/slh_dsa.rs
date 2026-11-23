@@ -122,39 +122,44 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
-    answer_groups(doc, |group| {
-        builder.try_build(|| match text(group, "parameterSet")? {
-            Sha2_128s::NAME => answer_group::<Sha2_128s>(mode, group),
-            Sha2_128f::NAME => answer_group::<Sha2_128f>(mode, group),
-            Sha2_192s::NAME => answer_group::<Sha2_192s>(mode, group),
-            Sha2_192f::NAME => answer_group::<Sha2_192f>(mode, group),
-            Sha2_256s::NAME => answer_group::<Sha2_256s>(mode, group),
-            Sha2_256f::NAME => answer_group::<Sha2_256f>(mode, group),
-            Shake128s::NAME => answer_group::<Shake128s>(mode, group),
-            Shake128f::NAME => answer_group::<Shake128f>(mode, group),
-            Shake192s::NAME => answer_group::<Shake192s>(mode, group),
-            Shake192f::NAME => answer_group::<Shake192f>(mode, group),
-            Shake256s::NAME => answer_group::<Shake256s>(mode, group),
-            Shake256f::NAME => answer_group::<Shake256f>(mode, group),
-            other => Err(Error::new(format!("parameter set {other}"))),
-        })
+    answer_groups(doc, |group| match text(group, "parameterSet")? {
+        Sha2_128s::NAME => answer_group::<Sha2_128s>(mode, group, builder),
+        Sha2_128f::NAME => answer_group::<Sha2_128f>(mode, group, builder),
+        Sha2_192s::NAME => answer_group::<Sha2_192s>(mode, group, builder),
+        Sha2_192f::NAME => answer_group::<Sha2_192f>(mode, group, builder),
+        Sha2_256s::NAME => answer_group::<Sha2_256s>(mode, group, builder),
+        Sha2_256f::NAME => answer_group::<Sha2_256f>(mode, group, builder),
+        Shake128s::NAME => answer_group::<Shake128s>(mode, group, builder),
+        Shake128f::NAME => answer_group::<Shake128f>(mode, group, builder),
+        Shake192s::NAME => answer_group::<Shake192s>(mode, group, builder),
+        Shake192f::NAME => answer_group::<Shake192f>(mode, group, builder),
+        Shake256s::NAME => answer_group::<Shake256s>(mode, group, builder),
+        Shake256f::NAME => answer_group::<Shake256f>(mode, group, builder),
+        other => Err(Error::new(format!("parameter set {other}"))),
     })
 }
 
+/// Every case builds its key from the case's bytes and runs it once,
+/// and every call hashes as it runs, starting hashes of its own: each
+/// case runs whole under `builder`.
 fn answer_group<S: Set>(
     mode: &str,
     group: &Value,
+    builder: &Builder,
 ) -> Result<Option<Value>, Error> {
+    let each = |answer: &dyn Fn(&Value) -> Result<Value, Error>| {
+        answer_tests(group, |t| builder.try_build(|| answer(t)))
+    };
     if mode != "keyGen" && !pure_external(group) {
         return skip(group, "only the pure external interface is offered");
     }
     match mode {
-        "keyGen" => answer_tests(group, key_gen::<S>),
+        "keyGen" => each(&key_gen::<S>),
         "sigGen" => {
             let deterministic = flag(group, "deterministic")?;
-            answer_tests(group, |t| sig_gen::<S>(t, deterministic))
+            each(&|t| sig_gen::<S>(t, deterministic))
         }
-        "sigVer" => answer_tests(group, sig_ver::<S>),
+        "sigVer" => each(&sig_ver::<S>),
         other => Err(Error::new(format!("mode {other}"))),
     }
 }

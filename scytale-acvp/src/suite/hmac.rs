@@ -46,28 +46,27 @@ fn answer_as<H: Hash + Clone + BlockType + Default>(
     builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            if text(group, "testType")? != "AFT" {
-                return Err(unknown_test_type(group));
-            }
-            let mac_bytes = int(group, "macLen")? as usize / 8;
-            answer_tests(group, |t| {
-                let mut mac = Hmac::<H>::new(&hex(t, "key")?);
-                let msg = hex(t, "msg")?;
+        if text(group, "testType")? != "AFT" {
+            return Err(unknown_test_type(group));
+        }
+        let mac_bytes = int(group, "macLen")? as usize / 8;
+        answer_tests(group, |t| {
+            let key = hex(t, "key")?;
+            let mut mac = builder.build(|| Hmac::<H>::new(&key))?;
+            let msg = hex(t, "msg")?;
+            mac.update(&msg);
+            let tag = mac.finalize();
+            let tag = tag.as_ref();
+            let truncated = tag
+                .get(..mac_bytes)
+                .ok_or_else(|| Error::new("macLen longer than the tag"))?;
+            // A full-length tag must verify too; `finalize` left the
+            // MAC keyed and at the start of a message.
+            if mac_bytes == tag.len() {
                 mac.update(&msg);
-                let tag = mac.finalize();
-                let tag = tag.as_ref();
-                let truncated = tag
-                    .get(..mac_bytes)
-                    .ok_or_else(|| Error::new("macLen longer than the tag"))?;
-                // A full-length tag must verify too; `finalize` left the
-                // MAC keyed and at the start of a message.
-                if mac_bytes == tag.len() {
-                    mac.update(&msg);
-                    mac.verify(truncated)?;
-                }
-                Ok(json!({ "mac": hex_value(truncated) }))
-            })
+                mac.verify(truncated)?;
+            }
+            Ok(json!({ "mac": hex_value(truncated) }))
         })
     })
 }

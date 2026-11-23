@@ -71,28 +71,25 @@ fn answer_one_step(
     builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            let validate = match text(group, "testType")? {
-                "AFT" => false,
-                "VAL" => true,
-                _ => return Err(unknown_test_type(group)),
-            };
-            let cfg = field(group, "kdfConfiguration")?;
-            if text(cfg, "fixedInfoPattern")? != "t||uPartyInfo||vPartyInfo||l"
-            {
-                return Err(Error::new("fixedInfoPattern"));
-            }
-            if text(cfg, "fixedInfoEncoding")? != "concatenation" {
-                return Err(Error::new("fixedInfoEncoding"));
-            }
-            let aux = text(cfg, "auxFunction")?;
-            answer_tests(group, |t| {
-                let dkm = one_step_case(t, aux, counter)?;
-                Ok(if validate {
-                    json!({ "testPassed": dkm == hex(t, "dkm")? })
-                } else {
-                    json!({ "dkm": hex_value(&dkm) })
-                })
+        let validate = match text(group, "testType")? {
+            "AFT" => false,
+            "VAL" => true,
+            _ => return Err(unknown_test_type(group)),
+        };
+        let cfg = field(group, "kdfConfiguration")?;
+        if text(cfg, "fixedInfoPattern")? != "t||uPartyInfo||vPartyInfo||l" {
+            return Err(Error::new("fixedInfoPattern"));
+        }
+        if text(cfg, "fixedInfoEncoding")? != "concatenation" {
+            return Err(Error::new("fixedInfoEncoding"));
+        }
+        let aux = text(cfg, "auxFunction")?;
+        answer_tests(group, |t| {
+            let dkm = one_step_case(t, aux, counter, builder)?;
+            Ok(if validate {
+                json!({ "testPassed": dkm == hex(t, "dkm")? })
+            } else {
+                json!({ "dkm": hex_value(&dkm) })
             })
         })
     })
@@ -103,6 +100,7 @@ fn one_step_case(
     t: &Value,
     aux: &str,
     counter: bool,
+    builder: &Builder,
 ) -> Result<Vec<u8>, Error> {
     let param = field(t, "kdfParameter")?;
     let bits = u32::try_from(int(param, "l")?)
@@ -131,13 +129,15 @@ fn one_step_case(
         out: &mut out,
         counter,
     };
-    match aux.strip_prefix("HMAC-") {
+    // The derivation starts its own hashes or KMAC; the HMAC one
+    // keys its own HMAC first.
+    builder.try_build(|| match aux.strip_prefix("HMAC-") {
         Some(alg) => with_hash!(alg, hmac(inputs)),
         None => match aux {
             "KMAC-128" | "KMAC-256" => kmac(aux, inputs),
             alg => with_hash!(alg, hash(inputs)),
         },
-    }?;
+    })?;
     Ok(out)
 }
 
@@ -181,20 +181,19 @@ fn kmac(aux: &str, i: Inputs<'_>) -> Result<(), Error> {
 
 fn answer_x963(doc: &Value, builder: &Builder) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            if text(group, "testType")? != "AFT" {
-                return Err(unknown_test_type(group));
-            }
-            let alg = text(group, "hashAlg")?;
-            let bits = int(group, "keyDataLength")?;
-            if !bits.is_multiple_of(8) {
-                return Err(Error::new("keyDataLength is not whole bytes"));
-            }
-            answer_tests(group, |t| {
-                let mut out = vec![0u8; bits as usize / 8];
-                with_hash!(alg, x963_case(t, &mut out))?;
-                Ok(json!({ "keyData": hex_value(&out) }))
-            })
+        if text(group, "testType")? != "AFT" {
+            return Err(unknown_test_type(group));
+        }
+        let alg = text(group, "hashAlg")?;
+        let bits = int(group, "keyDataLength")?;
+        if !bits.is_multiple_of(8) {
+            return Err(Error::new("keyDataLength is not whole bytes"));
+        }
+        answer_tests(group, |t| {
+            let mut out = vec![0u8; bits as usize / 8];
+            // The derivation starts its own hashes.
+            builder.try_build(|| with_hash!(alg, x963_case(t, &mut out)))?;
+            Ok(json!({ "keyData": hex_value(&out) }))
         })
     })
 }

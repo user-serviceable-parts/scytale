@@ -21,24 +21,23 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            let encrypt = match text(group, "direction")? {
-                "encrypt" => true,
-                "decrypt" => false,
-                other => return Err(Error::new(format!("direction {other}"))),
-            };
-            let tag_len = int(group, "tagLen")? as usize / 8;
-            match text(group, "testType")? {
-                "AFT" => answer_tests(group, |t| {
-                    let key = hex(t, "key")?;
-                    aes_width!(key, C => {
-                        let ccm = Ccm::<C>::new(&key_of::<C>(&key)?);
-                        aft(&ccm, t, encrypt, tag_len)
-                    })
-                }),
-                _ => Err(unknown_test_type(group)),
-            }
-        })
+        let encrypt = match text(group, "direction")? {
+            "encrypt" => true,
+            "decrypt" => false,
+            other => return Err(Error::new(format!("direction {other}"))),
+        };
+        let tag_len = int(group, "tagLen")? as usize / 8;
+        match text(group, "testType")? {
+            "AFT" => answer_tests(group, |t| {
+                let key = hex(t, "key")?;
+                aes_width!(key, C => {
+                    let k = key_of::<C>(&key)?;
+                    let ccm = builder.build(|| Ccm::<C>::new(&k))?;
+                    aft(&ccm, t, encrypt, tag_len)
+                })
+            }),
+            _ => Err(unknown_test_type(group)),
+        }
     })
 }
 

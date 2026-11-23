@@ -127,31 +127,36 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
-    answer_groups(doc, |group| {
-        builder.try_build(|| match text(group, "parameterSet")? {
-            Set44::NAME => answer_group::<Set44>(mode, group),
-            Set65::NAME => answer_group::<Set65>(mode, group),
-            Set87::NAME => answer_group::<Set87>(mode, group),
-            other => Err(Error::new(format!("parameter set {other}"))),
-        })
+    answer_groups(doc, |group| match text(group, "parameterSet")? {
+        Set44::NAME => answer_group::<Set44>(mode, group, builder),
+        Set65::NAME => answer_group::<Set65>(mode, group, builder),
+        Set87::NAME => answer_group::<Set87>(mode, group, builder),
+        other => Err(Error::new(format!("parameter set {other}"))),
     })
 }
 
+/// Every case builds its key from the case's bytes and runs it once,
+/// and every call hashes as it runs, starting hashes of its own: each
+/// case runs whole under `builder`.
 fn answer_group<S: Set>(
     mode: &str,
     group: &Value,
+    builder: &Builder,
 ) -> Result<Option<Value>, Error> {
+    let each = |answer: &dyn Fn(&Value) -> Result<Value, Error>| {
+        answer_tests(group, |t| builder.try_build(|| answer(t)))
+    };
     if mode != "keyGen" && !pure_external(group) {
         return skip(group, "only the pure external interface is offered");
     }
     match mode {
-        "keyGen" => answer_tests(group, key_gen::<S>),
+        "keyGen" => each(&key_gen::<S>),
         "sigGen" => {
             let deterministic = flag(group, "deterministic")?;
             let seed = text(group, "keyFormat")? == "seed";
-            answer_tests(group, |t| sig_gen::<S>(t, deterministic, seed))
+            each(&|t| sig_gen::<S>(t, deterministic, seed))
         }
-        "sigVer" => answer_tests(group, sig_ver::<S>),
+        "sigVer" => each(&sig_ver::<S>),
         other => Err(Error::new(format!("mode {other}"))),
     }
 }

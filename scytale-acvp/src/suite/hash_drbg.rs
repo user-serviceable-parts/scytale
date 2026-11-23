@@ -73,19 +73,23 @@ drbg!(HmacDrbg, Hash + Clone + BlockType + Default);
 /// Answers one group through the generator `$ty` over the group's
 /// hash.
 macro_rules! dispatch {
-    ($ty:ident, $group:expr) => {
+    ($ty:ident, $group:expr, $builder:expr) => {
         match text($group, "mode")? {
-            "SHA-1" => aft::<$ty<Sha1, NoEntropy>>($group),
-            "SHA2-224" => aft::<$ty<Sha224, NoEntropy>>($group),
-            "SHA2-256" => aft::<$ty<Sha256, NoEntropy>>($group),
-            "SHA2-384" => aft::<$ty<Sha384, NoEntropy>>($group),
-            "SHA2-512" => aft::<$ty<Sha512, NoEntropy>>($group),
-            "SHA2-512/224" => aft::<$ty<Sha512_224, NoEntropy>>($group),
-            "SHA2-512/256" => aft::<$ty<Sha512_256, NoEntropy>>($group),
-            "SHA3-224" => aft::<$ty<Sha3_224, NoEntropy>>($group),
-            "SHA3-256" => aft::<$ty<Sha3_256, NoEntropy>>($group),
-            "SHA3-384" => aft::<$ty<Sha3_384, NoEntropy>>($group),
-            "SHA3-512" => aft::<$ty<Sha3_512, NoEntropy>>($group),
+            "SHA-1" => aft::<$ty<Sha1, NoEntropy>>($group, $builder),
+            "SHA2-224" => aft::<$ty<Sha224, NoEntropy>>($group, $builder),
+            "SHA2-256" => aft::<$ty<Sha256, NoEntropy>>($group, $builder),
+            "SHA2-384" => aft::<$ty<Sha384, NoEntropy>>($group, $builder),
+            "SHA2-512" => aft::<$ty<Sha512, NoEntropy>>($group, $builder),
+            "SHA2-512/224" => {
+                aft::<$ty<Sha512_224, NoEntropy>>($group, $builder)
+            }
+            "SHA2-512/256" => {
+                aft::<$ty<Sha512_256, NoEntropy>>($group, $builder)
+            }
+            "SHA3-224" => aft::<$ty<Sha3_224, NoEntropy>>($group, $builder),
+            "SHA3-256" => aft::<$ty<Sha3_256, NoEntropy>>($group, $builder),
+            "SHA3-384" => aft::<$ty<Sha3_384, NoEntropy>>($group, $builder),
+            "SHA3-512" => aft::<$ty<Sha3_512, NoEntropy>>($group, $builder),
             _ => skip($group, "hash not offered"),
         }
     };
@@ -102,52 +106,59 @@ pub fn answer(
         other => return Err(Error::new(format!("algorithm {other}"))),
     };
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            if text(group, "testType")? != "AFT" {
-                return Err(unknown_test_type(group));
-            }
-            if flag(group, "derFunc")? {
-                return Err(Error::new("derFunc is set"));
-            }
-            if hmac {
-                dispatch!(HmacDrbg, group)
-            } else {
-                dispatch!(HashDrbg, group)
-            }
-        })
+        if text(group, "testType")? != "AFT" {
+            return Err(unknown_test_type(group));
+        }
+        if flag(group, "derFunc")? {
+            return Err(Error::new("derFunc is set"));
+        }
+        if hmac {
+            dispatch!(HmacDrbg, group, builder)
+        } else {
+            dispatch!(HashDrbg, group, builder)
+        }
     })
 }
 
-fn aft<D: Drbg>(group: &Value) -> Result<Option<Value>, Error> {
+/// Each case is built whole: every request and reseed rekeys the
+/// generator's hash or HMAC.
+fn aft<D: Drbg>(
+    group: &Value,
+    builder: &Builder,
+) -> Result<Option<Value>, Error> {
     let bits = int(group, "returnedBitsLen")? as usize;
     answer_tests(group, |t| {
-        // Instantiation takes the entropy, the nonce and the
-        // personalization string as one run of material.
-        let mut material = hex(t, "entropyInput")?;
-        material.extend(hex(t, "nonce")?);
-        material.extend(hex(t, "persoString")?);
-        let mut rng = D::try_new_seeded(&material)?;
+        builder.try_build(|| {
+            // Instantiation takes the entropy, the nonce and the
+            // personalization string as one run of material.
+            let mut material = hex(t, "entropyInput")?;
+            material.extend(hex(t, "nonce")?);
+            material.extend(hex(t, "persoString")?);
+            let mut rng = D::try_new_seeded(&material)?;
 
-        let mut out = vec![0u8; bits / 8];
-        for other in list(t, "otherInput")? {
-            let entropy = hex(other, "entropyInput")?;
-            let additional = hex(other, "additionalInput")?;
-            match opt_text(other, "intendedUse") {
-                Some("reSeed") => rng.reseed_with(&entropy, &additional)?,
-                // Prediction resistance is a reseeding from fresh
-                // entropy and the additional input, then a request
-                // carrying nothing further.
-                Some("generate") if !entropy.is_empty() => {
-                    rng.reseed_with(&entropy, &additional)?;
-                    rng.fill(&mut out)?;
-                }
-                Some("generate") => rng.fill_with(&mut out, &additional)?,
-                other => {
-                    return Err(Error::new(format!("intendedUse {other:?}")));
+            let mut out = vec![0u8; bits / 8];
+            for other in list(t, "otherInput")? {
+                let entropy = hex(other, "entropyInput")?;
+                let additional = hex(other, "additionalInput")?;
+                match opt_text(other, "intendedUse") {
+                    Some("reSeed") => rng.reseed_with(&entropy, &additional)?,
+                    // Prediction resistance is a reseeding from fresh
+                    // entropy and the additional input, then a request
+                    // carrying nothing further.
+                    Some("generate") if !entropy.is_empty() => {
+                        rng.reseed_with(&entropy, &additional)?;
+                        rng.fill(&mut out)?;
+                    }
+                    Some("generate") => rng.fill_with(&mut out, &additional)?,
+                    other => {
+                        return Err(Error::new(format!(
+                            "intendedUse {other:?}"
+                        )));
+                    }
                 }
             }
-        }
-        // The bits answered are those of the last request.
-        Ok(json!({ "returnedBits": hex_value(&out) }))
+            // The bits answered are those of the last request.
+            Ok(json!({ "returnedBits": hex_value(&out) }))
+        })
     })
 }

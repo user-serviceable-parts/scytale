@@ -18,18 +18,16 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            let encrypt = match text(group, "direction")? {
-                "encrypt" => true,
-                "decrypt" => false,
-                other => return Err(Error::new(format!("direction {other}"))),
-            };
-            match text(group, "testType")? {
-                "AFT" => answer_tests(group, |t| aft(t, encrypt)),
-                "MCT" => answer_tests(group, |t| mct(t, encrypt)),
-                _ => Err(unknown_test_type(group)),
-            }
-        })
+        let encrypt = match text(group, "direction")? {
+            "encrypt" => true,
+            "decrypt" => false,
+            other => return Err(Error::new(format!("direction {other}"))),
+        };
+        match text(group, "testType")? {
+            "AFT" => answer_tests(group, |t| aft(t, encrypt, builder)),
+            "MCT" => answer_tests(group, |t| mct(t, encrypt, builder)),
+            _ => Err(unknown_test_type(group)),
+        }
     })
 }
 
@@ -51,12 +49,13 @@ fn apply<C: BlockCipher<Block = [u8; 16]>>(
 }
 
 /// Algorithm Functional Test: one-shot, possibly several blocks.
-fn aft(t: &Value, encrypt: bool) -> Result<Value, Error> {
+fn aft(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
     let key = hex(t, "key")?;
     let (input, output) = if encrypt { ("pt", "ct") } else { ("ct", "pt") };
     let mut data = hex(t, input)?;
     aes_width!(key, C => {
-        let cipher = C::new(&key_of::<C>(&key)?);
+        let k = key_of::<C>(&key)?;
+        let cipher = builder.build(|| C::new(&k))?;
         apply(&cipher, encrypt, &mut data)?;
     });
     Ok(json!({ output: hex_value(&data) }))
@@ -66,7 +65,7 @@ fn aft(t: &Value, encrypt: bool) -> Result<Value, Error> {
 /// runs 1000 chained cipher calls, then derives the next key from the
 /// last outputs. The answer gives the key and input of each step, and
 /// the output of its final call.
-fn mct(t: &Value, encrypt: bool) -> Result<Value, Error> {
+fn mct(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
     let (input, output) = if encrypt { ("pt", "ct") } else { ("ct", "pt") };
     let mut key = hex(t, "key")?;
     let mut data = hex(t, input)?;
@@ -76,7 +75,8 @@ fn mct(t: &Value, encrypt: bool) -> Result<Value, Error> {
             json!({ "key": hex_value(&key), input: hex_value(&data) });
         let mut previous = data.clone();
         aes_width!(key, C => {
-            let cipher = C::new(&key_of::<C>(&key)?);
+            let k = key_of::<C>(&key)?;
+        let cipher = builder.build(|| C::new(&k))?;
             for _ in 0..MCT_ITERATIONS {
                 previous.copy_from_slice(&data);
                 apply(&cipher, encrypt, &mut data)?;

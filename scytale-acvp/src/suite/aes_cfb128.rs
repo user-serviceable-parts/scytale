@@ -22,18 +22,16 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            let encrypt = match text(group, "direction")? {
-                "encrypt" => true,
-                "decrypt" => false,
-                other => return Err(Error::new(format!("direction {other}"))),
-            };
-            match text(group, "testType")? {
-                "AFT" => answer_tests(group, |t| aft(t, encrypt)),
-                "MCT" => answer_tests(group, |t| mct(t, encrypt)),
-                _ => Err(unknown_test_type(group)),
-            }
-        })
+        let encrypt = match text(group, "direction")? {
+            "encrypt" => true,
+            "decrypt" => false,
+            other => return Err(Error::new(format!("direction {other}"))),
+        };
+        match text(group, "testType")? {
+            "AFT" => answer_tests(group, |t| aft(t, encrypt, builder)),
+            "MCT" => answer_tests(group, |t| mct(t, encrypt, builder)),
+            _ => Err(unknown_test_type(group)),
+        }
     })
 }
 
@@ -45,13 +43,14 @@ fn block(bytes: &[u8]) -> Result<[u8; 16], Error> {
 }
 
 /// Algorithm Functional Test: one message, one IV.
-fn aft(t: &Value, encrypt: bool) -> Result<Value, Error> {
+fn aft(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
     let key = hex(t, "key")?;
     let iv = block(&hex(t, "iv")?)?;
     let (input, output) = if encrypt { ("pt", "ct") } else { ("ct", "pt") };
     let mut data = hex(t, input)?;
     aes_width!(key, C => {
-        let cfb = Cfb128::<C>::new(&key_of::<C>(&key)?);
+        let k = key_of::<C>(&key)?;
+        let cfb = builder.build(|| Cfb128::<C>::new(&k))?;
         if encrypt {
             cfb.encrypt(&iv, &mut data)?;
         } else {
@@ -65,7 +64,7 @@ fn aft(t: &Value, encrypt: bool) -> Result<Value, Error> {
 /// single continuing state; each segment's input is a segment of the
 /// IV while the register still holds IV material, and an earlier
 /// output after that.
-fn mct(t: &Value, encrypt: bool) -> Result<Value, Error> {
+fn mct(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
     let (input_name, output_name) =
         if encrypt { ("pt", "ct") } else { ("ct", "pt") };
     let mut key = hex(t, "key")?;
@@ -82,7 +81,8 @@ fn mct(t: &Value, encrypt: bool) -> Result<Value, Error> {
         let mut outputs: Vec<Vec<u8>> = Vec::with_capacity(MCT_SEGMENTS);
         let mut segment = input.clone();
         aes_width!(key, C => {
-            let cfb = Cfb128::<C>::new(&key_of::<C>(&key)?);
+            let k = key_of::<C>(&key)?;
+        let cfb = builder.build(|| Cfb128::<C>::new(&k))?;
             if encrypt {
                 let mut state = cfb.encryptor(&register);
                 for j in 0..MCT_SEGMENTS {

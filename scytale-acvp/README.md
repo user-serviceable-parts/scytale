@@ -61,22 +61,26 @@ not run for the features the processor lacks, or was not selected. A
 test fails only if a kernel it ran fails. `SCYTALE_KERNELS` takes
 kernel names, separated by white space, and runs those alone, which
 is how a run on one machine names the kernels another must run.
-The work is cut into test groups, and a suite's kernels run at once:
-the groups of every kernel go to one pool, heaviest first, spread
-over the cores, and while it runs a line a minute says how far it
-has got. The tests run at once too, as many as the harness runs.
+The work is cut into cases, and a suite's kernels run at once: the
+cases of every kernel go to one pool, heaviest first, spread over
+the cores, and while it runs a line a minute says how far it has
+got. A group whose cases share a key the driver generates for it,
+RSA or LMS signing, or the RSA decryption primitive, goes whole. The
+tests run at once too, as many as the harness runs.
 
 The set of features in force is the process's, so the drivers build
-and run whatever a group needs through a builder that puts the
-kernel's profile in force for the while. Builds under one set share
-it, and builds under another wait their turn; the turn ends with the
-last build, and the set detected is put back. A builder holds the
-whole group rather than just its constructors, since the library
-chooses a kernel inside some operations too, the big-number and
-curve arithmetic, a GCM-SIV message, a hash-based signature, a KDF;
-the large-data and Monte Carlo hashes only build under it and hash
-outside. A random draw made outside its builder fails the group, as
-a sign that something was built there too.
+through a builder that puts the kernel's profile in force for the
+while. Builds under one set share it, and builds under another wait
+their turn; the turn ends with the last build, and the set detected
+is put back. An object keeps the kernel it was built with, so a
+builder holds only its construction, and the object runs outside.
+Some calls build as they run, and are made under the builder too: a
+GCM message over a cipher with no kernel of GCM's own starts its own
+GHASH, a GCM-SIV message its own cipher and POLYVAL, ML-KEM reads its
+matrix through SHAKE streams chosen then, and a signature, a KDF or
+a DRBG starts hashes or MACs for every call. A random draw made
+outside its builder fails the case, as a sign that something was
+built there too; a construction made outside one cannot be seen.
 
 `SCYTALE_VECTORS=required` makes a missing vector file a failure
 rather than a skip.

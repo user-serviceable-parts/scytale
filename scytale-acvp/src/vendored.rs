@@ -18,15 +18,14 @@
 //! each hash kernel, and a suite with no kernel of its own, HMAC or
 //! LMS or a KDF, is answered once, under the features detected.
 //!
-//! The work is cut into units, a test group each, or a single case of
-//! a large-data group, of SLH-DSA signing or of LMS key generation,
-//! since those cases are minutes apiece under emulation. A unit is
-//! answered under each kernel that tests it, and the units of every
-//! kernel of the suite go to one pool: one worker per core takes the
-//! next, heaviest first, and answers it through its kernel's
-//! [`Builder`], so that kernels and suites run side by side and only
-//! wait for one another while something is being built or run under
-//! another set; see there.
+//! The work is cut into units, a case each, or a whole group where
+//! its cases share a key the driver generates for it, as RSA and LMS
+//! signing do. A unit is answered under each kernel that tests it,
+//! and the units of every kernel of the suite go to one pool: one
+//! worker per core takes the next, heaviest first, and answers it
+//! through its kernel's [`Builder`], so that kernels and suites run
+//! side by side and only wait for one another while something is
+//! being built under another set; see there.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
@@ -43,7 +42,7 @@ use scytale::hash::sha2::{Sha256, Sha512};
 use scytale::hash::sha3::Sha3_256;
 use scytale::kem::ml_kem::ml_kem_768;
 use scytale::sig::{ecdsa, rsa};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::profile::Builder;
 use crate::suite::{SUITES, Suite, compare, fixed_rng, vendored};
@@ -162,21 +161,34 @@ pub struct Unit {
 }
 
 /// The expected cost of a unit, in the worth of an ordinary case.
-/// An ordinary group weighs its cases. A large-data case hashes
+/// A whole group weighs its cases. A large-data case hashes
 /// `fullLength` bits, and one of 2^36 measured as some eight
-/// thousand ordinary cases, so a case weighs its bits over 2^23. An
-/// SLH-DSA signature is dominated by the WOTS+ public keys of the
-/// hypertree, `d` layers of 2^(h/d) leaves each of `len` chains of
-/// fifteen hashes, plus the FORS tree, `k` trees of 2^a leaves; ten
-/// thousand of those hashes measured as one ordinary case.
+/// thousand ordinary cases, so a case weighs its bits over 2^23. A
+/// Monte Carlo case, a hundred steps of a thousand chained calls,
+/// weighs [`MCT`]. An SLH-DSA signature, `signing`, is dominated
+/// by the WOTS+ public keys of the hypertree, `d` layers of 2^(h/d)
+/// leaves each of `len` chains of fifteen hashes, plus the FORS
+/// tree, `k` trees of 2^a leaves; ten thousand of those hashes
+/// measured as one ordinary case.
 ///
 /// LMS is weighed by [`lms_weight`], where the units are made.
-fn weight(group: &Value, case: Option<&Value>, cases: usize) -> u64 {
+fn weight(
+    group: &Value,
+    case: Option<&Value>,
+    cases: usize,
+    signing: bool,
+) -> u64 {
     let Some(case) = case else {
         return cases as u64;
     };
     if let Some(bits) = case["largeMsg"]["fullLength"].as_u64() {
         return (bits >> 23).max(1);
+    }
+    if group["testType"] == "MCT" {
+        return MCT;
+    }
+    if !signing {
+        return 1;
     }
     let set = group["parameterSet"].as_str().unwrap_or("");
     // FIPS 205 table 2: h, d, len, k, a, for each security level and
@@ -231,11 +243,33 @@ fn lms_weight(group: &Value, leaves: impl Fn(u32) -> u64) -> Option<u64> {
     Some((leaves(h) * hashes / 10_000).max(1))
 }
 
+/// What a Monte Carlo case weighs, on the scale of [`weight`]: the
+/// AES, SHA-2, SHA-3 and SHAKE ones measured as a hundredth to a
+/// three-hundredth of a large-data case of 2^36 bits, under the
+/// portable kernels.
+const MCT: u64 = 50;
+
+/// Whether the cases of a group of `suite` share a key the driver
+/// generates once for the group and answers at the group's level, so
+/// that the group must be answered whole: RSA and LMS signing, and
+/// the RSA decryption primitive, whose generated key serves case
+/// after case. Every other driver answers a case from that case
+/// alone, or from a key the file gives the group, and where a group
+/// has a key of the driver's making, ECDSA's or EdDSA's when the file
+/// gives none, it is drawn first from the fixed generator, so every
+/// one of the group's units draws the same one.
+fn shares_a_key(suite: &Suite) -> bool {
+    matches!(
+        (suite.algorithm, suite.mode),
+        ("RSA" | "LMS", Some("sigGen")) | ("RSA", Some("decryptionPrimitive"))
+    )
+}
+
 /// Every unit of `doc`, the vendored document of suite `suite` in
-/// the registry, in a fixed order: a unit per group, except that the
-/// large-data groups, SLH-DSA signing and LMS key generation give a
-/// unit per case. An LMS signing group stays whole, since its cases
-/// share the one key the group generates.
+/// the registry, in a fixed order: a unit per case, so that a
+/// group's cases are answered side by side, except that a group
+/// whose cases share a key the driver generates, see
+/// [`shares_a_key`], is a unit whole.
 pub fn units(suite: usize, doc: &Value) -> Vec<Unit> {
     let mut out = Vec::new();
     let Some(groups) = doc["testGroups"].as_array() else {
@@ -244,28 +278,12 @@ pub fn units(suite: usize, doc: &Value) -> Vec<Unit> {
     let s = &SUITES[suite];
     let signing = s.algorithm == "SLH-DSA" && s.mode == Some("sigGen");
     let lms = |mode| s.algorithm == "LMS" && s.mode == Some(mode);
+    let whole = shares_a_key(s);
     for (group, g) in groups.iter().enumerate() {
         let cases = g["tests"].as_array().map_or(0, Vec::len);
-        let tree = lms("keyGen").then(|| lms_weight(g, |h| 1 << h)).flatten();
-        if let Some(weight) = tree.filter(|_| cases > 0) {
-            out.extend((0..cases).map(|case| Unit {
-                suite,
-                group,
-                case: Some(case),
-                weight,
-            }));
-        } else if (g["testType"] == "LDT" || signing) && cases > 0 {
-            for case in 0..cases {
-                out.push(Unit {
-                    suite,
-                    group,
-                    case: Some(case),
-                    weight: weight(g, Some(&g["tests"][case]), cases),
-                });
-            }
-        } else {
+        if whole || cases == 0 {
             let signed = cases as u64;
-            let whole = lms("sigGen")
+            let tree = lms("sigGen")
                 .then(|| {
                     lms_weight(g, |h| (1 << h) + signed * u64::from(h / 2 + 2))
                 })
@@ -274,7 +292,20 @@ pub fn units(suite: usize, doc: &Value) -> Vec<Unit> {
                 suite,
                 group,
                 case: None,
-                weight: whole.unwrap_or_else(|| weight(g, None, cases)),
+                weight: tree.unwrap_or_else(|| weight(g, None, cases, signing)),
+            });
+            continue;
+        }
+        let tree = lms("keyGen").then(|| lms_weight(g, |h| 1 << h)).flatten();
+        for case in 0..cases {
+            let weight = tree.unwrap_or_else(|| {
+                weight(g, Some(&g["tests"][case]), cases, signing)
+            });
+            out.push(Unit {
+                suite,
+                group,
+                case: Some(case),
+                weight,
             });
         }
     }
@@ -310,13 +341,31 @@ pub fn answer_unit(
     unit: &Unit,
     builder: &Builder,
 ) -> Result<Option<usize>, Error> {
-    let mut group = doc["testGroups"][unit.group].clone();
-    if let Some(case) = unit.case {
-        let test = group["tests"][case].clone();
-        group["tests"] = Value::Array(vec![test]);
-    }
-    let mut cut = doc.clone();
-    cut["testGroups"] = Value::Array(vec![group]);
+    // Copied field by field, leaving out what the unit does not hold:
+    // a unit is often a single case of thousands, and copying them all
+    // for each would cost more than answering it.
+    let without = |v: &Value, name: &str| -> Map<String, Value> {
+        let mut out = Map::new();
+        if let Some(fields) = v.as_object() {
+            for (k, v) in fields.iter().filter(|(k, _)| *k != name) {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+        out
+    };
+    let source = &doc["testGroups"][unit.group];
+    let mut group = without(source, "tests");
+    let tests = match unit.case {
+        Some(case) => Value::Array(vec![source["tests"][case].clone()]),
+        None => source["tests"].clone(),
+    };
+    group.insert("tests".into(), tests);
+    let mut cut = without(doc, "testGroups");
+    cut.insert(
+        "testGroups".into(),
+        Value::Array(vec![Value::Object(group)]),
+    );
+    let cut = Value::Object(cut);
     let mut rng = Watched {
         rng: fixed_rng(builder)?,
         set: builder.set(),
@@ -740,9 +789,10 @@ mod tests {
         let whole = of("sigGen");
         assert_eq!(whole.len(), 1);
         assert_eq!((whole[0].case, whole[0].weight), (None, 33));
-        // Verifying is an ordinary case.
+        // Verifying is ordinary cases, one each.
         let verified = of("sigVer");
-        assert_eq!((verified[0].case, verified[0].weight), (None, 10));
+        assert_eq!(verified.len(), 10);
+        assert!(verified.iter().all(|u| u.case.is_some() && u.weight == 1));
     }
 
     /// A driver that draws outside its builder fails its unit, which
@@ -796,7 +846,7 @@ mod tests {
     }
 
     #[test]
-    fn units_split_large_data_by_case_and_keep_other_groups() {
+    fn units_are_cases_weighed_by_their_kind() {
         // The first suite in the registry stands for any ordinary
         // one.
         let doc = json!({"testGroups": [
@@ -805,6 +855,7 @@ mod tests {
             {"tgId": 3, "testType": "LDT", "tests": [
                 {"tcId": 4, "largeMsg": {"fullLength": 1u64 << 23}},
                 {"tcId": 5, "largeMsg": {"fullLength": 1u64 << 24}}]},
+            {"tgId": 4, "testType": "AFT", "tests": []},
         ]});
         let got = units(0, &doc);
         let unit = |group, case, weight| Unit {
@@ -816,25 +867,50 @@ mod tests {
         assert_eq!(
             got,
             [
-                unit(0, None, 2),
-                unit(1, None, 1),
+                unit(0, Some(0), 1),
+                unit(0, Some(1), 1),
+                unit(1, Some(0), MCT),
                 unit(2, Some(0), 1),
-                unit(2, Some(1), 2)
+                unit(2, Some(1), 2),
+                unit(3, None, 0),
             ]
         );
     }
 
     #[test]
+    fn a_group_sharing_a_generated_key_is_one_unit() {
+        let doc = json!({"testGroups": [
+            {"tgId": 1, "testType": "GDT", "tests": [{"tcId": 1}, {"tcId": 2}]},
+        ]});
+        let rsa = units(suite_of("RSA", Some("sigGen")), &doc);
+        assert_eq!(rsa.len(), 1);
+        assert_eq!((rsa[0].case, rsa[0].weight), (None, 2));
+        let primitive =
+            units(suite_of("RSA", Some("decryptionPrimitive")), &doc);
+        assert_eq!(primitive.len(), 1);
+        // The file gives ECDSA's key, or else every unit draws the same
+        // one first, so its cases are split.
+        assert_eq!(units(suite_of("ECDSA", Some("sigGen")), &doc).len(), 2);
+        assert_eq!(units(suite_of("RSA", Some("sigVer")), &doc).len(), 2);
+    }
+
+    #[test]
     fn weights_follow_length_and_parameter_set() {
         let ldt = json!({"largeMsg": {"fullLength": 1u64 << 36}});
-        assert_eq!(weight(&json!({}), Some(&ldt), 4), 1 << 13);
+        assert_eq!(weight(&json!({}), Some(&ldt), 4, false), 1 << 13);
         let set = |name| json!({"parameterSet": name});
-        let w = |name| weight(&set(name), Some(&json!({})), 7);
+        let w = |name| weight(&set(name), Some(&json!({})), 7, true);
         assert!(w("SLH-DSA-SHA2-128s") > 10 * w("SLH-DSA-SHA2-128f"));
         assert!(w("SLH-DSA-SHAKE-192s") > w("SLH-DSA-SHAKE-128s"));
         // 7 * 512 * 35 * 15 + 14 * 4096 hashes.
         assert_eq!(w("SLH-DSA-SHA2-128s"), 193);
-        assert_eq!(weight(&json!({}), None, 914), 914);
+        // Only a signature climbs the hypertree.
+        let verify =
+            weight(&set("SLH-DSA-SHA2-128s"), Some(&json!({})), 7, false);
+        assert_eq!(verify, 1);
+        let mct = json!({"testType": "MCT"});
+        assert_eq!(weight(&mct, Some(&json!({})), 1, false), MCT);
+        assert_eq!(weight(&json!({}), None, 914, false), 914);
     }
 
     #[test]

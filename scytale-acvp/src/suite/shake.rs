@@ -23,16 +23,17 @@ pub fn answer(
     }
 }
 
-fn answer_as<X: BitXof + Default>(
+fn answer_as<X: BitXof + Default + Clone>(
     doc: &Value,
     builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| match text(group, "testType")? {
+        match text(group, "testType")? {
             "AFT" | "VOT" => answer_tests(group, |t| {
                 let bits = int(t, "outLen")? as usize;
                 let mut out = vec![0u8; bits.div_ceil(8)];
-                squeeze::<X>(&Message::of(t)?, &mut out)?;
+                let xof = builder.build(X::default)?;
+                squeeze(xof, &Message::of(t)?, &mut out)?;
                 // A length that is not whole bytes keeps the last byte's
                 // low bits, numbered as FIPS 202 numbers them, and the
                 // rest zero.
@@ -49,19 +50,22 @@ fn answer_as<X: BitXof + Default>(
                 if min_bits < 16 || max_bits < min_bits {
                     return Err(Error::new("output lengths out of range"));
                 }
-                answer_tests(group, |t| mct::<X>(t, min_bits, max_bits))
+                answer_tests(group, |t| {
+                    mct::<X>(t, min_bits, max_bits, builder)
+                })
             }
             _ => Err(unknown_test_type(group)),
-        })
+        }
     })
 }
 
-/// Squeezes `out.len()` bytes from `message`.
-fn squeeze<X: BitXof + Default>(
+/// Squeezes `out.len()` bytes from `message` through `xof`, a fresh
+/// one.
+fn squeeze<X: BitXof>(
+    mut xof: X,
     message: &Message,
     out: &mut [u8],
 ) -> Result<(), Error> {
-    let mut xof = X::default();
     let (whole, tail) = message.split(Family::Sha3);
     xof.update(whole);
     let mut reader = match tail {
@@ -76,11 +80,15 @@ fn squeeze<X: BitXof + Default>(
 /// times, feeding the first 16 bytes of each output (zero-padded)
 /// into the next, with the output length chosen each time by the
 /// last two bytes of the previous output within the group's range.
-fn mct<X: BitXof + Default>(
+fn mct<X: BitXof + Default + Clone>(
     t: &Value,
     min_bits: usize,
     max_bits: usize,
+    builder: &Builder,
 ) -> Result<Value, Error> {
+    // Built once and copied for each of the hundred thousand calls: a
+    // copy keeps the kernel it was built with.
+    let fresh = builder.build(X::default)?;
     let range = (max_bits - min_bits) / 8 + 1;
     let seed = Message::of(t)?;
     if seed.bits % 8 != 0 {
@@ -98,7 +106,7 @@ fn mct<X: BitXof + Default>(
                 bits: 128,
             };
             let mut out = vec![0u8; out_len];
-            squeeze::<X>(&message, &mut out)?;
+            squeeze(fresh.clone(), &message, &mut out)?;
             // At least two bytes by the group's minimum.
             let right = usize::from(u16::from_be_bytes([
                 out[out.len() - 2],

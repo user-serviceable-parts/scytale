@@ -10,9 +10,13 @@
 //! server then fails its cases, and the offline check counts what
 //! was answered against the suite's minimum.
 //!
-//! A driver answers each group inside the [`Builder`] it is given,
-//! so that whatever the group builds and runs does so under the
-//! kernel being checked, whatever other threads are checking.
+//! A driver builds everything inside the [`Builder`] it is given, and
+//! makes inside it every call that builds as it runs, so that all a
+//! case builds does so under the kernel being checked, whatever other
+//! threads are checking; see there. It answers each case from the
+//! case alone, except where a group's cases share a key the driver
+//! generates for the group, so that the offline check can answer the
+//! cases apart.
 
 use crate::profile::Builder;
 use crate::support::{Error, FixedEntropy, list, load, object};

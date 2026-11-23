@@ -38,19 +38,19 @@ pub fn answer(
         return Err(Error::new(format!("mode {}", doc["mode"])));
     }
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            if let Some(why) = skip_reason(group)? {
-                return skip(group, why);
-            }
-            if text(group, "testType")? != "GDT" {
-                return Err(unknown_test_type(group));
-            }
-            let bits = int(group, "modulo")? as usize;
-            let crt = opt_text(group, "keyFormat") == Some("crt");
-            answer_tests(group, |_| {
-                let key = PrivateKey::generate(&mut Rng(&mut *rng), bits)?;
-                key_fields(&key, crt)
-            })
+        if let Some(why) = skip_reason(group)? {
+            return skip(group, why);
+        }
+        if text(group, "testType")? != "GDT" {
+            return Err(unknown_test_type(group));
+        }
+        let bits = int(group, "modulo")? as usize;
+        let crt = opt_text(group, "keyFormat") == Some("crt");
+        answer_tests(group, |_| {
+            let key = builder.try_build(|| {
+                PrivateKey::generate(&mut Rng(&mut *rng), bits)
+            })?;
+            key_fields(&key, crt)
         })
     })
 }

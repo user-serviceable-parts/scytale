@@ -114,22 +114,20 @@ pub fn answer(
 ) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            let curve = match text(group, "curve")? {
-                "ED-25519" => &ED25519,
-                "ED-448" => &ED448,
-                other => {
-                    return Err(Error::new(format!("no curve named {other}")));
-                }
-            };
-            match (mode, text(group, "testType")?) {
-                ("keyGen", "AFT") => key_gen(curve, group, rng),
-                ("keyVer", "AFT") => key_ver(curve, group),
-                ("sigGen", "AFT" | "BFT") => sig_gen(curve, group, rng),
-                ("sigVer", "AFT") => sig_ver(curve, group),
-                _ => Err(unknown_test_type(group)),
+        let curve = match text(group, "curve")? {
+            "ED-25519" => &ED25519,
+            "ED-448" => &ED448,
+            other => {
+                return Err(Error::new(format!("no curve named {other}")));
             }
-        })
+        };
+        match (mode, text(group, "testType")?) {
+            ("keyGen", "AFT") => key_gen(curve, group, rng, builder),
+            ("keyVer", "AFT") => key_ver(curve, group, builder),
+            ("sigGen", "AFT" | "BFT") => sig_gen(curve, group, rng, builder),
+            ("sigVer", "AFT") => sig_ver(curve, group, builder),
+            _ => Err(unknown_test_type(group)),
+        }
     })
 }
 
@@ -163,14 +161,21 @@ fn context(t: &Value) -> Result<Vec<u8>, Error> {
     }
 }
 
+/// Every EdDSA function of the crate hashes as it runs, a key's
+/// public half included, so each case runs under `builder`, as each
+/// of the functions below does.
 fn key_gen(
     curve: &Curve,
     group: &Value,
     rng: &mut dyn Random,
+    builder: &Builder,
 ) -> Result<Option<Value>, Error> {
     answer_tests(group, |t| {
-        let d = secret(curve, t, rng)?;
-        let q = (curve.public_key)(&d);
+        let (d, q) = builder.try_build(|| {
+            let d = secret(curve, t, rng)?;
+            let q = (curve.public_key)(&d);
+            Ok::<_, Error>((d, q))
+        })?;
         Ok(json!({ "d": hex_value(&d), "q": hex_value(&q) }))
     })
 }
@@ -182,13 +187,19 @@ fn key_gen(
 /// curve and `InvalidSignature` for everything else. The signature
 /// handed in is therefore a dummy, and the verdict is read from the
 /// error alone.
-fn key_ver(curve: &Curve, group: &Value) -> Result<Option<Value>, Error> {
+fn key_ver(
+    curve: &Curve,
+    group: &Value,
+    builder: &Builder,
+) -> Result<Option<Value>, Error> {
     answer_tests(group, |t| {
         let q = hex(t, "q")?;
+        let dummy = vec![0; curve.signature];
         // A key of another length is not a key at all.
         let passed = q.len() == curve.key
             && !matches!(
-                (curve.verify)(&q, false, b"", b"", &vec![0; curve.signature]),
+                builder
+                    .build(|| (curve.verify)(&q, false, b"", b"", &dummy))?,
                 Err(scytale::Error::InvalidPublicKey)
             );
         Ok(json!({ "testPassed": passed }))
@@ -199,17 +210,24 @@ fn sig_gen(
     curve: &Curve,
     group: &Value,
     rng: &mut dyn Random,
+    builder: &Builder,
 ) -> Result<Option<Value>, Error> {
     let prehash = flag(group, "preHash")?;
-    let d = secret(curve, group, rng)?;
-    let q = (curve.public_key)(&d);
+    let (d, q) = builder.try_build(|| {
+        let d = secret(curve, group, rng)?;
+        let q = (curve.public_key)(&d);
+        Ok::<_, Error>((d, q))
+    })?;
     let answered = answer_tests(group, |t| {
         let message = hex(t, "message")?;
         let context = context(t)?;
-        let signature = (curve.sign)(&d, prehash, &context, &message)?;
-        // A signature this crate cannot itself verify is a fault worth
-        // stopping on before the server sees it.
-        (curve.verify)(&q, prehash, &context, &message, &signature)?;
+        let signature = builder.try_build(|| {
+            let signature = (curve.sign)(&d, prehash, &context, &message)?;
+            // A signature this crate cannot itself verify is a fault
+            // worth stopping on before the server sees it.
+            (curve.verify)(&q, prehash, &context, &message, &signature)?;
+            Ok::<_, Error>(signature)
+        })?;
         Ok(json!({ "signature": hex_value(&signature) }))
     })?;
     let Some(mut answered) = answered else {
@@ -221,7 +239,11 @@ fn sig_gen(
     Ok(Some(answered))
 }
 
-fn sig_ver(curve: &Curve, group: &Value) -> Result<Option<Value>, Error> {
+fn sig_ver(
+    curve: &Curve,
+    group: &Value,
+    builder: &Builder,
+) -> Result<Option<Value>, Error> {
     let prehash = flag(group, "preHash")?;
     answer_tests(group, |t| {
         let message = hex(t, "message")?;
@@ -230,8 +252,10 @@ fn sig_ver(curve: &Curve, group: &Value) -> Result<Option<Value>, Error> {
         // A key or signature of another length cannot verify.
         let passed = q.len() == curve.key
             && signature.len() == curve.signature
-            && (curve.verify)(&q, prehash, &context, &message, &signature)
-                .is_ok();
+            && builder.build(|| {
+                (curve.verify)(&q, prehash, &context, &message, &signature)
+                    .is_ok()
+            })?;
         Ok(json!({ "testPassed": passed }))
     })
 }

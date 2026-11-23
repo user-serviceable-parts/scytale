@@ -43,11 +43,9 @@ pub fn answer(
     }
 }
 
-/// The Monte Carlo and large-data cases run for a second or more
-/// each, the large-data ones for minutes under emulation, so they
-/// only build their hash under `builder` and feed it outside, where
-/// another kernel's builds need not wait for them: a hash keeps the
-/// kernel it was built with.
+/// Every case only builds its hash under `builder` and feeds it
+/// outside, where another kernel's builds need not wait for it: a
+/// hash keeps the kernel it was built with.
 fn answer_as<H: BitHash + Default>(
     doc: &Value,
     family: Family,
@@ -57,11 +55,10 @@ where
     H::Output: AsRef<[u8]>,
 {
     answer_groups(doc, |group| match text(group, "testType")? {
-        "AFT" => builder.try_build(|| {
-            answer_tests(group, |t| {
-                let digest = Message::of(t)?.digest(H::default(), family);
-                Ok(json!({ "md": hex_value(digest.as_ref()) }))
-            })
+        "AFT" => answer_tests(group, |t| {
+            let message = Message::of(t)?;
+            let digest = message.digest(builder.build(H::default)?, family);
+            Ok(json!({ "md": hex_value(digest.as_ref()) }))
         }),
         "MCT" => {
             let alternate = match opt_text(group, "mctVersion") {

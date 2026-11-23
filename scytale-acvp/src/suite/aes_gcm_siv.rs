@@ -22,25 +22,26 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            let encrypt = match text(group, "direction")? {
-                "encrypt" => true,
-                "decrypt" => false,
-                other => return Err(Error::new(format!("direction {other}"))),
-            };
-            match text(group, "testType")? {
-                // Not `aes_width!`: GCM-SIV is not defined over AES-192.
-                "AFT" => answer_tests(group, |t| {
-                    let key = hex(t, "key")?;
-                    match key.len() {
-                        16 => aft::<Aes128>(&key, t, encrypt),
-                        32 => aft::<Aes256>(&key, t, encrypt),
-                        n => Err(Error::new(format!("key of {n} bytes"))),
-                    }
-                }),
-                _ => Err(unknown_test_type(group)),
-            }
-        })
+        let encrypt = match text(group, "direction")? {
+            "encrypt" => true,
+            "decrypt" => false,
+            other => return Err(Error::new(format!("direction {other}"))),
+        };
+        match text(group, "testType")? {
+            // Not `aes_width!`: GCM-SIV is not defined over AES-192.
+            "AFT" => answer_tests(group, |t| {
+                let key = hex(t, "key")?;
+                // Every message derives its own keys and builds its
+                // own cipher and POLYVAL from them: the message is
+                // built too.
+                builder.try_build(|| match key.len() {
+                    16 => aft::<Aes128>(&key, t, encrypt),
+                    32 => aft::<Aes256>(&key, t, encrypt),
+                    n => Err(Error::new(format!("key of {n} bytes"))),
+                })
+            }),
+            _ => Err(unknown_test_type(group)),
+        }
     })
 }
 

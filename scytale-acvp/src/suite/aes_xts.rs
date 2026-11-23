@@ -31,26 +31,24 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            let encrypt = match text(group, "direction")? {
-                "encrypt" => true,
-                "decrypt" => false,
-                other => return Err(Error::new(format!("direction {other}"))),
-            };
-            let group_bits = opt_int(group, "payloadLen");
-            match text(group, "testType")? {
-                "AFT" => answer_tests(group, |t| {
-                    let bits = match group_bits {
-                        Some(bits) => bits,
-                        None => int(t, "payloadLen")?,
-                    } as usize;
-                    let unit =
-                        opt_int(t, "dataUnitLen").map_or(bits, |u| u as usize);
-                    aft(t, encrypt, bits, unit)
-                }),
-                _ => Err(unknown_test_type(group)),
-            }
-        })
+        let encrypt = match text(group, "direction")? {
+            "encrypt" => true,
+            "decrypt" => false,
+            other => return Err(Error::new(format!("direction {other}"))),
+        };
+        let group_bits = opt_int(group, "payloadLen");
+        match text(group, "testType")? {
+            "AFT" => answer_tests(group, |t| {
+                let bits = match group_bits {
+                    Some(bits) => bits,
+                    None => int(t, "payloadLen")?,
+                } as usize;
+                let unit =
+                    opt_int(t, "dataUnitLen").map_or(bits, |u| u as usize);
+                aft(t, encrypt, bits, unit, builder)
+            }),
+            _ => Err(unknown_test_type(group)),
+        }
     })
 }
 
@@ -71,6 +69,7 @@ fn aft(
     encrypt: bool,
     bits: usize,
     unit: usize,
+    builder: &Builder,
 ) -> Result<Value, Error> {
     let key = hex(t, "key")?;
     // The key field holds the data key and then the tweak key.
@@ -83,10 +82,10 @@ fn aft(
     }
     let mut out = vec![0u8; data.len()];
     aes_width!(data_key, C => {
-        let xts = Xts::<C>::try_new(
-            &key_of::<C>(data_key)?,
-            &key_of::<C>(tweak_key)?,
-        )?;
+        let (data_key, tweak_key) =
+            (key_of::<C>(data_key)?, key_of::<C>(tweak_key)?);
+        let xts =
+            builder.try_build(|| Xts::<C>::try_new(&data_key, &tweak_key))?;
         let mut start = 0;
         let mut index = 0u128;
         while start < bits {

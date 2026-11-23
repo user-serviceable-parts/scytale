@@ -30,30 +30,38 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
+    // Every LMS call hashes as it runs, starting hashes of its own, so
+    // each runs under `builder`: the tree, each signature and each
+    // verification apart.
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            let (lms, ots) = sets(group)?;
-            match mode {
-                "keyGen" => answer_tests(group, |t| key_gen(lms, ots, t)),
-                "sigGen" => {
-                    let mut key =
-                        PrivateKey::generate(&mut Rng(rng), lms, ots)?;
-                    let public = key.public_key().clone();
-                    let answered =
-                        answer_tests(group, |t| sig_gen(&mut key, rng, t))?;
-                    Ok(answered.map(|mut answered| {
-                        let key = hex_value(&public.bytes()[..public.len()]);
-                        answered["publicKey"] = key;
-                        answered
-                    }))
-                }
-                "sigVer" => {
-                    let public = PublicKey::new(&hex(group, "publicKey")?)?;
-                    answer_tests(group, |t| sig_ver(&public, t))
-                }
-                other => Err(Error::new(format!("mode {other}"))),
+        let (lms, ots) = sets(group)?;
+        match mode {
+            "keyGen" => answer_tests(group, |t| {
+                builder.try_build(|| key_gen(lms, ots, t))
+            }),
+            "sigGen" => {
+                let mut key = builder.try_build(|| {
+                    PrivateKey::generate(&mut Rng(rng), lms, ots)
+                })?;
+                let public = key.public_key().clone();
+                let answered = answer_tests(group, |t| {
+                    builder.try_build(|| sig_gen(&mut key, rng, t))
+                })?;
+                Ok(answered.map(|mut answered| {
+                    let key = hex_value(&public.bytes()[..public.len()]);
+                    answered["publicKey"] = key;
+                    answered
+                }))
             }
-        })
+            "sigVer" => {
+                let public = hex(group, "publicKey")?;
+                let public = builder.try_build(|| PublicKey::new(&public))?;
+                answer_tests(group, |t| {
+                    builder.try_build(|| sig_ver(&public, t))
+                })
+            }
+            other => Err(Error::new(format!("mode {other}"))),
+        }
     })
 }
 

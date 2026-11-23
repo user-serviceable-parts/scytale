@@ -43,16 +43,18 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            if text(group, "testType")? != "AFT" {
-                return Err(unknown_test_type(group));
-            }
-            if text(group, "mode")? != "AES-256" {
-                return skip(group, "not AES-256");
-            }
-            let bits = int(group, "returnedBitsLen")? as usize;
-            let derivation = flag(group, "derFunc")?;
-            answer_tests(group, |t| aft(t, bits, derivation))
+        if text(group, "testType")? != "AFT" {
+            return Err(unknown_test_type(group));
+        }
+        if text(group, "mode")? != "AES-256" {
+            return skip(group, "not AES-256");
+        }
+        let bits = int(group, "returnedBitsLen")? as usize;
+        let derivation = flag(group, "derFunc")?;
+        answer_tests(group, |t| {
+            // Built whole: every request and reseed rekeys the
+            // generator's cipher.
+            builder.try_build(|| aft(t, bits, derivation))
         })
     })
 }

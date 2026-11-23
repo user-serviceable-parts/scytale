@@ -204,42 +204,31 @@ pub fn answer(
     let mode = text(doc, "mode")?;
     match (text(doc, "algorithm")?, mode) {
         ("ECDSA", "keyGen") => answer_groups(doc, |group| {
-            builder.try_build(|| {
-                aft(group)?;
-                with_curve!(group, C => key_gen::<C>(group, rng);
-                    why => skip(group, why))
-            })
+            aft(group)?;
+            with_curve!(group, C => key_gen::<C>(group, rng, builder);
+                why => skip(group, why))
         }),
         ("ECDSA", "keyVer") => answer_groups(doc, |group| {
-            builder.try_build(|| {
-                aft(group)?;
-                with_curve!(group, C => key_ver::<C>(group);
-                    why => skip(group, why))
-            })
+            aft(group)?;
+            with_curve!(group, C => key_ver::<C>(group, builder);
+                why => skip(group, why))
         }),
         ("ECDSA", "sigVer") => answer_groups(doc, |group| {
-            builder.try_build(|| {
-                aft(group)?;
-                with_curve!(group, C => with_hash!(group,
-                    H => sig_ver::<C, H>(group);
-                    why => skip(group, why)); why => skip(group, why))
-            })
+            aft(group)?;
+            with_curve!(group, C => with_hash!(group,
+                H => sig_ver::<C, H>(group, builder);
+                why => skip(group, why)); why => skip(group, why))
         }),
         (algorithm @ ("ECDSA" | "DetECDSA"), "sigGen") => {
             let exact = algorithm == "DetECDSA";
             answer_groups(doc, |group| {
-                builder.try_build(|| {
-                    aft(group)?;
-                    if opt_text(group, "conformance") == Some("SP800-106") {
-                        return skip(
-                            group,
-                            "SP 800-106 hashing is not offered",
-                        );
-                    }
-                    with_curve!(group, C => with_hash!(group,
-                        H => sig_gen::<C, H>(group, rng, exact);
-                        why => skip(group, why)); why => skip(group, why))
-                })
+                aft(group)?;
+                if opt_text(group, "conformance") == Some("SP800-106") {
+                    return skip(group, "SP 800-106 hashing is not offered");
+                }
+                with_curve!(group, C => with_hash!(group,
+                    H => sig_gen::<C, H>(group, rng, exact, builder);
+                    why => skip(group, why)); why => skip(group, why))
             })
         }
         (algorithm, _) => {
@@ -323,29 +312,41 @@ fn public_fields<C: Curve>(key: &C::Private) -> (Value, Value) {
 fn key_gen<C: Curve>(
     group: &Value,
     rng: &mut dyn Random,
+    builder: &Builder,
 ) -> Result<Option<Value>, Error> {
     answer_tests(group, |t| {
-        let key = key::<C>(t, rng)?;
+        let key = builder.try_build(|| key::<C>(t, rng))?;
         let (qx, qy) = public_fields::<C>(&key);
         Ok(json!({ "d": hex_value(&C::secret_of(&key)), "qx": qx, "qy": qy }))
     })
 }
 
-fn key_ver<C: Curve>(group: &Value) -> Result<Option<Value>, Error> {
+fn key_ver<C: Curve>(
+    group: &Value,
+    builder: &Builder,
+) -> Result<Option<Value>, Error> {
     answer_tests(group, |t| {
         // A coordinate wider than the field cannot be presented at all.
-        let passed = sec1(t, C::WIDTH)?.is_some_and(|q| C::public(&q).is_ok());
+        let passed = match sec1(t, C::WIDTH)? {
+            Some(q) => builder.build(|| C::public(&q).is_ok())?,
+            None => false,
+        };
         Ok(json!({ "testPassed": passed }))
     })
 }
 
 fn sig_ver<C: Curve, H: SigHash>(
     group: &Value,
+    builder: &Builder,
 ) -> Result<Option<Value>, Error> {
     answer_tests(group, |t| {
+        let message = hex(t, "message")?;
         let passed = match (sec1(t, C::WIDTH)?, signature(t, C::WIDTH)?) {
-            (Some(q), Some(sig)) => match C::public(&q) {
-                Ok(key) => C::verify::<H>(&key, &hex(t, "message")?, &sig),
+            (Some(q), Some(sig)) => match builder.build(|| C::public(&q))? {
+                // Verifying starts a hash of the message.
+                Ok(key) => {
+                    builder.build(|| C::verify::<H>(&key, &message, &sig))?
+                }
                 Err(_) => false,
             },
             _ => false,
@@ -360,15 +361,20 @@ fn sig_gen<C: Curve, H: SigHash>(
     group: &Value,
     rng: &mut dyn Random,
     exact: bool,
+    builder: &Builder,
 ) -> Result<Option<Value>, Error> {
-    let key = key::<C>(group, rng)?;
+    let key = builder.try_build(|| key::<C>(group, rng))?;
     let answered = answer_tests(group, |t| {
         let message = hex(t, "message")?;
-        let sig = if exact {
-            C::sign_deterministic::<H>(&key, &message)?
-        } else {
-            C::sign::<H>(&key, rng, &message)?
-        };
+        // Signing starts a hash of the message, and a deterministic
+        // signature an HMAC generator for its nonce besides.
+        let sig = builder.try_build(|| {
+            if exact {
+                C::sign_deterministic::<H>(&key, &message)
+            } else {
+                C::sign::<H>(&key, rng, &message)
+            }
+        })?;
         let (r, s) = sig.split_at(C::WIDTH);
         Ok(json!({ "r": hex_value(r), "s": hex_value(s) }))
     })?;

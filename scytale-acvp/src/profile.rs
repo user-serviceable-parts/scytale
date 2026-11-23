@@ -77,12 +77,16 @@ impl Seed {
 /// program that never calls [`features::set`] would.
 ///
 /// A type chooses its kernel from the set in force when it is built,
-/// and some objects build others as they are used: a GCM-SIV message
-/// builds its own cipher and POLYVAL, a hash-based signature or a KDF
-/// starts a hash for every call, and the generator rekeys its cipher.
-/// So a driver runs a whole test group inside [`build`](Self::build),
-/// not just its constructors, and steps outside only to feed an
-/// object it built, as the large-data hashes do.
+/// and keeps it whatever the set becomes, so a driver builds inside
+/// [`build`](Self::build) and runs what it built outside, where
+/// builds under another set need not wait for it. Some calls build as
+/// they run, though: a GCM message over a cipher with no kernel of
+/// GCM's own starts its own GHASH, a GCM-SIV message builds its own
+/// cipher and POLYVAL, an ML-KEM key reads its matrix through SHAKE
+/// streams chosen then, a signature, a KDF or a DRBG starts hashes or
+/// MACs for every call, and the generator rekeys its cipher as it
+/// draws. A driver makes such a call inside the builder too, and no
+/// more than it.
 ///
 /// The set in force is process-wide, so a builder takes a turn: it
 /// waits while builds under another set are running, puts its own in

@@ -111,32 +111,37 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
-    answer_groups(doc, |group| {
-        builder.try_build(|| match text(group, "parameterSet")? {
-            Set512::NAME => answer_group::<Set512>(mode, group),
-            Set768::NAME => answer_group::<Set768>(mode, group),
-            Set1024::NAME => answer_group::<Set1024>(mode, group),
-            other => Err(Error::new(format!("parameter set {other}"))),
-        })
+    answer_groups(doc, |group| match text(group, "parameterSet")? {
+        Set512::NAME => answer_group::<Set512>(mode, group, builder),
+        Set768::NAME => answer_group::<Set768>(mode, group, builder),
+        Set1024::NAME => answer_group::<Set1024>(mode, group, builder),
+        other => Err(Error::new(format!("parameter set {other}"))),
     })
 }
 
+/// Every case builds its key from the case's bytes and runs it once,
+/// and every call hashes as it runs, starting hashes of its own: each
+/// case runs whole under `builder`.
 fn answer_group<S: Set>(
     mode: &str,
     group: &Value,
+    builder: &Builder,
 ) -> Result<Option<Value>, Error> {
+    let each = |answer: &dyn Fn(&Value) -> Result<Value, Error>| {
+        answer_tests(group, |t| builder.try_build(|| answer(t)))
+    };
     match mode {
-        "keyGen" => answer_tests(group, key_gen::<S>),
+        "keyGen" => each(&key_gen::<S>),
         "encapDecap" => match text(group, "function")? {
-            "encapsulation" => answer_tests(group, encapsulation::<S>),
+            "encapsulation" => each(&encapsulation::<S>),
             "decapsulation" => {
                 let seed = text(group, "keyFormat")? == "seed";
-                answer_tests(group, |t| decapsulation::<S>(t, seed))
+                each(&|t| decapsulation::<S>(t, seed))
             }
-            "encapsulationKeyCheck" => answer_tests(group, |t| {
+            "encapsulationKeyCheck" => each(&|t| {
                 Ok(json!({ "testPassed": S::public_ok(&hex(t, "ek")?) }))
             }),
-            "decapsulationKeyCheck" => answer_tests(group, |t| {
+            "decapsulationKeyCheck" => each(&|t| {
                 Ok(json!({ "testPassed": S::private_ok(&hex(t, "dk")?) }))
             }),
             other => Err(Error::new(format!("function {other}"))),

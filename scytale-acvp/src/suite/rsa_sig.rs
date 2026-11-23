@@ -106,29 +106,31 @@ pub fn answer(
         other => return Err(Error::new(format!("mode {other}"))),
     };
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            if let Some(why) = skip_reason(group)? {
-                return skip(group, why);
-            }
-            if text(group, "testType")? != "GDT" {
-                return Err(unknown_test_type(group));
-            }
-            let alg = text(group, "hashAlg")?;
-            let padding = padding(group)?;
-            if generate {
-                with_hash!(alg, H => sig_gen::<H>(group, padding, rng))
-            } else {
-                let key = public_key(group)?;
-                answer_tests(group, |t| {
-                    let message = hex(t, "message")?;
-                    let sig = hex(t, "signature")?;
-                    let ok = with_hash!(alg, H => {
+        if let Some(why) = skip_reason(group)? {
+            return skip(group, why);
+        }
+        if text(group, "testType")? != "GDT" {
+            return Err(unknown_test_type(group));
+        }
+        let alg = text(group, "hashAlg")?;
+        let padding = padding(group)?;
+        if generate {
+            with_hash!(alg, H => sig_gen::<H>(group, padding, rng, builder))
+        } else {
+            answer_tests(group, |t| {
+                let key = builder.try_build(|| public_key(group))?;
+                let message = hex(t, "message")?;
+                let sig = hex(t, "signature")?;
+                // Verifying starts a hash of the message, and PSS
+                // another for its mask.
+                let ok = builder.try_build(|| {
+                    Ok::<_, Error>(with_hash!(alg, H => {
                         verify::<H>(&key, padding, &message, &sig)
-                    });
-                    Ok(json!({ "testPassed": ok }))
-                })
-            }
-        })
+                    }))
+                })?;
+                Ok(json!({ "testPassed": ok }))
+            })
+        }
     })
 }
 
@@ -195,9 +197,11 @@ fn sig_gen<H: DigestInfo + Default>(
     group: &Value,
     padding: Padding,
     rng: &mut dyn Random,
+    builder: &Builder,
 ) -> Result<Option<Value>, Error> {
     let bits = int(group, "modulo")? as usize;
-    let key = PrivateKey::generate(&mut Rng(&mut *rng), bits)?;
+    let key = builder
+        .try_build(|| PrivateKey::generate(&mut Rng(&mut *rng), bits))?;
     let public = key.public_key();
     let mut n = vec![0u8; public.modulus_len()];
     let len = public.modulus_bytes(&mut n)?;
@@ -206,14 +210,16 @@ fn sig_gen<H: DigestInfo + Default>(
     let start = e.iter().position(|b| *b != 0).unwrap_or(e.len() - 1);
     let answered = answer_tests(group, |t| {
         let message = hex(t, "message")?;
-        let sig = match padding {
-            Padding::Pkcs1 => key.sign_pkcs1::<H>(&message)?,
+        // Signing starts a hash of the message, and PSS another for
+        // its mask; the salt is drawn, which rekeys the generator.
+        let sig = builder.try_build(|| match padding {
+            Padding::Pkcs1 => Ok(key.sign_pkcs1::<H>(&message)?),
             Padding::Pss(salt_len) => {
                 let mut salt = vec![0u8; salt_len];
                 rng.fill(&mut salt)?;
-                key.sign_pss_with_salt::<H>(&message, &salt)?
+                Ok::<_, Error>(key.sign_pss_with_salt::<H>(&message, &salt)?)
             }
-        };
+        })?;
         Ok(json!({ "signature": hex_value(sig.as_ref()) }))
     })?;
     let Some(mut answered) = answered else {

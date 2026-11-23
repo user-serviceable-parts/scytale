@@ -50,19 +50,22 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            if text(group, "testType")? != "AFT" {
-                return Err(unknown_test_type(group));
-            }
-            if let Some(why) = skip_reason(group)? {
-                return skip(group, &why);
-            }
-            let responder = match text(group, "kasRole")? {
-                "responder" => true,
-                "initiator" => false,
-                other => return Err(Error::new(format!("kasRole {other}"))),
-            };
-            answer_tests(group, |t| {
+        if text(group, "testType")? != "AFT" {
+            return Err(unknown_test_type(group));
+        }
+        if let Some(why) = skip_reason(group)? {
+            return skip(group, &why);
+        }
+        let responder = match text(group, "kasRole")? {
+            "responder" => true,
+            "initiator" => false,
+            other => return Err(Error::new(format!("kasRole {other}"))),
+        };
+        // Built whole: past the key, each case is decryption or
+        // encryption under OAEP, whose hashes and mask start with each
+        // call, and a MAC keyed by the transported key.
+        answer_tests(group, |t| {
+            builder.try_build(|| {
                 if responder {
                     respond(group, t)
                 } else {

@@ -19,18 +19,16 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            let encrypt = match text(group, "direction")? {
-                "encrypt" => true,
-                "decrypt" => false,
-                other => return Err(Error::new(format!("direction {other}"))),
-            };
-            match text(group, "testType")? {
-                "AFT" => answer_tests(group, |t| aft(t, encrypt)),
-                "MCT" => answer_tests(group, |t| mct(t, encrypt)),
-                _ => Err(unknown_test_type(group)),
-            }
-        })
+        let encrypt = match text(group, "direction")? {
+            "encrypt" => true,
+            "decrypt" => false,
+            other => return Err(Error::new(format!("direction {other}"))),
+        };
+        match text(group, "testType")? {
+            "AFT" => answer_tests(group, |t| aft(t, encrypt, builder)),
+            "MCT" => answer_tests(group, |t| mct(t, encrypt, builder)),
+            _ => Err(unknown_test_type(group)),
+        }
     })
 }
 
@@ -42,13 +40,14 @@ fn block(bytes: &[u8]) -> Result<[u8; 16], Error> {
 }
 
 /// Algorithm Functional Test: one message, one IV.
-fn aft(t: &Value, encrypt: bool) -> Result<Value, Error> {
+fn aft(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
     let key = hex(t, "key")?;
     let iv = block(&hex(t, "iv")?)?;
     let (input, output) = if encrypt { ("pt", "ct") } else { ("ct", "pt") };
     let mut data = hex(t, input)?;
     aes_width!(key, C => {
-        let cbc = Cbc::<C>::new(&key_of::<C>(&key)?);
+        let k = key_of::<C>(&key)?;
+        let cbc = builder.build(|| Cbc::<C>::new(&k))?;
         if encrypt {
             cbc.encrypt(&iv, &mut data)?;
         } else {
@@ -62,7 +61,7 @@ fn aft(t: &Value, encrypt: bool) -> Result<Value, Error> {
 /// operations whose inputs chain into one another, then derives the
 /// next key, IV and input from the last two outputs. The answer gives
 /// the key, IV and input of each step, and its last output.
-fn mct(t: &Value, encrypt: bool) -> Result<Value, Error> {
+fn mct(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
     let (input_name, output_name) =
         if encrypt { ("pt", "ct") } else { ("ct", "pt") };
     let mut key = hex(t, "key")?;
@@ -76,7 +75,8 @@ fn mct(t: &Value, encrypt: bool) -> Result<Value, Error> {
             input_name: hex_value(&input),
         });
         let (last, previous) = aes_width!(key, C => {
-            let cbc = Cbc::<C>::new(&key_of::<C>(&key)?);
+            let k = key_of::<C>(&key)?;
+        let cbc = builder.build(|| Cbc::<C>::new(&k))?;
             if encrypt {
                 step_encrypt(&cbc, &iv, &input)?
             } else {
