@@ -668,45 +668,9 @@ pub fn get() -> Features {
 
 /// What is in force until [`set`] is called, and again after
 /// [`reset`]: the hardware.
-#[cfg(not(test))]
 fn baseline() -> Features {
     detected()
 }
-
-/// In the library's own test build, `SCYTALE_FEATURES` names the
-/// baseline instead when it is set. A run of the suite under `none`
-/// then takes the portable kernels and every fallback through the
-/// public types on a machine that has the hardware, for a developer
-/// after one of them. Read once; a set the processor cannot honour
-/// fails the run as [`set`] would refuse it.
-#[cfg(test)]
-fn baseline() -> Features {
-    let kept = BASELINE.load(Ordering::Relaxed);
-    if kept & WRITTEN != 0 {
-        return Features(kept & !WRITTEN);
-    }
-    let found = match std::env::var("SCYTALE_FEATURES") {
-        Ok(text) => match text.parse::<Features>() {
-            Ok(wanted) => {
-                let hardware = detected();
-                if let Some(f) =
-                    wanted.native().iter().find(|&f| !hardware.contains(f))
-                {
-                    panic!("SCYTALE_FEATURES: {f} is not on this processor");
-                }
-                wanted
-            }
-            Err(e) => panic!("SCYTALE_FEATURES: {text:?}: {e:?}"),
-        },
-        Err(_) => detected(),
-    };
-    BASELINE.store(found.0 | WRITTEN, Ordering::Relaxed);
-    found
-}
-
-/// The test build's baseline, with [`WRITTEN`] once it has been read.
-#[cfg(test)]
-static BASELINE: AtomicU64 = AtomicU64::new(0);
 
 /// Makes `features` the set in force.
 ///
@@ -736,91 +700,33 @@ pub fn reset() {
 }
 
 /// Whether everything in `required` is in force. Private: a kernel
-/// asks for its instructions by naming its row, through [`allows`],
-/// so that every hardware branch in the crate is a row some list
-/// publishes and the inventory can account for.
+/// is chosen by [`choose`] from its list, so that every hardware
+/// branch in the crate is a row some list publishes and a kernel
+/// test runs.
 fn has(required: Features) -> bool {
     required.is_subset(get())
 }
 
-/// Whether the set in force meets the needs of some row of `kernels`
-/// named `kernel`. A kernel named twice, under two sets that each
-/// suffice, is allowed when either is met.
-///
-/// This is the one way to ask for hardware outside [`select`]: a
-/// kernel's own probe, and a loop that stands apart from any list and
-/// borrows a row's needs, both name the row.
-// An architecture with no kernels written for it asks for none.
-#[cfg_attr(
-    not(any(
-        target_arch = "aarch64",
-        target_arch = "riscv64",
-        target_arch = "x86_64"
-    )),
-    allow(dead_code)
-)]
-pub(crate) fn allows<K: PartialEq>(
-    kernels: &[(K, Features)],
-    kernel: K,
-) -> bool {
-    row_within(kernels, kernel, get())
-}
+/// A kernel the list chose: proof that its row's features were in
+/// force when it was chosen, and so that the processor has them,
+/// since the set in force never holds a feature the processor lacks.
+/// Only [`choose`] makes one, so a kernel's constructor that takes
+/// one needs to ask nothing of the processor: it checks only that the
+/// choice is its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Chosen<K>(K);
 
-/// Whether some row of `kernels` named `kernel` needs no more than
-/// `granted`.
-#[cfg_attr(
-    not(any(
-        target_arch = "aarch64",
-        target_arch = "riscv64",
-        target_arch = "x86_64"
-    )),
-    allow(dead_code)
-)]
-fn row_within<K: PartialEq>(
-    kernels: &[(K, Features)],
-    kernel: K,
-    granted: Features,
-) -> bool {
-    kernels
-        .iter()
-        .any(|(k, needs)| *k == kernel && needs.is_subset(granted))
-}
-
-/// The set of these x86-64 features, for writing a requirement down.
-#[cfg(target_arch = "x86_64")]
-pub(crate) const fn x86(features: &[x86_64::Feature]) -> Features {
-    let mut set = Features::new();
-    let mut i = 0;
-    while i < features.len() {
-        set = set.with(Feature::X86_64(features[i]));
-        i += 1;
+impl<K: Copy> Chosen<K> {
+    /// Which kernel was chosen.
+    pub(crate) fn kernel(self) -> K {
+        self.0
     }
-    set
 }
 
-/// The set of these AArch64 features, for writing a requirement
-/// down.
-#[cfg(target_arch = "aarch64")]
-pub(crate) const fn arm(features: &[aarch64::Feature]) -> Features {
-    let mut set = Features::new();
-    let mut i = 0;
-    while i < features.len() {
-        set = set.with(Feature::Aarch64(features[i]));
-        i += 1;
-    }
-    set
-}
-
-/// The set of these RISC-V features, for writing a requirement down.
-#[cfg(target_arch = "riscv64")]
-pub(crate) const fn riscv(features: &[riscv64::Feature]) -> Features {
-    let mut set = Features::new();
-    let mut i = 0;
-    while i < features.len() {
-        set = set.with(Feature::Riscv64(features[i]));
-        i += 1;
-    }
-    set
+/// As [`select`], with the answer as the proof a kernel's constructor
+/// takes.
+pub(crate) fn choose<K: Copy>(kernels: &[(K, Features)]) -> Option<Chosen<K>> {
+    select(kernels).map(Chosen)
 }
 
 /// The first kernel in `kernels` whose requirements are in force.
@@ -833,20 +739,282 @@ pub(crate) fn select<K: Copy>(kernels: &[(K, Features)]) -> Option<K> {
         .map(|(kernel, _)| *kernel)
 }
 
-/// Whether `kernel` is a row of `kernels` whose needs the set in force
-/// meets, the virtual features granted. What the test constructors
-/// ask: the virtual features so that the table-driven cipher is to be
-/// had without editing the set, which is global to the process; the
-/// set in force rather than the processor because a mode's test
-/// constructor builds the cipher beneath it under that set, and a
-/// loop cannot read a schedule laid out for another kernel. Under a
-/// narrowed baseline the hardware kernels are skipped, loudly.
+/// The set of features one kernel needs, written out: nothing,
+/// `isolated`, or one architecture's features by their variant names,
+/// as `x86_64: Avx2, Bmi2`. Every architecture's form compiles
+/// everywhere, so a row's `cfg` alone decides where it exists.
+macro_rules! needs {
+    () => {
+        $crate::features::Features::new()
+    };
+    (isolated) => {
+        $crate::features::Features::of(&[$crate::features::Feature::Isolated])
+    };
+    (x86_64: $($f:ident),+ $(,)?) => {
+        $crate::features::Features::of(&[$(
+            $crate::features::Feature::X86_64(
+                $crate::features::x86_64::Feature::$f,
+            )
+        ),+])
+    };
+    (aarch64: $($f:ident),+ $(,)?) => {
+        $crate::features::Features::of(&[$(
+            $crate::features::Feature::Aarch64(
+                $crate::features::aarch64::Feature::$f,
+            )
+        ),+])
+    };
+    (riscv64: $($f:ident),+ $(,)?) => {
+        $crate::features::Features::of(&[$(
+            $crate::features::Feature::Riscv64(
+                $crate::features::riscv64::Feature::$f,
+            )
+        ),+])
+    };
+}
+pub(crate) use needs;
+
+/// Declares the kernel lists of one kernel enum, the one place a
+/// kernel and the features it needs are written down.
+///
+/// Each list is a type's kernels, best first, each with exactly the
+/// features its code uses. From the same rows this makes:
+///
+/// - the list itself, which construction searches and
+///   [`Dispatcher::profiles`] publishes;
+/// - a compile-time check of each list, [`check_list`];
+/// - a `match` over the enum that compiles only if every kernel is in
+///   some list, so a kernel cannot be written and never dispatched;
+/// - in the test build, a test per list, `kernels::<alg>`, that runs
+///   the named suite once under every kernel, so a listed kernel
+///   cannot go untested.
+///
+/// ```text
+/// kernels! {
+///     enum Kernel;
+///     pub(crate) const KERNELS for sha512 tested by tests::suite = [
+///         #[cfg(target_arch = "x86_64")]
+///         Avx2 => (x86_64: Avx2, Bmi1, Bmi2),
+///         Portable => (),
+///     ];
+/// }
+/// ```
+macro_rules! kernels {
+    (
+        enum $kernel:ident;
+        $(
+            $(#[$doc:meta])*
+            $vis:vis const $list:ident for $alg:ident
+                tested by $suite:path = [
+                $(
+                    $(#[$attr:meta])*
+                    $variant:ident => ($($needs:tt)*)
+                ),+ $(,)?
+            ];
+        )+
+    ) => {
+        $(
+            $(#[$doc])*
+            $vis const $list: &[($kernel, $crate::features::Features)] = &[
+                $(
+                    $(#[$attr])*
+                    (
+                        $kernel::$variant,
+                        $crate::features::needs!($($needs)*),
+                    ),
+                )+
+            ];
+            const _: () = $crate::features::check_list($list);
+        )+
+
+        /// Compiles only if every kernel is in some list above.
+        #[allow(dead_code, unreachable_patterns)]
+        const fn every_kernel_is_listed(kernel: $kernel) {
+            match kernel {
+                $($(
+                    $(#[$attr])*
+                    $kernel::$variant => {}
+                )+)+
+            }
+        }
+
+        /// One test per list: its suite under every kernel.
+        #[cfg(test)]
+        mod kernels {
+            #[allow(unused_imports)]
+            use super::*;
+            $(
+                #[test]
+                fn $alg() {
+                    $crate::features::each_kernel(
+                        stringify!($alg),
+                        $list,
+                        $suite,
+                    );
+                }
+            )+
+        }
+    };
+}
+pub(crate) use kernels;
+
+/// What every kernel list must be, checked when the list is compiled:
+/// not empty; the last row needs nothing, so the search always ends;
+/// no row needs all that a row above it needs, since the row above
+/// would then always win and this one could never be chosen; and a
+/// row that needs `isolated` sits directly above the last, so the
+/// leaky tables are chosen only over the portable code.
+pub(crate) const fn check_list<K>(rows: &[(K, Features)]) {
+    assert!(!rows.is_empty(), "a kernel list is empty");
+    let n = rows.len();
+    assert!(
+        rows[n - 1].1.is_empty(),
+        "the last kernel must need nothing"
+    );
+    let isolated = Features::of(&[Feature::Isolated]);
+    let mut i = 0;
+    while i < n {
+        let mut j = i + 1;
+        while j < n {
+            assert!(
+                !rows[i].1.is_subset(rows[j].1),
+                "a kernel needs all that one above it needs: unreachable"
+            );
+            j += 1;
+        }
+        assert!(
+            !isolated.is_subset(rows[i].1) || i + 2 == n,
+            "an isolated kernel must sit directly above the last"
+        );
+        i += 1;
+    }
+}
+
+/// A kernel's needs as its test names them: the features, joined by
+/// `+`, without the architecture's prefix; `none` for nothing.
 #[cfg(test)]
-pub(crate) fn available<K: PartialEq>(
-    kernels: &[(K, Features)],
+pub(crate) fn short_name(needs: Features) -> std::string::String {
+    if needs.is_empty() {
+        return "none".into();
+    }
+    let names: std::vec::Vec<&str> = needs.iter().map(Feature::name).collect();
+    names.join("+")
+}
+
+/// The features `kernel`'s row of `rows` needs, for a test that asks
+/// what a processor with some set of extensions would be offered.
+#[cfg(test)]
+// Only the RISC-V tests ask, so far.
+#[cfg_attr(not(target_arch = "riscv64"), allow(dead_code))]
+pub(crate) fn needs_of<K: PartialEq>(
+    rows: &[(K, Features)],
     kernel: K,
-) -> bool {
-    row_within(kernels, kernel, get() | Features::of(&[Feature::Isolated]))
+) -> Features {
+    rows.iter()
+        .find(|(k, _)| *k == kernel)
+        .map(|(_, needs)| *needs)
+        .expect("the kernel is listed")
+}
+
+/// Where a kernel test builds its objects: under exactly one kernel's
+/// features, through the public API.
+#[cfg(test)]
+pub(crate) struct Under(Features);
+
+/// Held for each build under a kernel's features. The set in force is
+/// global, so two tests building at once must take turns; a build is
+/// short, and the object keeps its kernel once built.
+#[cfg(test)]
+static BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+impl Under {
+    /// Builds with this kernel's features in force, and puts the
+    /// set back before anyone else may build.
+    pub(crate) fn build<T>(&self, build: impl FnOnce() -> T) -> T {
+        // Put back however the build ends: a build that panics must
+        // not leave the tests that follow a narrowed set.
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                reset();
+            }
+        }
+        let _turn = BUILD.lock().unwrap_or_else(|e| e.into_inner());
+        set(self.0).expect("each_kernel checked the processor has these");
+        let _reset = Reset;
+        build()
+    }
+}
+
+/// Builds with nothing in force, so on the portable code of every
+/// type: the reference a kernel's answers are compared with.
+#[cfg(test)]
+pub(crate) fn build_portable<T>(build: impl FnOnce() -> T) -> T {
+    Under(Features::new()).build(build)
+}
+
+/// Builds with the set in force left as it is, taking the same turn
+/// as [`Under::build`], so a test that asks which kernel it got sees
+/// no other test's set.
+#[cfg(test)]
+pub(crate) fn build_alone<T>(build: impl FnOnce() -> T) -> T {
+    let _turn = BUILD.lock().unwrap_or_else(|e| e.into_inner());
+    build()
+}
+
+/// The kernels `SCYTALE_KERNELS` names, separated by white space, or
+/// `None` when it is unset, which selects every kernel.
+#[cfg(test)]
+fn selected() -> Option<std::vec::Vec<std::string::String>> {
+    let list = std::env::var("SCYTALE_KERNELS").ok()?;
+    Some(list.split_whitespace().map(Into::into).collect())
+}
+
+/// Runs `suite` once under each kernel of `rows` that is selected and
+/// that this processor can run, and prints a line for every kernel:
+/// run, not run with the features it lacks, or not selected. A
+/// kernel named twice, under two sets that each suffice, runs under
+/// the first the processor has. Fails if any kernel's suite fails.
+#[cfg(test)]
+pub(crate) fn each_kernel<K: Copy + PartialEq>(
+    alg: &str,
+    rows: &[(K, Features)],
+    suite: fn(&Under),
+) {
+    use std::string::String;
+    use std::vec::Vec;
+
+    let selected = selected();
+    let hardware = detected();
+    let mut ran: Vec<K> = Vec::new();
+    let mut lines: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    for &(kernel, needs) in rows {
+        if ran.contains(&kernel) {
+            continue;
+        }
+        let name = std::format!("{alg}/{}", short_name(needs));
+        let missing = needs.native() - hardware;
+        let state = if selected.as_ref().is_some_and(|s| !s.contains(&name)) {
+            "not selected".into()
+        } else if !missing.is_empty() {
+            std::format!("not run: needs {}", short_name(missing))
+        } else {
+            ran.push(kernel);
+            let under = Under(needs);
+            match std::panic::catch_unwind(|| suite(&under)) {
+                Ok(()) => "run".into(),
+                Err(_) => {
+                    failed.push(name.clone());
+                    "FAILED".into()
+                }
+            }
+        };
+        lines.push(std::format!("  {name:<40} {state}"));
+    }
+    std::println!("{alg}\n{}", lines.join("\n"));
+    assert!(failed.is_empty(), "failed: {}", failed.join(" "));
 }
 
 /// The requirements alone, in order: what a family publishes as its
@@ -1145,17 +1313,10 @@ mod tests {
         assert!(rows_are_reachable(&[("b", b), ("a", a), ("", none)]));
     }
 
-    /// Tests that edit the set in force. The set is global to the
-    /// process and the test binary is threaded, so these are ignored
-    /// by default and run on their own, single-threaded, by a step of
-    /// their own in CI:
-    ///
-    /// ```text
-    /// cargo test --lib features::tests::alone -- --ignored --test-threads=1
-    /// ```
-    ///
-    /// Each puts the hardware back in force when it is done.
-    mod alone {
+    /// Dispatch itself: these set the process-wide features, so each
+    /// holds the build lock throughout, as a kernel test's build does,
+    /// and no other test that asks which kernel it got runs between.
+    mod dispatch {
         use super::*;
         use crate::Key;
         use crate::aead::{Ccm, Gcm, GcmSiv, ccm, gcm, gcm_siv};
@@ -1206,8 +1367,11 @@ mod tests {
         }
 
         #[test]
-        #[ignore]
         fn removing_a_feature_selects_the_kernel_below() {
+            build_alone(removing_a_feature);
+        }
+
+        fn removing_a_feature() {
             let _restore = Restore;
             let key = [0u8; 16];
             let chacha_key = crate::Key::from([0u8; 32]);
@@ -1241,8 +1405,11 @@ mod tests {
         }
 
         #[test]
-        #[ignore]
         fn isolated_admits_the_tables_below_the_hardware() {
+            build_alone(isolated);
+        }
+
+        fn isolated() {
             let _restore = Restore;
             let key = [0u8; 16];
             // Alone, it unlocks the table-driven code over the
@@ -1261,8 +1428,11 @@ mod tests {
         }
 
         #[test]
-        #[ignore]
         fn a_value_keeps_the_kernel_it_was_built_with() {
+            build_alone(keeps);
+        }
+
+        fn keeps() {
             let _restore = Restore;
             let key = [0u8; 16];
             let built = Aes::<16>::new(&key);

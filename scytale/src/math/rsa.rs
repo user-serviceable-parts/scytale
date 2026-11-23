@@ -43,21 +43,13 @@ use crate::Random;
 /// [`crate::features::Dispatcher`]: on x86-64 the carry-chain
 /// multiply or the portable one, elsewhere no choice.
 pub(crate) fn profiles() -> &'static [crate::features::Features] {
-    #[cfg(target_arch = "x86_64")]
-    {
-        &crate::math::limbs::x86_64::PROFILES
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        const NONE: [crate::features::Features; 1] =
-            [crate::features::Features::new()];
-        &NONE
-    }
+    &limbs::PROFILES
 }
 use crate::codec::pem;
 use crate::der::{self, Algorithm, Reader, Writer};
 use crate::hash::Hash;
 use crate::math::limbs::{self, Modulus};
+use crate::math::{Arith, Choice, with_arith};
 
 /// The narrowest modulus accepted, in bits. Below this RSA is broken
 /// rather than merely weak.
@@ -175,11 +167,13 @@ impl Layout {
     }
 }
 
-/// The public half of an RSA key, a view over its words.
+/// The public half of an RSA key, a view over its words, with the
+/// arithmetic chosen when the key was made.
 #[derive(Clone, Copy)]
 pub(crate) struct Public<'a> {
     words: &'a [u64],
     layout: Layout,
+    choice: Choice,
 }
 
 /// The private half with its public half in front, a view over the
@@ -189,6 +183,7 @@ pub(crate) struct Public<'a> {
 pub(crate) struct Private<'a> {
     words: &'a [u64],
     layout: Layout,
+    choice: Choice,
 }
 
 /// The bit length of a big-endian integer, with leading zeros
@@ -268,10 +263,14 @@ impl<'a> Public<'a> {
         Ok(words)
     }
 
-    /// A view over words that [`fill`](Self::fill) laid out. The
-    /// header is checked against the slice, so a slice that is not a
-    /// key is refused rather than read out of bounds.
-    pub(crate) fn new(storage: &'a [u64]) -> Result<Self, Error> {
+    /// A view over words that [`fill`](Self::fill) laid out, running
+    /// the arithmetic `choice` names. The header is checked against
+    /// the slice, so a slice that is not a key is refused rather than
+    /// read out of bounds.
+    pub(crate) fn new(
+        storage: &'a [u64],
+        choice: Choice,
+    ) -> Result<Self, Error> {
         let bits = *storage.get(1).ok_or(Error::InvalidPublicKey)? as usize;
         if !(MIN_BITS..=MAX_BITS).contains(&bits)
             || storage[0] as usize != limbs(bits)
@@ -282,17 +281,26 @@ impl<'a> Public<'a> {
         Ok(Public {
             words: storage,
             layout: Layout::of(bits),
+            choice,
         })
     }
 
     /// A view over words this crate laid out itself and remembers
-    /// the bits of, so nothing has to be checked again. The owned
-    /// key types use it; the debug assertion is the check.
-    pub(crate) fn over(storage: &'a [u64], bits: usize) -> Self {
-        debug_assert!(Self::new(storage).is_ok_and(|p| p.bits() == bits));
+    /// the bits and the choice of, so nothing has to be checked or
+    /// chosen again. The owned key types use it; the debug assertion
+    /// is the check.
+    pub(crate) fn over(
+        storage: &'a [u64],
+        bits: usize,
+        choice: Choice,
+    ) -> Self {
+        debug_assert!(
+            Self::new(storage, choice).is_ok_and(|p| p.bits() == bits)
+        );
         Public {
             words: storage,
             layout: Layout::of(bits),
+            choice,
         }
     }
 
@@ -305,8 +313,13 @@ impl<'a> Public<'a> {
         modulus_len(self.layout.bits)
     }
 
-    fn modulus(&self) -> Modulus<'a> {
-        Modulus::new(&self.words[self.layout.modulus()], self.words[3])
+    fn modulus<A: Arith>(&self, arith: A) -> Modulus<'a, A> {
+        Modulus::new(&self.words[self.layout.modulus()], self.words[3], arith)
+    }
+
+    /// The modulus's limbs alone, for what needs no product.
+    fn n(&self) -> &'a [u64] {
+        &self.words[self.layout.modulus()][..self.layout.limbs]
     }
 
     fn e(&self) -> u64 {
@@ -323,7 +336,7 @@ impl<'a> Public<'a> {
         let mut value = [0u64; limbs(MAX_BITS)];
         let value = &mut value[..self.layout.limbs];
         limbs::from_be_bytes(input, value);
-        limbs::less_than(value, self.modulus().modulus()) != 0
+        limbs::less_than(value, self.n()) != 0
     }
 
     /// The public operation, `out = input^e mod n`, over
@@ -341,7 +354,9 @@ impl<'a> Public<'a> {
         let (value, rest) = scratch.split_at_mut(limbs);
         let (result, rest) = rest.split_at_mut(limbs);
         limbs::from_be_bytes(input, value);
-        self.modulus().modexp_public(value, self.e(), result, rest);
+        with_arith!(self.choice, a => {
+            self.modulus(a).modexp_public(value, self.e(), result, rest)
+        });
         limbs::to_be_bytes(result, out);
         scratch.zeroize();
         Ok(())
@@ -351,7 +366,7 @@ impl<'a> Public<'a> {
     /// [`modulus_len`](Self::modulus_len) bytes.
     pub(crate) fn write_modulus(&self, out: &mut [u8]) {
         debug_assert_eq!(out.len(), self.modulus_len());
-        limbs::to_be_bytes(self.modulus().modulus(), out);
+        limbs::to_be_bytes(self.n(), out);
     }
 
     /// The public exponent, big-endian in eight bytes.
@@ -378,7 +393,8 @@ impl<'a> Private<'a> {
             return Err(Error::ScratchTooSmall(words));
         };
         let (front, private) = storage.split_at_mut(public);
-        let public = Public::new(front)?;
+        // Only the modulus is read, which takes no product.
+        let public = Public::new(front, Choice::Portable)?;
 
         let d = strip_leading_zeros(d);
         if d.len() > public.modulus_len() {
@@ -389,8 +405,7 @@ impl<'a> Private<'a> {
         let d_words =
             &mut private[PRIVATE_HEADER..PRIVATE_HEADER + layout.limbs];
         limbs::from_be_bytes(d, d_words);
-        if limbs::is_zero(d_words)
-            || limbs::less_than(d_words, public.modulus().modulus()) == 0
+        if limbs::is_zero(d_words) || limbs::less_than(d_words, public.n()) == 0
         {
             d_words.zeroize();
             return Err(Error::InvalidPrivateKey);
@@ -407,9 +422,34 @@ impl<'a> Private<'a> {
     /// multiply to the modulus and `qinv` must invert `q`. A wrong
     /// `dp` or `dq` cannot be caught here, and is caught instead by
     /// the check every private operation gets before its result is
-    /// released.
+    /// released. The checks run the arithmetic `choice` names, which
+    /// is the one the key will be made with.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn fill_crt(
+        choice: Choice,
+        n: &[u8],
+        e: &[u8],
+        d: &[u8],
+        p: &[u8],
+        q: &[u8],
+        dp: &[u8],
+        dq: &[u8],
+        qinv: &[u8],
+        storage: &mut [u64],
+        scratch: &mut [u64],
+    ) -> Result<usize, Error> {
+        with_arith!(choice, a => {
+            Self::fill_crt_in(
+                a, n, e, d, p, q, dp, dq, qinv, storage, scratch,
+            )
+        })
+    }
+
+    /// [`fill_crt`](Self::fill_crt), of the kind of arithmetic
+    /// already in hand: key generation's too, which ends here.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_crt_in<A: Arith>(
+        arith: A,
         n: &[u8],
         e: &[u8],
         d: &[u8],
@@ -426,7 +466,8 @@ impl<'a> Private<'a> {
         let layout = Layout::of(storage[1] as usize);
         let scratch = scratch_for(layout.bits, scratch)?;
         let pieces = Pieces { p, q, dp, dq, qinv };
-        let result = Self::fill_crt_checked(layout, pieces, storage, scratch);
+        let result =
+            Self::fill_crt_checked(arith, layout, pieces, storage, scratch);
         scratch.zeroize();
         if result.is_err() {
             storage[layout.private()..].zeroize();
@@ -436,7 +477,8 @@ impl<'a> Private<'a> {
 
     /// The CRT part of [`fill_crt`](Self::fill_crt), once the public
     /// half and the exponent are in place.
-    fn fill_crt_checked(
+    fn fill_crt_checked<A: Arith>(
+        arith: A,
         layout: Layout,
         pieces: Pieces<'_>,
         storage: &mut [u64],
@@ -497,8 +539,8 @@ impl<'a> Private<'a> {
             limbs::from_be_bytes(part, &mut storage[range]);
         }
         {
-            let p = Modulus::new(&storage[layout.p()], p_inv);
-            let q = Modulus::new(&storage[layout.q()], q_inv);
+            let p = Modulus::new(&storage[layout.p()], p_inv, arith);
+            let q = Modulus::new(&storage[layout.q()], q_inv, arith);
             let dp = &storage[layout.dp()];
             let dq = &storage[layout.dq()];
             let qinv = &storage[layout.qinv()];
@@ -534,8 +576,11 @@ impl<'a> Private<'a> {
     /// A view over words that [`fill`](Self::fill) or
     /// [`fill_crt`](Self::fill_crt) laid out, checked as
     /// [`Public::new`] checks its half.
-    pub(crate) fn new(storage: &'a [u64]) -> Result<Self, Error> {
-        let public = Public::new(storage)?;
+    pub(crate) fn new(
+        storage: &'a [u64],
+        choice: Choice,
+    ) -> Result<Self, Error> {
+        let public = Public::new(storage, choice)?;
         let layout = public.layout;
         if storage.len() < private_words(layout.bits)
             || storage[layout.private() + 1] as usize != layout.half
@@ -546,23 +591,33 @@ impl<'a> Private<'a> {
         Ok(Private {
             words: storage,
             layout,
+            choice,
         })
     }
 
     /// As [`Public::over`], for a private key's words.
-    pub(crate) fn over(storage: &'a [u64], bits: usize) -> Self {
-        debug_assert!(Self::new(storage).is_ok_and(|p| p.layout.bits == bits));
+    pub(crate) fn over(
+        storage: &'a [u64],
+        bits: usize,
+        choice: Choice,
+    ) -> Self {
+        debug_assert!(
+            Self::new(storage, choice).is_ok_and(|p| p.layout.bits == bits)
+        );
         Private {
             words: storage,
             layout: Layout::of(bits),
+            choice,
         }
     }
 
-    /// The public half, as a view over the front of the same words.
+    /// The public half, as a view over the front of the same words,
+    /// with the same arithmetic.
     pub(crate) fn public(&self) -> Public<'a> {
         Public {
             words: &self.words[..public_words(self.layout.bits)],
             layout: self.layout,
+            choice: self.choice,
         }
     }
 
@@ -587,13 +642,16 @@ impl<'a> Private<'a> {
         let public = self.public();
         debug_assert!(public.in_range(em));
         let scratch = scratch_for(self.layout.bits, scratch)?;
-        let result = self.apply_in(&public, em, out, scratch);
+        let result = with_arith!(self.choice, a => {
+            self.apply_in(a, &public, em, out, scratch)
+        });
         scratch.zeroize();
         result
     }
 
-    fn apply_in(
+    fn apply_in<A: Arith>(
         &self,
+        arith: A,
         public: &Public<'a>,
         em: &[u8],
         out: &mut [u8],
@@ -604,18 +662,20 @@ impl<'a> Private<'a> {
         let (s, rest) = rest.split_at_mut(limbs);
         limbs::from_be_bytes(em, m);
         if self.has_crt() {
-            self.crt_apply(m, s, rest);
+            self.crt_apply(arith, m, s, rest);
             // One faulty CRT result factors the modulus (Boneh,
             // DeMillo and Lipton), so check with the public exponent
             // before anything leaves. This also catches a wrong dp or
             // dq, which import cannot.
             let (check, rest) = rest.split_at_mut(limbs);
-            public.modulus().modexp_public(s, public.e(), check, rest);
+            public
+                .modulus(arith)
+                .modexp_public(s, public.e(), check, rest);
             if limbs::equal(check, m) == 0 {
                 return Err(Error::InvalidPrivateKey);
             }
         } else {
-            public.modulus().modexp(m, self.d(), s, rest);
+            public.modulus(arith).modexp(m, self.d(), s, rest);
         }
         limbs::to_be_bytes(s, out);
         Ok(())
@@ -624,12 +684,19 @@ impl<'a> Private<'a> {
     /// Garner's recombination: exponentiate modulo each prime, then
     /// lift: `s = sq + q * (qinv * (sp - sq) mod p)`, which is below
     /// `p * q` with no final reduction.
-    fn crt_apply(&self, m: &[u64], s: &mut [u64], scratch: &mut [u64]) {
+    fn crt_apply<A: Arith>(
+        &self,
+        arith: A,
+        m: &[u64],
+        s: &mut [u64],
+        scratch: &mut [u64],
+    ) {
         let layout = self.layout;
         let half = layout.half;
         let private = layout.private();
-        let p = Modulus::new(&self.words[layout.p()], self.words[private + 2]);
-        let q = Modulus::new(&self.words[layout.q()], self.words[private + 3]);
+        let words = &self.words;
+        let p = Modulus::new(&words[layout.p()], words[private + 2], arith);
+        let q = Modulus::new(&words[layout.q()], words[private + 3], arith);
         let (mp, rest) = scratch.split_at_mut(half);
         let (mq, rest) = rest.split_at_mut(half);
         let (sp, rest) = rest.split_at_mut(half);
@@ -674,7 +741,10 @@ impl<'a> Private<'a> {
     /// The primes are random probable primes: trial division, then
     /// Miller-Rabin with random witnesses, with round counts read
     /// from FIPS 186-5 for random candidates of 1024 bits and up.
+    /// Every test runs the arithmetic `choice` names, which is the
+    /// one the key will be made with.
     pub(crate) fn generate<R: Random>(
+        choice: Choice,
         rng: &mut R,
         bits: usize,
         storage: &mut [u64],
@@ -684,12 +754,15 @@ impl<'a> Private<'a> {
             return Err(Error::InvalidKeyLength(bits));
         }
         let scratch = scratch_for(bits, scratch)?;
-        let result = Self::generate_in(rng, bits, storage, scratch);
+        let result = with_arith!(choice, a => {
+            Self::generate_in(a, rng, bits, storage, scratch)
+        });
         scratch.zeroize();
         result
     }
 
-    fn generate_in<R: Random>(
+    fn generate_in<R: Random, A: Arith>(
+        arith: A,
         rng: &mut R,
         bits: usize,
         storage: &mut [u64],
@@ -707,10 +780,10 @@ impl<'a> Private<'a> {
         let mut parts = Parts::zeroed();
         let (p, rest) = scratch.split_at_mut(half);
         let (q, rest) = rest.split_at_mut(half);
-        probable_prime(rng, half_bits, p, rest)?;
+        probable_prime(arith, rng, half_bits, p, rest)?;
         let mut found = false;
         for _ in 0..64 {
-            probable_prime(rng, half_bits, q, rest)?;
+            probable_prime(arith, rng, half_bits, q, rest)?;
             // FIPS 186-5: the primes must not be close, or Fermat
             // factoring splits the modulus. Whichever way round the
             // difference is positive.
@@ -789,7 +862,7 @@ impl<'a> Private<'a> {
             let (modulus, rest) = rest.split_at_mut(limbs::modulus_words(half));
             let inv = Modulus::prepare(p, modulus)
                 .ok_or(Error::KeyGenerationFailed)?;
-            let mont_p = Modulus::new(modulus, inv);
+            let mont_p = Modulus::new(modulus, inv, arith);
             let (q_mod_p, rest) = rest.split_at_mut(half);
             q_mod_p.copy_from_slice(q);
             reduce_once(q_mod_p, p);
@@ -803,7 +876,8 @@ impl<'a> Private<'a> {
         limbs::to_be_bytes(q, &mut parts.q[..half_len]);
         parts.e = E_WORD.to_be_bytes();
 
-        Self::fill_crt(
+        Self::fill_crt_in(
+            arith,
             &parts.n[..n_len],
             &parts.e,
             &parts.d[..n_len],
@@ -921,7 +995,8 @@ impl Parts {
 /// 186-5's, and failing it means the random source is not producing
 /// usable candidates. `scratch` is what an exponentiation at the
 /// candidate's length needs, and then some.
-fn probable_prime<R: Random>(
+fn probable_prime<R: Random, A: Arith>(
+    arith: A,
     rng: &mut R,
     bits: usize,
     out: &mut [u64],
@@ -962,7 +1037,7 @@ fn probable_prime<R: Random>(
         if composite || limbs::rem_word(out, E_WORD) == 1 {
             continue;
         }
-        if miller_rabin(out, rng, scratch)? {
+        if miller_rabin(arith, out, rng, scratch)? {
             return Ok(());
         }
     }
@@ -973,7 +1048,8 @@ fn probable_prime<R: Random>(
 /// Miller-Rabin with random witnesses. Eight rounds: FIPS 186-5
 /// table B.1 asks for at most five on random candidates of 1024
 /// bits, and the extras are margin for the narrower legacy widths.
-fn miller_rabin<R: Random>(
+fn miller_rabin<R: Random, A: Arith>(
+    arith: A,
     candidate: &[u64],
     rng: &mut R,
     scratch: &mut [u64],
@@ -982,7 +1058,7 @@ fn miller_rabin<R: Random>(
     let (modulus, rest) = scratch.split_at_mut(limbs::modulus_words(half));
     let inv = Modulus::prepare(candidate, modulus)
         .ok_or(Error::KeyGenerationFailed)?;
-    let m = Modulus::new(modulus, inv);
+    let m = Modulus::new(modulus, inv, arith);
     let (minus_one, rest) = rest.split_at_mut(half);
     let (t, rest) = rest.split_at_mut(half);
     let (a, rest) = rest.split_at_mut(half);
@@ -1161,6 +1237,7 @@ impl<'a> Private<'a> {
     /// public half it carries, laid out in `storage`. The structure
     /// holds the primes, so every key read this way is a CRT key.
     pub(crate) fn fill_from_pkcs1(
+        choice: Choice,
         der: &[u8],
         storage: &mut [u64],
         scratch: &mut [u64],
@@ -1184,12 +1261,13 @@ impl<'a> Private<'a> {
         let dq = key.integer()?;
         let qinv = key.integer()?;
         key.end()?;
-        Self::fill_crt(n, e, d, p, q, dp, dq, qinv, storage, scratch)
+        Self::fill_crt(choice, n, e, d, p, q, dp, dq, qinv, storage, scratch)
     }
 
     /// A PKCS#8 PrivateKeyInfo around one; `pss` as for
     /// [`Public::fill_from_spki`].
     pub(crate) fn fill_from_pkcs8(
+        choice: Choice,
         der: &[u8],
         pss: bool,
         storage: &mut [u64],
@@ -1197,7 +1275,7 @@ impl<'a> Private<'a> {
     ) -> Result<usize, Error> {
         let info = der::read_pkcs8(der)?;
         rsa_algorithm(&info.algorithm, pss)?;
-        Self::fill_from_pkcs1(info.private_key, storage, scratch)
+        Self::fill_from_pkcs1(choice, info.private_key, storage, scratch)
     }
 
     /// The integers to write, which needs the CRT parts: the
@@ -1253,6 +1331,7 @@ impl<'a> Private<'a> {
 
     /// Either DER form from a PEM block, told apart by its label.
     pub(crate) fn fill_from_pem(
+        choice: Choice,
         pem: &[u8],
         pss: bool,
         storage: &mut [u64],
@@ -1260,9 +1339,14 @@ impl<'a> Private<'a> {
     ) -> Result<usize, Error> {
         let mut der = [0u8; PRIVATE_DER];
         let result = pem::decode_one_of(&PRIVATE_LABELS, pem, &mut der)
-            .and_then(|(form, n)| match form {
-                0 => Self::fill_from_pkcs8(&der[..n], pss, storage, scratch),
-                _ => Self::fill_from_pkcs1(&der[..n], storage, scratch),
+            .and_then(|(form, n)| {
+                let der = &der[..n];
+                match form {
+                    0 => Self::fill_from_pkcs8(
+                        choice, der, pss, storage, scratch,
+                    ),
+                    _ => Self::fill_from_pkcs1(choice, der, storage, scratch),
+                }
             });
         der.zeroize();
         result
@@ -1315,8 +1399,67 @@ fn strip_leading_zeros(bytes: &[u8]) -> &[u8] {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::features;
+
+    /// RSA under one kernel of the big-number list: a key generated
+    /// from a fixed seed, which is every exponentiation Miller-Rabin
+    /// makes, and the private operation with and without the Chinese
+    /// remainder pieces, with the public one undoing it. The keys
+    /// choose their kernel when they are made, which is under the
+    /// row, and the answers must be the portable code's.
+    pub(crate) fn kernel(under: &features::Under) {
+        const BITS: usize = 1024;
+        const LEN: usize = modulus_len(BITS);
+        // Below the modulus: the top byte is clear, and a generated
+        // modulus has its top bit set.
+        let mut em = [0u8; LEN];
+        for (i, b) in em.iter_mut().enumerate().skip(1) {
+            *b = (i * 7 + 1) as u8;
+        }
+        let run = || {
+            let mut rng =
+                crate::random::CtrDrbg::from_seed(&[0x5a; 48]).expect("seeded");
+            let mut storage = std::vec![0u64; private_words(BITS)];
+            let mut scratch = std::vec![0u64; scratch_words(BITS)];
+            let choice = Choice::bignum();
+            Private::generate(
+                choice,
+                &mut rng,
+                BITS,
+                &mut storage,
+                &mut scratch,
+            )
+            .expect("generates");
+            let key = Private::new(&storage, choice).expect("a key");
+            let mut signed = [0u8; LEN];
+            key.apply(&em, &mut signed, &mut scratch).expect("applies");
+            let mut back = [0u8; LEN];
+            key.public()
+                .apply(&signed, &mut back, &mut scratch)
+                .expect("applies");
+            // The same key without its pieces, which takes the whole
+            // exponent the long way.
+            let mut n = [0u8; LEN];
+            key.public().write_modulus(&mut n);
+            let mut d = [0u8; LEN];
+            key.write_d(&mut d);
+            let e = key.public().exponent_bytes();
+            let mut plain = std::vec![0u64; private_words(BITS)];
+            Private::fill(&n, &e, &d, &mut plain).expect("fills");
+            let mut long = [0u8; LEN];
+            Private::new(&plain, choice)
+                .expect("a key")
+                .apply(&em, &mut long, &mut scratch)
+                .expect("applies");
+            (storage, signed, back, long)
+        };
+        let got = under.build(run);
+        assert_eq!(got.2, em, "the public operation undoes the private");
+        assert_eq!(got.3, got.1, "with and without the pieces");
+        assert_eq!(got, features::build_portable(run));
+    }
 
     /// The layout's parts are disjoint, in order, and end where the
     /// word count says, at every length in range.

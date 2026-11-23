@@ -1,32 +1,39 @@
 //! The check against the vendored vectors: every suite in full, the
 //! large-data groups and every SLH-DSA signature included, and every
 //! kernel this processor can run answering the vectors that test it,
-//! each exactly once.
+//! each exactly once. Each suite is a test of its own, which `cargo
+//! test` runs as the library runs its kernel lists: a line for every
+//! kernel, run, not run for the features the processor lacks, or not
+//! selected by `SCYTALE_KERNELS`.
 //!
 //! A kernel is reached through the feature profiles the library's
 //! types publish: setting a profile puts a feature set in force, and
 //! a type takes the first of its profiles the set meets. A vector
 //! tests the kernels of one type: a hash suite the hash's, AES-ECB
 //! the cipher's, a mode's suite the mode's, an ECDSA group its
-//! curve's, the RSA suites RSA's. It is answered under a profile only
-//! when that type takes a row there it has not yet taken, so SHA-2 on
-//! x86-64 runs twice, SHA-NI and portable. A kernel that has passed
-//! its own vectors is taken as good wherever else it is used: ECDSA
-//! is not answered again for each hash kernel, and a suite with no
-//! kernel of its own, HMAC or LMS or a KDF, is answered once.
+//! curve's, the RSA suites RSA's. It is answered under each profile
+//! that type publishes, so SHA-2 on x86-64 runs twice, SHA-NI and
+//! portable. A kernel that has passed its own vectors is taken as
+//! good wherever else it is used: ECDSA is not answered again for
+//! each hash kernel, and a suite with no kernel of its own, HMAC or
+//! LMS or a KDF, is answered once, under the features detected.
 //!
 //! The work is cut into units, a test group each, or a single case of
 //! a large-data group, of SLH-DSA signing or of LMS key generation,
-//! since those cases are minutes apiece under emulation. One worker
-//! per core takes the next unit of the profile in force, heaviest
-//! first, and the profile changes only between pools. `SCYTALE_SHARD`
-//! as `i/n` takes the i-th of n shares, equal by expected cost, which
-//! is how CI spreads the run over as many jobs as it needs.
+//! since those cases are minutes apiece under emulation. A unit is
+//! answered under each kernel that tests it, and the units of every
+//! kernel of the suite go to one pool: one worker per core takes the
+//! next, heaviest first, and answers it through its kernel's
+//! [`Builder`], so that kernels and suites run side by side and only
+//! wait for one another while something is being built or run under
+//! another set; see there.
 
-use std::collections::HashSet;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
+use scytale::Random;
 use scytale::aead::{Ccm, Gcm, GcmSiv, Xpn};
 use scytale::cipher::aes::Aes128;
 use scytale::cipher::mode::{Cbc, Ctr, Xts};
@@ -38,7 +45,7 @@ use scytale::kem::ml_kem::ml_kem_768;
 use scytale::sig::{ecdsa, rsa};
 use serde_json::Value;
 
-use crate::profile::walk;
+use crate::profile::Builder;
 use crate::suite::{SUITES, Suite, compare, fixed_rng, vendored};
 use crate::support::Error;
 
@@ -140,42 +147,6 @@ fn tested(types: &[Built], group: &Value) -> Option<usize> {
     }
 }
 
-/// The row each of `types` takes under `profile`: the index of the
-/// first published profile the set meets, which is how the library
-/// chooses. Every list ends with the empty set, so there is always
-/// one.
-pub fn rows(types: &[Built], profile: Features) -> Vec<usize> {
-    types
-        .iter()
-        .map(|(_, profiles)| {
-            profiles()
-                .iter()
-                .position(|p| p.is_subset(profile))
-                .expect("every list ends empty")
-        })
-        .collect()
-}
-
-/// The rows of `types` that `fresh` marks, each as the type's name
-/// and the feature set of its row: the kernels a suite is answered
-/// for under a profile.
-fn describe(types: &[Built], rows: &[usize], fresh: &[bool]) -> String {
-    let taken: Vec<String> = types
-        .iter()
-        .zip(rows)
-        .zip(fresh)
-        .filter(|(_, fresh)| **fresh)
-        .map(|(((name, profiles), &row), _)| {
-            format!("{name} {}", profiles()[row])
-        })
-        .collect();
-    if taken.is_empty() {
-        "no kernel of its own".into()
-    } else {
-        taken.join(", ")
-    }
-}
-
 /// One piece of the run: a test group of a suite, or one case of it
 /// where the group's cases are minutes apiece.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,9 +155,9 @@ pub struct Unit {
     pub group: usize,
     pub case: Option<usize>,
     /// What the unit is expected to cost, in ordinary cases' worth;
-    /// see `weight` below. It steers the split over shards and the order
-    /// within one, and nothing else, so an estimate off by some
-    /// factor costs balance, never coverage.
+    /// see `weight` below. It steers the order the workers take the
+    /// units in, and nothing else, so an estimate off by some factor
+    /// costs time, never coverage.
     pub weight: u64,
 }
 
@@ -260,70 +231,84 @@ fn lms_weight(group: &Value, leaves: impl Fn(u32) -> u64) -> Option<u64> {
     Some((leaves(h) * hashes / 10_000).max(1))
 }
 
-/// Every unit of `docs`, which are the suites' vendored documents in
-/// registry order, in a fixed order: a unit per group, except that the
+/// Every unit of `doc`, the vendored document of suite `suite` in
+/// the registry, in a fixed order: a unit per group, except that the
 /// large-data groups, SLH-DSA signing and LMS key generation give a
 /// unit per case. An LMS signing group stays whole, since its cases
 /// share the one key the group generates.
-pub fn units(docs: &[Option<Value>]) -> Vec<Unit> {
+pub fn units(suite: usize, doc: &Value) -> Vec<Unit> {
     let mut out = Vec::new();
-    for (suite, doc) in docs.iter().enumerate() {
-        let Some(groups) =
-            doc.as_ref().and_then(|d| d["testGroups"].as_array())
-        else {
-            continue;
-        };
-        let s = &SUITES[suite];
-        let signing = s.algorithm == "SLH-DSA" && s.mode == Some("sigGen");
-        let lms = |mode| s.algorithm == "LMS" && s.mode == Some(mode);
-        for (group, g) in groups.iter().enumerate() {
-            let cases = g["tests"].as_array().map_or(0, Vec::len);
-            let tree =
-                lms("keyGen").then(|| lms_weight(g, |h| 1 << h)).flatten();
-            if let Some(weight) = tree.filter(|_| cases > 0) {
-                out.extend((0..cases).map(|case| Unit {
-                    suite,
-                    group,
-                    case: Some(case),
-                    weight,
-                }));
-            } else if (g["testType"] == "LDT" || signing) && cases > 0 {
-                for case in 0..cases {
-                    out.push(Unit {
-                        suite,
-                        group,
-                        case: Some(case),
-                        weight: weight(g, Some(&g["tests"][case]), cases),
-                    });
-                }
-            } else {
-                let signed = cases as u64;
-                let whole = lms("sigGen")
-                    .then(|| {
-                        lms_weight(g, |h| {
-                            (1 << h) + signed * u64::from(h / 2 + 2)
-                        })
-                    })
-                    .flatten();
+    let Some(groups) = doc["testGroups"].as_array() else {
+        return out;
+    };
+    let s = &SUITES[suite];
+    let signing = s.algorithm == "SLH-DSA" && s.mode == Some("sigGen");
+    let lms = |mode| s.algorithm == "LMS" && s.mode == Some(mode);
+    for (group, g) in groups.iter().enumerate() {
+        let cases = g["tests"].as_array().map_or(0, Vec::len);
+        let tree = lms("keyGen").then(|| lms_weight(g, |h| 1 << h)).flatten();
+        if let Some(weight) = tree.filter(|_| cases > 0) {
+            out.extend((0..cases).map(|case| Unit {
+                suite,
+                group,
+                case: Some(case),
+                weight,
+            }));
+        } else if (g["testType"] == "LDT" || signing) && cases > 0 {
+            for case in 0..cases {
                 out.push(Unit {
                     suite,
                     group,
-                    case: None,
-                    weight: whole.unwrap_or_else(|| weight(g, None, cases)),
+                    case: Some(case),
+                    weight: weight(g, Some(&g["tests"][case]), cases),
                 });
             }
+        } else {
+            let signed = cases as u64;
+            let whole = lms("sigGen")
+                .then(|| {
+                    lms_weight(g, |h| (1 << h) + signed * u64::from(h / 2 + 2))
+                })
+                .flatten();
+            out.push(Unit {
+                suite,
+                group,
+                case: None,
+                weight: whole.unwrap_or_else(|| weight(g, None, cases)),
+            });
         }
     }
     out
 }
 
-/// Answers `unit` of `doc` with a fresh fixed generator and compares
-/// the answer with `doc`; returns the cases compared, or `None` for a
-/// group the driver skipped.
+/// A generator that notes any draw made while its builder's set is
+/// not in force. A driver that draws outside the builder has very
+/// likely built outside it too, and a build there takes whatever set
+/// another thread has put in force; the answers cannot show it, since
+/// every kernel answers alike, but a draw can.
+struct Watched<R> {
+    rng: R,
+    set: Features,
+    strayed: bool,
+}
+
+impl<R: Random> Random for Watched<R> {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), scytale::Error> {
+        if features::get() != self.set {
+            self.strayed = true;
+        }
+        self.rng.fill(out)
+    }
+}
+
+/// Answers `unit` of `doc` under `builder` with a fresh fixed
+/// generator and compares the answer with `doc`; returns the cases
+/// compared, or `None` for a group the driver skipped.
 pub fn answer_unit(
     suite: &Suite,
     doc: &Value,
     unit: &Unit,
+    builder: &Builder,
 ) -> Result<Option<usize>, Error> {
     let mut group = doc["testGroups"][unit.group].clone();
     if let Some(case) = unit.case {
@@ -332,115 +317,26 @@ pub fn answer_unit(
     }
     let mut cut = doc.clone();
     cut["testGroups"] = Value::Array(vec![group]);
-    let mut rng = fixed_rng();
-    let answered = (suite.answer)(&cut, &mut rng)?;
+    let mut rng = Watched {
+        rng: fixed_rng(builder)?,
+        set: builder.set(),
+        strayed: false,
+    };
+    let answered = (suite.answer)(&cut, &mut rng, builder)?;
+    if rng.strayed {
+        return Err(Error::new("drew randomness outside the builder"));
+    }
     if answered["testGroups"].as_array().is_some_and(Vec::is_empty) {
         return Ok(None);
     }
-    compare(suite, doc, &answered).map(Some)
-}
-
-/// The work of a whole run: each unit paired with the index of every
-/// profile it is answered under, in walking order, and the count of
-/// suite-profile pairs that have any. A unit that tests a type's
-/// kernels is answered under each profile where that type takes a
-/// row it has not yet taken, so once per kernel; a unit that tests
-/// none is answered under the first profile only. `types` is each
-/// suite's from [`kernels_tested`]. Prints what each pair is run for.
-fn plan(
-    profiles: &[Features],
-    docs: &[Option<Value>],
-    types: &[Vec<Built>],
-    all: &[Unit],
-) -> (Vec<(usize, Unit)>, usize) {
-    let mut seen: Vec<Vec<HashSet<usize>>> = types
-        .iter()
-        .map(|t| t.iter().map(|_| HashSet::new()).collect())
-        .collect();
-    let mut work: Vec<(usize, Unit)> = Vec::new();
-    let mut pairs = 0;
-    for (p, &profile) in profiles.iter().enumerate() {
-        for (s, suite) in SUITES.iter().enumerate() {
-            let Some(doc) = &docs[s] else {
-                continue;
-            };
-            let taken = rows(&types[s], profile);
-            let fresh: Vec<bool> = taken
-                .iter()
-                .enumerate()
-                .map(|(t, &row)| seen[s][t].insert(row))
-                .collect();
-            let before = work.len();
-            for unit in all.iter().filter(|u| u.suite == s) {
-                let group = &doc["testGroups"][unit.group];
-                let due = match tested(&types[s], group) {
-                    Some(t) => fresh[t],
-                    None => p == 0,
-                };
-                if due {
-                    work.push((p, *unit));
-                }
-            }
-            if work.len() > before {
-                pairs += 1;
-                println!(
-                    "profile {profile}: {}: {}",
-                    suite.directory,
-                    describe(&types[s], &taken, &fresh)
-                );
-            }
-        }
-    }
-    (work, pairs)
-}
-
-/// Splits `work` over `shards` and returns shard `index`'s part,
-/// heaviest first, with every shard's weight: the heaviest unit left
-/// goes to the lightest shard, which keeps the shards within one
-/// unit's weight of each other. Deterministic, since every shard
-/// computes the split for itself.
-fn split(
-    work: &[(usize, Unit)],
-    shards: usize,
-    index: usize,
-) -> (Vec<(usize, Unit)>, Vec<u64>) {
-    let mut order: Vec<usize> = (0..work.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(work[i].1.weight));
-    let mut loads = vec![0u64; shards];
-    let mut mine = Vec::new();
-    for i in order {
-        let lightest = (0..shards)
-            .min_by_key(|&s| loads[s])
-            .expect("at least one shard");
-        loads[lightest] += work[i].1.weight;
-        if lightest == index - 1 {
-            mine.push(work[i]);
-        }
-    }
-    (mine, loads)
-}
-
-/// `SCYTALE_SHARD` parsed: `i/n` gives shard `i` of `n`, one-based;
-/// empty is the whole, `1/1`.
-pub fn shard(spec: &str) -> Result<(usize, usize), Error> {
-    if spec.is_empty() {
-        return Ok((1, 1));
-    }
-    let bad = || Error::new(format!("{spec}: want i/n with 1 <= i <= n"));
-    let (i, n) = spec.split_once('/').ok_or_else(bad)?;
-    let i: usize = i.parse().map_err(|_| bad())?;
-    let n: usize = n.parse().map_err(|_| bad())?;
-    if i == 0 || n == 0 || i > n {
-        return Err(bad());
-    }
-    Ok((i, n))
+    compare(suite, doc, &answered, builder).map(Some)
 }
 
 /// The seconds between two lines of progress.
 const PROGRESS: u64 = 60;
 
 /// Whether a line of progress is due at `now`, in seconds since the
-/// profile began: when [`PROGRESS`] have passed since the last, which
+/// suite began: when [`PROGRESS`] have passed since the last, which
 /// `said` holds. One caller of those that ask at once is told yes.
 fn progress_due(said: &AtomicU64, now: u64) -> bool {
     let last = said.load(Ordering::Relaxed);
@@ -450,70 +346,93 @@ fn progress_due(said: &AtomicU64, now: u64) -> bool {
             .is_ok()
 }
 
-/// What a run did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Report {
-    /// Cases compared, every profile together.
-    pub cases: usize,
-    /// Cases compared under the detected profile: the count a whole
-    /// run of every suite once gives, which the README quotes.
-    pub detected: usize,
-    /// Units this shard ran, of the units the run has.
-    pub units: (usize, usize),
-    /// Suite-profile pairs with anything to run, of the pairs there
-    /// would be were every suite run under every profile.
-    pub pairs: (usize, usize),
-    pub shard: (usize, usize),
+/// A kernel's features as its line names them: joined by `+`,
+/// without the architecture's prefix; `none` for nothing. The
+/// library's kernel tests name theirs the same way.
+pub fn short_name(features: Features) -> String {
+    if features.is_empty() {
+        return "none".into();
+    }
+    let names: Vec<&str> = features.iter().map(Feature::name).collect();
+    names.join("+")
 }
 
-/// The run: see the module. Prints what it does to stdout. Fails on
-/// any difference from the file, on a suite that answers fewer cases
-/// than its minimum when the run is whole, and on a `SCYTALE_SHARD`
-/// it cannot read.
-///
-/// # Panics
-///
-/// A worker that finds a difference panics with the profile, suite,
-/// group and case, which the process reports as it ends.
-pub fn run() -> Result<Report, Error> {
-    let (index, shards) =
-        shard(&std::env::var("SCYTALE_SHARD").unwrap_or_default())
-            .map_err(|e| Error::new(format!("SCYTALE_SHARD: {e}")))?;
-    let (profiles, refused) = walk();
-    for p in &refused {
-        println!("profile {p}: not on this processor, skipped");
-    }
-    let detected = features::detected();
-    if profiles.first() != Some(&detected) {
-        return Err(Error::new("the walk does not start where it is"));
-    }
-    // The empty set closes the walk, unless it opened it: a processor
-    // with nothing written for it walks the empty set and then the
-    // same isolated.
-    let last = if detected.is_empty() {
-        detected.with(Feature::Isolated)
-    } else {
-        Features::new()
-    };
-    if profiles.last() != Some(&last) {
-        return Err(Error::new("the walk does not end portable"));
-    }
+/// The kernels `SCYTALE_KERNELS` names, separated by white space, or
+/// `None` when it is unset, which selects every kernel.
+fn selected() -> Option<Vec<String>> {
+    let list = std::env::var("SCYTALE_KERNELS").ok()?;
+    Some(list.split_whitespace().map(Into::into).collect())
+}
 
-    let docs: Vec<Option<Value>> = SUITES.iter().map(vendored).collect();
-    let types: Vec<Vec<Built>> = SUITES
-        .iter()
-        .map(kernels_tested)
-        .collect::<Result<_, _>>()?;
-    let all = units(&docs);
-    let possible = profiles.len() * docs.iter().flatten().count();
-    let (work, pairs) = plan(&profiles, &docs, &types, &all);
-    let (mine, loads) = split(&work, shards, index);
-    println!(
-        "shard {index}/{shards}: weight {} of {}",
-        loads[index - 1],
-        loads.iter().sum::<u64>()
-    );
+/// The kernels the units `all` of `doc` test, each as the profile
+/// that selects it and the indices of the units it answers. `types`
+/// is the suite's from [`kernels_tested`]. A profile of a type
+/// selects that type's row of it, so each unit is answered once
+/// under every profile its type publishes; profiles two types share
+/// are one kernel, run once for both. The empty set, last in every
+/// list, comes last, and takes the groups no type tests too. A suite
+/// with no kernel of its own has one, the features detected.
+pub fn kernels(
+    types: &[Built],
+    doc: &Value,
+    all: &[Unit],
+) -> Vec<(Features, Vec<usize>)> {
+    if types.is_empty() {
+        return vec![(features::detected(), (0..all.len()).collect())];
+    }
+    let mut out: Vec<(Features, Vec<usize>)> = Vec::new();
+    for (_, profiles) in types {
+        for &profile in profiles() {
+            if !profile.is_empty() && out.iter().all(|(p, _)| *p != profile) {
+                out.push((profile, Vec::new()));
+            }
+        }
+    }
+    out.push((Features::new(), Vec::new()));
+    for (i, unit) in all.iter().enumerate() {
+        let group = &doc["testGroups"][unit.group];
+        let published = tested(types, group).map(|t| (types[t].1)());
+        for (profile, list) in &mut out {
+            let due = match published {
+                Some(published) => published.contains(profile),
+                None => profile.is_empty(),
+            };
+            if due {
+                list.push(i);
+            }
+        }
+    }
+    out.retain(|(_, list)| !list.is_empty());
+    out
+}
 
+/// What one unit came to under one kernel: the cases compared, `None`
+/// for a group the driver skipped, or what went wrong.
+type Outcome = Result<Option<usize>, String>;
+
+/// One unit of `all` to answer under one kernel: their indices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Task {
+    kernel: usize,
+    unit: usize,
+}
+
+/// Answers `tasks`, each a unit of `all` under its kernel's builder
+/// in `builders`, one worker per core taking the next, heaviest
+/// first, and returns each task with its outcome. A panicking driver
+/// is one task's failure, not the end of the run. `name` heads the
+/// lines of progress.
+fn answer_all(
+    name: &str,
+    suite: &Suite,
+    doc: &Value,
+    all: &[Unit],
+    builders: &[Builder],
+    tasks: &[Task],
+) -> Vec<(Task, Outcome)> {
+    let mut order = tasks.to_vec();
+    // Stable, so units of a weight go in kernel order.
+    order.sort_by_key(|t| std::cmp::Reverse(all[t.unit].weight));
     // WebAssembly has no threads: spawning one aborts the run.
     let workers = if cfg!(target_family = "wasm") {
         1
@@ -522,131 +441,181 @@ pub fn run() -> Result<Report, Error> {
             .map(|n| n.get())
             .unwrap_or(1)
     };
-    let mut cases = 0;
-    let mut detected_cases = 0;
-    for (p, &profile) in profiles.iter().enumerate() {
-        let list: Vec<Unit> = mine
-            .iter()
-            .filter(|(q, _)| *q == p)
-            .map(|(_, u)| *u)
-            .collect();
-        if list.is_empty() {
-            continue;
-        }
-        features::set(profile)?;
-        let next = AtomicUsize::new(0);
-        let counts: Vec<AtomicUsize> =
-            SUITES.iter().map(|_| AtomicUsize::new(0)).collect();
-        let skipped: Vec<AtomicUsize> =
-            SUITES.iter().map(|_| AtomicUsize::new(0)).collect();
-        let nanos: Vec<AtomicU64> =
-            SUITES.iter().map(|_| AtomicU64::new(0)).collect();
-        // The suites report when the profile is done, which under
-        // emulation is a long silence; a line a minute says how far
-        // it has got.
-        let total: u64 = list.iter().map(|u| u.weight).sum();
-        let began = Instant::now();
-        let said = AtomicU64::new(0);
-        let finished = AtomicUsize::new(0);
-        let weighed = AtomicU64::new(0);
-        let work = || {
-            loop {
-                let i = next.fetch_add(1, Ordering::Relaxed);
-                let Some(unit) = list.get(i) else {
-                    break;
-                };
-                let started = Instant::now();
-                let suite = &SUITES[unit.suite];
-                let doc = docs[unit.suite].as_ref().expect("listed");
-                let count = answer_unit(suite, doc, unit).unwrap_or_else(|e| {
-                    panic!("profile {profile}: {}: {e}", suite.directory)
-                });
-                match count {
-                    Some(n) => {
-                        counts[unit.suite].fetch_add(n, Ordering::Relaxed);
-                    }
-                    None => {
-                        skipped[unit.suite].fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-                nanos[unit.suite].fetch_add(
-                    started.elapsed().as_nanos() as u64,
-                    Ordering::Relaxed,
-                );
-                let units = finished.fetch_add(1, Ordering::Relaxed) + 1;
-                let weight = weighed.fetch_add(unit.weight, Ordering::Relaxed)
-                    + unit.weight;
-                let now = began.elapsed().as_secs();
-                if progress_due(&said, now) {
-                    println!(
-                        "profile {profile}: {units} of {} units, weight \
-                         {weight} of {total}, after {now} s",
-                        list.len()
-                    );
-                }
-            }
-        };
-        if workers == 1 {
-            work();
-        } else {
-            std::thread::scope(|scope| {
-                for _ in 0..workers {
-                    scope.spawn(work);
-                }
-            });
-        }
-        features::reset();
-        for (s, suite) in SUITES.iter().enumerate() {
-            let count = counts[s].load(Ordering::Relaxed);
-            let left = skipped[s].load(Ordering::Relaxed);
-            if count == 0 && left == 0 {
-                continue;
-            }
-            let took = Duration::from_nanos(nanos[s].load(Ordering::Relaxed));
-            let left = if left == 0 {
-                String::new()
-            } else {
-                format!(", {left} groups skipped")
+    let next = AtomicUsize::new(0);
+    let outcomes = Mutex::new(Vec::with_capacity(order.len()));
+    // The table is printed when the suite is done, which under
+    // emulation is a long silence; a line a minute says how far it
+    // has got.
+    let total: u64 = order.iter().map(|t| all[t.unit].weight).sum();
+    let began = Instant::now();
+    let said = AtomicU64::new(0);
+    let finished = AtomicUsize::new(0);
+    let weighed = AtomicU64::new(0);
+    let work = || {
+        while let Some(&task) = order.get(next.fetch_add(1, Ordering::Relaxed))
+        {
+            let unit = &all[task.unit];
+            let builder = &builders[task.kernel];
+            let outcome = match catch_unwind(AssertUnwindSafe(|| {
+                answer_unit(suite, doc, unit, builder)
+            })) {
+                Ok(Ok(count)) => Ok(count),
+                Ok(Err(e)) => Err(e.message),
+                Err(panic) => Err(panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| {
+                        panic.downcast_ref::<&str>().map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| "panicked".into())),
             };
-            println!(
-                "profile {profile}: {}: {count} cases in {:.1} s{left}",
-                suite.directory,
-                took.as_secs_f64()
-            );
-            // The minimum is a whole suite's, so only a whole run
-            // under the detected profile can hold a suite to it.
-            if p == 0 && shards == 1 && count < suite.minimum {
-                return Err(Error::new(format!(
-                    "{}: only {count} cases, expected at least {}",
-                    suite.directory, suite.minimum
-                )));
+            let outcome = outcome.map_err(|e| {
+                let group = &doc["testGroups"][unit.group];
+                let case = unit.case.map_or(String::new(), |c| {
+                    format!(" tcId {}", group["tests"][c]["tcId"])
+                });
+                format!("unit tgId {}{case}: {e}", group["tgId"])
+            });
+            outcomes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((task, outcome));
+            let units = finished.fetch_add(1, Ordering::Relaxed) + 1;
+            let weight =
+                weighed.fetch_add(unit.weight, Ordering::Relaxed) + unit.weight;
+            let now = began.elapsed().as_secs();
+            if progress_due(&said, now) {
+                println!(
+                    "  {name}: {units} of {} units, weight {weight} of \
+                     {total}, after {now} s",
+                    order.len()
+                );
             }
-            if p == 0 {
-                detected_cases += count;
+        }
+    };
+    if workers == 1 {
+        work();
+    } else {
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(work);
             }
-            cases += count;
+        });
+    }
+    outcomes.into_inner().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Checks the suite whose vendored directory is `directory` under
+/// each of its kernels, as the test `name`, and prints the cases
+/// compared and a line for every kernel: run, not run with the
+/// features it lacks, not selected, or failed, with what went wrong
+/// on stderr. A suite whose vectors are not in this copy is skipped.
+/// Fails if any kernel's run fails, and on a suite that answers fewer
+/// cases than its minimum when every unit was answered.
+///
+/// The kernels run at once, each unit building through its kernel's
+/// [`Builder`], so suites may be checked from several threads at
+/// once too.
+pub fn check(name: &str, directory: &str) -> Result<(), Error> {
+    let s = SUITES
+        .iter()
+        .position(|s| s.directory == directory)
+        .ok_or_else(|| Error::new(format!("{directory}: not registered")))?;
+    let suite = &SUITES[s];
+    let Some(doc) = vendored(suite) else {
+        println!("{name}: {directory}: no vectors in this copy, skipped");
+        return Ok(());
+    };
+    let types = kernels_tested(suite)?;
+    let all = units(s, &doc);
+    let selected = selected();
+    let hardware = features::detected();
+    let kernels = kernels(&types, &doc, &all);
+    // Each kernel's name, and its builder if it is to run or else
+    // why not; the processor's refusals are found here, once.
+    let mut names = Vec::with_capacity(kernels.len());
+    let mut builders = Vec::with_capacity(kernels.len());
+    let mut states = Vec::with_capacity(kernels.len());
+    let mut tasks = Vec::new();
+    for (k, (profile, list)) in kernels.iter().enumerate() {
+        // A suite with no kernel of its own runs once, on whatever
+        // the processor dispatches to; its name says that, rather
+        // than spelling out a set that differs from machine to
+        // machine.
+        let kernel = if types.is_empty() {
+            format!("{name}/default")
+        } else {
+            format!("{name}/{}", short_name(*profile))
+        };
+        let missing = profile.without(Feature::Isolated) - hardware;
+        let built = if selected.as_ref().is_some_and(|s| !s.contains(&kernel)) {
+            Err("not selected".to_string())
+        } else if types.is_empty() {
+            Ok(Builder::default())
+        } else {
+            Builder::try_new(*profile)
+                .map_err(|_| format!("not run: needs {}", short_name(missing)))
+        };
+        match built {
+            Ok(builder) => {
+                tasks.extend(list.iter().map(|&unit| Task { kernel: k, unit }));
+                builders.push(builder);
+                states.push(None);
+            }
+            Err(state) => {
+                // Holds the kernel's place; no task names it.
+                builders.push(Builder::default());
+                states.push(Some(state));
+            }
+        }
+        names.push(kernel);
+    }
+    let mut outcomes = answer_all(name, suite, &doc, &all, &builders, &tasks);
+    // In kernel order, so that a unit's cases are counted as the
+    // first kernel to answer it found them, whatever order the
+    // workers finished in.
+    outcomes.sort_by_key(|(t, _)| (t.kernel, t.unit));
+    // Each unit's cases, the first time any kernel answers it.
+    let mut answered: Vec<Option<usize>> = vec![None; all.len()];
+    let mut errors: Vec<Vec<String>> = vec![Vec::new(); kernels.len()];
+    for (task, outcome) in outcomes {
+        match outcome {
+            Ok(count) => {
+                answered[task.unit].get_or_insert(count.unwrap_or(0));
+            }
+            Err(e) => errors[task.kernel].push(e),
         }
     }
-    let report = Report {
-        cases,
-        detected: detected_cases,
-        units: (mine.len(), work.len()),
-        pairs: (pairs, possible),
-        shard: (index, shards),
-    };
-    println!(
-        "detected profile: {} cases; total: {} cases in {} of {} units, \
-         {} of {} suite-profile pairs, shard {}/{}",
-        report.detected,
-        report.cases,
-        report.units.0,
-        report.units.1,
-        report.pairs.0,
-        report.pairs.1,
-        report.shard.0,
-        report.shard.1
-    );
-    Ok(report)
+    let mut lines = Vec::new();
+    let mut failed = Vec::new();
+    for ((kernel, state), mut errors) in names.iter().zip(states).zip(errors) {
+        let state = state.unwrap_or_else(|| {
+            if errors.is_empty() {
+                return "run".into();
+            }
+            errors.sort();
+            for e in errors.drain(..) {
+                eprintln!("{kernel}: {directory}: {e}");
+            }
+            failed.push(kernel.clone());
+            "FAILED".into()
+        });
+        lines.push(format!("  {kernel:<40} {state}"));
+    }
+    let cases: usize = answered.iter().flatten().sum();
+    println!("{name}: {directory}, {cases} cases\n{}", lines.join("\n"));
+    if !failed.is_empty() {
+        return Err(Error::new(format!("failed: {}", failed.join(" "))));
+    }
+    // The minimum is a whole suite's, so only a run that answered
+    // every unit can hold the suite to it.
+    if answered.iter().all(Option::is_some) && cases < suite.minimum {
+        return Err(Error::new(format!(
+            "{directory}: only {cases} cases, expected at least {}",
+            suite.minimum
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -654,6 +623,7 @@ mod tests {
     use super::*;
     use crate::profile::candidates;
     use serde_json::json;
+    use std::collections::HashSet;
 
     #[test]
     fn every_tested_type_is_walked() {
@@ -676,32 +646,11 @@ mod tests {
         }
     }
 
-    fn isolated_or_nothing() -> &'static [Features] {
-        static P: [Features; 2] =
-            [Features::of(&[Feature::Isolated]), Features::new()];
-        &P
-    }
-
-    fn nothing() -> &'static [Features] {
-        static P: [Features; 1] = [Features::new()];
-        &P
-    }
-
     #[test]
-    fn rows_are_the_first_profile_the_set_meets() {
-        let types: [Built; 2] = [("a", isolated_or_nothing), ("b", nothing)];
-        let isolated = Features::of(&[Feature::Isolated]);
-        assert_eq!(rows(&types, isolated), [0, 0]);
-        assert_eq!(rows(&types, Features::new()), [1, 0]);
-        assert_eq!(rows(&[], isolated), Vec::<usize>::new());
-        let both = [true, true];
-        assert_eq!(describe(&types, &[1, 0], &both), "a none, b none");
-        assert_eq!(describe(&types, &[1, 0], &[false, true]), "b none");
-        assert_eq!(describe(&types, &[1, 0], &[false; 2]), NONE);
-        assert_eq!(describe(&[], &[], &[]), NONE);
+    fn short_names_join_the_features() {
+        assert_eq!(short_name(Features::new()), "none");
+        assert_eq!(short_name(Features::of(&[Feature::Isolated])), "isolated");
     }
-
-    const NONE: &str = "no kernel of its own";
 
     /// The registry index of the suite of `algorithm` and `mode`.
     fn suite_of(algorithm: &str, mode: Option<&str>) -> usize {
@@ -726,47 +675,44 @@ mod tests {
     }
 
     #[test]
-    fn each_unit_is_planned_once_per_kernel_it_tests() {
+    fn each_unit_is_answered_once_per_kernel_it_tests() {
         let ecdsa = suite_of("ECDSA", Some("sigGen"));
-        let sha = suite_of("SHA2-256", None);
-        let lms = suite_of("LMS", Some("sigVer"));
-        let mut docs: Vec<Option<Value>> =
-            SUITES.iter().map(|_| None).collect();
         let group = |curve: &str| json!({"curve": curve, "tests": [{}]});
-        docs[ecdsa] = Some(json!({"testGroups": [
+        let doc = json!({"testGroups": [
             group("P-256"), group("P-384"), group("P-224"), group("P-521"),
-        ]}));
-        docs[sha] = Some(json!({"testGroups": [{"tests": [{}, {}]}]}));
-        docs[lms] = Some(json!({"testGroups": [{"tests": [{}]}]}));
-        let types: Vec<Vec<Built>> =
-            SUITES.iter().map(|s| kernels_tested(s).unwrap()).collect();
-        let profiles = candidates();
-        let all = units(&docs);
-        assert_eq!(all.len(), 6);
-        let (work, pairs) = plan(&profiles, &docs, &types, &all);
-        assert!(pairs >= 3);
-        for unit in &all {
-            let under: Vec<usize> = work
+        ]});
+        let types = kernels_tested(&SUITES[ecdsa]).unwrap();
+        let all = units(ecdsa, &doc);
+        assert_eq!(all.len(), 4);
+        let got = kernels(&types, &doc, &all);
+        assert_eq!(got.last().map(|(p, _)| *p), Some(Features::new()));
+        let mut seen = HashSet::new();
+        for (profile, _) in &got {
+            assert!(seen.insert(*profile), "{profile} twice");
+        }
+        for (i, unit) in all.iter().enumerate() {
+            let group = &doc["testGroups"][unit.group];
+            let under: Vec<Features> = got
                 .iter()
-                .filter(|(_, u)| u == unit)
+                .filter(|(_, list)| list.contains(&i))
                 .map(|(p, _)| *p)
                 .collect();
-            let doc = docs[unit.suite].as_ref().unwrap();
-            let group = &doc["testGroups"][unit.group];
-            let Some(t) = tested(&types[unit.suite], group) else {
-                assert_eq!(under, [0], "{unit:?}");
-                continue;
-            };
-            // The rows the type takes where the unit is answered:
-            // no row twice, and every row any profile reaches.
-            let row = |p: usize| rows(&types[unit.suite], profiles[p])[t];
-            let answered: Vec<usize> = under.iter().map(|&p| row(p)).collect();
-            let unique: HashSet<usize> = answered.iter().copied().collect();
-            assert_eq!(unique.len(), answered.len(), "{unit:?}");
-            let reached: HashSet<usize> =
-                (0..profiles.len()).map(row).collect();
-            assert_eq!(unique, reached, "{unit:?}");
+            // Every profile its curve publishes, once each; a curve
+            // the library lacks is answered once, portably.
+            match tested(&types, group) {
+                Some(t) => assert_eq!(under, (types[t].1)(), "{unit:?}"),
+                None => assert_eq!(under, [Features::new()], "{unit:?}"),
+            }
         }
+
+        let lms = suite_of("LMS", Some("sigVer"));
+        let doc = json!({"testGroups": [{"tests": [{}]}, {"tests": [{}]}]});
+        let all = units(lms, &doc);
+        let types = kernels_tested(&SUITES[lms]).unwrap();
+        assert_eq!(
+            kernels(&types, &doc, &all),
+            [(features::detected(), vec![0, 1])]
+        );
     }
 
     #[test]
@@ -784,26 +730,57 @@ mod tests {
         assert_eq!(lms_leaf(&tall), Some((15, 34 * 255)));
         assert_eq!(lms_leaf(&json!({"lmsMode": "LMS_SHA256_M24"})), None);
 
-        let mut docs: Vec<Option<Value>> =
-            SUITES.iter().map(|_| None).collect();
-        let key_gen = suite_of("LMS", Some("keyGen"));
-        let sig_gen = suite_of("LMS", Some("sigGen"));
-        let sig_ver = suite_of("LMS", Some("sigVer"));
-        for s in [key_gen, sig_gen, sig_ver] {
-            docs[s] = Some(json!({"testGroups": [small.clone()]}));
-        }
-        let got = units(&docs);
-        let of = |s| got.iter().filter(move |u| u.suite == s);
+        let doc = json!({"testGroups": [small.clone()]});
+        let of = |mode| units(suite_of("LMS", Some(mode)), &doc);
         // A tree of 1024 leaves of 303 hashes, a case each.
-        assert_eq!(of(key_gen).count(), 10);
-        assert!(of(key_gen).all(|u| u.case.is_some() && u.weight == 31));
+        let tree = of("keyGen");
+        assert_eq!(tree.len(), 10);
+        assert!(tree.iter().all(|u| u.case.is_some() && u.weight == 31));
         // The group whole: its tree and ten signatures of 7 leaves.
-        let whole: Vec<_> = of(sig_gen).collect();
+        let whole = of("sigGen");
         assert_eq!(whole.len(), 1);
         assert_eq!((whole[0].case, whole[0].weight), (None, 33));
         // Verifying is an ordinary case.
-        let verified: Vec<_> = of(sig_ver).collect();
+        let verified = of("sigVer");
         assert_eq!((verified[0].case, verified[0].weight), (None, 10));
+    }
+
+    /// A driver that draws outside its builder fails its unit, which
+    /// can be seen only under a profile the processor would not pick
+    /// by itself: under the set detected, outside looks like inside.
+    #[test]
+    fn a_draw_outside_the_builder_fails_the_unit() {
+        if features::detected().is_empty() {
+            return;
+        }
+        let suite = |answer| Suite {
+            directory: "x",
+            algorithm: "x",
+            mode: None,
+            revision: "1.0",
+            answer,
+            verify: None,
+            minimum: 0,
+        };
+        let inside = suite(|doc, rng, builder| {
+            builder.try_build(|| rng.fill(&mut [0u8; 8]))?;
+            Ok(json!({ "testGroups": [], "vsId": doc["vsId"] }))
+        });
+        let outside = suite(|doc, rng, _| {
+            rng.fill(&mut [0u8; 8])?;
+            Ok(json!({ "testGroups": [], "vsId": doc["vsId"] }))
+        });
+        let doc = json!({"testGroups": [{"tgId": 1, "tests": []}]});
+        let unit = Unit {
+            suite: 0,
+            group: 0,
+            case: None,
+            weight: 1,
+        };
+        let portable = Builder::try_new(Features::new()).unwrap();
+        assert_eq!(answer_unit(&inside, &doc, &unit, &portable), Ok(None));
+        let e = answer_unit(&outside, &doc, &unit, &portable).unwrap_err();
+        assert_eq!(e.message, "drew randomness outside the builder");
     }
 
     #[test]
@@ -819,19 +796,9 @@ mod tests {
     }
 
     #[test]
-    fn shard_parses_i_of_n() {
-        assert_eq!(shard("").unwrap(), (1, 1));
-        assert_eq!(shard("3/8").unwrap(), (3, 8));
-        assert_eq!(shard("8/8").unwrap(), (8, 8));
-        for bad in ["0/8", "9/8", "x", "3", "3/", "/8", "3/0"] {
-            assert!(shard(bad).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
     fn units_split_large_data_by_case_and_keep_other_groups() {
-        // The units name a suite by registry index, so the first
-        // document stands for whichever suite is first.
+        // The first suite in the registry stands for any ordinary
+        // one.
         let doc = json!({"testGroups": [
             {"tgId": 1, "testType": "AFT", "tests": [{"tcId": 1}, {"tcId": 2}]},
             {"tgId": 2, "testType": "MCT", "tests": [{"tcId": 3}]},
@@ -839,8 +806,7 @@ mod tests {
                 {"tcId": 4, "largeMsg": {"fullLength": 1u64 << 23}},
                 {"tcId": 5, "largeMsg": {"fullLength": 1u64 << 24}}]},
         ]});
-        let docs = [Some(doc), None];
-        let got = units(&docs);
+        let got = units(0, &doc);
         let unit = |group, case, weight| Unit {
             suite: 0,
             group,
@@ -872,47 +838,15 @@ mod tests {
     }
 
     #[test]
-    fn split_sends_the_heaviest_unit_to_the_lightest_shard() {
-        let work: Vec<(usize, Unit)> = [8, 7, 6, 5, 4, 3]
-            .into_iter()
-            .enumerate()
-            .map(|(group, weight)| {
-                (
-                    0,
-                    Unit {
-                        suite: 0,
-                        group,
-                        case: None,
-                        weight,
-                    },
-                )
-            })
-            .collect();
-        let (first, loads) = split(&work, 2, 1);
-        let (second, _) = split(&work, 2, 2);
-        assert_eq!(loads, [17, 16]);
-        let groups = |v: &[(usize, Unit)]| {
-            v.iter().map(|(_, u)| u.group).collect::<Vec<_>>()
-        };
-        assert_eq!(groups(&first), [0, 3, 4]);
-        assert_eq!(groups(&second), [1, 2, 5]);
-        let (all, loads) = split(&work, 1, 1);
-        assert_eq!(all.len(), 6);
-        assert_eq!(loads, [33]);
-    }
-
-    #[test]
     fn units_split_slh_dsa_signing_by_case() {
         let signing = SUITES
             .iter()
             .position(|s| s.algorithm == "SLH-DSA" && s.mode == Some("sigGen"))
             .expect("registered");
-        let mut docs: Vec<Option<Value>> =
-            SUITES.iter().map(|_| None).collect();
-        docs[signing] = Some(json!({"testGroups": [
+        let doc = json!({"testGroups": [
             {"tgId": 1, "testType": "AFT", "tests": [{"tcId": 1}, {"tcId": 2}]},
-        ]}));
-        let got = units(&docs);
+        ]});
+        let got = units(signing, &doc);
         assert_eq!(got.len(), 2);
         assert!(got.iter().all(|u| u.suite == signing && u.case.is_some()));
     }

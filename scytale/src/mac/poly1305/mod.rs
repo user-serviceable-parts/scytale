@@ -77,11 +77,11 @@ pub struct Poly1305 {
     /// none of it, and a wipe of all of it, a byte at a time, cost
     /// more than one of those groups takes.
     dirty: usize,
-    /// Whether this processor has the loop written out for it. Asked
-    /// once, here, rather than on the way past for every run of
-    /// blocks.
+    /// The vector loop, where the list chose it when this was built:
+    /// settled once, here, rather than on the way past for every run
+    /// of blocks.
     #[cfg(target_arch = "x86_64")]
-    fast: bool,
+    fast: Option<x86_64::Avx2>,
     /// The powers of `r` that loop wants, worked out the first time a
     /// run long enough to use them arrives. A short message never
     /// pays for them.
@@ -126,7 +126,7 @@ impl Poly1305 {
             used: 0,
             dirty: 0,
             #[cfg(target_arch = "x86_64")]
-            fast: x86_64::supported(),
+            fast: features::choose(KERNELS).and_then(x86_64::Avx2::of),
             #[cfg(target_arch = "x86_64")]
             powers: None,
             #[cfg(target_arch = "x86_64")]
@@ -138,7 +138,7 @@ impl Poly1305 {
     /// a block for the chain.
     fn unit(&self) -> usize {
         #[cfg(target_arch = "x86_64")]
-        if self.fast {
+        if self.fast.is_some() {
             return x86_64::SPAN;
         }
         BLOCK
@@ -153,11 +153,11 @@ impl Poly1305 {
         // borrowed where they lie, field by field, so that no copy of
         // them is made for the `Drop` to miss.
         #[cfg(target_arch = "x86_64")]
-        if self.fast {
+        if let Some(avx2) = self.fast {
             let r = &self.r;
             let powers =
                 self.powers.get_or_insert_with(|| x86_64::Powers::new(r));
-            x86_64::bulk(&mut self.lanes, powers, data);
+            x86_64::bulk(avx2, &mut self.lanes, powers, data);
             return;
         }
         let (blocks, _) = data.as_chunks::<BLOCK>();
@@ -265,13 +265,32 @@ impl Poly1305 {
     }
 }
 
-/// What the type publishes: on x86-64 its rows, elsewhere the one
-/// loop, which needs nothing.
-#[cfg(target_arch = "x86_64")]
-pub(crate) const PROFILES: [Features; x86_64::PROFILES.len()] =
-    x86_64::PROFILES;
-#[cfg(not(target_arch = "x86_64"))]
-pub(crate) const PROFILES: [Features; 1] = [Features::new()];
+/// Which loop the bulk of a message runs through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kernel {
+    /// Four blocks at once in the vector registers.
+    #[cfg(target_arch = "x86_64")]
+    Avx2,
+    /// Plain Rust, a block at a time, on any processor.
+    Portable,
+}
+
+features::kernels! {
+    enum Kernel;
+
+    /// The kernels, best first: AVX2, with the operating system
+    /// keeping the wider registers (AVX), then the chain a block at a
+    /// time.
+    pub(crate) const KERNELS for poly1305 tested by tests::kernel = [
+        #[cfg(target_arch = "x86_64")]
+        Avx2 => (x86_64: Avx, Avx2),
+        Portable => (),
+    ];
+}
+
+/// What the type publishes: the rows' needs.
+pub(crate) const PROFILES: [Features; KERNELS.len()] =
+    features::profiles_of(KERNELS);
 
 impl Poly1305 {
     /// The feature profiles this authenticator tells apart, best
@@ -407,7 +426,7 @@ impl fmt::Debug for Poly1305 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::Error;
 
@@ -421,16 +440,45 @@ mod tests {
         (out, s.len() / 2)
     }
 
-    fn tag_of(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
+    /// The tag under the kernel this processor dispatches to.
+    fn plain_tag(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
         let mut mac = Poly1305::new(&Key::from(*key));
         mac.update(message);
         mac.finalize()
     }
 
-    fn check(key: &str, message: &[u8], expected: &str) {
+    fn tag_of(
+        under: &features::Under,
+        key: &[u8; 32],
+        message: &[u8],
+    ) -> [u8; 16] {
+        let mut mac = under.build(|| Poly1305::new(&Key::from(*key)));
+        mac.update(message);
+        mac.finalize()
+    }
+
+    fn check(
+        under: &features::Under,
+        key: &str,
+        message: &[u8],
+        expected: &str,
+    ) {
         let (k, _) = hex(key);
         let (t, _) = hex(expected);
-        assert_eq!(tag_of(k[..32].try_into().unwrap(), message), t[..16]);
+        assert_eq!(
+            tag_of(under, k[..32].try_into().unwrap(), message),
+            t[..16]
+        );
+    }
+
+    /// Poly1305 under one kernel, built through the public type: the
+    /// RFC 8439 examples, and the vector loop against the chain a
+    /// block at a time.
+    pub(crate) fn kernel(under: &features::Under) {
+        rfc8439_example(under);
+        rfc8439_a3_ordinary(under);
+        rfc8439_a3_edge_cases(under);
+        four_at_once_agrees_with_one(under);
     }
 
     /// RFC 8439 section 2.5.2.
@@ -440,33 +488,32 @@ mod tests {
     ///
     /// On a processor without the instructions both sides of this are
     /// the same code, and the test still says the lengths are right.
-    #[test]
-    fn four_at_once_agrees_with_one() {
+    fn four_at_once_agrees_with_one(under: &features::Under) {
         const MAX: usize = 17 * BLOCK + 7;
         let mut data = [0u8; MAX];
         for (i, b) in data.iter_mut().enumerate() {
             *b = (i * 7 + 1) as u8;
         }
-        agrees(&[0x2bu8; KEY_SIZE], &data);
+        agrees(under, &[0x2bu8; KEY_SIZE], &data);
         // Every bit set, in the key and the message: the limbs as
         // large as they come, which is what the bounds in the vector
         // code are about.
-        agrees(&[0xffu8; KEY_SIZE], &[0xffu8; MAX]);
+        agrees(under, &[0xffu8; KEY_SIZE], &[0xffu8; MAX]);
     }
 
-    fn agrees(key: &[u8; KEY_SIZE], data: &[u8]) {
+    fn agrees(under: &features::Under, key: &[u8; KEY_SIZE], data: &[u8]) {
         let key = *key;
         for len in 0..data.len() {
-            let want = one_at_a_time(&key, &data[..len]);
+            let want = one_at_a_time(under, &key, &data[..len]);
 
-            let mut p = Poly1305::new(&Key::from(key));
+            let mut p = under.build(|| Poly1305::new(&Key::from(key)));
             p.update(&data[..len]);
             assert_eq!(p.finalize(), want, "{len} bytes");
 
             // Pieces, so a run starts and ends part way along and the
             // part block is carried between calls.
             for piece in [1, 16, 17, 64, 65] {
-                let mut p = Poly1305::new(&Key::from(key));
+                let mut p = under.build(|| Poly1305::new(&Key::from(key)));
                 for part in data[..len].chunks(piece) {
                     p.update(part);
                 }
@@ -477,8 +524,12 @@ mod tests {
 
     /// The tag with every block put through the chain on its own,
     /// which no bulk path touches.
-    fn one_at_a_time(key: &[u8; KEY_SIZE], message: &[u8]) -> [u8; BLOCK] {
-        let mut p = Poly1305::new(&Key::from(*key));
+    fn one_at_a_time(
+        under: &features::Under,
+        key: &[u8; KEY_SIZE],
+        message: &[u8],
+    ) -> [u8; BLOCK] {
+        let mut p = under.build(|| Poly1305::new(&Key::from(*key)));
         let (blocks, rest) = message.as_chunks::<BLOCK>();
         for block in blocks {
             p.absorb(block, 1);
@@ -492,9 +543,9 @@ mod tests {
         p.tag()
     }
 
-    #[test]
-    fn rfc8439_example() {
+    fn rfc8439_example(under: &features::Under) {
         check(
+            under,
             "85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f5\
              1b",
             b"Cryptographic Forum Research Group",
@@ -533,20 +584,20 @@ mod tests {
     }
 
     /// RFC 8439 appendix A.3, tests 1 to 4.
-    #[test]
-    fn rfc8439_a3_ordinary() {
-        assert_eq!(tag_of(&[0u8; 32], &[0u8; 64]), [0u8; 16]);
+    fn rfc8439_a3_ordinary(under: &features::Under) {
+        assert_eq!(tag_of(under, &[0u8; 32], &[0u8; 64]), [0u8; 16]);
         let (text, n) = hex(IETF);
         let text = &text[..n];
         assert_eq!(n, 375);
         let (s, _) = hex("36e5f6b5c5e06070f0efca96227a863e");
         let s: [u8; 16] = s[..16].try_into().unwrap();
         // r = 0: the tag is s, whatever the message.
-        assert_eq!(tag_of(&key([0; 16], s), text), s);
+        assert_eq!(tag_of(under, &key([0; 16], s), text), s);
         // s = 0.
         let (expected, _) = hex("f3477e7cd95417af89a6b8794c310cf0");
-        assert_eq!(tag_of(&key(s, [0; 16]), text), expected[..16]);
+        assert_eq!(tag_of(under, &key(s, [0; 16]), text), expected[..16]);
         check(
+            under,
             "1c9240a5eb55d38af333888604f6b5f0473917c1402b80099dca5cbc207075\
              c0",
             b"'Twas brillig, and the slithy toves\nDid gyre and gimble in \
@@ -560,8 +611,7 @@ mod tests {
     /// the accumulator overflow, borrow, and need every reduction.
     /// The tags were also recomputed from the standard's definition
     /// with big integers, which agreed.
-    #[test]
-    fn rfc8439_a3_edge_cases() {
+    fn rfc8439_a3_edge_cases(under: &features::Under) {
         let r1 = block(1, 0);
         let r2 = block(2, 0);
         let ones = [0xff; 16];
@@ -569,23 +619,23 @@ mod tests {
 
         // 5: r = 2, s = 0, message of ones: the product wraps past
         // 2^130 and reduces to three.
-        assert_eq!(tag_of(&key(r2, zero), &ones), block(3, 0));
+        assert_eq!(tag_of(under, &key(r2, zero), &ones), block(3, 0));
         // 6: r = 2, s all ones, message 2: the final addition wraps.
-        assert_eq!(tag_of(&key(r2, ones), &r2), block(3, 0));
+        assert_eq!(tag_of(under, &key(r2, ones), &r2), block(3, 0));
         // 7: r = 1, carries through every limb.
         let mut m = [0u8; 48];
         m[..16].copy_from_slice(&ones);
         m[16..32].copy_from_slice(&block(0xf0, 0xff));
         m[32..].copy_from_slice(&block(0x11, 0));
-        assert_eq!(tag_of(&key(r1, zero), &m), block(5, 0));
+        assert_eq!(tag_of(under, &key(r1, zero), &m), block(5, 0));
         // 8: r = 1, a borrow.
         m[16..32].copy_from_slice(&block(0xfb, 0xff));
         m[17] = 0xfe;
         m[32..].copy_from_slice(&block(1, 0));
-        assert_eq!(tag_of(&key(r1, zero), &m), block(0, 0xff));
+        assert_eq!(tag_of(under, &key(r1, zero), &m), block(0, 0xff));
         // 9: r = 2, the accumulator lands just under the prime.
         assert_eq!(
-            tag_of(&key(r2, zero), &block(0xfd, 0xff)),
+            tag_of(under, &key(r2, zero), &block(0xfd, 0xff)),
             block(0xfa, 0xff)
         );
         // 10 and 11: r with a bit in its second word, and messages
@@ -600,8 +650,8 @@ mod tests {
         assert_eq!(n, 64);
         let mut expected = block(0x14, 0);
         expected[8] = 0x55;
-        assert_eq!(tag_of(&key(r, zero), &m[..64]), expected);
-        assert_eq!(tag_of(&key(r, zero), &m[..48]), block(0x13, 0));
+        assert_eq!(tag_of(under, &key(r, zero), &m[..64]), expected);
+        assert_eq!(tag_of(under, &key(r, zero), &m[..48]), block(0x13, 0));
     }
 
     #[test]
@@ -612,7 +662,7 @@ mod tests {
         );
         let key: &[u8; 32] = key[..32].try_into().unwrap();
         let message: [u8; 101] = core::array::from_fn(|i| (i * 13) as u8);
-        let expected = tag_of(key, &message);
+        let expected = plain_tag(key, &message);
         for chunk in [1, 3, 15, 16, 17, 40] {
             let mut mac = Poly1305::new(&Key::from(*key));
             for piece in message.chunks(chunk) {
@@ -633,7 +683,7 @@ mod tests {
     fn reset_forgets_the_chains() {
         let key = [0x3cu8; KEY_SIZE];
         let message: [u8; 101] = core::array::from_fn(|i| (i * 5) as u8);
-        let expected = tag_of(&key, &message);
+        let expected = plain_tag(&key, &message);
         let mut mac = Poly1305::new(&Key::from(key));
         mac.update(&[0xa5; 3 * BUFFER + 9]);
         mac.reset();
@@ -646,7 +696,7 @@ mod tests {
     #[test]
     fn verify_accepts_and_rejects() {
         let key = [7u8; 32];
-        let tag = tag_of(&key, b"message");
+        let tag = plain_tag(&key, b"message");
         let mut mac = Poly1305::new(&Key::from(key));
         mac.update(b"message");
         assert_eq!(mac.clone().verify(&tag), Ok(()));

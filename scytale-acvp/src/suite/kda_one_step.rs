@@ -9,6 +9,7 @@
 //! answer whether it is what the inputs derive.
 
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{
     Error, field, hex, hex_value, int, opt_hex, text, unknown_test_type,
 };
@@ -51,36 +52,47 @@ struct Inputs<'a> {
     counter: bool,
 }
 
-pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    _rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     match (text(doc, "algorithm")?, text(doc, "mode")?) {
-        ("KDA", "OneStep") => answer_one_step(doc, true),
-        ("KDA", "OneStepNoCounter") => answer_one_step(doc, false),
-        ("kdf-components", "ansix9.63") => answer_x963(doc),
+        ("KDA", "OneStep") => answer_one_step(doc, true, builder),
+        ("KDA", "OneStepNoCounter") => answer_one_step(doc, false, builder),
+        ("kdf-components", "ansix9.63") => answer_x963(doc, builder),
         (alg, mode) => Err(Error::new(format!("{alg} {mode}"))),
     }
 }
 
-fn answer_one_step(doc: &Value, counter: bool) -> Result<Value, Error> {
+fn answer_one_step(
+    doc: &Value,
+    counter: bool,
+    builder: &Builder,
+) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        let validate = match text(group, "testType")? {
-            "AFT" => false,
-            "VAL" => true,
-            _ => return Err(unknown_test_type(group)),
-        };
-        let cfg = field(group, "kdfConfiguration")?;
-        if text(cfg, "fixedInfoPattern")? != "t||uPartyInfo||vPartyInfo||l" {
-            return Err(Error::new("fixedInfoPattern"));
-        }
-        if text(cfg, "fixedInfoEncoding")? != "concatenation" {
-            return Err(Error::new("fixedInfoEncoding"));
-        }
-        let aux = text(cfg, "auxFunction")?;
-        answer_tests(group, |t| {
-            let dkm = one_step_case(t, aux, counter)?;
-            Ok(if validate {
-                json!({ "testPassed": dkm == hex(t, "dkm")? })
-            } else {
-                json!({ "dkm": hex_value(&dkm) })
+        builder.try_build(|| {
+            let validate = match text(group, "testType")? {
+                "AFT" => false,
+                "VAL" => true,
+                _ => return Err(unknown_test_type(group)),
+            };
+            let cfg = field(group, "kdfConfiguration")?;
+            if text(cfg, "fixedInfoPattern")? != "t||uPartyInfo||vPartyInfo||l"
+            {
+                return Err(Error::new("fixedInfoPattern"));
+            }
+            if text(cfg, "fixedInfoEncoding")? != "concatenation" {
+                return Err(Error::new("fixedInfoEncoding"));
+            }
+            let aux = text(cfg, "auxFunction")?;
+            answer_tests(group, |t| {
+                let dkm = one_step_case(t, aux, counter)?;
+                Ok(if validate {
+                    json!({ "testPassed": dkm == hex(t, "dkm")? })
+                } else {
+                    json!({ "dkm": hex_value(&dkm) })
+                })
             })
         })
     })
@@ -167,20 +179,22 @@ fn kmac(aux: &str, i: Inputs<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-fn answer_x963(doc: &Value) -> Result<Value, Error> {
+fn answer_x963(doc: &Value, builder: &Builder) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        if text(group, "testType")? != "AFT" {
-            return Err(unknown_test_type(group));
-        }
-        let alg = text(group, "hashAlg")?;
-        let bits = int(group, "keyDataLength")?;
-        if !bits.is_multiple_of(8) {
-            return Err(Error::new("keyDataLength is not whole bytes"));
-        }
-        answer_tests(group, |t| {
-            let mut out = vec![0u8; bits as usize / 8];
-            with_hash!(alg, x963_case(t, &mut out))?;
-            Ok(json!({ "keyData": hex_value(&out) }))
+        builder.try_build(|| {
+            if text(group, "testType")? != "AFT" {
+                return Err(unknown_test_type(group));
+            }
+            let alg = text(group, "hashAlg")?;
+            let bits = int(group, "keyDataLength")?;
+            if !bits.is_multiple_of(8) {
+                return Err(Error::new("keyDataLength is not whole bytes"));
+            }
+            answer_tests(group, |t| {
+                let mut out = vec![0u8; bits as usize / 8];
+                with_hash!(alg, x963_case(t, &mut out))?;
+                Ok(json!({ "keyData": hex_value(&out) }))
+            })
         })
     })
 }

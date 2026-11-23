@@ -30,6 +30,7 @@
 //! direction instead, which must give back the ciphertext.
 
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{
     Error, Rng, hex, hex_value, int, list, opt_hex, opt_int, text,
     unknown_test_type,
@@ -41,21 +42,27 @@ use scytale::pke::rsa::{
 use scytale::sig::rsa::PrivateKey;
 use serde_json::{Value, json};
 
-pub fn answer(doc: &Value, rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     let signature = match text(doc, "mode")? {
         "signaturePrimitive" => true,
         "decryptionPrimitive" => false,
         other => return Err(Error::new(format!("mode {other}"))),
     };
     answer_groups(doc, |group| {
-        if text(group, "testType")? != "AFT" {
-            return Err(unknown_test_type(group));
-        }
-        if signature {
-            answer_tests(group, |t| signature_case(group, t))
-        } else {
-            decryption_group(group, rng)
-        }
+        builder.try_build(|| {
+            if text(group, "testType")? != "AFT" {
+                return Err(unknown_test_type(group));
+            }
+            if signature {
+                answer_tests(group, |t| signature_case(group, t))
+            } else {
+                decryption_group(group, rng)
+            }
+        })
     })
 }
 
@@ -517,7 +524,12 @@ mod tests {
         else {
             return;
         };
-        let with = answer(&doc, &mut fixed_rng()).unwrap();
+        let with = answer(
+            &doc,
+            &mut fixed_rng(&Builder::default()).unwrap(),
+            &Builder::default(),
+        )
+        .unwrap();
         for group in doc["testGroups"].as_array_mut().unwrap() {
             if group["keyMode"] != "crt" {
                 continue;
@@ -526,7 +538,12 @@ mod tests {
                 t.as_object_mut().unwrap().remove("d");
             }
         }
-        let without = answer(&doc, &mut fixed_rng()).unwrap();
+        let without = answer(
+            &doc,
+            &mut fixed_rng(&Builder::default()).unwrap(),
+            &Builder::default(),
+        )
+        .unwrap();
         assert_eq!(with, without);
     }
 
@@ -554,7 +571,12 @@ mod tests {
                 ]}],
             }],
         });
-        let answered = answer(&doc, &mut fixed_rng()).unwrap();
+        let answered = answer(
+            &doc,
+            &mut fixed_rng(&Builder::default()).unwrap(),
+            &Builder::default(),
+        )
+        .unwrap();
         let entries = &answered["testGroups"][0]["tests"][0]["resultsArray"];
         let (pass, fail) = (&entries[0], &entries[1]);
         // One key serves the whole group when it can.
@@ -592,7 +614,12 @@ mod tests {
                 ]}],
             }],
         });
-        let answered = answer(&doc, &mut fixed_rng()).unwrap();
+        let answered = answer(
+            &doc,
+            &mut fixed_rng(&Builder::default()).unwrap(),
+            &Builder::default(),
+        )
+        .unwrap();
         let entries = &answered["testGroups"][0]["tests"][0]["resultsArray"];
         let passed: Vec<bool> = entries
             .as_array()
@@ -607,7 +634,12 @@ mod tests {
         let mut doc = doc;
         doc["testGroups"][0]["tests"][0]["resultsArray"][2]["cipherText"] =
             json!(format!("80{}", "00".repeat(255)));
-        let err = answer(&doc, &mut fixed_rng()).unwrap_err();
+        let err = answer(
+            &doc,
+            &mut fixed_rng(&Builder::default()).unwrap(),
+            &Builder::default(),
+        )
+        .unwrap_err();
         assert!(err.message.contains("no key"), "{}", err.message);
     }
 }

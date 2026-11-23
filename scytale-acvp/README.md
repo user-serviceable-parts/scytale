@@ -31,31 +31,53 @@ a sample file. They cover both hashes at both lengths, and are
 answered offline like any other suite.
 
 ```sh
-cargo test -p scytale-acvp --test vendored
+cargo test --release -p scytale-acvp --test acvp_samples -- --nocapture
 ```
 
 answers every suite in full, the large-data groups and every SLH-DSA
 signature included, and has every kernel this processor can run
-answer the vectors that test it, each exactly once. A kernel is
-reached through the feature profiles the library's types publish. A
-vector tests the kernels of one type: a hash suite the hash's,
-AES-ECB the cipher's, a mode's suite the mode's, an ECDSA group its
-curve's, the RSA suites RSA's. It is answered under a profile only
-when that type takes a kernel there it has not yet taken, so on
-x86-64 SHA-256 runs twice, SHA-NI and portable, and SHA-512 twice,
-AVX2 and portable. A kernel that has passed
-its own vectors is taken as good wherever else it is used, so a
-suite with no kernel of its own, HMAC or LMS or a KDF, is answered
-once. The work is cut into test groups and spread over the cores,
-and the report says which suites ran under which profile and for
-which kernels, and the cases compared per suite; while a profile is
-running, a line a minute says how far it has got. The run edits the
-process-wide set of features, so it is a binary of its own, outside
-the harness. `cargo test -p scytale-acvp` runs it after the crate's
-unit tests.
+answer the vectors that test it, each exactly once. Each suite is a
+test of its own, named after its directory: `acvp_samples::sha2_512`
+for `ACVP-SHA2-512-1.0`, without the `ACVP-` prefix and the revision,
+which is kept only where two directories differ by nothing else. A
+test is filtered as any other is, so
+`cargo test -p scytale-acvp -- --exact acvp_samples::sha2_512` runs that
+one; without `--exact` a name selects every test it is part of.
 
-`SCYTALE_SHARD=i/n` runs the i-th of n shares, equal by expected
-cost, which is how CI spreads the run over jobs.
+A kernel is reached through the feature profiles the library's
+types publish. A vector tests the kernels of one type: a hash suite
+the hash's, AES-ECB the cipher's, a mode's suite the mode's, an
+ECDSA group its curve's, the RSA suites RSA's. It is answered under
+each profile that type publishes, so on x86-64 SHA-256 runs twice,
+SHA-NI and portable, and SHA-512 twice, AVX2 and portable. A kernel
+that has passed its own vectors is taken as good wherever else it is
+used, so a suite with no kernel of its own, HMAC or LMS or a KDF, is
+answered once, under the features detected, as `<suite>/default`.
+
+Each test prints the cases compared and a line per kernel, as the
+library's kernel tests do: the suite and the kernel's features,
+`acvp_samples::sha2_512`'s as `sha2_512/avx2`, and whether it ran, was
+not run for the features the processor lacks, or was not selected. A
+test fails only if a kernel it ran fails. `SCYTALE_KERNELS` takes
+kernel names, separated by white space, and runs those alone, which
+is how a run on one machine names the kernels another must run.
+The work is cut into test groups, and a suite's kernels run at once:
+the groups of every kernel go to one pool, heaviest first, spread
+over the cores, and while it runs a line a minute says how far it
+has got. The tests run at once too, as many as the harness runs.
+
+The set of features in force is the process's, so the drivers build
+and run whatever a group needs through a builder that puts the
+kernel's profile in force for the while. Builds under one set share
+it, and builds under another wait their turn; the turn ends with the
+last build, and the set detected is put back. A builder holds the
+whole group rather than just its constructors, since the library
+chooses a kernel inside some operations too, the big-number and
+curve arithmetic, a GCM-SIV message, a hash-based signature, a KDF;
+the large-data and Monte Carlo hashes only build under it and hash
+outside. A random draw made outside its builder fails the group, as
+a sign that something was built there too.
+
 `SCYTALE_VECTORS=required` makes a missing vector file a failure
 rather than a skip.
 

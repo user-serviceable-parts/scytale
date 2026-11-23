@@ -229,7 +229,8 @@ impl<'a> Core<AutoStream<'a>> {
         cipher: &'a ChaCha20,
         nonce: &[u8; NONCE_SIZE],
     ) -> Result<Self, Error> {
-        Ok(Core::over(cipher.stream(nonce, 1), mac(cipher, nonce)?))
+        let mac = mac(cipher, nonce)?;
+        Ok(Core::over(cipher.stream(nonce, 1), mac))
     }
 }
 

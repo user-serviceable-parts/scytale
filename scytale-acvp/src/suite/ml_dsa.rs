@@ -8,6 +8,7 @@
 //! expanded form alike.
 
 use super::{answer_groups, answer_tests, skip};
+use crate::profile::Builder;
 use crate::support::{Error, flag, hex, hex_value, text};
 use scytale::Random;
 use scytale::sig::ml_dsa::{ml_dsa_44, ml_dsa_65, ml_dsa_87};
@@ -120,13 +121,19 @@ fn pure_external(group: &Value) -> bool {
         && group["externalMu"] != true
 }
 
-pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    _rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
-    answer_groups(doc, |group| match text(group, "parameterSet")? {
-        Set44::NAME => answer_group::<Set44>(mode, group),
-        Set65::NAME => answer_group::<Set65>(mode, group),
-        Set87::NAME => answer_group::<Set87>(mode, group),
-        other => Err(Error::new(format!("parameter set {other}"))),
+    answer_groups(doc, |group| {
+        builder.try_build(|| match text(group, "parameterSet")? {
+            Set44::NAME => answer_group::<Set44>(mode, group),
+            Set65::NAME => answer_group::<Set65>(mode, group),
+            Set87::NAME => answer_group::<Set87>(mode, group),
+            other => Err(Error::new(format!("parameter set {other}"))),
+        })
     })
 }
 

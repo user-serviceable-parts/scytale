@@ -359,12 +359,6 @@ use crate::Error;
 use crate::cipher::aes::{BLOCK_SIZE, Kernel};
 use crate::traits::ByteArray;
 
-/// What the scalar kernels need: the AES encryption instructions
-/// alone, since nothing in AEGIS runs the cipher backwards.
-#[cfg(target_arch = "riscv64")]
-const ZKNE: crate::features::Features =
-    crate::features::riscv(&[crate::features::riscv64::Feature::Zkne]);
-
 /// The tag length, in bytes.
 const TAG: usize = 16;
 

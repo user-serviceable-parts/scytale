@@ -5,6 +5,7 @@
 //! answers carry them the same way.
 
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{
     Error, hex, hex_value, int, key_of, text, unknown_test_type,
 };
@@ -21,18 +22,24 @@ const MCT_SEGMENTS: usize = 1000;
 /// Segments the IV holds: 128 bits.
 const HISTORY: usize = 128;
 
-pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    _rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        let encrypt = match text(group, "direction")? {
-            "encrypt" => true,
-            "decrypt" => false,
-            other => return Err(Error::new(format!("direction {other}"))),
-        };
-        match text(group, "testType")? {
-            "AFT" => answer_tests(group, |t| aft(t, encrypt)),
-            "MCT" => answer_tests(group, |t| mct(t, encrypt)),
-            _ => Err(unknown_test_type(group)),
-        }
+        builder.try_build(|| {
+            let encrypt = match text(group, "direction")? {
+                "encrypt" => true,
+                "decrypt" => false,
+                other => return Err(Error::new(format!("direction {other}"))),
+            };
+            match text(group, "testType")? {
+                "AFT" => answer_tests(group, |t| aft(t, encrypt)),
+                "MCT" => answer_tests(group, |t| mct(t, encrypt)),
+                _ => Err(unknown_test_type(group)),
+            }
+        })
     })
 }
 

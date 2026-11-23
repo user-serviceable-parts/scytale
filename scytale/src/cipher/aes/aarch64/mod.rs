@@ -74,17 +74,7 @@ pub(crate) type KeysEitherWay<C> =
 /// and nothing would fail.
 macro_rules! keyed {
     ($mac:ident) => {
-        $mac!(
-            Aes128,
-            Aes192,
-            Aes256,
-            Aes<16>,
-            Aes<24>,
-            Aes<32>,
-            armv8::Aes<16>,
-            armv8::Aes<24>,
-            armv8::Aes<32>,
-        );
+        $mac!(Aes128, Aes192, Aes256, Aes<16>, Aes<24>, Aes<32>,);
     };
 }
 

@@ -10,27 +10,27 @@
 
 #![allow(unsafe_code)]
 
+use crate::features::Chosen;
 use zeroize::Zeroize;
 
 use super::engine::{LANES, Permutation};
 use super::portable::{ROUND_CONSTANTS, keccak_f1600};
 use crate::align::At32;
-use crate::features::{self, Features, x86_64::Feature as F};
 
 /// The permutation compiled for BMI1 and BMI2. No public constructor:
-/// a value exists only by way of `probe`.
+/// a value exists only by way of `of`.
 #[derive(Clone, Copy)]
 pub struct Bmi(());
 
 impl super::engine::Sealed for Bmi {}
 
 impl Permutation for Bmi {
-    fn probe() -> Option<Self> {
-        features::allows(super::KERNELS, super::Kernel::Bmi).then_some(Bmi(()))
+    fn of(chosen: Chosen<super::Kernel>) -> Option<Self> {
+        (chosen.kernel() == super::Kernel::Bmi).then_some(Bmi(()))
     }
 
     fn permute(self, state: &mut [u64; LANES]) {
-        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // SAFETY: `self` was minted by `of`, which confirmed the
         // instructions.
         unsafe { permute_bmi(state) }
     }
@@ -365,90 +365,20 @@ unsafe fn permute4(state: &mut Four) {
 }
 
 /// The four-state permutation. No public constructor: a value exists
-/// only by way of `probe`.
+/// only by way of `of`.
 #[derive(Clone, Copy)]
 pub(crate) struct Avx2(());
 
 impl Avx2 {
-    /// The permutation, where the features in force allow it.
-    pub(crate) fn probe() -> Option<Self> {
-        features::allows(
-            super::together::KERNELS,
-            super::together::Kernel::Avx2,
-        )
-        .then_some(Avx2(()))
+    /// The permutation, where the four-state list chose it.
+    pub(crate) fn of(chosen: Chosen<super::together::Kernel>) -> Option<Self> {
+        (chosen.kernel() == super::together::Kernel::Avx2).then_some(Avx2(()))
     }
 
     /// Applies the permutation to each of the four states.
     pub(crate) fn permute(self, state: &mut Four) {
-        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // SAFETY: `self` was minted by `of`, which confirmed the
         // instructions.
         unsafe { permute4(state) }
-    }
-}
-
-/// What the four-state row needs: AVX2 (CPUID leaf 7, EBX bit 5), and
-/// AVX for the operating system keeping the wider registers.
-pub(crate) const AVX2: Features = features::x86(&[F::Avx, F::Avx2]);
-
-/// What the BMI row needs: BMI1 and BMI2 (CPUID leaf 7, EBX bits 3
-/// and 8).
-pub(crate) const BMI: Features = features::x86(&[F::Bmi1, F::Bmi2]);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The build for the instruction sets permutes as the baseline
-    /// one does, from the zero state and from states reached by
-    /// permuting it.
-    #[test]
-    fn matches_the_baseline_build() {
-        let Some(bmi) = Bmi::probe() else {
-            std::eprintln!("Bmi not available; skipping");
-            return;
-        };
-        let mut expected = [0u64; LANES];
-        for round in 0..4 {
-            for (i, lane) in expected.iter_mut().enumerate() {
-                *lane ^= (i as u64 + 1)
-                    .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-                    .wrapping_mul(round);
-            }
-            let mut actual = expected;
-            keccak_f1600(&mut expected);
-            bmi.permute(&mut actual);
-            assert_eq!(actual, expected, "round {round}");
-        }
-    }
-
-    /// The four-state permutation is the one-state permutation on
-    /// each of its states, which are made to differ so that a lane
-    /// landing in the wrong state shows.
-    #[test]
-    fn four_states_agree_with_one_at_a_time() {
-        let Some(avx2) = Avx2::probe() else {
-            std::eprintln!("Avx2 not available; skipping");
-            return;
-        };
-        let mut four: Four = At32([[0; 4]; LANES]);
-        let mut each = [[0u64; LANES]; 4];
-        for round in 0..4u64 {
-            for (s, state) in each.iter_mut().enumerate() {
-                for (i, lane) in state.iter_mut().enumerate() {
-                    *lane ^= (i as u64 + 1 + 25 * s as u64)
-                        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-                        .wrapping_mul(round);
-                    four.0[i][s] = *lane;
-                }
-                keccak_f1600(state);
-            }
-            avx2.permute(&mut four);
-            for (s, state) in each.iter().enumerate() {
-                for (i, lane) in state.iter().enumerate() {
-                    assert_eq!(four.0[i][s], *lane, "{round} {s} {i}");
-                }
-            }
-        }
     }
 }

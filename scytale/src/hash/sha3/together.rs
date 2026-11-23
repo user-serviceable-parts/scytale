@@ -33,14 +33,21 @@ pub(crate) enum Kernel {
     Apart,
 }
 
-/// The kernels, best first, each with what it needs.
-pub(crate) const KERNELS: &[(Kernel, Features)] = &[
-    #[cfg(target_arch = "x86_64")]
-    (Kernel::Avx2, super::x86_64::AVX2),
-    #[cfg(target_arch = "aarch64")]
-    (Kernel::Armv8, super::ARMV8),
-    (Kernel::Apart, Features::new()),
-];
+features::kernels! {
+    enum Kernel;
+
+    /// The kernels, best first. Four states in 256-bit registers need
+    /// AVX2 and the operating system keeping them (AVX); two in
+    /// 128-bit registers need the ARMv8.2 SHA-3 instructions.
+    pub(crate) const KERNELS for shake128_together
+        tested by crate::kem::ml_kem::tests::together = [
+        #[cfg(target_arch = "x86_64")]
+        Avx2 => (x86_64: Avx, Avx2),
+        #[cfg(target_arch = "aarch64")]
+        Armv8 => (aarch64: Sha3),
+        Apart => (),
+    ];
+}
 
 /// What the list publishes: the needs, without the names.
 pub(crate) const PROFILES: [Features; KERNELS.len()] =
@@ -59,6 +66,7 @@ mod wide {
     use super::super::engine::LANES;
     use super::RATE;
     use crate::align::At32;
+    use crate::features::Chosen;
 
     #[cfg(target_arch = "aarch64")]
     use super::super::aarch64::Pair as Permutation;
@@ -87,16 +95,16 @@ mod wide {
     }
 
     impl Shake128Together {
-        /// The streams over `messages`, or `None` where the
-        /// features in force have no kernel that runs them
-        /// together.
+        /// The streams over `messages`, or `None` where the list
+        /// chose to run them apart.
         pub(crate) fn new<const M: usize>(
             messages: [&[u8; M]; WIDTH],
+            chosen: Chosen<super::Kernel>,
         ) -> Option<Self> {
             // Shorter than a block, so the padding ends the first
             // block and there is exactly one to absorb.
             const { assert!(M < RATE) };
-            let permutation = Permutation::probe()?;
+            let permutation = Permutation::of(chosen)?;
             let mut state = At32([[0; WIDTH]; LANES]);
             for (s, message) in messages.iter().enumerate() {
                 let mut block = [0u8; RATE];
@@ -142,41 +150,49 @@ mod wide {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    use crate::features::Chosen;
 
     /// Each row can be chosen, the last needs nothing, and the
     /// streams are run together exactly when the first row the set
     /// in force meets says so.
     #[test]
     fn dispatches_by_the_list() {
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        let built = match Shake128Together::new([&[0u8; 1]; WIDTH]) {
-            Some(_) => KERNELS[0].0,
-            None => Kernel::Apart,
-        };
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        let built = Kernel::Apart;
-        features::dispatches(KERNELS, &PROFILES, built);
+        features::build_alone(|| {
+            let chosen = features::choose(KERNELS).expect("listed");
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            let built = match Shake128Together::new([&[0u8; 1]; WIDTH], chosen)
+            {
+                Some(_) => KERNELS[0].0,
+                None => Kernel::Apart,
+            };
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+            let built = chosen.kernel();
+            features::dispatches(KERNELS, &PROFILES, built);
+        });
     }
 
     /// The streams together are the streams apart: over messages
     /// that differ, so that a lane in the wrong stream shows, at the
     /// shortest and longest lengths there are and the one ML-KEM
     /// uses, and for more blocks than a matrix entry ever takes.
+    ///
+    /// Run by the kernel's meta test, under the kernel's own choice.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    #[test]
-    fn together_agrees_with_apart() {
+    pub(crate) fn together_agrees_with_apart(chosen: Chosen<Kernel>) {
         use super::super::Shake128;
         use crate::hash::{Xof, XofReader};
 
-        fn check<const M: usize>() {
+        fn check<const M: usize>(chosen: Chosen<Kernel>) {
             let messages: [[u8; M]; WIDTH] = core::array::from_fn(|s| {
                 core::array::from_fn(|i| (i * 7 + s * 59 + M) as u8)
             });
-            let Some(mut wide) = Shake128Together::new(messages.each_ref())
+            // The row that runs them apart has nothing to compare.
+            let Some(mut wide) =
+                Shake128Together::new(messages.each_ref(), chosen)
             else {
-                std::eprintln!("no kernel runs streams together; skipping");
                 return;
             };
             let mut readers = messages.each_ref().map(|message| {
@@ -194,10 +210,10 @@ mod tests {
                 }
             }
         }
-        check::<0>();
-        check::<1>();
-        check::<34>();
-        check::<166>();
-        check::<167>();
+        check::<0>(chosen);
+        check::<1>(chosen);
+        check::<34>(chosen);
+        check::<166>(chosen);
+        check::<167>(chosen);
     }
 }

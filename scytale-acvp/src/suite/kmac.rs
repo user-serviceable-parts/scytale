@@ -10,6 +10,7 @@
 
 use super::cshake::{customization, to_top};
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{
     Error, flag, hex, hex_value, int, text, unknown_test_type,
 };
@@ -97,56 +98,62 @@ macro_rules! width {
 width!(Kmac128);
 width!(Kmac256);
 
-pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    _rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     match text(doc, "algorithm")? {
-        "KMAC-128" => answer_as::<Kmac128>(doc),
-        "KMAC-256" => answer_as::<Kmac256>(doc),
+        "KMAC-128" => answer_as::<Kmac128>(doc, builder),
+        "KMAC-256" => answer_as::<Kmac256>(doc, builder),
         other => Err(Error::new(format!("algorithm {other}"))),
     }
 }
 
-fn answer_as<K: Width>(doc: &Value) -> Result<Value, Error> {
+fn answer_as<K: Width>(doc: &Value, builder: &Builder) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        let xof = flag(group, "xof")?;
-        let verify = match text(group, "testType")? {
-            "AFT" => false,
-            "MVT" => true,
-            _ => return Err(unknown_test_type(group)),
-        };
-        answer_tests(group, |t| {
-            let custom = customization(group, t)?;
-            let key_bits = length(t, "keyLen")?;
-            let mac_bits = length(t, "macLen")?;
-            let key = hex(t, "key")?;
-            let msg_bits = length(t, "msgLen")?;
-            let msg = from_top(hex(t, "msg")?, msg_bits)?;
-            let (whole, last, extra) = split(&msg, msg_bits);
+        builder.try_build(|| {
+            let xof = flag(group, "xof")?;
+            let verify = match text(group, "testType")? {
+                "AFT" => false,
+                "MVT" => true,
+                _ => return Err(unknown_test_type(group)),
+            };
+            answer_tests(group, |t| {
+                let custom = customization(group, t)?;
+                let key_bits = length(t, "keyLen")?;
+                let mac_bits = length(t, "macLen")?;
+                let key = hex(t, "key")?;
+                let msg_bits = length(t, "msgLen")?;
+                let msg = from_top(hex(t, "msg")?, msg_bits)?;
+                let (whole, last, extra) = split(&msg, msg_bits);
 
-            let mut kmac = K::try_new_bits(&key, key_bits, &custom)?;
-            kmac.update(whole);
-            let mut out = vec![0u8; mac_bits.div_ceil(8)];
-            if !verify {
-                if xof {
+                let mut kmac = K::try_new_bits(&key, key_bits, &custom)?;
+                kmac.update(whole);
+                let mut out = vec![0u8; mac_bits.div_ceil(8)];
+                if !verify {
+                    if xof {
+                        kmac.xof_bits(last, extra, &mut out)?;
+                        to_top(&mut out, mac_bits);
+                    } else {
+                        kmac.finalize_bits_to(last, extra, &mut out, mac_bits)?;
+                    }
+                    return Ok(json!({ "mac": hex_value(&out) }));
+                }
+                let expected = hex(t, "mac")?;
+                let passed = if xof {
                     kmac.xof_bits(last, extra, &mut out)?;
                     to_top(&mut out, mac_bits);
+                    constant_time::equal(&out, &expected)
                 } else {
-                    kmac.finalize_bits_to(last, extra, &mut out, mac_bits)?;
-                }
-                return Ok(json!({ "mac": hex_value(&out) }));
-            }
-            let expected = hex(t, "mac")?;
-            let passed = if xof {
-                kmac.xof_bits(last, extra, &mut out)?;
-                to_top(&mut out, mac_bits);
-                constant_time::equal(&out, &expected)
-            } else {
-                match kmac.verify_bits(last, extra, &expected, mac_bits) {
-                    Ok(()) => true,
-                    Err(scytale::Error::AuthenticationFailed) => false,
-                    Err(e) => return Err(e.into()),
-                }
-            };
-            Ok(json!({ "testPassed": passed }))
+                    match kmac.verify_bits(last, extra, &expected, mac_bits) {
+                        Ok(()) => true,
+                        Err(scytale::Error::AuthenticationFailed) => false,
+                        Err(e) => return Err(e.into()),
+                    }
+                };
+                Ok(json!({ "testPassed": passed }))
+            })
         })
     })
 }

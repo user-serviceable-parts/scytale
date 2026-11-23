@@ -6,6 +6,7 @@
 //! randomness the same way, so both reproduce the expected bytes.
 
 use super::{answer_groups, answer_tests, skip};
+use crate::profile::Builder;
 use crate::support::{Error, flag, hex, hex_value, text};
 use scytale::Random;
 use scytale::sig::slh_dsa::*;
@@ -115,22 +116,28 @@ fn pure_external(group: &Value) -> bool {
     group["signatureInterface"] == "external" && group["preHash"] == "pure"
 }
 
-pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    _rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
-    answer_groups(doc, |group| match text(group, "parameterSet")? {
-        Sha2_128s::NAME => answer_group::<Sha2_128s>(mode, group),
-        Sha2_128f::NAME => answer_group::<Sha2_128f>(mode, group),
-        Sha2_192s::NAME => answer_group::<Sha2_192s>(mode, group),
-        Sha2_192f::NAME => answer_group::<Sha2_192f>(mode, group),
-        Sha2_256s::NAME => answer_group::<Sha2_256s>(mode, group),
-        Sha2_256f::NAME => answer_group::<Sha2_256f>(mode, group),
-        Shake128s::NAME => answer_group::<Shake128s>(mode, group),
-        Shake128f::NAME => answer_group::<Shake128f>(mode, group),
-        Shake192s::NAME => answer_group::<Shake192s>(mode, group),
-        Shake192f::NAME => answer_group::<Shake192f>(mode, group),
-        Shake256s::NAME => answer_group::<Shake256s>(mode, group),
-        Shake256f::NAME => answer_group::<Shake256f>(mode, group),
-        other => Err(Error::new(format!("parameter set {other}"))),
+    answer_groups(doc, |group| {
+        builder.try_build(|| match text(group, "parameterSet")? {
+            Sha2_128s::NAME => answer_group::<Sha2_128s>(mode, group),
+            Sha2_128f::NAME => answer_group::<Sha2_128f>(mode, group),
+            Sha2_192s::NAME => answer_group::<Sha2_192s>(mode, group),
+            Sha2_192f::NAME => answer_group::<Sha2_192f>(mode, group),
+            Sha2_256s::NAME => answer_group::<Sha2_256s>(mode, group),
+            Sha2_256f::NAME => answer_group::<Sha2_256f>(mode, group),
+            Shake128s::NAME => answer_group::<Shake128s>(mode, group),
+            Shake128f::NAME => answer_group::<Shake128f>(mode, group),
+            Shake192s::NAME => answer_group::<Shake192s>(mode, group),
+            Shake192f::NAME => answer_group::<Shake192f>(mode, group),
+            Shake256s::NAME => answer_group::<Shake256s>(mode, group),
+            Shake256f::NAME => answer_group::<Shake256f>(mode, group),
+            other => Err(Error::new(format!("parameter set {other}"))),
+        })
     })
 }
 

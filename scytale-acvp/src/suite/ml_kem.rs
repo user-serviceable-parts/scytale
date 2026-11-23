@@ -7,6 +7,7 @@
 //! secret. The key checks answer whether the library accepts the key.
 
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{Error, hex, hex_value, text};
 use scytale::Random;
 use scytale::kem::ml_kem::{ml_kem_512, ml_kem_768, ml_kem_1024};
@@ -104,13 +105,19 @@ set!(Set512, ml_kem_512, "ML-KEM-512");
 set!(Set768, ml_kem_768, "ML-KEM-768");
 set!(Set1024, ml_kem_1024, "ML-KEM-1024");
 
-pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    _rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
-    answer_groups(doc, |group| match text(group, "parameterSet")? {
-        Set512::NAME => answer_group::<Set512>(mode, group),
-        Set768::NAME => answer_group::<Set768>(mode, group),
-        Set1024::NAME => answer_group::<Set1024>(mode, group),
-        other => Err(Error::new(format!("parameter set {other}"))),
+    answer_groups(doc, |group| {
+        builder.try_build(|| match text(group, "parameterSet")? {
+            Set512::NAME => answer_group::<Set512>(mode, group),
+            Set768::NAME => answer_group::<Set768>(mode, group),
+            Set1024::NAME => answer_group::<Set1024>(mode, group),
+            other => Err(Error::new(format!("parameter set {other}"))),
+        })
     })
 }
 

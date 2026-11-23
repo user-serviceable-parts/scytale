@@ -4,6 +4,7 @@
 //! bit-string message sit in their byte and the Monte Carlo chaining.
 
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{
     Error, hex, hex_value, int, opt_text, text, unknown_test_type,
 };
@@ -22,33 +23,45 @@ pub enum Family {
     Sha3,
 }
 
-pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    _rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     match text(doc, "algorithm")? {
-        "SHA2-224" => answer_as::<Sha224>(doc, Family::Sha2),
-        "SHA2-256" => answer_as::<Sha256>(doc, Family::Sha2),
-        "SHA2-384" => answer_as::<Sha384>(doc, Family::Sha2),
-        "SHA2-512" => answer_as::<Sha512>(doc, Family::Sha2),
-        "SHA2-512/224" => answer_as::<Sha512_224>(doc, Family::Sha2),
-        "SHA2-512/256" => answer_as::<Sha512_256>(doc, Family::Sha2),
-        "SHA3-224" => answer_as::<Sha3_224>(doc, Family::Sha3),
-        "SHA3-256" => answer_as::<Sha3_256>(doc, Family::Sha3),
-        "SHA3-384" => answer_as::<Sha3_384>(doc, Family::Sha3),
-        "SHA3-512" => answer_as::<Sha3_512>(doc, Family::Sha3),
+        "SHA2-224" => answer_as::<Sha224>(doc, Family::Sha2, builder),
+        "SHA2-256" => answer_as::<Sha256>(doc, Family::Sha2, builder),
+        "SHA2-384" => answer_as::<Sha384>(doc, Family::Sha2, builder),
+        "SHA2-512" => answer_as::<Sha512>(doc, Family::Sha2, builder),
+        "SHA2-512/224" => answer_as::<Sha512_224>(doc, Family::Sha2, builder),
+        "SHA2-512/256" => answer_as::<Sha512_256>(doc, Family::Sha2, builder),
+        "SHA3-224" => answer_as::<Sha3_224>(doc, Family::Sha3, builder),
+        "SHA3-256" => answer_as::<Sha3_256>(doc, Family::Sha3, builder),
+        "SHA3-384" => answer_as::<Sha3_384>(doc, Family::Sha3, builder),
+        "SHA3-512" => answer_as::<Sha3_512>(doc, Family::Sha3, builder),
         other => Err(Error::new(format!("algorithm {other}"))),
     }
 }
 
+/// The Monte Carlo and large-data cases run for a second or more
+/// each, the large-data ones for minutes under emulation, so they
+/// only build their hash under `builder` and feed it outside, where
+/// another kernel's builds need not wait for them: a hash keeps the
+/// kernel it was built with.
 fn answer_as<H: BitHash + Default>(
     doc: &Value,
     family: Family,
+    builder: &Builder,
 ) -> Result<Value, Error>
 where
     H::Output: AsRef<[u8]>,
 {
     answer_groups(doc, |group| match text(group, "testType")? {
-        "AFT" => answer_tests(group, |t| {
-            let digest = Message::of(t)?.digest(H::default(), family);
-            Ok(json!({ "md": hex_value(digest.as_ref()) }))
+        "AFT" => builder.try_build(|| {
+            answer_tests(group, |t| {
+                let digest = Message::of(t)?.digest(H::default(), family);
+                Ok(json!({ "md": hex_value(digest.as_ref()) }))
+            })
         }),
         "MCT" => {
             let alternate = match opt_text(group, "mctVersion") {
@@ -58,9 +71,9 @@ where
                     return Err(Error::new(format!("mctVersion {other}")));
                 }
             };
-            answer_tests(group, |t| mct::<H>(t, family, alternate))
+            answer_tests(group, |t| mct::<H>(t, family, alternate, builder))
         }
-        "LDT" => answer_tests(group, |t| ldt::<H>(t)),
+        "LDT" => answer_tests(group, |t| ldt::<H>(t, builder)),
         _ => Err(unknown_test_type(group)),
     })
 }
@@ -125,6 +138,7 @@ fn mct<H: BitHash + Default>(
     t: &Value,
     family: Family,
     alternate: bool,
+    builder: &Builder,
 ) -> Result<Value, Error>
 where
     H::Output: AsRef<[u8]>,
@@ -134,7 +148,7 @@ where
         return Err(Error::new("bit-length seed"));
     }
     let seed = seed.bytes;
-    let mut hash = H::default();
+    let mut hash = builder.build(H::default)?;
     let mut md: Vec<u8> = seed.clone();
     let mut steps = Vec::with_capacity(100);
     for _ in 0..100 {
@@ -193,7 +207,7 @@ where
 
 /// Large Data Test: a short piece repeated to gigabytes, hashed as
 /// it is generated.
-fn ldt<H: Hash + Default>(t: &Value) -> Result<Value, Error>
+fn ldt<H: Hash + Default>(t: &Value, builder: &Builder) -> Result<Value, Error>
 where
     H::Output: AsRef<[u8]>,
 {
@@ -211,7 +225,7 @@ where
     // Feed in chunks of many pieces to keep the call count sane.
     let per_chunk = (1 << 20) / piece.len().max(1);
     let chunk: Vec<u8> = piece.repeat(per_chunk);
-    let mut hash = H::default();
+    let mut hash = builder.build(H::default)?;
     let mut left = repeats;
     while left > 0 {
         let n = left.min(per_chunk as u64) as usize;

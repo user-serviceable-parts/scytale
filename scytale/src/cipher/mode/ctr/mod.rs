@@ -119,22 +119,7 @@ impl<C: BlockCipher> Clone for Engine<C> {
 /// features in force meet. The tests and the vector suites do name
 /// them, so that every kernel is validated and not only the one this
 /// machine would pick.
-pub(crate) const KERNELS: &[(Kernel, Features)] = &[
-    #[cfg(target_arch = "x86_64")]
-    (Kernel::Vaes, crate::cipher::aes::x86_64::VAES256),
-    #[cfg(target_arch = "x86_64")]
-    (Kernel::Aesni, crate::cipher::aes::x86_64::AESNI_AVX),
-    #[cfg(target_arch = "aarch64")]
-    (Kernel::Armv8, crate::cipher::aes::ARMV8),
-    // The counters are reversed with `vrev8`, which either of two
-    // extensions brings.
-    #[cfg(target_arch = "riscv64")]
-    (
-        Kernel::Zvkned,
-        crate::cipher::aes::ZVKNED.union(crate::cipher::aes::VREV8),
-    ),
-    (Kernel::Portable, Features::new()),
-];
+pub(crate) const KERNELS: &[(Kernel, Features)] = crate::kernel::CTR;
 
 /// What the list publishes: the needs, without the names.
 const PROFILES: [Features; KERNELS.len()] = features::profiles_of(KERNELS);
@@ -189,6 +174,36 @@ impl<C: BlockCipher> Engine<C> {
         features::select(kernels::<C>())
             .and_then(Self::with)
             .unwrap_or(Engine::Generic(PhantomData))
+    }
+
+    /// This engine where it can read `cipher`'s schedule, and the
+    /// portable one where it cannot. The cipher chose its own kernel
+    /// from its own reading of the set in force; a set changed in
+    /// between can leave it on code whose schedule these loops cannot
+    /// load, and the engine must then not be the one that tries.
+    #[cfg_attr(
+        not(any(
+            target_arch = "aarch64",
+            target_arch = "riscv64",
+            target_arch = "x86_64"
+        )),
+        allow(unused_variables)
+    )]
+    fn over(self, cipher: &C) -> Self {
+        match self {
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
+            Engine::Native(_)
+                if !native::keys::<C>()
+                    .is_some_and(|keys| keys(cipher).is_some()) =>
+            {
+                Engine::Generic(PhantomData)
+            }
+            engine => engine,
+        }
     }
 
     /// The engine `kernel` names, or `None` where it is not written
@@ -292,10 +307,9 @@ where
         // counter to run. Said when the mode is built for it, rather
         // than found out by an index past the front of the block.
         const { assert!(size_of::<C::Block>() >= 4) };
-        Ctr {
-            cipher: C::new(key),
-            engine: Engine::new(),
-        }
+        let cipher = C::new(key);
+        let engine = Engine::new().over(&cipher);
+        Ctr { cipher, engine }
     }
 
     /// The feature profiles this mode tells apart, best first; see
@@ -303,23 +317,6 @@ where
     /// instructions cannot read, the portable one alone.
     pub fn profiles() -> &'static [Features] {
         profiles::<C>()
-    }
-
-    /// The mode over the kernel named, or `None` where the set in
-    /// force does not meet its needs or it is not written for this
-    /// cipher.
-    ///
-    /// For the tests and the vector suites, which run every kernel
-    /// rather than only the one [`new`](Self::new) would take. The
-    /// virtual features are granted, so the table-driven cipher is to
-    /// be had without editing the set; see [`features::available`].
-    #[cfg(test)]
-    pub(crate) fn with_kernel(key: &C::Key, kernel: Kernel) -> Option<Self> {
-        features::available(kernels::<C>(), kernel).then_some(())?;
-        Some(Ctr {
-            cipher: C::new(key),
-            engine: Engine::with(kernel)?,
-        })
     }
 
     /// Which kernel this mode was built with.
@@ -526,7 +523,7 @@ impl<C: BlockCipher> fmt::Debug for Stream<'_, C> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::Key;
     use crate::cipher::aes::{Aes, Aes128, portable};
@@ -595,13 +592,12 @@ mod tests {
     /// Every kernel this processor has must agree with the keystream
     /// taken a block at a time, at every length around the group
     /// boundaries of both widths.
-    #[test]
-    fn the_engines_agree() {
+    pub(crate) fn kernel(under: &features::Under) {
         // Past the wider group more than once, with an odd tail.
         const N: usize = 3 * 16 * 16 + 5 * 16 + 7;
         let key = [0x5au8; 16];
         let start = [0x77u8; 16];
-        let aes = Aes::<16>::new(&key);
+        let aes = features::build_portable(|| Aes::<16>::new(&key));
 
         let mut want = [0u8; N];
         let mut counter = start;
@@ -613,22 +609,13 @@ mod tests {
         }
 
         let key = Key::from(key);
-        let mut engines = 0;
-        for &(kernel, _) in KERNELS {
-            let Some(ctr) = Ctr::<Aes128>::with_kernel(&key, kernel) else {
-                continue;
-            };
-            engines += 1;
-            for n in 0..=N {
-                let mut got = [0u8; N];
-                ctr.encrypt(&start, &mut got[..n]);
-                assert_eq!(got[..n], want[..n], "{n} bytes, {kernel:?}");
-            }
+        let ctr = under.build(|| Ctr::<Aes128>::new(&key));
+        for n in 0..=N {
+            let mut got = [0u8; N];
+            ctr.encrypt(&start, &mut got[..n]);
+            assert_eq!(got[..n], want[..n], "{n} bytes");
         }
-        assert!(engines >= 1, "no kernel to test");
-        // The portable one is always to be had.
-        let portable = Kernel::Portable;
-        assert!(Ctr::<Aes128>::with_kernel(&key, portable).is_some());
+        crate::aead::ccm::tests::kernel(under);
     }
 
     /// The loops add to the last byte of the block without carrying

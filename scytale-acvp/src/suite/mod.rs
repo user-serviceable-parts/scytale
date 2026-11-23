@@ -9,14 +9,19 @@
 //! driver cannot answer is left out, with a note on stderr; the
 //! server then fails its cases, and the offline check counts what
 //! was answered against the suite's minimum.
+//!
+//! A driver answers each group inside the [`Builder`] it is given,
+//! so that whatever the group builds and runs does so under the
+//! kernel being checked, whatever other threads are checking.
 
+use crate::profile::Builder;
 use crate::support::{Error, FixedEntropy, list, load, object};
 use scytale::Random;
 use scytale::random::CtrDrbg;
 use serde_json::{Map, Value, json};
 
-/// Answers one vector set.
-pub type Answer = fn(&Value, &mut dyn Random) -> Result<Value, Error>;
+/// Answers one vector set, building under the builder given.
+pub type Answer = fn(&Value, &mut dyn Random, &Builder) -> Result<Value, Error>;
 
 /// Checks one answered test against the vendored one, for a suite
 /// whose stored answers came from NIST's own randomness and cannot
@@ -772,9 +777,10 @@ pub fn vendored(suite: &Suite) -> Option<Value> {
 }
 
 /// A generator whose output is a function of nothing but the order
-/// of the calls, so two runs of one suite answer alike.
-pub fn fixed_rng() -> CtrDrbg<FixedEntropy> {
-    CtrDrbg::try_new(FixedEntropy::default()).expect("fixed entropy")
+/// of the calls, so two runs of one suite answer alike; built by
+/// `builder`.
+pub fn fixed_rng(builder: &Builder) -> Result<CtrDrbg<FixedEntropy>, Error> {
+    builder.try_build(|| CtrDrbg::try_new(FixedEntropy::default()))
 }
 
 /// The server's `/expected` for the vector set `prompt`, with each
@@ -829,11 +835,13 @@ fn fill(into: &mut Value, from: &Value, except: &[&str]) -> Result<(), Error> {
 
 /// Compares `answered` with `expected`, the vendored file or the
 /// server's `/expected` made into the shape of one by
-/// [`with_prompt`]; returns the cases compared.
+/// [`with_prompt`]; returns the cases compared. A suite that verifies
+/// does so under `builder`.
 pub fn compare(
     suite: &Suite,
     expected: &Value,
     answered: &Value,
+    builder: &Builder,
 ) -> Result<usize, Error> {
     let mut count = 0;
     for group in list(answered, "testGroups")? {
@@ -857,7 +865,9 @@ pub fn compare(
                 .map_err(tag)?;
             let tag = |e: Error| tag(Error::new(format!("tcId {id}: {e}")));
             match suite.verify {
-                Some(verify) => verify(vendored, stored, group, test),
+                Some(verify) => {
+                    builder.try_build(|| verify(vendored, stored, group, test))
+                }
                 None => compare_fields(test, stored, &[]),
             }
             .map_err(tag)?;
@@ -990,25 +1000,27 @@ mod tests {
             doc
         };
         let expected = answer_only(&["tcId", "signature"]);
-        assert!(compare(suite, &expected, &expected).is_err());
+        let builder = Builder::default();
+        assert!(compare(suite, &expected, &expected, &builder).is_err());
         let merged = with_prompt(&prompt, &expected).unwrap();
-        assert_eq!(compare(suite, &merged, &expected).unwrap(), 42);
+        assert_eq!(compare(suite, &merged, &expected, &builder).unwrap(), 42);
     }
 
     #[test]
     fn compare_names_the_differing_case() {
-        let suite = plain("x", "x", |_, _| Ok(Value::Null), 0);
+        let suite = plain("x", "x", |_, _, _| Ok(Value::Null), 0);
         let file = json!({"testGroups": [{"tgId": 1, "tests": [
             {"tcId": 1, "ct": "AA"}, {"tcId": 2, "ct": "BB"},
         ]}]});
         let good = json!({"testGroups": [{"tgId": 1, "tests": [
             {"tcId": 1, "ct": "aa"}, {"tcId": 2, "ct": "bb"},
         ]}]});
-        assert_eq!(compare(&suite, &file, &good).unwrap(), 2);
+        let builder = Builder::default();
+        assert_eq!(compare(&suite, &file, &good, &builder).unwrap(), 2);
         let bad = json!({"testGroups": [
             {"tgId": 1, "tests": [{"tcId": 2, "ct": "cc"}]}
         ]});
-        let e = compare(&suite, &file, &bad).unwrap_err().message;
+        let e = compare(&suite, &file, &bad, &builder).unwrap_err().message;
         assert_eq!(e, "tgId 1: tcId 2: ct: answered \"cc\", file has \"BB\"");
     }
 }

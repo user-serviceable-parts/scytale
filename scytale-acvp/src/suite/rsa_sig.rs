@@ -20,6 +20,7 @@
 //! skipped, that encoding not being implemented.
 
 use super::{answer_groups, answer_tests, skip};
+use crate::profile::Builder;
 use crate::support::{
     Error, Rng, field, hex, hex_value, int, opt_text, text, unknown_test_type,
 };
@@ -94,34 +95,40 @@ enum Padding {
     Pss(usize),
 }
 
-pub fn answer(doc: &Value, rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     let generate = match text(doc, "mode")? {
         "sigGen" => true,
         "sigVer" => false,
         other => return Err(Error::new(format!("mode {other}"))),
     };
     answer_groups(doc, |group| {
-        if let Some(why) = skip_reason(group)? {
-            return skip(group, why);
-        }
-        if text(group, "testType")? != "GDT" {
-            return Err(unknown_test_type(group));
-        }
-        let alg = text(group, "hashAlg")?;
-        let padding = padding(group)?;
-        if generate {
-            with_hash!(alg, H => sig_gen::<H>(group, padding, rng))
-        } else {
-            let key = public_key(group)?;
-            answer_tests(group, |t| {
-                let message = hex(t, "message")?;
-                let sig = hex(t, "signature")?;
-                let ok = with_hash!(alg, H => {
-                    verify::<H>(&key, padding, &message, &sig)
-                });
-                Ok(json!({ "testPassed": ok }))
-            })
-        }
+        builder.try_build(|| {
+            if let Some(why) = skip_reason(group)? {
+                return skip(group, why);
+            }
+            if text(group, "testType")? != "GDT" {
+                return Err(unknown_test_type(group));
+            }
+            let alg = text(group, "hashAlg")?;
+            let padding = padding(group)?;
+            if generate {
+                with_hash!(alg, H => sig_gen::<H>(group, padding, rng))
+            } else {
+                let key = public_key(group)?;
+                answer_tests(group, |t| {
+                    let message = hex(t, "message")?;
+                    let sig = hex(t, "signature")?;
+                    let ok = with_hash!(alg, H => {
+                        verify::<H>(&key, padding, &message, &sig)
+                    });
+                    Ok(json!({ "testPassed": ok }))
+                })
+            }
+        })
     })
 }
 

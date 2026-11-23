@@ -47,6 +47,69 @@ pub(crate) enum Kernel {
     Portable,
 }
 
+crate::features::kernels! {
+    enum Kernel;
+
+    /// CBC's kernels, best first. The AES-NI loops are VEX-encoded,
+    /// so they need AVX beside the cipher's own AES and SSSE3; VAES
+    /// adds AVX2 for its 256-bit registers.
+    pub(crate) const CBC for cbc
+        tested by crate::cipher::mode::cbc::tests::kernel = [
+        #[cfg(target_arch = "x86_64")]
+        Vaes => (x86_64: Aes, Ssse3, Avx, Avx2, Vaes),
+        #[cfg(target_arch = "x86_64")]
+        Aesni => (x86_64: Aes, Ssse3, Avx),
+        #[cfg(target_arch = "aarch64")]
+        Armv8 => (aarch64: Aes),
+        Portable => (),
+    ];
+
+    /// CTR's kernels, best first: CBC's, and on RISC-V the vector
+    /// loop, which reverses the counters with `vrev8` from Zvkb.
+    pub(crate) const CTR for ctr
+        tested by crate::cipher::mode::ctr::tests::kernel = [
+        #[cfg(target_arch = "x86_64")]
+        Vaes => (x86_64: Aes, Ssse3, Avx, Avx2, Vaes),
+        #[cfg(target_arch = "x86_64")]
+        Aesni => (x86_64: Aes, Ssse3, Avx),
+        #[cfg(target_arch = "aarch64")]
+        Armv8 => (aarch64: Aes),
+        #[cfg(target_arch = "riscv64")]
+        Zvkned => (riscv64: V, Zvkned, Zvkb),
+        Portable => (),
+    ];
+
+    /// GCM's kernels, best first: the counter loop and the hash
+    /// together. AES-NI's VEX-encoded loop (AVX) with PCLMULQDQ; VAES
+    /// with VPCLMULQDQ on 256-bit registers (AVX2) beside it. On RISC-V
+    /// the vector cipher, Zvkb's byte reverse for the counters and
+    /// Zvkg for the hash.
+    pub(crate) const GCM for gcm
+        tested by crate::aead::gcm::tests::kernel = [
+        #[cfg(target_arch = "x86_64")]
+        Vaes => (x86_64: Aes, Ssse3, Pclmulqdq, Avx, Avx2, Vaes, Vpclmulqdq),
+        #[cfg(target_arch = "x86_64")]
+        Aesni => (x86_64: Aes, Ssse3, Pclmulqdq, Avx),
+        #[cfg(target_arch = "aarch64")]
+        Armv8 => (aarch64: Aes, Pmull),
+        #[cfg(target_arch = "riscv64")]
+        Zvkned => (riscv64: V, Zvkned, Zvkb, Zvkg),
+        Portable => (),
+    ];
+
+    /// XTS's kernels, best first, as CBC's.
+    pub(crate) const XTS for xts
+        tested by crate::cipher::mode::xts::tests::kernel = [
+        #[cfg(target_arch = "x86_64")]
+        Vaes => (x86_64: Aes, Ssse3, Avx, Avx2, Vaes),
+        #[cfg(target_arch = "x86_64")]
+        Aesni => (x86_64: Aes, Ssse3, Avx),
+        #[cfg(target_arch = "aarch64")]
+        Armv8 => (aarch64: Aes),
+        Portable => (),
+    ];
+}
+
 /// The rows of a mode's list that a cipher can run with: all of them
 /// where the instructions can read its key schedule, and the last
 /// alone, the portable construction over the cipher's own calls,
@@ -78,48 +141,50 @@ mod tests {
     /// read, so every row is in play.
     #[test]
     fn every_mode_picks_the_first_kernel_whose_needs_are_met() {
-        let key = Key::from([0u8; 16]);
-        let tweak = Key::from([1u8; 16]);
-        let cbc = Cbc::<Aes128>::new(&key);
-        features::dispatches(
-            cbc::KERNELS,
-            Cbc::<Aes128>::profiles(),
-            cbc.kernel(),
-        );
-        let ctr = Ctr::<Aes128>::new(&key);
-        features::dispatches(
-            ctr::KERNELS,
-            Ctr::<Aes128>::profiles(),
-            ctr.kernel(),
-        );
-        let xts = Xts::<Aes128>::try_new(&key, &tweak).expect("distinct");
-        features::dispatches(
-            xts::KERNELS,
-            Xts::<Aes128>::profiles(),
-            xts.kernel(),
-        );
-        // The GCM modes choose their multiply apart, so their
-        // profiles are the cipher rows joined with GHASH's.
-        let gcm = Gcm::<Aes128>::new(&key);
-        features::dispatches_combined(
-            gcm::KERNELS,
-            &ghash::PROFILES,
-            Gcm::<Aes128>::profiles(),
-            gcm.kernel(),
-        );
-        let siv = GcmSiv::<Aes128>::new(&key);
-        features::dispatches_combined(
-            gcm_siv::KERNELS,
-            &ghash::PROFILES,
-            GcmSiv::<Aes128>::profiles(),
-            siv.kernel(),
-        );
-        let ccm = Ccm::<Aes128>::new(&key);
-        features::dispatches(
-            ccm::KERNELS,
-            Ccm::<Aes128>::profiles(),
-            ccm.kernel(),
-        );
+        features::build_alone(|| {
+            let key = Key::from([0u8; 16]);
+            let tweak = Key::from([1u8; 16]);
+            let cbc = Cbc::<Aes128>::new(&key);
+            features::dispatches(
+                cbc::KERNELS,
+                Cbc::<Aes128>::profiles(),
+                cbc.kernel(),
+            );
+            let ctr = Ctr::<Aes128>::new(&key);
+            features::dispatches(
+                ctr::KERNELS,
+                Ctr::<Aes128>::profiles(),
+                ctr.kernel(),
+            );
+            let xts = Xts::<Aes128>::try_new(&key, &tweak).expect("distinct");
+            features::dispatches(
+                xts::KERNELS,
+                Xts::<Aes128>::profiles(),
+                xts.kernel(),
+            );
+            // The GCM modes choose their multiply apart, so their
+            // profiles are the cipher rows joined with GHASH's.
+            let gcm = Gcm::<Aes128>::new(&key);
+            features::dispatches_combined(
+                gcm::KERNELS,
+                &ghash::PROFILES,
+                Gcm::<Aes128>::profiles(),
+                gcm.kernel(),
+            );
+            let siv = GcmSiv::<Aes128>::new(&key);
+            features::dispatches_combined(
+                gcm_siv::KERNELS,
+                &ghash::PROFILES,
+                GcmSiv::<Aes128>::profiles(),
+                siv.kernel(),
+            );
+            let ccm = Ccm::<Aes128>::new(&key);
+            features::dispatches(
+                ccm::KERNELS,
+                Ccm::<Aes128>::profiles(),
+                ccm.kernel(),
+            );
+        });
     }
 
     /// Each list names a kernel once: one that named it twice would

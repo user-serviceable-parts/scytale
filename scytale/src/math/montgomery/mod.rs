@@ -30,6 +30,7 @@ pub(crate) mod x86_64;
 
 use zeroize::Zeroize;
 
+use super::Arith;
 use super::uint::Uint;
 
 impl<const LIMBS: usize> Zeroize for Montgomery<LIMBS> {
@@ -232,12 +233,22 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
     /// `n`; `a` may be any width-sized value; the result is below
     /// `n`. The shape picks the reduction, which is the same
     /// arithmetic either way: one branch on a public constant, then
-    /// a fixed sequence of limb operations.
-    pub(crate) fn mul(&self, a: &Uint<LIMBS>, b: &Uint<LIMBS>) -> Uint<LIMBS> {
+    /// a fixed sequence of limb operations. `arith` is what the
+    /// operation chose; it decides nothing at run time.
+    // Out of line, as the field's own product is in the curve code:
+    // the written-out products are long, and the exponentiations
+    // call this from many places.
+    #[inline(never)]
+    pub(crate) fn mul<A: Arith>(
+        &self,
+        arith: A,
+        a: &Uint<LIMBS>,
+        b: &Uint<LIMBS>,
+    ) -> Uint<LIMBS> {
         #[cfg(target_arch = "x86_64")]
         if LIMBS == 4
+            && let Some(adx) = arith.adx()
             && self.shape == Shape::P256
-            && let Some(adx) = x86_64::probe()
         {
             return adx.mul(a, b);
         }
@@ -245,7 +256,7 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
         if LIMBS == 4 && self.shape == Shape::P256 {
             return aarch64::mul(a, b);
         }
-        self.mul_with(a, b)
+        self.mul_with(arith, a, b)
     }
 
     /// `a a / R mod n`, the Montgomery square.
@@ -255,11 +266,22 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
     /// general product spends sixteen: the cross products once, then
     /// doubled, then the squares of the limbs. The reduction
     /// afterwards is the same as the product's, one word at a time.
-    pub(crate) fn sqr(&self, a: &Uint<LIMBS>) -> Uint<LIMBS> {
+    // Only the processors with something written out take `arith`.
+    #[cfg_attr(
+        not(any(target_arch = "x86_64", target_arch = "aarch64")),
+        allow(unused_variables)
+    )]
+    // Out of line, as the product is.
+    #[inline(never)]
+    pub(crate) fn sqr<A: Arith>(
+        &self,
+        arith: A,
+        a: &Uint<LIMBS>,
+    ) -> Uint<LIMBS> {
         #[cfg(target_arch = "x86_64")]
         if LIMBS == 4
+            && let Some(adx) = arith.adx()
             && self.shape == Shape::P256
-            && let Some(adx) = x86_64::probe()
         {
             return adx.sqr(a);
         }
@@ -273,15 +295,15 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
         // go through the product.
         #[cfg(target_arch = "aarch64")]
         if LIMBS == 6 || LIMBS == 4 {
-            return self.mul(a, a);
+            return self.mul(arith, a, a);
         }
         // At six limbs, and at four with an unshaped modulus, the
         // product is written out for the processor and the square is
         // not, and the ten multiplications a square saves are worth
         // less than the two carry chains.
         #[cfg(target_arch = "x86_64")]
-        if (LIMBS == 6 || LIMBS == 4) && x86_64::probe().is_some() {
-            return self.mul(a, a);
+        if (LIMBS == 6 || LIMBS == 4) && arith.adx().is_some() {
+            return self.mul(arith, a, a);
         }
         let wide = |x: u64, y: u64| u128::from(x) * u128::from(y);
         // Twice the width, and the widest modulus the crate has.
@@ -391,14 +413,20 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
     /// The product by coarsely integrated operand scanning: a row of
     /// products of one limb of `a` by `b`, then the multiple of `n`
     /// that clears the low word, which the shape makes cheap.
-    fn mul_with(&self, a: &Uint<LIMBS>, b: &Uint<LIMBS>) -> Uint<LIMBS> {
+    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
+    fn mul_with<A: Arith>(
+        &self,
+        arith: A,
+        a: &Uint<LIMBS>,
+        b: &Uint<LIMBS>,
+    ) -> Uint<LIMBS> {
         // Six limbs is P-384's width, field and order alike, and the
         // rows there are written out for the carry-chain
         // instructions; the shaped reduction below saves multiplies,
         // but not as many as two chains save cycles.
         #[cfg(target_arch = "x86_64")]
         if LIMBS == 6
-            && let Some(adx) = x86_64::probe()
+            && let Some(adx) = arith.adx()
         {
             let mut context = [self.inv; 13];
             context[1..7].copy_from_slice(&self.n.0);
@@ -415,7 +443,7 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
         // order, where ECDSA inverts a nonce and a signature's `s`.
         #[cfg(target_arch = "x86_64")]
         if LIMBS == 4
-            && let Some(adx) = x86_64::probe()
+            && let Some(adx) = arith.adx()
         {
             return adx.mul4(a, b, &self.n, self.inv);
         }
@@ -478,27 +506,36 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
 
     /// Moves `a`, which must be below `n`, into the Montgomery
     /// domain: `a * R mod n`.
-    pub(crate) fn to_mont(&self, a: &Uint<LIMBS>) -> Uint<LIMBS> {
+    pub(crate) fn to_mont<A: Arith>(
+        &self,
+        arith: A,
+        a: &Uint<LIMBS>,
+    ) -> Uint<LIMBS> {
         debug_assert_eq!(a.less_than(&self.n), 1);
-        self.mul(a, &self.rr)
+        self.mul(arith, a, &self.rr)
     }
 
     /// `a * b mod n`, in plain form: two Montgomery passes, the
     /// second cancelling the first's stray factor.
-    pub(crate) fn mulmod(
+    pub(crate) fn mulmod<A: Arith>(
         &self,
+        arith: A,
         a: &Uint<LIMBS>,
         b: &Uint<LIMBS>,
     ) -> Uint<LIMBS> {
-        self.mul(&self.mul(a, b), &self.rr)
+        self.mul(arith, &self.mul(arith, a, b), &self.rr)
     }
 
     /// Moves a value back out of the Montgomery domain. Named for
     /// the domain, not for the conversion convention the lint
     /// expects.
     #[allow(clippy::wrong_self_convention)]
-    pub(crate) fn from_mont(&self, a: &Uint<LIMBS>) -> Uint<LIMBS> {
-        self.mul(a, &Uint::one())
+    pub(crate) fn from_mont<A: Arith>(
+        &self,
+        arith: A,
+        a: &Uint<LIMBS>,
+    ) -> Uint<LIMBS> {
+        self.mul(arith, a, &Uint::one())
     }
 
     /// `base ^ exponent mod n` for an exponent that is public, with
@@ -511,29 +548,30 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
     /// call; it cannot skip a zero window or index a table, and pays
     /// for both. Here only the base is secret, and nothing here
     /// depends on it.
-    pub(crate) fn exp_public<const E: usize>(
+    pub(crate) fn exp_public<A: Arith, const E: usize>(
         &self,
+        arith: A,
         base: &Uint<LIMBS>,
         exponent: &Uint<E>,
     ) -> Uint<LIMBS> {
         const WINDOW: usize = 5;
         // The odd powers the windows call for: base^1, base^3, ...
-        let mut mont = self.to_mont(base);
-        let mut square = self.sqr(&mont);
+        let mut mont = self.to_mont(arith, base);
+        let mut square = self.sqr(arith, &mont);
         let mut odd = [mont; 1 << (WINDOW - 1)];
         for i in 1..odd.len() {
-            odd[i] = self.mul(&odd[i - 1], &square);
+            odd[i] = self.mul(arith, &odd[i - 1], &square);
         }
 
         let bit = |i: usize| (exponent.0[i >> 6] >> (i & 63)) & 1;
-        let mut acc = self.from_mont(&self.rr);
+        let mut acc = self.from_mont(arith, &self.rr);
         let mut i = 64 * E;
         let mut started = false;
         while i > 0 {
             i -= 1;
             if bit(i) == 0 {
                 if started {
-                    acc = self.sqr(&acc);
+                    acc = self.sqr(arith, &acc);
                 }
                 continue;
             }
@@ -551,16 +589,16 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
             }
             if started {
                 for _ in 0..width {
-                    acc = self.sqr(&acc);
+                    acc = self.sqr(arith, &acc);
                 }
-                acc = self.mul(&acc, &odd[digit >> 1]);
+                acc = self.mul(arith, &acc, &odd[digit >> 1]);
             } else {
                 acc = odd[digit >> 1];
                 started = true;
             }
             i -= width - 1;
         }
-        let out = self.from_mont(&acc);
+        let out = self.from_mont(arith, &acc);
         // The base is secret even where the exponent is not: the
         // ECDSA nonce is inverted through here, and `odd[0]` is that
         // nonce in the domain. Everything worked out from it goes
@@ -587,24 +625,25 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
     /// exponent out of the timing. The exponent's limb count is its
     /// own const parameter, since RSA's public exponent is a word
     /// while its private one is as wide as the modulus.
-    pub(crate) fn modexp<const E: usize>(
+    pub(crate) fn modexp<A: Arith, const E: usize>(
         &self,
+        arith: A,
         base: &Uint<LIMBS>,
         exponent: &Uint<E>,
     ) -> Uint<LIMBS> {
         // Table entry i is base^i in the Montgomery domain; entry 0
         // is 1, which is R mod n there.
-        let mont_base = self.to_mont(base);
+        let mont_base = self.to_mont(arith, base);
         let mut table = [Uint::<LIMBS>::ZERO; 16];
-        table[0] = self.from_mont(&self.rr);
+        table[0] = self.from_mont(arith, &self.rr);
         for i in 1..16 {
-            table[i] = self.mul(&table[i - 1], &mont_base);
+            table[i] = self.mul(arith, &table[i - 1], &mont_base);
         }
 
         let mut acc = table[0];
         for window in (0..16 * E).rev() {
             for _ in 0..4 {
-                acc = self.sqr(&acc);
+                acc = self.sqr(arith, &acc);
             }
             let digit = (exponent.0[window >> 4] >> ((window & 15) * 4)) & 15;
             // Read the whole table, keeping the entry whose index
@@ -614,17 +653,35 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
                 let matches = ((i as u64 ^ digit).wrapping_sub(1)) >> 63;
                 chosen.cmov(entry, matches);
             }
-            acc = self.mul(&acc, &chosen);
+            acc = self.mul(arith, &acc, &chosen);
         }
-        let result = self.from_mont(&acc);
+        let result = self.from_mont(arith, &acc);
         acc.zeroize();
         result
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::math::Choice;
+
+    /// The contexts under one kernel of the big-number list, chosen
+    /// under its row: every property below with that kind.
+    pub(crate) fn kernel(choice: Choice) {
+        crate::math::with_arith!(choice, kind => {
+            square_matches_the_product(kind);
+            products_match_plain_arithmetic(kind);
+            domain_round_trip(kind);
+            public_exponent_matches_modexp(kind);
+            modexp_identities(kind);
+            p256_reduction_matches_the_general_one(kind);
+            p384_reduction_matches_the_general_one(kind);
+            the_processor_product_is_the_portable_one(kind);
+            the_processor_product_survives_the_carry_patterns(kind);
+            known_answer_2048(kind);
+        });
+    }
 
     /// The context made when the crate is built is the one made at
     /// run time, for both curve primes and a general modulus.
@@ -645,24 +702,26 @@ mod tests {
 
     /// The square is the product of a value with itself, at both
     /// curve shapes and at a general modulus.
-    #[test]
-    fn square_matches_the_product() {
-        fn check<const L: usize>(n: Uint<L>) {
+    fn square_matches_the_product<A: Arith>(kind: A) {
+        fn check<A: Arith, const L: usize>(kind: A, n: Uint<L>) {
             let m = Montgomery::known(n);
-            let mut x = m.to_mont(&Uint::from_limbs(&[3]));
+            let mut x = m.to_mont(kind, &Uint::from_limbs(&[3]));
             for _ in 0..100 {
-                assert_eq!(m.sqr(&x).0, m.mul(&x, &x).0);
-                x = m.mul(&x, &Uint::from_limbs(&[0x9e3779b97f4a7c15]));
+                assert_eq!(m.sqr(kind, &x).0, m.mul(kind, &x, &x).0);
+                x = m.mul(kind, &x, &Uint::from_limbs(&[0x9e3779b97f4a7c15]));
             }
             let (below, _) = n.sub_borrow(&Uint::one());
             for edge in [Uint::ZERO, Uint::one(), below] {
-                assert_eq!(m.sqr(&edge).0, m.mul(&edge, &edge).0);
+                assert_eq!(m.sqr(kind, &edge).0, m.mul(kind, &edge, &edge).0);
             }
         }
-        check(Uint(P256_PRIME));
-        check(Uint(P384_PRIME));
-        check(Uint::<3>([0x8765432187654321, 0x1234567812345678, 0xabcd]));
-        check(Uint::<1>([1000003]));
+        check(kind, Uint(P256_PRIME));
+        check(kind, Uint(P384_PRIME));
+        check(
+            kind,
+            Uint::<3>([0x8765432187654321, 0x1234567812345678, 0xabcd]),
+        );
+        check(kind, Uint::<1>([1000003]));
     }
 
     #[test]
@@ -674,14 +733,13 @@ mod tests {
     }
 
     /// Every product modulo a small prime, against plain division.
-    #[test]
-    fn products_match_plain_arithmetic() {
+    fn products_match_plain_arithmetic<A: Arith>(kind: A) {
         let m = Montgomery::new(Uint::<1>([101])).unwrap();
         for a in 0..101u64 {
             for b in 0..101u64 {
-                let am = m.to_mont(&Uint([a]));
-                let bm = m.to_mont(&Uint([b]));
-                let product = m.from_mont(&m.mul(&am, &bm));
+                let am = m.to_mont(kind, &Uint([a]));
+                let bm = m.to_mont(kind, &Uint([b]));
+                let product = m.from_mont(kind, &m.mul(kind, &am, &bm));
                 assert_eq!(product.0, [a * b % 101]);
             }
         }
@@ -689,21 +747,19 @@ mod tests {
 
     /// The domain round trip is the identity, at a width where the
     /// limbs interact.
-    #[test]
-    fn domain_round_trip() {
+    fn domain_round_trip<A: Arith>(kind: A) {
         let n = Uint::<3>([0x8765432187654321, 0x1234567812345678, 0xabcd]);
         let m = Montgomery::new(n).unwrap();
         let x = Uint::<3>([0xdeadbeef, 0xcafe, 0x1234]);
-        let back = m.from_mont(&m.to_mont(&x));
+        let back = m.from_mont(kind, &m.to_mont(kind, &x));
         assert_eq!(back.0, x.0);
     }
 
     /// The public-exponent window agrees with the constant-time
     /// exponentiation, at the exponents the curves use and at small
     /// ones that reach its edges.
-    #[test]
-    fn public_exponent_matches_modexp() {
-        fn check<const L: usize>(n: Uint<L>) {
+    fn public_exponent_matches_modexp<A: Arith>(kind: A) {
+        fn check<A: Arith, const L: usize>(kind: A, n: Uint<L>) {
             let m = Montgomery::known(n);
             let (less_two, _) = n.sub_borrow(&Uint::from_limbs(&[2]));
             let (plus_one, _) = n.add_carry(&Uint::one());
@@ -717,32 +773,41 @@ mod tests {
             ];
             let mut x = Uint::from_limbs(&[7]);
             for e in exponents {
-                assert_eq!(m.exp_public(&x, &e).0, m.modexp(&x, &e).0);
-                x = m.mulmod(&x, &Uint::from_limbs(&[0x9e3779b97f4a7c15]));
+                assert_eq!(
+                    m.exp_public(kind, &x, &e).0,
+                    m.modexp(kind, &x, &e).0
+                );
+                x = m.mulmod(
+                    kind,
+                    &x,
+                    &Uint::from_limbs(&[0x9e3779b97f4a7c15]),
+                );
             }
         }
-        check(Uint(P256_PRIME));
-        check(Uint(P384_PRIME));
-        check(Uint::<3>([0x8765432187654321, 0x1234567812345678, 0xabcd]));
+        check(kind, Uint(P256_PRIME));
+        check(kind, Uint(P384_PRIME));
+        check(
+            kind,
+            Uint::<3>([0x8765432187654321, 0x1234567812345678, 0xabcd]),
+        );
     }
 
-    #[test]
-    fn modexp_identities() {
+    fn modexp_identities<A: Arith>(kind: A) {
         let m = Montgomery::new(Uint::<1>([1000003])).unwrap();
         let x = Uint::<1>([123456]);
         // x^0 = 1 and x^1 = x.
-        assert_eq!(m.modexp(&x, &Uint::<1>([0])).0, [1]);
-        assert_eq!(m.modexp(&x, &Uint::<1>([1])).0, x.0);
+        assert_eq!(m.modexp(kind, &x, &Uint::<1>([0])).0, [1]);
+        assert_eq!(m.modexp(kind, &x, &Uint::<1>([1])).0, x.0);
         // x^20, against twenty plain multiplications.
         let mut expected = 1u64;
         for _ in 0..20 {
             expected = expected * x.0[0] % 1000003;
         }
-        assert_eq!(m.modexp(&x, &Uint::<1>([20])).0, [expected]);
+        assert_eq!(m.modexp(kind, &x, &Uint::<1>([20])).0, [expected]);
         // (x^a)^b = x^(a*b) across the exponentiation itself.
-        let xa = m.modexp(&x, &Uint::<1>([17]));
-        let composed = m.modexp(&xa, &Uint::<1>([23]));
-        assert_eq!(composed.0, m.modexp(&x, &Uint::<1>([17 * 23])).0);
+        let xa = m.modexp(kind, &x, &Uint::<1>([17]));
+        let composed = m.modexp(kind, &xa, &Uint::<1>([23]));
+        assert_eq!(composed.0, m.modexp(kind, &x, &Uint::<1>([17 * 23])).0);
     }
 
     /// A cheap pseudorandom stream, for inputs that vary across the
@@ -769,7 +834,10 @@ mod tests {
 
     /// The shaped reduction against the general one, over the two
     /// primes it recognises: the same products either way.
-    fn shaped_matches_general<const L: usize>(prime: &[u64; L]) {
+    fn shaped_matches_general<A: Arith, const L: usize>(
+        kind: A,
+        prime: &[u64; L],
+    ) {
         let n = Uint(*prime);
         let shaped = Montgomery::new(n).expect("odd prime");
         assert_ne!(shaped.shape, Shape::General);
@@ -780,7 +848,7 @@ mod tests {
         for _ in 0..200 {
             let a = below(&mut state, &n);
             let b = below(&mut state, &n);
-            assert_eq!(shaped.mul(&a, &b).0, general.mul(&a, &b).0);
+            assert_eq!(shaped.mul(kind, &a, &b).0, general.mul(kind, &a, &b).0);
         }
         // The edges the random values will not reach.
         let zero = Uint::<L>::ZERO;
@@ -788,19 +856,20 @@ mod tests {
         let (top, _) = n.sub_borrow(&one);
         for a in [zero, one, top] {
             for b in [zero, one, top] {
-                assert_eq!(shaped.mul(&a, &b).0, general.mul(&a, &b).0);
+                assert_eq!(
+                    shaped.mul(kind, &a, &b).0,
+                    general.mul(kind, &a, &b).0
+                );
             }
         }
     }
 
-    #[test]
-    fn p256_reduction_matches_the_general_one() {
-        shaped_matches_general(&P256_PRIME);
+    fn p256_reduction_matches_the_general_one<A: Arith>(kind: A) {
+        shaped_matches_general(kind, &P256_PRIME);
     }
 
-    #[test]
-    fn p384_reduction_matches_the_general_one() {
-        shaped_matches_general(&P384_PRIME);
+    fn p384_reduction_matches_the_general_one<A: Arith>(kind: A) {
+        shaped_matches_general(kind, &P384_PRIME);
     }
 
     /// The products written out for the processor against the
@@ -811,35 +880,37 @@ mod tests {
     /// reduction out, `shaped_matches_general` compares one block
     /// with another; this is what compares either with the arithmetic
     /// they are meant to be.
-    #[test]
-    fn the_processor_product_is_the_portable_one() {
-        fn check<const L: usize>(n: Uint<L>) {
+    fn the_processor_product_is_the_portable_one<A: Arith>(kind: A) {
+        fn check<A: Arith, const L: usize>(kind: A, n: Uint<L>) {
             let m = Montgomery::known(n);
             let mut state = 0xb7e151628aed2a6b;
             for _ in 0..200 {
                 let a = below(&mut state, &n);
                 let b = below(&mut state, &n);
-                assert_eq!(m.mul(&a, &b).0, m.mul_portable(&a, &b).0);
-                assert_eq!(m.sqr(&a).0, m.mul_portable(&a, &a).0);
+                assert_eq!(m.mul(kind, &a, &b).0, m.mul_portable(&a, &b).0);
+                assert_eq!(m.sqr(kind, &a).0, m.mul_portable(&a, &a).0);
             }
             // The edges the random values will not reach.
             let (top, _) = n.sub_borrow(&Uint::one());
             for a in [Uint::ZERO, Uint::one(), top] {
                 for b in [Uint::ZERO, Uint::one(), top] {
-                    assert_eq!(m.mul(&a, &b).0, m.mul_portable(&a, &b).0);
+                    assert_eq!(m.mul(kind, &a, &b).0, m.mul_portable(&a, &b).0);
                 }
             }
         }
-        check(Uint(P256_PRIME));
-        check(Uint(P384_PRIME));
-        check(crate::math::ec::P256_N);
-        check(crate::math::ec::P384_N);
-        check(Uint::<4>([
-            0x9e3779b97f4a7c15,
-            0x243f6a8885a308d3,
-            0x13198a2e03707344,
-            0xa4093822299f31d1,
-        ]));
+        check(kind, Uint(P256_PRIME));
+        check(kind, Uint(P384_PRIME));
+        check(kind, crate::math::ec::P256_N);
+        check(kind, crate::math::ec::P384_N);
+        check(
+            kind,
+            Uint::<4>([
+                0x9e3779b97f4a7c15,
+                0x243f6a8885a308d3,
+                0x13198a2e03707344,
+                0xa4093822299f31d1,
+            ]),
+        );
     }
 
     /// The same comparison over the values a carry bug hides behind.
@@ -850,8 +921,7 @@ mod tests {
     /// that make boundaries happen: all zeros, all ones, one either
     /// side of them, and the two half-words the primes themselves
     /// are made of.
-    #[test]
-    fn the_processor_product_survives_the_carry_patterns() {
+    fn the_processor_product_survives_the_carry_patterns<A: Arith>(kind: A) {
         const WORDS: [u64; 7] = [
             0,
             1,
@@ -861,7 +931,7 @@ mod tests {
             0xffff_ffff_0000_0000,
             0x8000_0000_0000_0000,
         ];
-        fn check<const L: usize>(n: Uint<L>) {
+        fn check<A: Arith, const L: usize>(kind: A, n: Uint<L>) {
             let m = Montgomery::known(n);
             // The value whose limbs are the digits of `index` in
             // base seven, brought below `n`.
@@ -882,30 +952,33 @@ mod tests {
             let mut state = 0x9e3779b97f4a7c15;
             for i in (0..count).step_by(step) {
                 let a = pattern(i);
-                assert_eq!(m.sqr(&a).0, m.mul_portable(&a, &a).0, "{i}");
+                assert_eq!(m.sqr(kind, &a).0, m.mul_portable(&a, &a).0, "{i}");
                 // Partners drawn from the same patterns, so that
                 // boundaries meet boundaries.
                 for _ in 0..24 {
                     let j = (xorshift(&mut state) % count as u64) as usize;
                     let b = pattern(j);
                     assert_eq!(
-                        m.mul(&a, &b).0,
+                        m.mul(kind, &a, &b).0,
                         m.mul_portable(&a, &b).0,
                         "{i} by {j}"
                     );
                 }
             }
         }
-        check(Uint(P256_PRIME));
-        check(Uint(P384_PRIME));
-        check(crate::math::ec::P256_N);
-        check(crate::math::ec::P384_N);
-        check(Uint::<4>([
-            0x9e3779b97f4a7c15,
-            0x243f6a8885a308d3,
-            0x13198a2e03707344,
-            0xa4093822299f31d1,
-        ]));
+        check(kind, Uint(P256_PRIME));
+        check(kind, Uint(P384_PRIME));
+        check(kind, crate::math::ec::P256_N);
+        check(kind, crate::math::ec::P384_N);
+        check(
+            kind,
+            Uint::<4>([
+                0x9e3779b97f4a7c15,
+                0x243f6a8885a308d3,
+                0x13198a2e03707344,
+                0xa4093822299f31d1,
+            ]),
+        );
     }
 
     /// A modulus of another width, or of the same width and a
@@ -921,8 +994,7 @@ mod tests {
     /// A full RSA-2048-shaped known answer: fixed 2048-bit modulus,
     /// base and exponents, produced by an independent bignum
     /// implementation.
-    #[test]
-    fn known_answer_2048() {
+    fn known_answer_2048<A: Arith>(kind: A) {
         fn unhex256(hex: &str) -> [u8; 256] {
             let mut out = [0u8; 256];
             let hex = hex.as_bytes();
@@ -984,16 +1056,16 @@ mod tests {
         let base = Uint::<32>::from_be_bytes(&unhex256(base));
         let d = Uint::<32>::from_be_bytes(&unhex256(d));
 
-        let signed = m.modexp(&base, &d);
+        let signed = m.modexp(kind, &base, &d);
         let expected = Uint::<32>::from_be_bytes(&unhex256(base_pow_d));
         assert_eq!(signed.0, expected.0);
 
         // The public-exponent direction inverts it: 65537 fits one
         // limb, exercising the narrow-exponent form.
-        let verified = m.modexp(&signed, &Uint::<1>([65537]));
+        let verified = m.modexp(kind, &signed, &Uint::<1>([65537]));
         // d was chosen freely, not as 65537's inverse, so check the
         // forward value instead.
-        let encrypted = m.modexp(&base, &Uint::<1>([65537]));
+        let encrypted = m.modexp(kind, &base, &Uint::<1>([65537]));
         assert_eq!(
             encrypted.0,
             Uint::<32>::from_be_bytes(&unhex256(base_pow_65537)).0,

@@ -16,7 +16,7 @@ use super::engine::{Engine32, Engine64};
 use super::portable::{K256, K512};
 #[cfg(test)]
 use super::variant;
-use crate::features;
+use crate::features::Chosen;
 
 // Named for the vector suites, which drive each engine in turn; the
 // dispatching types reach it directly.
@@ -33,31 +33,21 @@ pub type Sha384 = Engine64<Armv8, variant::Sha384>;
 #[cfg(test)]
 pub type Sha512 = Engine64<Armv8, variant::Sha512>;
 
-/// Whether the SHA-256 instructions are available.
-pub(crate) fn has_sha256() -> bool {
-    features::allows(super::KERNELS32, super::Kernel::Armv8)
-}
-
-/// Whether the SHA-512 instructions are available.
-pub(crate) fn has_sha512() -> bool {
-    features::allows(super::KERNELS64, super::Kernel::Armv8)
-}
-
 /// The compression functions via the ARMv8 instructions.
-// No public constructor: a value exists only by way of `probe`.
+// No public constructor: a value exists only by way of `of`.
 #[derive(Clone, Copy)]
 pub struct Armv8(());
 
 impl super::engine::Sealed for Armv8 {}
 
 impl Compress32 for Armv8 {
-    fn probe() -> Option<Self> {
-        has_sha256().then_some(Armv8(()))
+    fn of(chosen: Chosen<super::Kernel>) -> Option<Self> {
+        (chosen.kernel() == super::Kernel::Armv8).then_some(Armv8(()))
     }
 
     fn compress(self, state: &mut [u32; 8], blocks: &[[u8; 64]]) {
-        // SAFETY: `self` was minted by `probe`, which confirmed the
-        // instructions.
+        // SAFETY: `self` was minted by `of`, from the kernel list's
+        // choice, which only a row whose features were in force gets.
         unsafe {
             if !blocks.is_empty() {
                 compress256(state, blocks.as_ptr().cast(), blocks.len());
@@ -67,8 +57,8 @@ impl Compress32 for Armv8 {
 }
 
 impl Compress64 for Armv8 {
-    fn probe() -> Option<Self> {
-        has_sha512().then_some(Armv8(()))
+    fn of(chosen: Chosen<super::Kernel>) -> Option<Self> {
+        (chosen.kernel() == super::Kernel::Armv8).then_some(Armv8(()))
     }
 
     fn compress(self, state: &mut [u64; 8], blocks: &[[u8; 128]]) {
@@ -298,38 +288,5 @@ unsafe fn compress512(state: &mut [u64; 8], data: *const u8, count: usize) {
             out("v20") _,
             options(nostack),
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::hash::sha2::portable;
-    use crate::hash::sha2::tests::check_known_answers;
-
-    #[test]
-    fn known_answers() {
-        if has_sha256() {
-            check_known_answers(
-                || Sha224::try_new().expect("supported"),
-                || Sha256::try_new().expect("supported"),
-                || portable::Sha384::try_new().expect("supported"),
-                || portable::Sha512::try_new().expect("supported"),
-            );
-        }
-        if has_sha512() {
-            check_known_answers(
-                || portable::Sha224::try_new().expect("supported"),
-                || portable::Sha256::try_new().expect("supported"),
-                || Sha384::try_new().expect("supported"),
-                || Sha512::try_new().expect("supported"),
-            );
-        }
-    }
-
-    #[test]
-    fn probes_agree_with_constructors() {
-        assert_eq!(Sha256::try_new().is_ok(), has_sha256());
-        assert_eq!(Sha512::try_new().is_ok(), has_sha512());
     }
 }

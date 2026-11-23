@@ -21,18 +21,33 @@
 
 #![allow(unsafe_code)]
 
+use super::Kernel;
+use crate::features::Chosen;
+
 /// The four round constants, one for each twenty rounds. Read one at
 /// a time into all four lanes.
 static RCON: [u32; 4] = [0x5a827999, 0x6ed9eba1, 0x8f1bbcdc, 0xca62c1d6];
 
-/// Folds `blocks` into `state` on the SHA-1 instructions. Chosen from
-/// the row that needs them, so they are here.
-pub(crate) fn compress(state: &mut [u32; 5], blocks: &[[u8; 64]]) {
+/// The proof the kernel list chose the SHA-1 instructions. No public
+/// constructor: a value exists only by way of [`Armv8::of`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Armv8(());
+
+impl Armv8 {
+    /// The compression function, where the list chose it.
+    pub(crate) fn of(chosen: Chosen<Kernel>) -> Option<Self> {
+        (chosen.kernel() == Kernel::Armv8).then_some(Armv8(()))
+    }
+}
+
+/// Folds `blocks` into `state` on the SHA-1 instructions.
+pub(crate) fn compress(_: Armv8, state: &mut [u32; 5], blocks: &[[u8; 64]]) {
     if blocks.is_empty() {
         return;
     }
-    // SAFETY: the row this was chosen from needs the instructions,
-    // and `blocks` is that many whole blocks, at least one.
+    // SAFETY: the token is the list's choice of this row, whose
+    // features were in force, and `blocks` is that many whole
+    // blocks, at least one.
     unsafe { compress_blocks(state, blocks.as_ptr().cast(), blocks.len()) }
 }
 

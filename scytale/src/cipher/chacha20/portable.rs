@@ -8,11 +8,9 @@
 //! Nothing here touches memory in a way that depends on the key.
 
 // Only the trait impl is unsafe, and it calls safe code.
-use super::{BLOCK_SIZE, Backend, CONSTANTS, Cipher, Sealed};
+use super::{BLOCK_SIZE, Backend, CONSTANTS, Sealed};
+use crate::features::Chosen;
 use zeroize::Zeroize;
-
-/// ChaCha20, portably.
-pub type ChaCha20 = Cipher<Portable>;
 
 /// Blocks computed together.
 const LANES: usize = 4;
@@ -156,7 +154,7 @@ pub struct Portable;
 impl Sealed for Portable {}
 
 impl Backend for Portable {
-    fn probe() -> Option<Self> {
+    fn of(_: Chosen<super::Kernel>) -> Option<Self> {
         Some(Portable)
     }
 
@@ -174,12 +172,6 @@ impl Backend for Portable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cipher::chacha20::tests::check_known_answers;
-
-    #[test]
-    fn known_answers() {
-        check_known_answers::<Portable>();
-    }
 
     /// RFC 8439 section 2.1.1: the quarter round on its own.
     #[test]

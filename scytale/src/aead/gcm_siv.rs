@@ -299,20 +299,6 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
         gcm::profiles::<C>()
     }
 
-    /// The mode over the kernel named, or `None` where the set in
-    /// force does not meet its needs or it is not written for this
-    /// cipher.
-    ///
-    /// For the tests and the vector suites, which run every kernel
-    /// rather than only the one [`new`](Self::new) would take. The
-    /// virtual features are granted, so the table-driven cipher is to
-    /// be had without editing the set; see [`features::available`].
-    #[cfg(test)]
-    pub(crate) fn with_kernel(key: &C::Key, kernel: Kernel) -> Option<Self> {
-        features::available(kernels::<C>(), kernel).then_some(())?;
-        Self::with(key, kernel)
-    }
-
     /// Which kernel this mode was built with.
     #[cfg(test)]
     pub(crate) fn kernel(&self) -> Kernel {
@@ -572,7 +558,7 @@ fn increment(counter: &mut [u8; BLOCK]) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::cipher::aes::{Aes, Aes128, Aes256};
 
@@ -754,10 +740,10 @@ mod tests {
         );
     }
 
-    /// Every kernel this processor has must agree, at every
-    /// length around the group boundaries the loops work in.
-    #[test]
-    fn the_engines_agree() {
+    /// GCM-SIV under one of GCM's kernels, whose loops it borrows,
+    /// against the portable code, at every length around the group
+    /// boundaries the loops work in. Run by GCM's meta test.
+    pub(crate) fn agrees(under: &crate::features::Under) {
         // Past the length at which the hash starts working out the
         // powers of its key, so that the loop which runs the cipher
         // and the hash together is reached as well.
@@ -771,7 +757,8 @@ mod tests {
         }
 
         let generic =
-            GcmSiv::<Aes128>::with_kernel(&key, Kernel::Portable).unwrap();
+            crate::features::build_portable(|| GcmSiv::<Aes128>::new(&key));
+        let siv = under.build(|| GcmSiv::<Aes128>::new(&key));
         for len in 0..MAX {
             let mut want = [0u8; MAX];
             want[..len].copy_from_slice(&message[..len]);
@@ -780,23 +767,17 @@ mod tests {
                 .encrypt(&nonce, &aad, &mut want[..len], &mut wanted_tag)
                 .expect("encrypt");
 
-            for &(kernel, _) in KERNELS {
-                let Some(siv) = GcmSiv::<Aes128>::with_kernel(&key, kernel)
-                else {
-                    continue;
-                };
-                let mut got = [0u8; MAX];
-                got[..len].copy_from_slice(&message[..len]);
-                let mut tag = [0u8; TAG];
-                siv.encrypt(&nonce, &aad, &mut got[..len], &mut tag)
-                    .unwrap();
-                assert_eq!(got[..len], want[..len], "{len}, {kernel:?}");
-                assert_eq!(tag, wanted_tag, "tag {len}, {kernel:?}");
+            let mut got = [0u8; MAX];
+            got[..len].copy_from_slice(&message[..len]);
+            let mut tag = [0u8; TAG];
+            siv.encrypt(&nonce, &aad, &mut got[..len], &mut tag)
+                .unwrap();
+            assert_eq!(got[..len], want[..len], "{len}");
+            assert_eq!(tag, wanted_tag, "tag {len}");
 
-                siv.decrypt(&nonce, &aad, &mut got[..len], &tag)
-                    .unwrap_or_else(|e| panic!("{len}, {kernel:?}: {e:?}"));
-                assert_eq!(got[..len], message[..len], "{len}, {kernel:?}");
-            }
+            siv.decrypt(&nonce, &aad, &mut got[..len], &tag)
+                .unwrap_or_else(|e| panic!("{len}: {e:?}"));
+            assert_eq!(got[..len], message[..len], "{len}");
         }
     }
 

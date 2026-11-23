@@ -92,9 +92,7 @@ use core::fmt;
 
 use engine::{DigestVariant, Reader, Sponge, XofVariant};
 
-#[cfg(target_arch = "aarch64")]
-use crate::features::aarch64::Feature as A;
-use crate::features::{self, Dispatcher, Features};
+use crate::features::{self, Chosen, Dispatcher, Features};
 use crate::hash::{BitHash, BitXof, Hash, Xof, XofReader};
 use crate::{BlockType, Error};
 
@@ -224,21 +222,22 @@ pub(crate) enum Kernel {
     Portable,
 }
 
-/// The ARMv8.2 SHA-3 instructions.
-#[cfg(target_arch = "aarch64")]
-pub(crate) const ARMV8: Features = features::arm(&[A::Sha3]);
+features::kernels! {
+    enum Kernel;
 
-/// The kernels, best first, each with what it needs; the first whose
-/// needs are in force is the one a new function gets.
-pub(crate) const KERNELS: &[(Kernel, Features)] = &[
-    #[cfg(target_arch = "aarch64")]
-    (Kernel::Armv8, ARMV8),
-    #[cfg(target_arch = "x86_64")]
-    (Kernel::Bmi, x86_64::BMI),
-    #[cfg(target_arch = "riscv64")]
-    (Kernel::Zbb, riscv64::ZBB),
-    (Kernel::Portable, Features::new()),
-];
+    /// The kernels, best first; the first whose needs are in force is
+    /// the one a new function gets. On x86-64 the portable
+    /// permutation compiled for BMI1 and BMI2; on RISC-V for Zbb.
+    pub(crate) const KERNELS for sha3 tested by tests::kernel = [
+        #[cfg(target_arch = "aarch64")]
+        Armv8 => (aarch64: Sha3),
+        #[cfg(target_arch = "x86_64")]
+        Bmi => (x86_64: Bmi1, Bmi2),
+        #[cfg(target_arch = "riscv64")]
+        Zbb => (riscv64: Zbb),
+        Portable => (),
+    ];
+}
 
 /// What the list publishes: the needs, without the names.
 const PROFILES: [Features; KERNELS.len()] = features::profiles_of(KERNELS);
@@ -263,13 +262,6 @@ macro_rules! dispatch {
 #[derive(Clone)]
 pub(crate) struct Auto<V: engine::Variant>(Inner<V>);
 
-/// The kernels every function of the family chooses among, with
-/// their needs: one Keccak permutation serves them all.
-#[cfg(test)]
-pub(crate) fn kernels() -> &'static [(Kernel, Features)] {
-    KERNELS
-}
-
 #[derive(Clone)]
 enum Inner<V: engine::Variant> {
     #[cfg(target_arch = "aarch64")]
@@ -288,28 +280,28 @@ impl<V: engine::Variant> Auto<V> {
         // The list chose the kernel, so its probe answers unless the
         // features changed between the two reads; portable is right
         // if they did.
-        let inner = features::select(KERNELS)
+        let inner = features::choose(KERNELS)
             .and_then(Self::with)
             .unwrap_or(Inner::Portable(Sponge::with(portable::Keccak)));
         Auto(inner)
     }
 
-    /// The sponge on `kernel`, or `None` where its probe says no.
-    fn with(kernel: Kernel) -> Option<Inner<V>> {
-        Some(match kernel {
+    /// The sponge on the kernel the list chose.
+    fn with(chosen: Chosen<Kernel>) -> Option<Inner<V>> {
+        Some(match chosen.kernel() {
             #[cfg(target_arch = "aarch64")]
             Kernel::Armv8 => {
-                let p = <aarch64::Armv8 as engine::Permutation>::probe()?;
+                let p = <aarch64::Armv8 as engine::Permutation>::of(chosen)?;
                 Inner::Armv8(Sponge::with(p))
             }
             #[cfg(target_arch = "x86_64")]
             Kernel::Bmi => {
-                let p = <x86_64::Bmi as engine::Permutation>::probe()?;
+                let p = <x86_64::Bmi as engine::Permutation>::of(chosen)?;
                 Inner::Bmi(Sponge::with(p))
             }
             #[cfg(target_arch = "riscv64")]
             Kernel::Zbb => {
-                let p = <riscv64::Zbb as engine::Permutation>::probe()?;
+                let p = <riscv64::Zbb as engine::Permutation>::of(chosen)?;
                 Inner::Zbb(Sponge::with(p))
             }
             Kernel::Portable => Inner::Portable(Sponge::with(portable::Keccak)),
@@ -328,18 +320,6 @@ impl<V: engine::Variant> Auto<V> {
             Inner::Zbb(_) => Kernel::Zbb,
             Inner::Portable(_) => Kernel::Portable,
         }
-    }
-
-    /// Starts a function on `kernel` alone, or `None` where the set
-    /// in force does not allow it. The vector suites and the cross-checks
-    /// reach each kernel this way, through the same type that
-    /// dispatches to it.
-    #[cfg(test)]
-    pub(crate) fn with_kernel(kernel: Kernel) -> Option<Self> {
-        if !features::available(KERNELS, kernel) {
-            return None;
-        }
-        Self::with(kernel).map(Auto)
     }
 }
 
@@ -587,41 +567,6 @@ pub(crate) mod tests {
         out
     }
 
-    /// Checks the six functions of one implementation against the
-    /// NIST examples.
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn check_known_answers<A, B, C, D, E, F>(
-        starts: (fn() -> A, fn() -> B, fn() -> C, fn() -> D),
-        xofs: (fn() -> E, fn() -> F),
-    ) where
-        A: Hash<Output = [u8; 28]>,
-        B: Hash<Output = [u8; 32]>,
-        C: Hash<Output = [u8; 48]>,
-        D: Hash<Output = [u8; 64]>,
-        E: Xof,
-        F: Xof,
-    {
-        for e in &EXAMPLES {
-            let mut a = starts.0();
-            a.update(e.message);
-            assert_eq!(a.finalize(), hex(e.sha3_224)[..28]);
-            let mut b = starts.1();
-            b.update(e.message);
-            assert_eq!(b.finalize(), hex(e.sha3_256)[..32]);
-            let mut c = starts.2();
-            c.update(e.message);
-            assert_eq!(c.finalize(), hex(e.sha3_384)[..48]);
-            let mut d = starts.3();
-            d.update(e.message);
-            assert_eq!(d.finalize(), hex(e.sha3_512)[..64]);
-            assert_eq!(
-                squeeze(e.message, 32, xofs.0)[..32],
-                hex(e.shake128)[..32]
-            );
-            assert_eq!(squeeze(e.message, 64, xofs.1), hex(e.shake256));
-        }
-    }
-
     /// Checks one kernel against the portable one over every length
     /// up to a few blocks, fed in every way, digest and XOF.
     fn check_matches_portable<H, P, X, Y>(
@@ -659,46 +604,54 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn known_answers() {
-        check_known_answers(
-            (Sha3_224::new, Sha3_256::new, Sha3_384::new, Sha3_512::new),
-            (Shake128::new, Shake256::new),
+    /// The six functions under one kernel, built through the public
+    /// types: the NIST examples, and agreement with the portable code
+    /// at every length up to a few blocks, whole and in pieces.
+    pub(crate) fn kernel(under: &features::Under) {
+        for e in &EXAMPLES {
+            let mut a = under.build(Sha3_224::new);
+            a.update(e.message);
+            assert_eq!(a.finalize(), hex(e.sha3_224)[..28]);
+            let mut b = under.build(Sha3_256::new);
+            b.update(e.message);
+            assert_eq!(b.finalize(), hex(e.sha3_256)[..32]);
+            let mut c = under.build(Sha3_384::new);
+            c.update(e.message);
+            assert_eq!(c.finalize(), hex(e.sha3_384)[..48]);
+            let mut d = under.build(Sha3_512::new);
+            d.update(e.message);
+            assert_eq!(d.finalize(), hex(e.sha3_512)[..64]);
+            let shake128 =
+                squeeze(e.message, 32, || under.build(Shake128::new));
+            assert_eq!(shake128[..32], hex(e.shake128)[..32]);
+            let shake256 =
+                squeeze(e.message, 64, || under.build(Shake256::new));
+            assert_eq!(shake256, hex(e.shake256));
+        }
+        check_matches_portable(
+            || under.build(Sha3_224::new),
+            || features::build_portable(Sha3_224::new),
+            || under.build(Shake128::new),
+            || features::build_portable(Shake128::new),
         );
-    }
-
-    /// Every kernel this processor can build agrees with the portable
-    /// code, for each digest and each XOF. The kernels this processor
-    /// cannot build are reported rather than passed over in silence;
-    /// the inventory audits those skips.
-    #[test]
-    fn every_kernel_agrees_with_the_portable_code() {
-        fn check<H, X>(
-            kernel: Kernel,
-            digest: fn(Kernel) -> Option<H>,
-            xof: fn(Kernel) -> Option<X>,
-        ) where
-            H: Hash,
-            H::Output: PartialEq + core::fmt::Debug,
-            X: Xof,
-        {
-            check_matches_portable(
-                || digest(kernel).expect("available"),
-                || digest(Kernel::Portable).expect("portable"),
-                || xof(kernel).expect("available"),
-                || xof(Kernel::Portable).expect("portable"),
-            );
-        }
-        for &(kernel, _) in KERNELS {
-            if Sha3_256::with_kernel(kernel).is_none() {
-                std::eprintln!("{kernel:?} not available; skipping");
-                continue;
-            }
-            check(kernel, Sha3_224::with_kernel, Shake128::with_kernel);
-            check(kernel, Sha3_256::with_kernel, Shake256::with_kernel);
-            check(kernel, Sha3_384::with_kernel, Shake128::with_kernel);
-            check(kernel, Sha3_512::with_kernel, Shake256::with_kernel);
-        }
+        check_matches_portable(
+            || under.build(Sha3_256::new),
+            || features::build_portable(Sha3_256::new),
+            || under.build(Shake256::new),
+            || features::build_portable(Shake256::new),
+        );
+        check_matches_portable(
+            || under.build(Sha3_384::new),
+            || features::build_portable(Sha3_384::new),
+            || under.build(Shake128::new),
+            || features::build_portable(Shake128::new),
+        );
+        check_matches_portable(
+            || under.build(Sha3_512::new),
+            || features::build_portable(Sha3_512::new),
+            || under.build(Shake256::new),
+            || features::build_portable(Shake256::new),
+        );
     }
 
     /// Two bit-string cases from the NIST ACVP SHA3-256 vectors: 22
@@ -835,10 +788,12 @@ pub(crate) mod tests {
 
     #[test]
     fn picks_the_first_kernel_whose_needs_are_met() {
-        let hash = Auto::<variant::Sha3_256>::new();
-        features::dispatches(KERNELS, Sha3_256::profiles(), hash.kernel());
-        let xof = Auto::<variant::Shake128>::new();
-        features::dispatches(KERNELS, Shake128::profiles(), xof.kernel());
+        features::build_alone(|| {
+            let hash = Auto::<variant::Sha3_256>::new();
+            features::dispatches(KERNELS, Sha3_256::profiles(), hash.kernel());
+            let xof = Auto::<variant::Shake128>::new();
+            features::dispatches(KERNELS, Shake128::profiles(), xof.kernel());
+        });
     }
 
     #[test]
@@ -883,12 +838,6 @@ macro_rules! digest {
                 &PROFILES
             }
 
-            /// Starts a hash on `kernel` alone, or `None` where the
-            /// set in force does not allow it.
-            #[cfg(test)]
-            pub(crate) fn with_kernel(kernel: Kernel) -> Option<Self> {
-                Auto::with_kernel(kernel).map($name)
-            }
         }
 
         impl features::sealed::Sealed for $name {}
@@ -967,12 +916,6 @@ macro_rules! shake {
                 &PROFILES
             }
 
-            /// Starts a function on `kernel` alone, or `None` where
-            /// the set in force does not allow it.
-            #[cfg(test)]
-            pub(crate) fn with_kernel(kernel: Kernel) -> Option<Self> {
-                Auto::with_kernel(kernel).map($name)
-            }
         }
 
         impl features::sealed::Sealed for $name {}

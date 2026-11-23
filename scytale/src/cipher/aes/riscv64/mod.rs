@@ -14,7 +14,6 @@ use core::any::Any;
 
 use super::{Aes, Aes128, Aes192, Aes256, MAX_WORDS};
 use crate::cipher::{BlockCipher, is};
-use crate::features;
 
 /// A cipher whose expanded key the vector AES instructions can read.
 ///
@@ -70,18 +69,6 @@ impl<'a> Schedule<'a> {
     }
 }
 
-/// Whether the scalar AES instructions (Zkne and Zknd) are available.
-pub(crate) fn has_zkn() -> bool {
-    features::allows(super::KERNELS, super::Kernel::Zkn)
-}
-
-/// Whether the vector AES instructions are available: the vector
-/// extension, Zvkned, and registers of at least 128 bits, which the
-/// 128-bit element groups need.
-pub(crate) fn has_zvkned() -> bool {
-    features::allows(super::KERNELS, super::Kernel::Zvkned)
-}
-
 /// How to reach the round keys of the cipher a mode was built over.
 pub(crate) type Keys<C> = for<'a> fn(&'a C) -> Option<Schedule<'a>>;
 
@@ -98,17 +85,7 @@ pub(crate) type Keys<C> = for<'a> fn(&'a C) -> Option<Schedule<'a>>;
 /// and nothing would fail.
 macro_rules! keyed {
     ($mac:ident) => {
-        $mac!(
-            Aes128,
-            Aes192,
-            Aes256,
-            Aes<16>,
-            Aes<24>,
-            Aes<32>,
-            zvkned::Aes<16>,
-            zvkned::Aes<24>,
-            zvkned::Aes<32>,
-        );
+        $mac!(Aes128, Aes192, Aes256, Aes<16>, Aes<24>, Aes<32>,);
     };
 }
 
@@ -138,24 +115,28 @@ pub(crate) fn keys<C: BlockCipher>() -> Option<Keys<C>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::arch::riscv64::{
         EXT_ZKND, EXT_ZKNE, EXT_ZVBB, EXT_ZVKB, IMA_V, detected_from, profile,
     };
-    use crate::cipher::aes::{VREV8, ZKN, ZVKNED};
+    use crate::cipher::aes::{KERNELS, Kernel};
+    use crate::features::{Features, needs, needs_of};
 
-    #[test]
-    fn probes_agree_with_constructors() {
-        assert_eq!(zkn::Aes::<16>::supported(), has_zkn());
-        assert_eq!(zvkned::Aes::<16>::supported(), has_zvkned());
+    /// What the AES list says each kernel needs.
+    fn zkn() -> Features {
+        needs_of(KERNELS, Kernel::Zkn)
     }
+    fn zvkned() -> Features {
+        needs_of(KERNELS, Kernel::Zvkned)
+    }
+    /// The vector byte reverse the counter loop adds.
+    const VREV8: Features = needs!(riscv64: V, Zvkb);
 
     /// What each kind of real processor is offered. A bit set is all
     /// the probes look at, so these are the answers themselves rather
     /// than a sample of them.
     #[test]
     fn the_scalar_cipher_needs_both_halves_of_zkn() {
-        let has = |ext| ZKN.is_subset(detected_from(ext, 0));
+        let has = |ext| zkn().is_subset(detected_from(ext, 0));
         assert!(has(profile::ZKN));
         // A profile with the vector set and no scalar one, which is
         // every vector profile: Zvkn does not imply Zkn.
@@ -168,7 +149,7 @@ mod tests {
 
     #[test]
     fn the_vector_cipher_needs_registers_wide_enough() {
-        let has = |ext, bytes| ZVKNED.is_subset(detected_from(ext, bytes));
+        let has = |ext, bytes| zvkned().is_subset(detected_from(ext, bytes));
         assert!(has(profile::ZVKN, 16));
         assert!(has(profile::ZVKN, 64));
         // A 64-bit vector register cannot hold a block.

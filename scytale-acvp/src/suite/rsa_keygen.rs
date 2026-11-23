@@ -16,6 +16,7 @@
 //! by the live session, where the server judges the keys.
 
 use super::{answer_groups, answer_tests, skip};
+use crate::profile::Builder;
 use crate::support::{
     Error, Rng, field, hex, hex_value, int, opt_int, opt_text, text,
     unknown_test_type,
@@ -28,22 +29,28 @@ use serde_json::{Value, json};
 /// The one exponent the crate generates under, as NIST writes it.
 const FIXED_EXPONENT: &str = "010001";
 
-pub fn answer(doc: &Value, rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     if text(doc, "mode")? != "keyGen" {
         return Err(Error::new(format!("mode {}", doc["mode"])));
     }
     answer_groups(doc, |group| {
-        if let Some(why) = skip_reason(group)? {
-            return skip(group, why);
-        }
-        if text(group, "testType")? != "GDT" {
-            return Err(unknown_test_type(group));
-        }
-        let bits = int(group, "modulo")? as usize;
-        let crt = opt_text(group, "keyFormat") == Some("crt");
-        answer_tests(group, |_| {
-            let key = PrivateKey::generate(&mut Rng(&mut *rng), bits)?;
-            key_fields(&key, crt)
+        builder.try_build(|| {
+            if let Some(why) = skip_reason(group)? {
+                return skip(group, why);
+            }
+            if text(group, "testType")? != "GDT" {
+                return Err(unknown_test_type(group));
+            }
+            let bits = int(group, "modulo")? as usize;
+            let crt = opt_text(group, "keyFormat") == Some("crt");
+            answer_tests(group, |_| {
+                let key = PrivateKey::generate(&mut Rng(&mut *rng), bits)?;
+                key_fields(&key, crt)
+            })
         })
     })
 }
@@ -193,7 +200,12 @@ mod tests {
                 "tests": [{"tcId": 3, "deferred": true}],
             }],
         });
-        let answered = answer(&doc, &mut fixed_rng()).unwrap();
+        let answered = answer(
+            &doc,
+            &mut fixed_rng(&Builder::default()).unwrap(),
+            &Builder::default(),
+        )
+        .unwrap();
         let groups = answered["testGroups"].as_array().unwrap();
         assert_eq!(groups.len(), 2, "the residue group is skipped");
         let crt = &groups[0]["tests"][0];
@@ -202,7 +214,10 @@ mod tests {
         // Verified against itself, as the file's key and the answer.
         let suite = rsa_keygen_suite();
         let file = with_prompt(&doc, &answered).unwrap();
-        assert_eq!(compare(suite, &file, &answered).unwrap(), 2);
+        assert_eq!(
+            compare(suite, &file, &answered, &Builder::default()).unwrap(),
+            2
+        );
     }
 
     /// The server's expected key has no private exponent: the
@@ -216,15 +231,23 @@ mod tests {
                 "modulo": 2048, "tests": [{"tcId": 1}],
             }],
         });
-        let good = answer(&doc, &mut fixed_rng()).unwrap();
+        let good = answer(
+            &doc,
+            &mut fixed_rng(&Builder::default()).unwrap(),
+            &Builder::default(),
+        )
+        .unwrap();
         let mut theirs = with_prompt(&doc, &good).unwrap();
         let key = theirs["testGroups"][0]["tests"][0].as_object_mut().unwrap();
         key.remove("d");
         let suite = rsa_keygen_suite();
-        assert_eq!(compare(suite, &theirs, &good).unwrap(), 1);
+        assert_eq!(
+            compare(suite, &theirs, &good, &Builder::default()).unwrap(),
+            1
+        );
         let mut bad = good.clone();
         bad["testGroups"][0]["tests"][0]["e"] = json!("03");
-        assert!(compare(suite, &theirs, &bad).is_err());
+        assert!(compare(suite, &theirs, &bad, &Builder::default()).is_err());
     }
 
     #[test]
@@ -236,15 +259,25 @@ mod tests {
                 "modulo": 2048, "tests": [{"tcId": 1}],
             }],
         });
-        let good = answer(&doc, &mut fixed_rng()).unwrap();
+        let good = answer(
+            &doc,
+            &mut fixed_rng(&Builder::default()).unwrap(),
+            &Builder::default(),
+        )
+        .unwrap();
         let mut bad = good.clone();
         let d = bad["testGroups"][0]["tests"][0]["d"].as_str().unwrap();
         let flipped = format!("{}{}", &d[..d.len() - 1], "0");
         bad["testGroups"][0]["tests"][0]["d"] = json!(flipped);
         let suite = rsa_keygen_suite();
         let file = with_prompt(&doc, &good).unwrap();
-        assert_eq!(compare(suite, &file, &good).unwrap(), 1);
-        let e = compare(suite, &file, &bad).unwrap_err().message;
+        assert_eq!(
+            compare(suite, &file, &good, &Builder::default()).unwrap(),
+            1
+        );
+        let e = compare(suite, &file, &bad, &Builder::default())
+            .unwrap_err()
+            .message;
         assert!(!e.contains("the file's key"), "{e}");
     }
 }

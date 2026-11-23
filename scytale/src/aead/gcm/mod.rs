@@ -101,7 +101,7 @@ use crate::aead::Aead;
 use crate::cipher::mode::{ByteOrder, counter_blocks, xor};
 use crate::cipher::{BlockCipher, OneBlock};
 use crate::constant_time;
-use crate::features::{self, Dispatcher, Features};
+use crate::features::{self, Chosen, Dispatcher, Features};
 use crate::kernel::{self, Kernel};
 use crate::{Error, KeyType};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -179,23 +179,9 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Clone for Engine<C> {
     }
 }
 
-/// Every kernel, best first, with what each needs.
-///
-/// A caller never names one: the mode takes the first row the
-/// features in force meet. The tests and the vector suites do name
-/// them, so that every kernel is validated and not only the one this
-/// machine would pick.
-pub(crate) const KERNELS: &[(Kernel, Features)] = &[
-    #[cfg(target_arch = "x86_64")]
-    (Kernel::Vaes, x86_64::WIDE),
-    #[cfg(target_arch = "x86_64")]
-    (Kernel::Aesni, x86_64::NARROW),
-    #[cfg(target_arch = "aarch64")]
-    (Kernel::Armv8, aarch64::ARMV8),
-    #[cfg(target_arch = "riscv64")]
-    (Kernel::Zvkned, riscv64::ZVKNED),
-    (Kernel::Portable, Features::new()),
-];
+/// Every kernel, best first, with what each needs; see
+/// [`crate::kernel::GCM`].
+pub(crate) const KERNELS: &[(Kernel, Features)] = crate::kernel::GCM;
 
 /// What the list publishes: the needs, without the names.
 const PROFILES: [Features; KERNELS.len()] = features::profiles_of(KERNELS);
@@ -266,8 +252,8 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     fn new(h: &[u8; BLOCK]) -> Self {
         // The list ends in the portable row, which needs nothing, so
         // there is always one; the fallback is for the type checker.
-        features::select(kernels::<C>())
-            .and_then(|kernel| Self::with(h, kernel))
+        features::choose(kernels::<C>())
+            .and_then(|chosen| Self::with(h, chosen))
             .unwrap_or(Engine::Generic(PhantomData))
     }
 
@@ -275,16 +261,44 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     /// for this cipher. That the processor has its instructions is
     /// the caller's to have settled from the kernel's row, by the set
     /// in force or by what was detected.
-    fn with(h: &[u8; BLOCK], kernel: Kernel) -> Option<Self> {
+    fn with(h: &[u8; BLOCK], chosen: Chosen<Kernel>) -> Option<Self> {
         let _ = h;
-        match kernel {
+        match chosen.kernel() {
             Kernel::Portable => Some(Engine::Generic(PhantomData)),
             #[cfg(any(
                 target_arch = "aarch64",
                 target_arch = "riscv64",
                 target_arch = "x86_64"
             ))]
-            hardware => native::Engine::of(h, hardware).map(Engine::Native),
+            _ => native::Engine::of(h, chosen).map(Engine::Native),
+        }
+    }
+
+    /// This engine where it can read `cipher`'s schedule, and the
+    /// generic one where it cannot: the cipher chose its own kernel
+    /// from its own reading of the set in force.
+    #[cfg_attr(
+        not(any(
+            target_arch = "aarch64",
+            target_arch = "riscv64",
+            target_arch = "x86_64"
+        )),
+        allow(unused_variables)
+    )]
+    fn over(self, cipher: &C) -> Self {
+        match self {
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
+            Engine::Native(_)
+                if !native::keys::<C>()
+                    .is_some_and(|keys| keys(cipher).is_some()) =>
+            {
+                Engine::Generic(PhantomData)
+            }
+            engine => engine,
         }
     }
 
@@ -453,11 +467,8 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
         let cipher = C::new(key);
         let mut h = [0u8; BLOCK];
         cipher.encrypt_one(&mut h);
-        Gcm {
-            engine: Engine::<C>::new(&h),
-            cipher,
-            h,
-        }
+        let engine = Engine::<C>::new(&h).over(&cipher);
+        Gcm { engine, cipher, h }
     }
 
     /// The feature profiles this mode tells apart, best first; see
@@ -465,27 +476,6 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
     /// instructions cannot read, the portable one alone.
     pub fn profiles() -> &'static [Features] {
         profiles::<C>()
-    }
-
-    /// The mode over the kernel named, or `None` where the set in
-    /// force does not meet its needs or it is not written for this
-    /// cipher.
-    ///
-    /// For the tests and the vector suites, which run every kernel
-    /// rather than only the one [`new`](Self::new) would take. The
-    /// virtual features are granted, so the table-driven cipher is to
-    /// be had without editing the set; see [`features::available`].
-    #[cfg(test)]
-    pub(crate) fn with_kernel(key: &C::Key, kernel: Kernel) -> Option<Self> {
-        features::available(kernels::<C>(), kernel).then_some(())?;
-        let cipher = C::new(key);
-        let mut h = [0u8; BLOCK];
-        cipher.encrypt_one(&mut h);
-        Some(Gcm {
-            engine: Engine::<C>::with(&h, kernel)?,
-            cipher,
-            h,
-        })
     }
 
     /// Which kernel this mode was built with.
@@ -906,13 +896,14 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Decryptor<'_, C> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     extern crate std;
 
     use super::*;
     use crate::Key;
-    use crate::cipher::aes::{Aes, Aes128, portable};
-    use std::vec::Vec;
+    #[cfg(target_arch = "x86_64")]
+    use crate::cipher::aes::portable;
+    use crate::cipher::aes::{Aes, Aes128};
 
     /// Buffers big enough for every case below.
     const MAX: usize = 64;
@@ -1007,8 +998,19 @@ mod tests {
         ],
     ];
 
-    #[test]
-    fn published_test_cases() {
+    /// GCM under one kernel, built through the public type: the
+    /// published cases, agreement with the portable code at every
+    /// length around the group boundaries whole and in pieces, a
+    /// nonce of another length, and GCM-SIV, which borrows the same
+    /// loops. GHASH's rows run this too, for the multiply alone.
+    pub(crate) fn kernel(under: &features::Under) {
+        published_test_cases(under);
+        the_engines_agree(under);
+        the_engines_agree_on_a_long_nonce(under);
+        crate::aead::gcm_siv::tests::agrees(under);
+    }
+
+    fn published_test_cases(under: &features::Under) {
         for (i, case) in CASES.iter().enumerate() {
             let (mut kb, mut nb) = ([0u8; 32], [0u8; 32]);
             let (mut ab, mut pb) = ([0u8; MAX], [0u8; MAX]);
@@ -1022,14 +1024,22 @@ mod tests {
             let tag = &tb;
 
             match key.len() {
-                16 => run_case::<16>(i, key, nonce, aad, plain, cipher, tag),
-                24 => run_case::<24>(i, key, nonce, aad, plain, cipher, tag),
-                _ => run_case::<32>(i, key, nonce, aad, plain, cipher, tag),
+                16 => run_case::<16>(
+                    under, i, key, nonce, aad, plain, cipher, tag,
+                ),
+                24 => run_case::<24>(
+                    under, i, key, nonce, aad, plain, cipher, tag,
+                ),
+                _ => run_case::<32>(
+                    under, i, key, nonce, aad, plain, cipher, tag,
+                ),
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_case<const K: usize>(
+        under: &features::Under,
         i: usize,
         key: &[u8],
         nonce: &[u8],
@@ -1039,7 +1049,7 @@ mod tests {
         tag: &[u8; 16],
     ) {
         let key: &[u8; K] = key.try_into().unwrap();
-        let gcm = Gcm::<Aes<K>>::new(&Key::from(*key));
+        let gcm = under.build(|| Gcm::<Aes<K>>::new(&Key::from(*key)));
         let mut data = [0u8; MAX];
         let data = &mut data[..plain.len()];
         data.copy_from_slice(plain);
@@ -1247,20 +1257,12 @@ mod tests {
     /// cipher, whose key schedule the AES instructions cannot read,
     /// so it always gets the generic engine. AES is AES, so the two
     /// must produce the same ciphertext and the same tag.
-    #[test]
-    fn the_engines_agree() {
+    fn the_engines_agree(under: &features::Under) {
         const MAX: usize = 9 * 16 * BLOCK + 3;
         let key = [0x9du8; 16];
-        let generic = Gcm::<portable::bitsliced::Aes<16>>::new(&Key::from(key));
-        // Every kernel this processor has, not only the one
-        // the mode would pick.
-        let all: Vec<Gcm<Aes128>> = KERNELS
-            .iter()
-            .filter_map(|&(k, _)| {
-                Gcm::<Aes128>::with_kernel(&Key::from(key), k)
-            })
-            .collect();
-        assert!(!all.is_empty(), "no kernel to test");
+        let generic =
+            features::build_portable(|| Gcm::<Aes128>::new(&Key::from(key)));
+        let all = [under.build(|| Gcm::<Aes128>::new(&Key::from(key)))];
         let nonce = [0x33u8; 12];
         let aad = [0x77u8; 21];
 
@@ -1339,11 +1341,11 @@ mod tests {
     /// A nonce that is not ninety-six bits is hashed down to a
     /// counter block, which the engine does with its own hash. Both
     /// engines must reach the same block.
-    #[test]
-    fn the_engines_agree_on_a_long_nonce() {
+    fn the_engines_agree_on_a_long_nonce(under: &features::Under) {
         let key = [0x11u8; 16];
-        let native = Gcm::<Aes128>::new(&Key::from(key));
-        let generic = Gcm::<portable::bitsliced::Aes<16>>::new(&Key::from(key));
+        let native = under.build(|| Gcm::<Aes128>::new(&Key::from(key)));
+        let generic =
+            features::build_portable(|| Gcm::<Aes128>::new(&Key::from(key)));
         for len in [1, 8, 15, 16, 17, 128, 129] {
             let nonce = std::vec![0xa5u8; len];
             let mut a = [7u8; 40];
@@ -1361,8 +1363,8 @@ mod tests {
     #[test]
     fn the_native_engine_is_chosen_where_there_is_one() {
         #[cfg(target_arch = "x86_64")]
-        {
-            if !features::available(KERNELS, Kernel::Aesni) {
+        features::build_alone(|| {
+            if features::select(KERNELS) == Some(Kernel::Portable) {
                 // Nothing to check on a processor without them.
                 return;
             }
@@ -1373,19 +1375,7 @@ mod tests {
             // instructions cannot read, does not.
             let other = Gcm::<portable::bitsliced::Aes<16>>::new(&key);
             assert!(matches!(other.engine, Engine::Generic(_)));
-
-            // The portable one is always to be had, and on x86-64 the
-            // AES-NI one is too wherever this test runs at all, so
-            // both are validated and not just the one this machine
-            // would take.
-            let portable = Kernel::Portable;
-            assert!(Gcm::<Aes128>::with_kernel(&key, portable).is_some());
-            #[cfg(target_arch = "x86_64")]
-            {
-                let aesni = Kernel::Aesni;
-                assert!(Gcm::<Aes128>::with_kernel(&key, aesni).is_some());
-            }
-        }
+        });
     }
 
     #[test]

@@ -52,7 +52,7 @@ use super::super::engine::{Engine32, Engine64};
 use super::super::portable::{K256, K512};
 #[cfg(test)]
 use super::super::variant;
-use crate::features;
+use crate::features::Chosen;
 
 // Named for the vector suites, which drive each engine in turn; the
 // dispatching types reach it directly.
@@ -70,23 +70,11 @@ pub type Sha384 = Engine64<Zvknh, variant::Sha384>;
 pub type Sha512 = Engine64<Zvknh, variant::Sha512>;
 
 /// The vector SHA-2 instructions.
-// No public constructor: a value exists only by way of `probe`.
+// No public constructor: a value exists only by way of `of`.
 #[derive(Clone, Copy)]
 pub struct Zvknh(());
 
 impl super::super::engine::Sealed for Zvknh {}
-
-/// Whether the SHA-256 instructions are available. Zvknha has them
-/// and Zvknhb has them as well as SHA-512's.
-pub(crate) fn has_sha256() -> bool {
-    features::allows(super::super::KERNELS32, super::super::Kernel::Zvknh)
-}
-
-/// Whether the SHA-512 instructions are available; only Zvknhb has
-/// them.
-pub(crate) fn has_sha512() -> bool {
-    features::allows(super::super::KERNELS64, super::super::Kernel::Zvknh)
-}
 
 /// Splits the state into the two element groups the instructions
 /// want: `{a, b, e, f}` and `{c, d, g, h}`, least significant element
@@ -305,13 +293,13 @@ unsafe fn rounds512(
 }
 
 impl Compress32 for Zvknh {
-    fn probe() -> Option<Self> {
-        has_sha256().then_some(Zvknh(()))
+    fn of(chosen: Chosen<super::super::Kernel>) -> Option<Self> {
+        (chosen.kernel() == super::super::Kernel::Zvknh).then_some(Zvknh(()))
     }
 
     fn compress(self, state: &mut [u32; 8], blocks: &[[u8; 64]]) {
-        // SAFETY: `self` was minted by `probe`, which confirmed the
-        // instructions.
+        // SAFETY: `self` was minted by `of`, from the kernel list's
+        // choice, which only a row whose features were in force gets.
         unsafe {
             if blocks.is_empty() {
                 return;
@@ -329,8 +317,8 @@ impl Compress32 for Zvknh {
 }
 
 impl Compress64 for Zvknh {
-    fn probe() -> Option<Self> {
-        has_sha512().then_some(Zvknh(()))
+    fn of(chosen: Chosen<super::super::Kernel>) -> Option<Self> {
+        (chosen.kernel() == super::super::Kernel::Zvknh).then_some(Zvknh(()))
     }
 
     fn compress(self, state: &mut [u64; 8], blocks: &[[u8; 128]]) {
@@ -348,69 +336,5 @@ impl Compress64 for Zvknh {
             );
             unpack(state, &abef, &cdgh);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::hash::sha2::tests::check_known_answers;
-
-    #[test]
-    fn known_answers() {
-        if has_sha256() && has_sha512() {
-            check_known_answers(
-                || Sha224::try_new().expect("supported"),
-                || Sha256::try_new().expect("supported"),
-                || Sha384::try_new().expect("supported"),
-                || Sha512::try_new().expect("supported"),
-            );
-        }
-    }
-
-    #[test]
-    fn probes_agree_with_constructors() {
-        assert_eq!(Sha256::try_new().is_ok(), has_sha256());
-        assert_eq!(Sha512::try_new().is_ok(), has_sha512());
-    }
-
-    /// Zvknha is SHA-256 alone and Zvknhb is both families, so a
-    /// processor with the first must be offered one and not the
-    /// other. Zvkn includes Zvknhb, so real vector hardware has both.
-    #[test]
-    fn the_narrow_extension_offers_only_sha256() {
-        use crate::arch::riscv64::{
-            EXT_ZVKB, EXT_ZVKNHA, EXT_ZVKNHB, IMA_V, detected_from, profile,
-        };
-        use crate::hash::sha2::{ZVKNH_256, ZVKNH_512};
-
-        let narrow = detected_from(IMA_V | EXT_ZVKB | EXT_ZVKNHA, 16);
-        assert!(ZVKNH_256.is_subset(narrow));
-        assert!(!ZVKNH_512.is_subset(narrow));
-
-        for needs in [ZVKNH_256, ZVKNH_512] {
-            assert!(needs.is_subset(detected_from(profile::ZVKN, 16)));
-            // No byte reverse to put the message words the right way
-            // round, no vector unit, or registers too narrow.
-            assert!(!needs.is_subset(detected_from(IMA_V | EXT_ZVKNHB, 16)));
-            assert!(
-                !needs.is_subset(detected_from(profile::ZVKN & !IMA_V, 16))
-            );
-            assert!(!needs.is_subset(detected_from(profile::ZVKN, 8)));
-            assert!(!needs.is_subset(detected_from(profile::ZKN, 0)));
-        }
-    }
-
-    /// The two element groups have to survive the round trip, or the
-    /// state would be scrambled between blocks.
-    #[test]
-    fn packing_is_reversible() {
-        let state: [u32; 8] = core::array::from_fn(|i| i as u32 + 1);
-        let (abef, cdgh) = pack(&state);
-        assert_eq!(abef, [6, 5, 2, 1]);
-        assert_eq!(cdgh, [8, 7, 4, 3]);
-        let mut back = [0u32; 8];
-        unpack(&mut back, &abef, &cdgh);
-        assert_eq!(back, state);
     }
 }

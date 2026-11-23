@@ -56,6 +56,8 @@
 use zeroize::Zeroize;
 
 use crate::constant_time;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::features::{self, Chosen};
 use crate::hash::sha3::{Sha3_256, Sha3_512, Shake128, Shake256, together};
 use crate::hash::{Hash, Xof, XofReader};
 
@@ -549,6 +551,7 @@ impl Poly {
     fn sample_ntt_together(
         rho: &[u8; 32],
         at: [(u8, u8); together::WIDTH],
+        chosen: Chosen<together::Kernel>,
     ) -> Option<[Poly; together::WIDTH]> {
         let messages = at.map(|(row, col)| {
             let mut message = [0u8; 34];
@@ -557,7 +560,8 @@ impl Poly {
             message[33] = row;
             message
         });
-        let mut streams = together::Shake128Together::new(messages.each_ref())?;
+        let mut streams =
+            together::Shake128Together::new(messages.each_ref(), chosen)?;
         let mut kept: [Kept; together::WIDTH] =
             core::array::from_fn(|_| Kept::new());
         let mut blocks = [[0u8; together::RATE]; together::WIDTH];
@@ -693,10 +697,15 @@ fn sample_matrix<const K: usize>(rho: &[u8; 32]) -> [[Poly; K]; K] {
     let done = 0;
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let mut done = 0;
+    // One choice for the whole matrix, read once as the key is made.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    while done + together::WIDTH <= entries.len() {
+    let chosen = features::choose(together::KERNELS);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    while let Some(chosen) = chosen
+        && done + together::WIDTH <= entries.len()
+    {
         let next = core::array::from_fn(|i| at(done + i));
-        let Some(polys) = Poly::sample_ntt_together(rho, next) else {
+        let Some(polys) = Poly::sample_ntt_together(rho, next, chosen) else {
             break;
         };
         entries[done..done + together::WIDTH].copy_from_slice(&polys);
@@ -1307,7 +1316,7 @@ pub mod ml_kem_1024 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{Error, der};
 
@@ -1481,17 +1490,21 @@ mod tests {
     /// for enough seeds that some entry needs a block its neighbours
     /// do not, which is where one that has filled must sit a block
     /// out.
+    ///
+    /// Run by the kernel's meta test, under the kernel's own choice.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    #[test]
-    fn entries_together_agree_with_entries_alone() {
+    fn entries_together_agree_with_entries_alone(
+        chosen: crate::features::Chosen<together::Kernel>,
+    ) {
         let places = [(0, 0), (0, 1), (1, 0), (3, 3)];
         let at: [(u8, u8); together::WIDTH] =
             core::array::from_fn(|i| places[i]);
         let mut uneven = 0;
         for seed in 0..=255u8 {
             let rho = [seed; 32];
-            let Some(polys) = Poly::sample_ntt_together(&rho, at) else {
-                std::eprintln!("no kernel runs streams together; skipping");
+            // The row that runs them apart has nothing to compare.
+            let Some(polys) = Poly::sample_ntt_together(&rho, at, chosen)
+            else {
                 return;
             };
             for (poly, (row, col)) in polys.iter().zip(at) {
@@ -1561,6 +1574,41 @@ mod tests {
                 let round = f.decompress(d).compress(d);
                 assert_eq!(round.0, f.0, "d = {d}");
             }
+        }
+    }
+
+    /// The matrix sampled on one four- or two-state SHAKE kernel, as
+    /// the keys of all three sets are made on it, against keys made
+    /// on the portable code: each side decapsulates what the other
+    /// encapsulated, which needs the same matrix on both.
+    pub(crate) fn together(under: &crate::features::Under) {
+        macro_rules! check {
+            ($module:ident) => {{
+                use $module::*;
+                let seed = [0x3cu8; SEED_SIZE];
+                let mut rng = crate::random::CtrDrbg::from_system().unwrap();
+                let key = under.build(|| PrivateKey::from_seed(&seed));
+                let reference = crate::features::build_portable(|| {
+                    PrivateKey::from_seed(&seed)
+                });
+                assert_eq!(key.key_bytes(), reference.key_bytes());
+                let (c, k) =
+                    reference.public_key().encapsulate(&mut rng).unwrap();
+                assert_eq!(key.decapsulate(&c), k);
+                let (c, k) = key.public_key().encapsulate(&mut rng).unwrap();
+                assert_eq!(reference.decapsulate(&c), k);
+            }};
+        }
+        check!(ml_kem_512);
+        check!(ml_kem_768);
+        check!(ml_kem_1024);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            let chosen = under
+                .build(|| crate::features::choose(together::KERNELS))
+                .expect("listed");
+            entries_together_agree_with_entries_alone(chosen);
+            together::tests::together_agrees_with_apart(chosen);
         }
     }
 

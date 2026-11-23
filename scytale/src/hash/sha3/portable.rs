@@ -11,27 +11,14 @@ use super::engine::Sponge;
 use super::engine::{LANES, Permutation};
 #[cfg(test)]
 use super::variant;
+use crate::features::Chosen;
 
-// Named for the vector suites, which drive each engine in turn; the
-// dispatching types reach it directly.
-/// SHA3-224, portably.
-#[cfg(test)]
-pub type Sha3_224 = Sponge<Keccak, variant::Sha3_224>;
 /// SHA3-256, portably.
 #[cfg(test)]
 pub type Sha3_256 = Sponge<Keccak, variant::Sha3_256>;
-/// SHA3-384, portably.
-#[cfg(test)]
-pub type Sha3_384 = Sponge<Keccak, variant::Sha3_384>;
-/// SHA3-512, portably.
-#[cfg(test)]
-pub type Sha3_512 = Sponge<Keccak, variant::Sha3_512>;
 /// SHAKE128, portably.
 #[cfg(test)]
 pub type Shake128 = Sponge<Keccak, variant::Shake128>;
-/// SHAKE256, portably.
-#[cfg(test)]
-pub type Shake256 = Sponge<Keccak, variant::Shake256>;
 
 /// The round constants, one per round, for iota.
 pub(crate) static ROUND_CONSTANTS: [u64; 24] = [
@@ -118,7 +105,7 @@ pub struct Keccak;
 impl super::engine::Sealed for Keccak {}
 
 impl Permutation for Keccak {
-    fn probe() -> Option<Self> {
+    fn of(_: Chosen<super::Kernel>) -> Option<Self> {
         Some(Keccak)
     }
 
@@ -130,23 +117,6 @@ impl Permutation for Keccak {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hash::sha3::tests::check_known_answers;
-
-    #[test]
-    fn known_answers() {
-        check_known_answers(
-            (
-                || Sha3_224::try_new().expect("portable"),
-                || Sha3_256::try_new().expect("portable"),
-                || Sha3_384::try_new().expect("portable"),
-                || Sha3_512::try_new().expect("portable"),
-            ),
-            (
-                || Shake128::try_new().expect("portable"),
-                || Shake256::try_new().expect("portable"),
-            ),
-        );
-    }
 
     /// The permutation of the zero state, from the Keccak team's
     /// published intermediate values: the first lane after one

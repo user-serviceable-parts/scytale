@@ -15,49 +15,6 @@ use core::any::Any;
 
 use super::{Aes, Aes128, Aes192, Aes256, KeySize, MAX_WORDS};
 use crate::cipher::{BlockCipher, is};
-use crate::features::{self, Features, x86_64::Feature as F};
-
-/// Whether the processor reports AES-NI (CPUID leaf 1, ECX bit 25)
-/// and `pshufb`, which comes with SSSE3 (bit 9).
-///
-/// The counter loop uses `pshufb` and the cipher itself does not, but
-/// the two have arrived together on every processor ever built, so
-/// they are asked for together. A machine with one and not the other
-/// takes the portable path, rather than every call carrying a branch
-/// for hardware that does not exist.
-pub(crate) fn has_aesni() -> bool {
-    features::allows(super::KERNELS, super::Kernel::AesNi)
-}
-
-/// What [`has_aesni`] asks for.
-pub(crate) const AESNI: Features = features::x86(&[F::Aes, F::Ssse3]);
-
-/// AES-NI *and* AVX, with the operating system saving its state:
-/// AES-NI and SSSE3 as above, then OSXSAVE and AVX (leaf 1, ECX bits
-/// 27 and 28) and XCR0 bits 1 and 2.
-///
-/// AES-NI does not imply AVX. A loop written in the VEX encodings --
-/// `vmovdqu`, `vpxor`, `vaesenc` -- needs both, and asking only for
-/// AES-NI puts an illegal instruction on every Westmere and on the
-/// whole Silvermont and Goldmont line, which have the cipher and not
-/// the encoding. Any mode whose assembly is VEX-encoded needs this
-/// rather than [`AESNI`].
-pub(crate) const AESNI_AVX: Features =
-    features::x86(&[F::Aes, F::Ssse3, F::Avx]);
-
-/// Whether the processor and operating system support VAES on 256-bit
-/// registers: VAES (leaf 7, ECX bit 9), AVX2 (leaf 7, EBX bit 5), and
-/// the OS saving the upper register halves (XCR0 bits 1 and 2).
-pub(crate) fn has_vaes256() -> bool {
-    features::allows(super::KERNELS, super::Kernel::Vaes)
-}
-
-/// What [`has_vaes256`] asks for. The wider loops finish with the
-/// narrower ones, and the cipher keeps a schedule these can read only
-/// where it took the AES instructions itself, so VAES alone, which a
-/// hypervisor's mask can produce, is not enough.
-pub(crate) const VAES256: Features =
-    features::x86(&[F::Aes, F::Ssse3, F::Avx, F::Avx2, F::Vaes]);
 
 /// A cipher whose expanded key the AES instructions can read.
 ///
@@ -417,20 +374,7 @@ pub(crate) type KeysEitherWay<C> =
 /// and nothing would fail.
 macro_rules! keyed {
     ($mac:ident) => {
-        $mac!(
-            Aes128,
-            Aes192,
-            Aes256,
-            Aes<16>,
-            Aes<24>,
-            Aes<32>,
-            aesni::Aes<16>,
-            aesni::Aes<24>,
-            aesni::Aes<32>,
-            vaes::Aes<16>,
-            vaes::Aes<24>,
-            vaes::Aes<32>,
-        );
+        $mac!(Aes128, Aes192, Aes256, Aes<16>, Aes<24>, Aes<32>,);
     };
 }
 
@@ -483,52 +427,36 @@ pub(crate) fn keys_either_way<C: BlockCipher>() -> Option<KeysEitherWay<C>> {
     None
 }
 
+/// The schedule the instructions build is FIPS 197's, word for word,
+/// encryption and decryption both, where AES's list chose one of this
+/// file's rows; run by AES's kernel test under that choice.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) fn schedule_is_standard(
+    chosen: crate::features::Chosen<super::Kernel>,
+) {
     use crate::cipher::aes::expand_words;
     use crate::cipher::aes::portable::bitsliced::sub_word;
-
-    /// The schedule built in registers is the schedule FIPS 197
-    /// section 5.2 writes out word by word, at every width. The
-    /// inverse half is exercised by every decryption test; here only
-    /// its untransformed ends are checked, so that a wrong copy shows
-    /// up as itself.
-    #[test]
-    fn the_schedule_is_the_standard_one() {
-        for (len, size) in [
-            (16, KeySize::Aes128),
-            (24, KeySize::Aes192),
-            (32, KeySize::Aes256),
-        ] {
-            for i in 0..100u32 {
-                let key: std::vec::Vec<u8> = (0..len)
-                    .map(|j| (i.wrapping_mul(97).wrapping_add(j * 31)) as u8)
-                    .collect();
-                let want = expand_words(&key, size, sub_word);
-                // SAFETY: the test runs only where the probe says so.
-                let keys = if has_aesni() {
-                    unsafe { RoundKeys::new(&key, size) }
-                } else {
-                    return;
-                };
-                assert_eq!(keys.enc, want, "{size:?} key {i}");
-                let rounds = size.rounds();
-                assert_eq!(keys.dec[..4], want[4 * rounds..4 * rounds + 4]);
-                assert_eq!(keys.dec[4 * rounds..4 * rounds + 4], want[..4]);
-                assert_eq!(keys.dec[4 * rounds + 4..], want[4 * rounds + 4..]);
-            }
-        }
+    if !matches!(chosen.kernel(), super::Kernel::AesNi | super::Kernel::Vaes) {
+        return;
     }
-
-    /// The questions are put in terms of the set in force, and each
-    /// wider one asks for everything the narrower one does.
-    #[test]
-    fn the_questions_nest() {
-        let in_force = features::get();
-        assert_eq!(has_aesni(), AESNI.is_subset(in_force));
-        assert_eq!(has_vaes256(), VAES256.is_subset(in_force));
-        assert!(AESNI.is_subset(AESNI_AVX));
-        assert!(AESNI_AVX.is_subset(VAES256));
+    for (len, size) in [
+        (16, KeySize::Aes128),
+        (24, KeySize::Aes192),
+        (32, KeySize::Aes256),
+    ] {
+        for i in 0..100u32 {
+            let key: std::vec::Vec<u8> = (0..len)
+                .map(|j| (i.wrapping_mul(97).wrapping_add(j * 31)) as u8)
+                .collect();
+            let want = expand_words(&key, size, sub_word);
+            // SAFETY: the list chose a row whose features include the
+            // AES instructions and SSSE3, which the schedule uses.
+            let keys = unsafe { RoundKeys::new(&key, size) };
+            assert_eq!(keys.enc, want, "{size:?} key {i}");
+            let rounds = size.rounds();
+            assert_eq!(keys.dec[..4], want[4 * rounds..4 * rounds + 4]);
+            assert_eq!(keys.dec[4 * rounds..4 * rounds + 4], want[..4]);
+            assert_eq!(keys.dec[4 * rounds + 4..], want[4 * rounds + 4..]);
+        }
     }
 }

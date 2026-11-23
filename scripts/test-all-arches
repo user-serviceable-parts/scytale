@@ -31,21 +31,13 @@ export QEMU_CPU
 # emulated processor would add nothing there. The vector length is the
 # exception: it is a property of the silicon rather than of a bit set,
 # the vector code sizes itself to whatever it finds, and `max` is 128
-# bits. So the dispatch check, the inventory and the tests that
-# compare each kernel with the portable code, runs at the other
-# widths; the suite itself runs once, at 128.
+# bits. So the kernel tests, which run every kernel against the
+# portable code, run at the other widths; the suite itself runs once,
+# at 128.
 RISCV_CONFIGS="
 max,vlen=256
 max,vlen=512
 "
-
-# What `max` has, of the extensions any backend needs. The standard
-# library cannot say on RISC-V, so without this the inventory test
-# could only print what the probes found; with it the test holds them
-# to it. A QEMU_CPU given by hand is a different processor, so it
-# gets no list.
-RISCV_FEATURES="v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb \
-zvbb zvbc zvkb zvkg"
 
 # This runs from a checkout, so the vectors are there, and a suite
 # that cannot find them is to fail rather than skip.
@@ -65,9 +57,6 @@ run_target() {
     echo "==> $target"
     if [ "$target" = "$host" ]; then
         cargo test --release --workspace
-        cargo test --release -p scytale --lib -- \
-            features::tests::alone vectors::alone \
-            --ignored --test-threads=1
         return
     fi
     if ! command -v cross >/dev/null 2>&1; then
@@ -80,32 +69,42 @@ run_target() {
     fi
     # The check against the vendored vectors is left out under
     # emulation: it is hours through qemu on one machine, and CI
-    # does it, spread over jobs. To take one share of it here:
-    #   SCYTALE_SHARD=i/n cross test -p scytale-acvp \
-    #       --no-default-features --target "$target"
+    # does it, spread over jobs. To run some suites of it here:
+    #   cross test -p scytale-acvp --no-default-features \
+    #       --target "$target" --test vendored -- vendored::sha2_
+    cross test --workspace --exclude scytale-acvp --target "$target" \
+        -- --skip kernels::
+    # The output is kept for the check below; sh has no pipefail, so
+    # cargo's status is carried out of the pipe in a file.
+    log=$(mktemp)
+    status=$(mktemp)
+    { cross test -p scytale --lib --target "$target" kernels:: \
+        -- --nocapture; echo $? > "$status"; } | tee "$log"
+    failed=$(cat "$status")
+    # Under the emulator's `max`, every RISC-V kernel must run, as CI
+    # holds it to. Only RISC-V is given QEMU_CPU (see Cross.toml); the
+    # other targets run on the image's own default processor.
+    missing=no
     if [ "$target" = riscv64gc-unknown-linux-gnu ] \
-        && [ -z "$QEMU_SWEEP" ]; then
-        export SCYTALE_CPU_FEATURES="$RISCV_FEATURES"
+        && [ "$QEMU_CPU" = max ] && grep -q ' not run' "$log"; then
+        missing=yes
     fi
-    # Under the emulator's `max`, every kernel of the architecture
-    # must run; the inventory fails on one that cannot, as CI does.
-    if [ "$QEMU_CPU" = max ]; then
-        export SCYTALE_EXPECT_ALL=1
+    rm -f "$log" "$status"
+    if [ "$failed" != 0 ]; then
+        exit "$failed"
     fi
-    cross test --workspace --exclude scytale-acvp --target "$target"
-    cross test -p scytale --lib --target "$target" -- \
-        features::tests::alone vectors::alone \
-        --ignored --test-threads=1
+    if [ "$missing" = yes ]; then
+        echo "a kernel did not run under max" >&2
+        exit 1
+    fi
     if [ "$target" = riscv64gc-unknown-linux-gnu ] \
         && [ -z "$QEMU_SWEEP" ]; then
         for cpu in $RISCV_CONFIGS; do
             echo "==> $target QEMU_CPU=$cpu"
             QEMU_CPU=$cpu cross test -p scytale --lib \
-                --target "$target" -- vectors::inventory agree
+                --target "$target" kernels::
         done
-        unset SCYTALE_CPU_FEATURES
     fi
-    unset SCYTALE_EXPECT_ALL
 }
 
 if [ $# -gt 0 ]; then

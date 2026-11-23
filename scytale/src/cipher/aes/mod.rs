@@ -35,11 +35,7 @@ pub(crate) mod x86_64;
 use core::fmt;
 
 use crate::cipher::BlockCipher;
-#[cfg(target_arch = "aarch64")]
-use crate::features::aarch64::Feature as A;
-#[cfg(target_arch = "riscv64")]
-use crate::features::riscv64::Feature as R;
-use crate::features::{self, Dispatcher, Feature, Features};
+use crate::features::{self, Dispatcher, Features};
 use crate::{BlockType, Key, KeyType};
 
 /// AES block size in bytes.
@@ -141,42 +137,102 @@ pub(crate) enum Kernel {
     Bitsliced,
 }
 
-/// The scalar AES instructions, both directions.
-#[cfg(target_arch = "riscv64")]
-pub(crate) const ZKN: Features = features::riscv(&[R::Zkne, R::Zknd]);
-/// The vector AES instructions on registers of a block or more.
-#[cfg(target_arch = "riscv64")]
-pub(crate) const ZVKNED: Features = features::riscv(&[R::V, R::Zvkned]);
-/// The vector byte reverse `vrev8.v`, from Zvkb (which Zvbb
-/// includes); the counter loop uses it and the cipher does not.
-#[cfg(target_arch = "riscv64")]
-pub(crate) const VREV8: Features = features::riscv(&[R::V, R::Zvkb]);
-/// The ARMv8 AES instructions.
-#[cfg(target_arch = "aarch64")]
-pub(crate) const ARMV8: Features = features::arm(&[A::Aes]);
-/// Nothing the processor reports; the program's word that nothing
-/// untrusted shares its caches.
-pub(crate) const ISOLATED: Features = Features::of(&[Feature::Isolated]);
+features::kernels! {
+    enum Kernel;
 
-/// The kernels, best first, each with what it needs; the first whose
-/// needs are in force is the one a new key gets. The hardware comes
-/// first, fastest first; then the table-driven code, which only
-/// [`Feature::Isolated`] admits; then the constant-time portable
-/// code, which needs nothing, so the search always ends.
-pub(crate) const KERNELS: &[(Kernel, Features)] = &[
-    #[cfg(target_arch = "x86_64")]
-    (Kernel::Vaes, x86_64::VAES256),
-    #[cfg(target_arch = "x86_64")]
-    (Kernel::AesNi, x86_64::AESNI),
-    #[cfg(target_arch = "aarch64")]
-    (Kernel::Armv8, ARMV8),
-    #[cfg(target_arch = "riscv64")]
-    (Kernel::Zvkned, ZVKNED),
-    #[cfg(target_arch = "riscv64")]
-    (Kernel::Zkn, ZKN),
-    (Kernel::Tables, ISOLATED),
-    (Kernel::Bitsliced, Features::new()),
-];
+    /// The kernels, best first; the first whose needs are in force is
+    /// the one a new key gets. The hardware comes first, fastest
+    /// first; then the table-driven code, which only
+    /// [`Feature::Isolated`] admits; then the constant-time portable
+    /// code, which needs nothing.
+    ///
+    /// AES-NI's key expansion shuffles with `pshufb` (SSSE3); its
+    /// loops are the legacy SSE encodings, so it needs no AVX. VAES
+    /// runs two blocks to a 256-bit register (AVX2, with AVX for the
+    /// operating system keeping those registers) and finishes its
+    /// tails with the AES-NI loops.
+    pub(crate) const KERNELS for aes tested by tests::kernel = [
+        #[cfg(target_arch = "x86_64")]
+        Vaes => (x86_64: Aes, Ssse3, Avx, Avx2, Vaes),
+        #[cfg(target_arch = "x86_64")]
+        AesNi => (x86_64: Aes, Ssse3),
+        #[cfg(target_arch = "aarch64")]
+        Armv8 => (aarch64: Aes),
+        #[cfg(target_arch = "riscv64")]
+        Zvkned => (riscv64: V, Zvkned),
+        #[cfg(target_arch = "riscv64")]
+        Zkn => (riscv64: Zkne, Zknd),
+        Tables => (isolated),
+        Bitsliced => (),
+    ];
+
+    /// AEGIS-128L's kernels, named as AES's are since each is built
+    /// on that kernel's round. Only the encryption round is used, so
+    /// the scalar RISC-V kernel needs Zkne alone.
+    pub(crate) const AEGIS128L for aegis128l
+        tested by crate::aead::aegis::aegis128l::tests::kernel = [
+        #[cfg(target_arch = "x86_64")]
+        AesNi => (x86_64: Aes, Ssse3),
+        #[cfg(target_arch = "aarch64")]
+        Armv8 => (aarch64: Aes),
+        #[cfg(target_arch = "riscv64")]
+        Zvkned => (riscv64: V, Zvkned),
+        #[cfg(target_arch = "riscv64")]
+        Zkn => (riscv64: Zkne),
+        Tables => (isolated),
+        Bitsliced => (),
+    ];
+
+    /// AEGIS-256's kernels, as AEGIS-128L's.
+    pub(crate) const AEGIS256 for aegis256
+        tested by crate::aead::aegis::aegis256::tests::kernel = [
+        #[cfg(target_arch = "x86_64")]
+        AesNi => (x86_64: Aes, Ssse3),
+        #[cfg(target_arch = "aarch64")]
+        Armv8 => (aarch64: Aes),
+        #[cfg(target_arch = "riscv64")]
+        Zvkned => (riscv64: V, Zvkned),
+        #[cfg(target_arch = "riscv64")]
+        Zkn => (riscv64: Zkne),
+        Tables => (isolated),
+        Bitsliced => (),
+    ];
+
+    /// AEGIS-128X's kernels: AEGIS-128L's, and VAES on x86-64, whose
+    /// lanes are its own.
+    pub(crate) const AEGIS128X for aegis128x
+        tested by crate::aead::aegis::aegis128x::tests::kernel = [
+        #[cfg(target_arch = "x86_64")]
+        Vaes => (x86_64: Aes, Ssse3, Avx, Avx2, Vaes),
+        #[cfg(target_arch = "x86_64")]
+        AesNi => (x86_64: Aes, Ssse3),
+        #[cfg(target_arch = "aarch64")]
+        Armv8 => (aarch64: Aes),
+        #[cfg(target_arch = "riscv64")]
+        Zvkned => (riscv64: V, Zvkned),
+        #[cfg(target_arch = "riscv64")]
+        Zkn => (riscv64: Zkne),
+        Tables => (isolated),
+        Bitsliced => (),
+    ];
+
+    /// AEGIS-256X's kernels, as AEGIS-128X's.
+    pub(crate) const AEGIS256X for aegis256x
+        tested by crate::aead::aegis::aegis256x::tests::kernel = [
+        #[cfg(target_arch = "x86_64")]
+        Vaes => (x86_64: Aes, Ssse3, Avx, Avx2, Vaes),
+        #[cfg(target_arch = "x86_64")]
+        AesNi => (x86_64: Aes, Ssse3),
+        #[cfg(target_arch = "aarch64")]
+        Armv8 => (aarch64: Aes),
+        #[cfg(target_arch = "riscv64")]
+        Zvkned => (riscv64: V, Zvkned),
+        #[cfg(target_arch = "riscv64")]
+        Zkn => (riscv64: Zkne),
+        Tables => (isolated),
+        Bitsliced => (),
+    ];
+}
 
 /// What the list publishes: the needs, without the names.
 const PROFILES: [Features; KERNELS.len()] = features::profiles_of(KERNELS);
@@ -247,8 +303,6 @@ impl<const K: usize> Aes<K> {
     ///
     /// A width other than 16, 24 or 32 is refused when the type is
     /// instantiated, at compile time.
-    // Each hardware constructor checks the features itself, which is
-    // one atomic load; there is nothing here to be unsafe about.
     pub(crate) fn new(key: &[u8; K]) -> Self {
         const {
             assert!(
@@ -257,58 +311,37 @@ impl<const K: usize> Aes<K> {
             )
         };
         let inner = {
-            match features::select(KERNELS) {
+            let built = match features::choose(KERNELS) {
                 #[cfg(target_arch = "x86_64")]
-                Some(Kernel::Vaes) => Inner::Vaes(x86_64::vaes::Aes::new(key)),
+                Some(c) if c.kernel() == Kernel::Vaes => {
+                    x86_64::vaes::Aes::new(key, c).map(Inner::Vaes)
+                }
                 #[cfg(target_arch = "x86_64")]
-                Some(Kernel::AesNi) => {
-                    Inner::AesNi(x86_64::aesni::Aes::new(key))
+                Some(c) if c.kernel() == Kernel::AesNi => {
+                    x86_64::aesni::Aes::new(key, c).map(Inner::AesNi)
                 }
                 #[cfg(target_arch = "aarch64")]
-                Some(Kernel::Armv8) => {
-                    Inner::Armv8(aarch64::armv8::Aes::new(key))
+                Some(c) if c.kernel() == Kernel::Armv8 => {
+                    aarch64::armv8::Aes::new(key, c).map(Inner::Armv8)
                 }
                 #[cfg(target_arch = "riscv64")]
-                Some(Kernel::Zvkned) => {
-                    Inner::Zvkned(riscv64::zvkned::Aes::new(key))
+                Some(c) if c.kernel() == Kernel::Zvkned => {
+                    riscv64::zvkned::Aes::new(key, c).map(Inner::Zvkned)
                 }
                 #[cfg(target_arch = "riscv64")]
-                Some(Kernel::Zkn) => Inner::Zkn(riscv64::zkn::Aes::new(key)),
-                Some(Kernel::Tables) => {
-                    Inner::Tables(portable::ttable::Aes::new(key))
+                Some(c) if c.kernel() == Kernel::Zkn => {
+                    riscv64::zkn::Aes::new(key, c).map(Inner::Zkn)
                 }
-                _ => Inner::Bitsliced(portable::bitsliced::Aes::new(key)),
-            }
+                Some(c) if c.kernel() == Kernel::Tables => {
+                    Some(Inner::Tables(portable::ttable::Aes::new(key)))
+                }
+                _ => None,
+            };
+            built.unwrap_or_else(|| {
+                Inner::Bitsliced(portable::bitsliced::Aes::new(key))
+            })
         };
         Aes(inner)
-    }
-
-    /// Expands `key` for `kernel` alone, or `None` where the set in
-    /// force does not allow it. The vector suites and the cross-checks
-    /// reach each kernel this way, through the same type that
-    /// dispatches to it.
-    #[cfg(test)]
-    pub(crate) fn with_kernel(key: &[u8; K], kernel: Kernel) -> Option<Self> {
-        if !features::available(KERNELS, kernel) {
-            return None;
-        }
-        let inner = match kernel {
-            #[cfg(target_arch = "x86_64")]
-            Kernel::Vaes => Inner::Vaes(x86_64::vaes::Aes::new(key)),
-            #[cfg(target_arch = "x86_64")]
-            Kernel::AesNi => Inner::AesNi(x86_64::aesni::Aes::new(key)),
-            #[cfg(target_arch = "aarch64")]
-            Kernel::Armv8 => Inner::Armv8(aarch64::armv8::Aes::new(key)),
-            #[cfg(target_arch = "riscv64")]
-            Kernel::Zvkned => Inner::Zvkned(riscv64::zvkned::Aes::new(key)),
-            #[cfg(target_arch = "riscv64")]
-            Kernel::Zkn => Inner::Zkn(riscv64::zkn::Aes::new(key)),
-            Kernel::Tables => Inner::Tables(portable::ttable::Aes::new(key)),
-            Kernel::Bitsliced => {
-                Inner::Bitsliced(portable::bitsliced::Aes::new(key))
-            }
-        };
-        Some(Aes(inner))
     }
 
     /// Which kernel this key was expanded for.
@@ -563,7 +596,6 @@ width!(
 mod tests {
 
     use super::*;
-    use crate::cipher::OneBlock;
     use zeroize::ZeroizeOnDrop;
 
     /// Compiles only if every implementation wipes its key on drop.
@@ -614,59 +646,114 @@ mod tests {
 
     #[test]
     fn picks_the_first_kernel_whose_needs_are_met() {
-        let built = Aes::<16>::new(&[0; 16]).kernel();
-        features::dispatches(KERNELS, Aes128::profiles(), built);
+        let built = features::build_alone(|| {
+            let built = Aes::<16>::new(&[0; 16]).kernel();
+            features::dispatches(KERNELS, Aes128::profiles(), built);
+            built
+        });
         assert_eq!(Aes256::profiles(), Aes128::profiles());
         assert_eq!(KERNELS.last(), Some(&(Kernel::Bitsliced, Features::new())));
         // Tables are never detected, so never chosen unasked.
         assert_ne!(built, Kernel::Tables);
     }
 
-    /// Every kernel this processor can build agrees with the
-    /// constant-time portable code, at every key width, both
-    /// directions, a block at a time and in bulk: every tail width
-    /// the widest loop has, with and without full groups before it.
-    /// The kernels this processor cannot build are reported rather
-    /// than passed over in silence; the inventory audits those skips.
-    #[test]
-    fn every_kernel_agrees_with_the_portable_code() {
-        agrees_with_the_portable_code::<16>();
-        agrees_with_the_portable_code::<24>();
-        agrees_with_the_portable_code::<32>();
+    /// AES at every key width under one kernel, built through the
+    /// public types: the FIPS 197 examples, and agreement with the
+    /// portable code both directions, a block at a time and in bulk,
+    /// at every tail width the widest loop has, with and without full
+    /// groups before it.
+    pub(crate) fn kernel(under: &features::Under) {
+        // The round counts, on the kernel the row chooses.
+        assert_eq!(under.build(|| Aes::<16>::new(&[0; 16])).rounds(), 10);
+        assert_eq!(under.build(|| Aes::<24>::new(&[0; 24])).rounds(), 12);
+        assert_eq!(under.build(|| Aes::<32>::new(&[0; 32])).rounds(), 14);
+        let chosen = under.build(|| features::choose(KERNELS)).expect("listed");
+        #[cfg(target_arch = "x86_64")]
+        x86_64::schedule_is_standard(chosen);
+        #[cfg(target_arch = "aarch64")]
+        aarch64::armv8::schedule_is_standard(chosen);
+        let _ = chosen;
+        fips197(under);
+        agrees::<Aes128, 16>(under);
+        agrees::<Aes192, 24>(under);
+        agrees::<Aes256, 32>(under);
     }
 
-    fn agrees_with_the_portable_code<const K: usize>() {
+    /// FIPS 197 appendix C, at each width.
+    fn fips197(under: &features::Under) {
+        let plain: [u8; 16] = core::array::from_fn(|i| (i * 0x11) as u8);
+        let key: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let cases: [(&[u8], [u8; 16]); 3] = [
+            (
+                &key[..16],
+                [
+                    0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30, 0xd8, 0xcd,
+                    0xb7, 0x80, 0x70, 0xb4, 0xc5, 0x5a,
+                ],
+            ),
+            (
+                &key[..24],
+                [
+                    0xdd, 0xa9, 0x7c, 0xa4, 0x86, 0x4c, 0xdf, 0xe0, 0x6e, 0xaf,
+                    0x70, 0xa0, 0xec, 0x0d, 0x71, 0x91,
+                ],
+            ),
+            (
+                &key[..32],
+                [
+                    0x8e, 0xa2, 0xb7, 0xca, 0x51, 0x67, 0x45, 0xbf, 0xea, 0xfc,
+                    0x49, 0x90, 0x4b, 0x49, 0x60, 0x89,
+                ],
+            ),
+        ];
+        for (key, want) in cases {
+            let mut block = [plain];
+            match key.len() {
+                16 => run::<Aes128, 16>(under, key, &mut block),
+                24 => run::<Aes192, 24>(under, key, &mut block),
+                _ => run::<Aes256, 32>(under, key, &mut block),
+            }
+            assert_eq!(block[0], want, "AES-{}", key.len() * 8);
+        }
+
+        fn run<C, const K: usize>(
+            under: &features::Under,
+            key: &[u8],
+            blocks: &mut [[u8; 16]],
+        ) where
+            C: BlockCipher<Block = [u8; BLOCK_SIZE], Key = Key<[u8; K]>>,
+        {
+            let key = Key::from(<[u8; K]>::try_from(key).expect("width"));
+            let aes = under.build(|| C::new(&key));
+            aes.encrypt(blocks);
+            let mut back = blocks.to_vec();
+            aes.decrypt(&mut back);
+            assert_eq!(back[0], core::array::from_fn(|i| (i * 0x11) as u8));
+        }
+    }
+
+    /// One width under one kernel against the bitsliced code.
+    fn agrees<C, const K: usize>(under: &features::Under)
+    where
+        C: BlockCipher<Block = [u8; BLOCK_SIZE], Key = Key<[u8; K]>>,
+    {
         // Past the widest loop's group, so its tails are all here.
         const MAX: usize = 41;
-        let key: [u8; K] = core::array::from_fn(|i| (i * 37 + K) as u8);
-        let reference = Aes::<K>::with_kernel(&key, Kernel::Bitsliced)
-            .expect("the portable code runs anywhere");
+        let key = Key::from(core::array::from_fn(|i| (i * 37 + K) as u8));
+        let aes = under.build(|| C::new(&key));
+        let reference = features::build_portable(|| C::new(&key));
         let mut data = [[0u8; BLOCK_SIZE]; MAX];
         for (i, b) in data.as_flattened_mut().iter_mut().enumerate() {
             *b = (i * 13 + K) as u8;
         }
-        for &(kernel, _) in KERNELS {
-            let Some(aes) = Aes::<K>::with_kernel(&key, kernel) else {
-                std::eprintln!("{kernel:?} not available; skipping");
-                continue;
-            };
-            assert_eq!(aes.rounds(), reference.rounds(), "{kernel:?}");
-            for nblocks in 0..=MAX {
-                let mut got = data;
-                let mut want = data;
-                reference.encrypt_blocks(&mut want[..nblocks]);
-                aes.encrypt_blocks(&mut got[..nblocks]);
-                assert_eq!(got, want, "{kernel:?} encrypt {K} {nblocks}");
-                aes.decrypt_blocks(&mut got[..nblocks]);
-                assert_eq!(got, data, "{kernel:?} decrypt {K} {nblocks}");
-            }
-            let mut block = [7u8; BLOCK_SIZE];
-            let mut want = block;
-            reference.encrypt_one(&mut want);
-            aes.encrypt_one(&mut block);
-            assert_eq!(block, want, "{kernel:?} one block");
-            aes.decrypt_one(&mut block);
-            assert_eq!(block, [7u8; BLOCK_SIZE], "{kernel:?} one block back");
+        for nblocks in 0..=MAX {
+            let mut got = data;
+            let mut want = data;
+            reference.encrypt(&mut want[..nblocks]);
+            aes.encrypt(&mut got[..nblocks]);
+            assert_eq!(got, want, "encrypt {K} {nblocks}");
+            aes.decrypt(&mut got[..nblocks]);
+            assert_eq!(got, data, "decrypt {K} {nblocks}");
         }
     }
 

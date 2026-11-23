@@ -20,7 +20,7 @@ use super::super::portable::{
 };
 #[cfg(test)]
 use super::super::variant;
-use crate::features;
+use crate::features::Chosen;
 
 // Named for the vector suites, which drive each engine in turn; the
 // dispatching types reach it directly.
@@ -37,14 +37,8 @@ pub type Sha384 = Engine64<Zknh, variant::Sha384>;
 #[cfg(test)]
 pub type Sha512 = Engine64<Zknh, variant::Sha512>;
 
-/// Whether the Zknh instructions are available.
-pub(crate) fn has_zknh() -> bool {
-    // The same row in both lists; either list answers.
-    features::allows(super::super::KERNELS32, super::super::Kernel::Zknh)
-}
-
 /// The sigma functions as Zknh instructions.
-// No public constructor: a value exists only by way of `probe`.
+// No public constructor: a value exists only by way of `of`.
 #[derive(Clone, Copy)]
 pub struct Zknh(());
 
@@ -105,8 +99,8 @@ impl Functions64 for Zknh {
 }
 
 impl Compress32 for Zknh {
-    fn probe() -> Option<Self> {
-        has_zknh().then_some(Zknh(()))
+    fn of(chosen: Chosen<super::super::Kernel>) -> Option<Self> {
+        (chosen.kernel() == super::super::Kernel::Zknh).then_some(Zknh(()))
     }
 
     fn compress(self, state: &mut [u32; 8], blocks: &[[u8; 64]]) {
@@ -115,47 +109,11 @@ impl Compress32 for Zknh {
 }
 
 impl Compress64 for Zknh {
-    fn probe() -> Option<Self> {
-        has_zknh().then_some(Zknh(()))
+    fn of(chosen: Chosen<super::super::Kernel>) -> Option<Self> {
+        (chosen.kernel() == super::super::Kernel::Zknh).then_some(Zknh(()))
     }
 
     fn compress(self, state: &mut [u64; 8], blocks: &[[u8; 128]]) {
         compress512::<Zknh>(state, blocks)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::hash::sha2::tests::check_known_answers;
-
-    #[test]
-    fn known_answers() {
-        if has_zknh() {
-            check_known_answers(
-                || Sha224::try_new().expect("supported"),
-                || Sha256::try_new().expect("supported"),
-                || Sha384::try_new().expect("supported"),
-                || Sha512::try_new().expect("supported"),
-            );
-        }
-    }
-
-    #[test]
-    fn probes_agree_with_constructors() {
-        assert_eq!(Sha256::try_new().is_ok(), has_zknh());
-        assert_eq!(Sha512::try_new().is_ok(), has_zknh());
-    }
-
-    /// Zknh covers both families at once, and comes with the scalar
-    /// set rather than with any vector one.
-    #[test]
-    fn the_scalar_sigmas_come_with_the_scalar_set() {
-        use crate::arch::riscv64::{detected_from, profile};
-        use crate::hash::sha2::ZKNH;
-
-        assert!(ZKNH.is_subset(detected_from(profile::ZKN, 0)));
-        assert!(!ZKNH.is_subset(detected_from(profile::ZVKNG, 16)));
-        assert!(!ZKNH.is_subset(detected_from(profile::RVA23, 16)));
     }
 }

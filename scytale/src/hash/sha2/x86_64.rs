@@ -15,9 +15,8 @@
 
 #![allow(unsafe_code)]
 
+use crate::features::Chosen;
 use zeroize::Zeroize;
-
-use crate::features;
 
 use super::engine::{Compress32, Compress64};
 #[cfg(test)]
@@ -42,28 +41,21 @@ pub type Sha384 = Engine64<Avx2, variant::Sha384>;
 #[cfg(test)]
 pub type Sha512 = Engine64<Avx2, variant::Sha512>;
 
-/// Whether the processor reports SHA-NI (CPUID leaf 7, EBX bit 29).
-/// Every such processor also has the SSSE3 and SSE4.1 shuffles the
-/// code uses.
-pub(crate) fn has_sha() -> bool {
-    features::allows(super::KERNELS32, super::Kernel::ShaNi)
-}
-
 /// The compression function via SHA-NI.
-// No public constructor: a value exists only by way of `probe`.
+// No public constructor: a value exists only by way of `of`.
 #[derive(Clone, Copy)]
 pub struct ShaNi(());
 
 impl super::engine::Sealed for ShaNi {}
 
 impl Compress32 for ShaNi {
-    fn probe() -> Option<Self> {
-        has_sha().then_some(ShaNi(()))
+    fn of(chosen: Chosen<super::Kernel>) -> Option<Self> {
+        (chosen.kernel() == super::Kernel::ShaNi).then_some(ShaNi(()))
     }
 
     fn compress(self, state: &mut [u32; 8], blocks: &[[u8; 64]]) {
-        // SAFETY: `self` was minted by `probe`, which confirmed the
-        // instructions.
+        // SAFETY: `self` was minted by `of`, from the kernel list's
+        // choice, which only a row whose features were in force gets.
         unsafe {
             if !blocks.is_empty() {
                 compress(state, blocks.as_ptr().cast(), blocks.len());
@@ -240,29 +232,24 @@ unsafe fn compress(state: &mut [u32; 8], data: *const u8, count: usize) {
     }
 }
 
-/// Whether the features in force allow the AVX2 SHA-512 kernel.
-pub(crate) fn has_avx2() -> bool {
-    features::allows(super::KERNELS64, super::Kernel::Avx2)
-}
-
 /// The SHA-512 compression function with an AVX2 message schedule.
-// No public constructor: a value exists only by way of `probe`.
+// No public constructor: a value exists only by way of `of`.
 #[derive(Clone, Copy)]
 pub struct Avx2(());
 
 impl super::engine::Sealed for Avx2 {}
 
 impl Compress64 for Avx2 {
-    fn probe() -> Option<Self> {
-        has_avx2().then_some(Avx2(()))
+    fn of(chosen: Chosen<super::Kernel>) -> Option<Self> {
+        (chosen.kernel() == super::Kernel::Avx2).then_some(Avx2(()))
     }
 
     fn compress(self, state: &mut [u64; 8], blocks: &[[u8; 128]]) {
         if blocks.is_empty() {
             return;
         }
-        // SAFETY: `self` was minted by `probe`, which confirmed the
-        // instructions.
+        // SAFETY: `self` was minted by `of`, from the kernel list's
+        // choice, which only a row whose features were in force gets.
         unsafe { compress512(state, blocks.as_ptr().cast(), blocks.len()) }
     }
 }
@@ -561,81 +548,4 @@ unsafe fn compress512(state: &mut [u64; 8], data: *const u8, count: usize) {
     // The schedule is the message, and the state is the hash so far.
     frame.wk.zeroize();
     frame.state.zeroize();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::Error;
-    use crate::hash::sha2::portable;
-    use crate::hash::sha2::tests::check_known_answers;
-
-    #[test]
-    fn known_answers() {
-        if !has_sha() {
-            return;
-        }
-        type Sha384 = portable::Sha384;
-        type Sha512 = portable::Sha512;
-        check_known_answers(
-            || Sha224::try_new().expect("supported"),
-            || Sha256::try_new().expect("supported"),
-            || Sha384::try_new().expect("supported"),
-            || Sha512::try_new().expect("supported"),
-        );
-    }
-
-    #[test]
-    fn probe_agrees_with_constructor() {
-        assert_eq!(Sha256::try_new().is_ok(), has_sha());
-        if !has_sha() {
-            assert_eq!(Sha256::try_new().err(), Some(Error::NotSupported));
-        }
-    }
-
-    #[test]
-    fn avx2_known_answers() {
-        if !has_avx2() {
-            return;
-        }
-        type Sha224 = portable::Sha224;
-        type Sha256 = portable::Sha256;
-        check_known_answers(
-            || Sha224::try_new().expect("supported"),
-            || Sha256::try_new().expect("supported"),
-            || Sha384::try_new().expect("supported"),
-            || Sha512::try_new().expect("supported"),
-        );
-    }
-
-    #[test]
-    fn avx2_probe_agrees_with_constructor() {
-        assert_eq!(Sha512::try_new().is_ok(), has_avx2());
-        if !has_avx2() {
-            assert_eq!(Sha512::try_new().err(), Some(Error::NotSupported));
-        }
-    }
-
-    /// Every block count from one to nine through one call, against
-    /// the portable code, so that the loop, and the state it carries
-    /// from block to block, are tested and not only a single block.
-    #[test]
-    fn avx2_matches_portable_over_many_blocks() {
-        if !has_avx2() {
-            return;
-        }
-        let mut blocks = [[0u8; 128]; 9];
-        for (i, b) in blocks.iter_mut().flatten().enumerate() {
-            *b = (i as u8).wrapping_mul(167).wrapping_add(13);
-        }
-        use crate::hash::sha2::engine::Variant64;
-        let avx2 = Avx2::probe().expect("supported");
-        for n in 1..=blocks.len() {
-            let mut ours = variant::Sha512::IV;
-            let mut theirs = ours;
-            avx2.compress(&mut ours, &blocks[..n]);
-            Compress64::compress(portable::Compress, &mut theirs, &blocks[..n]);
-            assert_eq!(ours, theirs, "{n} blocks");
-        }
-    }
 }

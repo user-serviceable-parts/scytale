@@ -7,6 +7,7 @@
 //! tag that must be refused.
 
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{
     Error, hex, hex_value, int, key_of, text, unknown_test_type,
 };
@@ -17,24 +18,30 @@ use scytale::mac::Mac;
 use scytale::mac::cmac::Cmac;
 use serde_json::{Value, json};
 
-pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    _rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        let generate = match text(group, "direction")? {
-            "gen" => true,
-            "ver" => false,
-            other => return Err(Error::new(format!("direction {other}"))),
-        };
-        let mac_len = int(group, "macLen")? as usize / 8;
-        match text(group, "testType")? {
-            "AFT" => answer_tests(group, |t| {
-                let key = hex(t, "key")?;
-                aes_width!(key, C => {
-                    let mac = Cmac::<C>::new(&key_of::<C>(&key)?);
-                    aft(mac, t, generate, mac_len)
-                })
-            }),
-            _ => Err(unknown_test_type(group)),
-        }
+        builder.try_build(|| {
+            let generate = match text(group, "direction")? {
+                "gen" => true,
+                "ver" => false,
+                other => return Err(Error::new(format!("direction {other}"))),
+            };
+            let mac_len = int(group, "macLen")? as usize / 8;
+            match text(group, "testType")? {
+                "AFT" => answer_tests(group, |t| {
+                    let key = hex(t, "key")?;
+                    aes_width!(key, C => {
+                        let mac = Cmac::<C>::new(&key_of::<C>(&key)?);
+                        aft(mac, t, generate, mac_len)
+                    })
+                }),
+                _ => Err(unknown_test_type(group)),
+            }
+        })
     })
 }
 

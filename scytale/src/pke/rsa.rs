@@ -102,6 +102,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::Error;
 use crate::Random;
 use crate::hash::Hash;
+use crate::math::Choice;
 use crate::math::rsa::{Private, Public, mgf1_xor};
 
 pub use crate::math::rsa::{
@@ -200,6 +201,7 @@ pub struct PrivateKeyRef<'a> {
 pub struct PublicKey {
     words: [u64; PUBLIC_WORDS],
     bits: usize,
+    choice: Choice,
 }
 
 /// A decryption key that owns its words, with the public half in
@@ -208,6 +210,7 @@ pub struct PublicKey {
 pub struct PrivateKey {
     words: [u64; PRIVATE_WORDS],
     bits: usize,
+    choice: Choice,
 }
 
 impl crate::features::sealed::Sealed for PublicKey {}
@@ -269,7 +272,7 @@ impl<'a> PublicKeyRef<'a> {
     /// a key are [`Error::InvalidPublicKey`].
     pub fn new(storage: &'a [u64]) -> Result<Self, Error> {
         Ok(PublicKeyRef {
-            raw: Public::new(storage)?,
+            raw: Public::new(storage, Choice::bignum())?,
         })
     }
 
@@ -430,7 +433,8 @@ impl<'a> PrivateKeyRef<'a> {
         storage: &mut [u64],
         scratch: &mut [u64],
     ) -> Result<usize, Error> {
-        Private::fill_crt(n, e, d, p, q, dp, dq, qinv, storage, scratch)
+        let choice = Choice::bignum();
+        Private::fill_crt(choice, n, e, d, p, q, dp, dq, qinv, storage, scratch)
     }
 
     /// Lays out a key from its DER PKCS#8 `PrivateKeyInfo`, as
@@ -440,7 +444,7 @@ impl<'a> PrivateKeyRef<'a> {
         storage: &mut [u64],
         scratch: &mut [u64],
     ) -> Result<usize, Error> {
-        Private::fill_from_pkcs8(der, false, storage, scratch)
+        Private::fill_from_pkcs8(Choice::bignum(), der, false, storage, scratch)
     }
 
     /// Lays out a key from the bare PKCS#1 `RSAPrivateKey`, as
@@ -450,7 +454,7 @@ impl<'a> PrivateKeyRef<'a> {
         storage: &mut [u64],
         scratch: &mut [u64],
     ) -> Result<usize, Error> {
-        Private::fill_from_pkcs1(der, storage, scratch)
+        Private::fill_from_pkcs1(Choice::bignum(), der, storage, scratch)
     }
 
     /// Lays out a key from a PEM block, as
@@ -460,7 +464,7 @@ impl<'a> PrivateKeyRef<'a> {
         storage: &mut [u64],
         scratch: &mut [u64],
     ) -> Result<usize, Error> {
-        Private::fill_from_pem(pem, false, storage, scratch)
+        Private::fill_from_pem(Choice::bignum(), pem, false, storage, scratch)
     }
 
     /// Generates a fresh key of `bits` in `storage`, returning the
@@ -471,14 +475,14 @@ impl<'a> PrivateKeyRef<'a> {
         storage: &mut [u64],
         scratch: &mut [u64],
     ) -> Result<usize, Error> {
-        Private::generate(rng, bits, storage, scratch)
+        Private::generate(Choice::bignum(), rng, bits, storage, scratch)
     }
 
     /// The view over words a `fill` laid out. Words that do not hold
     /// a key are [`Error::InvalidPrivateKey`].
     pub fn new(storage: &'a [u64]) -> Result<Self, Error> {
         Ok(PrivateKeyRef {
-            raw: Private::new(storage)?,
+            raw: Private::new(storage, Choice::bignum())?,
         })
     }
 
@@ -643,9 +647,10 @@ impl PublicKey {
         let mut key = PublicKey {
             words: [0; PUBLIC_WORDS],
             bits: 0,
+            choice: Choice::bignum(),
         };
         fill(&mut key.words)?;
-        key.bits = Public::new(&key.words)?.bits();
+        key.bits = Public::new(&key.words, key.choice)?.bits();
         Ok(key)
     }
 
@@ -653,7 +658,7 @@ impl PublicKey {
     /// by this type, so they hold a key of the bits it remembers.
     fn view(&self) -> PublicKeyRef<'_> {
         PublicKeyRef {
-            raw: Public::over(&self.words, self.bits),
+            raw: Public::over(&self.words, self.bits, self.choice),
         }
     }
 
@@ -800,17 +805,20 @@ impl PublicKey {
 
 impl PrivateKey {
     /// The key laid out by `fill` in a fresh array, with the scratch
-    /// the checks need.
-    fn filled(
-        fill: impl FnOnce(&mut [u64], &mut [u64]) -> Result<usize, Error>,
-    ) -> Result<Self, Error> {
+    /// the checks need and the arithmetic the key will keep, so
+    /// that the checks run what the key will.
+    fn filled<F>(fill: F) -> Result<Self, Error>
+    where
+        F: FnOnce(Choice, &mut [u64], &mut [u64]) -> Result<usize, Error>,
+    {
         let mut key = PrivateKey {
             words: [0; PRIVATE_WORDS],
             bits: 0,
+            choice: Choice::bignum(),
         };
         let mut scratch = Scratch::new();
-        fill(&mut key.words, &mut scratch.0)?;
-        key.bits = Private::new(&key.words)?.public().bits();
+        fill(key.choice, &mut key.words, &mut scratch.0)?;
+        key.bits = Private::new(&key.words, key.choice)?.public().bits();
         Ok(key)
     }
 
@@ -818,7 +826,7 @@ impl PrivateKey {
     /// by this type, so they hold a key of the bits it remembers.
     fn view(&self) -> PrivateKeyRef<'_> {
         PrivateKeyRef {
-            raw: Private::over(&self.words, self.bits),
+            raw: Private::over(&self.words, self.bits, self.choice),
         }
     }
 
@@ -829,7 +837,7 @@ impl PrivateKey {
     /// [`try_new_crt`](PrivateKey::try_new_crt) instead, which
     /// decrypts three times faster.
     pub fn try_new(n: &[u8], e: &[u8], d: &[u8]) -> Result<Self, Error> {
-        Self::filled(|words, _| PrivateKeyRef::fill(n, e, d, words))
+        Self::filled(|_, words, _| PrivateKeyRef::fill(n, e, d, words))
     }
 
     /// A decryption key with its Chinese remainder pieces, in the
@@ -853,8 +861,10 @@ impl PrivateKey {
         dq: &[u8],
         qinv: &[u8],
     ) -> Result<Self, Error> {
-        Self::filled(|words, scratch| {
-            PrivateKeyRef::fill_crt(n, e, d, p, q, dp, dq, qinv, words, scratch)
+        Self::filled(|choice, words, scratch| {
+            Private::fill_crt(
+                choice, n, e, d, p, q, dp, dq, qinv, words, scratch,
+            )
         })
     }
 
@@ -872,8 +882,8 @@ impl PrivateKey {
         rng: &mut R,
         bits: usize,
     ) -> Result<Self, Error> {
-        Self::filled(|words, scratch| {
-            PrivateKeyRef::generate(rng, bits, words, scratch)
+        Self::filled(|choice, words, scratch| {
+            Private::generate(choice, rng, bits, words, scratch)
         })
     }
 
@@ -890,8 +900,8 @@ impl PrivateKey {
     /// [`Error::UnsupportedVersion`], and anything else wrong with
     /// the bytes [`Error::InvalidEncoding`].
     pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
-        Self::filled(|words, scratch| {
-            PrivateKeyRef::fill_from_der(der, words, scratch)
+        Self::filled(|choice, words, scratch| {
+            Private::fill_from_pkcs8(choice, der, false, words, scratch)
         })
     }
 
@@ -899,8 +909,8 @@ impl PrivateKey {
     /// 8017 A.1.2), the form under `RSA PRIVATE KEY`, which is what
     /// the `PrivateKeyInfo` wraps.
     pub fn try_from_pkcs1(der: &[u8]) -> Result<Self, Error> {
-        Self::filled(|words, scratch| {
-            PrivateKeyRef::fill_from_pkcs1(der, words, scratch)
+        Self::filled(|choice, words, scratch| {
+            Private::fill_from_pkcs1(choice, der, words, scratch)
         })
     }
 
@@ -910,8 +920,8 @@ impl PrivateKey {
     /// anything else that is not exactly one well-formed block, an
     /// encrypted key included, is [`Error::InvalidEncoding`].
     pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
-        Self::filled(|words, scratch| {
-            PrivateKeyRef::fill_from_pem(pem, words, scratch)
+        Self::filled(|choice, words, scratch| {
+            Private::fill_from_pem(choice, pem, false, words, scratch)
         })
     }
 
@@ -920,6 +930,7 @@ impl PrivateKey {
         let mut public = PublicKey {
             words: [0; PUBLIC_WORDS],
             bits: self.bits,
+            choice: self.choice,
         };
         let used = public_words(self.bits);
         public.words[..used].copy_from_slice(&self.words[..used]);

@@ -73,25 +73,10 @@ use self::riscv64 as arch;
 use self::x86_64 as arch;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::features::Features;
+use crate::features::{self, Features};
 
 /// Which carry-less multiply a hash runs on, named for the
-/// instructions.
-///
-/// There is no portable row: the portable multiply is what the
-/// arithmetic falls back to when no row is met, and a value of an
-/// architecture's `Multiply` is the proof that its instructions are
-/// there, so there is nothing for a row needing nothing to mint.
-// An architecture with no multiply written out has an empty list,
-// which only the inventory reads.
-#[cfg_attr(
-    not(any(
-        target_arch = "aarch64",
-        target_arch = "riscv64",
-        target_arch = "x86_64"
-    )),
-    allow(dead_code)
-)]
+/// instructions, or the portable multiply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kernel {
     /// PCLMULQDQ.
@@ -109,44 +94,38 @@ pub(crate) enum Kernel {
     /// A scalar carry-less multiply, from Zbc or Zbkc.
     #[cfg(target_arch = "riscv64")]
     Zbc,
+    /// Plain Rust, on any processor.
+    Portable,
 }
 
-/// Every multiply, best first, each with what it needs. One may
-/// appear twice, under two sets that each suffice.
-#[cfg_attr(
-    not(any(
-        target_arch = "aarch64",
-        target_arch = "riscv64",
-        target_arch = "x86_64"
-    )),
-    allow(dead_code)
-)]
-pub(crate) const KERNELS: &[(Kernel, Features)] = &[
-    #[cfg(target_arch = "x86_64")]
-    (Kernel::Pclmul, x86_64::PCLMUL),
-    #[cfg(target_arch = "aarch64")]
-    (Kernel::Pmull, aarch64::PMULL),
-    #[cfg(target_arch = "riscv64")]
-    (Kernel::Zvkg, riscv64::ZVKG),
-    #[cfg(target_arch = "riscv64")]
-    (Kernel::Zvbc, riscv64::ZVBC),
-    #[cfg(target_arch = "riscv64")]
-    (Kernel::Zbc, riscv64::ZBC),
-    #[cfg(target_arch = "riscv64")]
-    (Kernel::Zbc, riscv64::ZBKC),
-];
+features::kernels! {
+    enum Kernel;
 
-/// What the list publishes: each row's needs, and the portable
-/// multiply, which needs nothing, closing it.
-pub(crate) const PROFILES: [Features; KERNELS.len() + 1] = {
-    let mut profiles = [Features::new(); KERNELS.len() + 1];
-    let mut i = 0;
-    while i < KERNELS.len() {
-        profiles[i] = KERNELS[i].1;
-        i += 1;
-    }
-    profiles
-};
+    /// Every multiply, best first. PCLMULQDQ with SSSE3 for the byte
+    /// swaps. Vector GHASH whole (Zvkg), or the vector carry-less
+    /// multiply with Zvkb's byte reverse, on registers of a block or
+    /// more; the scalar carry-less multiply is Zbc's, and Zbkc's as
+    /// well, so that row is listed twice.
+    pub(crate) const KERNELS for ghash tested by tests::kernel = [
+        #[cfg(target_arch = "x86_64")]
+        Pclmul => (x86_64: Pclmulqdq, Ssse3),
+        #[cfg(target_arch = "aarch64")]
+        Pmull => (aarch64: Pmull),
+        #[cfg(target_arch = "riscv64")]
+        Zvkg => (riscv64: V, Zvkg),
+        #[cfg(target_arch = "riscv64")]
+        Zvbc => (riscv64: V, Zvbc, Zvkb),
+        #[cfg(target_arch = "riscv64")]
+        Zbc => (riscv64: Zbc),
+        #[cfg(target_arch = "riscv64")]
+        Zbc => (riscv64: Zbkc),
+        Portable => (),
+    ];
+}
+
+/// What the list publishes: its rows' needs.
+pub(crate) const PROFILES: [Features; KERNELS.len()] =
+    features::profiles_of(KERNELS);
 
 /// Divides the subkey by `x` and puts its halves in the order a
 /// vector register wants them, least significant first.
@@ -224,7 +203,9 @@ impl Ghash {
             y: [0, 0],
             block: [0; BLOCK],
             used: 0,
-            fast: arch::probe().map(|m| (m, m.prepare(&h))),
+            fast: features::choose(KERNELS)
+                .and_then(arch::Multiply::of)
+                .map(|m| (m, m.prepare(&h))),
             powers: None,
         }
     }
@@ -395,11 +376,10 @@ fn multiply(value: &mut [u64; 2], h: &[u64; 2]) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     extern crate std;
 
     use super::*;
-    use std::eprintln;
 
     /// A cheap spread of test values. The multiply is linear in each
     /// operand, so agreement on a varied sample is strong evidence.
@@ -414,12 +394,19 @@ mod tests {
         [next(), next()]
     }
 
-    #[test]
-    fn carryless_multiply_agrees_with_portable() {
-        let Some(fast) = arch::probe() else {
-            eprintln!("skipping: no carry-less multiply");
-            return;
-        };
+    /// GHASH under one multiply: the multiply against the portable
+    /// one on a spread of values and on the edges, and the hash at
+    /// every length whole and in pieces.
+    pub(crate) fn kernel(under: &features::Under) {
+        let chosen = under.build(|| features::choose(KERNELS));
+        if let Some(fast) = chosen.and_then(arch::Multiply::of) {
+            carryless_multiply_agrees_with_portable(fast);
+            carryless_multiply_handles_edges(fast);
+        }
+        hashes_agree_with_portable_at_every_length(under);
+    }
+
+    fn carryless_multiply_agrees_with_portable(fast: arch::Multiply) {
         for seed in 0..500 {
             let h = values(seed);
             let start = values(seed ^ 0x5555_5555);
@@ -451,8 +438,7 @@ mod tests {
     /// Whatever path the processor takes must agree with the portable
     /// one, at every length either side of a group boundary and
     /// whether the data arrives whole or in pieces.
-    #[test]
-    fn hashes_agree_with_portable_at_every_length() {
+    fn hashes_agree_with_portable_at_every_length(under: &features::Under) {
         let key: [u8; BLOCK] = core::array::from_fn(|i| (i as u8) | 1);
         let data: [u8; 40 * BLOCK] =
             core::array::from_fn(|i| (i * 7 + 3) as u8);
@@ -460,7 +446,7 @@ mod tests {
         for len in 0..data.len() {
             let want = portably(&key, &data[..len]);
 
-            let mut hash = Ghash::new(&key);
+            let mut hash = under.build(|| Ghash::new(&key));
             hash.update(&data[..len]);
             hash.pad();
             assert_eq!(hash.finish(), want, "one call, {len} bytes");
@@ -468,7 +454,7 @@ mod tests {
             // Pieces that do not line up with blocks or groups, so
             // the group path meets every kind of leftover.
             for piece in [1, 7, 16, 17, 63, 129] {
-                let mut hash = Ghash::new(&key);
+                let mut hash = under.build(|| Ghash::new(&key));
                 for part in data[..len].chunks(piece) {
                     hash.update(part);
                 }
@@ -484,12 +470,7 @@ mod tests {
 
     /// Zero and one are the cases the folding is most likely to get
     /// wrong, and the random sample is unlikely to hit them.
-    #[test]
-    fn carryless_multiply_handles_edges() {
-        let Some(fast) = arch::probe() else {
-            eprintln!("skipping: no carry-less multiply");
-            return;
-        };
+    fn carryless_multiply_handles_edges(fast: arch::Multiply) {
         // In this bit order the identity is the top bit of the first
         // word, and the all-ones value exercises every fold term.
         let edges = [[0, 0], [1 << 63, 0], [0, 1], [!0, !0]];

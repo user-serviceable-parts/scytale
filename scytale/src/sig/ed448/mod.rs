@@ -70,6 +70,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::der;
 use crate::hash::sha3::Shake256;
 use crate::hash::{Xof, XofReader};
+use crate::math::Portable;
 use crate::math::fe448::Fe;
 use crate::math::montgomery::Montgomery;
 use crate::math::uint::Uint;
@@ -1076,7 +1077,9 @@ const L: Uint<7> = Uint([
     0x3fffffffffffffff,
 ]);
 
-/// Arithmetic modulo the group order.
+/// Arithmetic modulo the group order. Nothing is written out for
+/// seven limbs on any processor, so its products are the portable
+/// kind and there is nothing to choose.
 static ORDER: Montgomery<7> = Montgomery::known(L);
 
 /// An integer modulo the group order, fully reduced.
@@ -1104,7 +1107,7 @@ impl Scalar {
     /// Any 448-bit integer, reduced: the product by one in plain form
     /// is a full reduction, whatever the input's size.
     fn reduce(bytes: &[u8; 56]) -> Scalar {
-        Scalar(ORDER.mulmod(&from_le(bytes), &Uint::one()))
+        Scalar(ORDER.mulmod(Portable, &from_le(bytes), &Uint::one()))
     }
 
     /// A 114-byte hash, little-endian, reduced: Horner's rule over
@@ -1112,13 +1115,15 @@ impl Scalar {
     /// running value scaled by 2^448 mod L between them.
     fn from_wide(bytes: &[u8; WIDE]) -> Scalar {
         let one = Uint::one();
-        let radix = ORDER.to_mont(&one);
+        let radix = ORDER.to_mont(Portable, &one);
         let piece = |range: core::ops::Range<usize>| {
-            ORDER.mulmod(&from_le(&bytes[range]), &one)
+            ORDER.mulmod(Portable, &from_le(&bytes[range]), &one)
         };
         let mut acc = piece(112..114);
         for range in [56..112, 0..56] {
-            acc = ORDER.mulmod(&acc, &radix).add_mod(&piece(range), &L);
+            acc = ORDER
+                .mulmod(Portable, &acc, &radix)
+                .add_mod(&piece(range), &L);
         }
         Scalar(acc)
     }
@@ -1146,7 +1151,7 @@ impl Scalar {
 
     /// `self * a + b`.
     fn mul_add(&self, a: &Scalar, b: &Scalar) -> Scalar {
-        Scalar(ORDER.mulmod(&self.0, &a.0).add_mod(&b.0, &L))
+        Scalar(ORDER.mulmod(Portable, &self.0, &a.0).add_mod(&b.0, &L))
     }
 }
 

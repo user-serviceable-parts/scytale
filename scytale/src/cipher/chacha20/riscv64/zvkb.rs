@@ -15,30 +15,20 @@
 
 #![allow(unsafe_code)]
 
-use super::super::{BLOCK_SIZE, Backend, Cipher, Sealed};
-use crate::features;
-
-/// ChaCha20 with the vector extension and Zvkb.
-pub type ChaCha20 = Cipher<Zvkb>;
-
-/// Whether the vector extension with a vector rotate is available,
-/// with registers of at least 128 bits. `vror.vi` belongs to Zvkb,
-/// the subset of Zvbb that the vector cryptography sets pull in, so
-/// either extension will do.
-pub(crate) fn has_zvkb() -> bool {
-    features::allows(super::super::KERNELS, super::super::Kernel::Zvkb)
-}
+use super::super::Kernel;
+use super::super::{BLOCK_SIZE, Backend, Sealed};
+use crate::features::Chosen;
 
 /// The keystream generator with the vector extension and Zvkb.
-// No public constructor: a value exists only by way of `probe`.
+// No public constructor: a value exists only by way of `of`.
 #[derive(Clone, Copy)]
 pub struct Zvkb(());
 
 impl Sealed for Zvkb {}
 
 impl Backend for Zvkb {
-    fn probe() -> Option<Self> {
-        has_zvkb().then_some(Zvkb(()))
+    fn of(chosen: Chosen<Kernel>) -> Option<Self> {
+        (chosen.kernel() == Kernel::Zvkb).then_some(Zvkb(()))
     }
 
     fn xor(
@@ -48,7 +38,7 @@ impl Backend for Zvkb {
         counter: u32,
         data: &mut [u8],
     ) {
-        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // SAFETY: `self` was minted by `of`, which confirmed the
         // instructions.
         unsafe { xor(key, nonce, counter, data) }
     }
@@ -192,44 +182,5 @@ unsafe fn group(state: &[u32; 16], data: *mut u8, blocks: usize) -> usize {
             options(nostack),
         );
         done
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::cipher::chacha20::tests::check_known_answers;
-
-    #[test]
-    fn known_answers() {
-        if has_zvkb() {
-            check_known_answers::<Zvkb>();
-        }
-    }
-
-    #[test]
-    fn probes_agree_with_constructors() {
-        assert_eq!(
-            ChaCha20::try_new(&crate::Key::from([0u8; 32])).is_ok(),
-            has_zvkb()
-        );
-    }
-
-    /// `vror.vi` is in Zvbb and in Zvkb, and a processor with the
-    /// vector cryptography set has the second without the first.
-    #[test]
-    fn the_rotate_comes_from_either_extension() {
-        use crate::arch::riscv64::{EXT_ZVBB, IMA_V, detected_from, profile};
-        use crate::cipher::chacha20::ZVKB;
-
-        let has = |ext, bytes| ZVKB.is_subset(detected_from(ext, bytes));
-        assert!(has(profile::ZVKN, 16));
-        assert!(has(profile::RVA23, 16));
-        // A vector unit with neither is not enough, and nor is the
-        // extension without one.
-        assert!(!has(IMA_V, 16));
-        assert!(!has(EXT_ZVBB, 16));
-        // Registers too narrow for four lanes of the state.
-        assert!(!has(profile::ZVKN, 8));
     }
 }

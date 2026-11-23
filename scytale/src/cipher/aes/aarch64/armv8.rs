@@ -30,10 +30,8 @@ use core::arch::aarch64::{
 };
 use core::fmt;
 
-use crate::cipher::BlockCipher;
 use crate::cipher::aes::{BLOCK_SIZE, KeySize, MAX_WORDS};
-use crate::features;
-use crate::{BlockType, Key, KeyType};
+use crate::features::Chosen;
 use zeroize::ZeroizeOnDrop;
 
 /// An AES cipher with an expanded key, using the ARMv8 instructions.
@@ -59,33 +57,17 @@ impl<const K: usize> fmt::Debug for Aes<K> {
     }
 }
 
-/// Whether the AES instructions are available.
-pub(crate) fn has_aes() -> bool {
-    features::allows(super::super::KERNELS, super::super::Kernel::Armv8)
-}
-
 impl<const K: usize> Aes<K> {
-    /// Whether this processor can run this implementation.
-    pub(crate) fn supported() -> bool {
-        has_aes()
-    }
-
-    /// Expands `key`.
-    ///
-    /// # Panics
-    /// If the processor lacks the AES instructions. The type is private and
-    /// is named only after the probe has confirmed them, so the
-    /// panic is unreachable from outside this crate.
-    pub(crate) fn new(key: &[u8; K]) -> Self {
-        const {
-            assert!(
-                K == 16 || K == 24 || K == 32,
-                "AES keys are 16, 24 or 32 bytes"
-            )
-        };
-        assert!(Self::supported(), "the AES instructions not available");
-        // SAFETY: just confirmed present.
-        unsafe { Self::new_unchecked(key) }
+    /// Expands `key` where the kernel list chose this kernel, and
+    /// `None` for any other choice.
+    pub(crate) fn new(
+        key: &[u8; K],
+        chosen: Chosen<super::super::Kernel>,
+    ) -> Option<Self> {
+        // SAFETY: only the list makes a `Chosen`, and only for a row
+        // whose features were in force; this is that row.
+        (chosen.kernel() == super::super::Kernel::Armv8)
+            .then(|| unsafe { Self::new_unchecked(key) })
     }
 
     /// Expands `key` without checking for the AES instructions.
@@ -135,36 +117,6 @@ impl<const K: usize> super::Keyed for Aes<K> {
 
     fn decryption(&self) -> Option<super::Schedule<'_>> {
         Some(super::Schedule::new(&self.dec, self.rounds()))
-    }
-}
-
-impl<const K: usize> BlockType for Aes<K> {
-    type Block = [u8; BLOCK_SIZE];
-
-    fn zero_block() -> Self::Block {
-        [0; BLOCK_SIZE]
-    }
-}
-
-impl<const K: usize> KeyType for Aes<K> {
-    type Key = Key<[u8; K]>;
-
-    fn zero_key() -> Self::Key {
-        Key::zeroed()
-    }
-}
-
-impl<const K: usize> BlockCipher for Aes<K> {
-    fn new(key: &Self::Key) -> Self {
-        Aes::new(key.array())
-    }
-
-    fn encrypt(&self, blocks: &mut [Self::Block]) {
-        Aes::encrypt_blocks(self, blocks)
-    }
-
-    fn decrypt(&self, blocks: &mut [Self::Block]) {
-        Aes::decrypt_blocks(self, blocks)
     }
 }
 
@@ -579,104 +531,33 @@ body!(
     ["v0", "v1", "v2", "v3", "v4", "v5", "v6"]
 );
 
+/// The schedule the instructions build is FIPS 197's, word for word,
+/// encryption and decryption both, where AES's list chose this row;
+/// run by AES's kernel test under that choice.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) fn schedule_is_standard(chosen: Chosen<crate::cipher::aes::Kernel>) {
     use crate::cipher::aes::expand_words;
     use crate::cipher::aes::portable::bitsliced::sub_word;
-
-    /// The schedule built in registers is the schedule FIPS 197
-    /// section 5.2 writes out word by word, at every width. The
-    /// inverse half is exercised by every decryption test; here only
-    /// its untransformed ends are checked, so that a wrong copy shows
-    /// up as itself.
-    #[test]
-    fn the_schedule_is_the_standard_one() {
-        if !has_aes() {
-            return;
+    if chosen.kernel() != crate::cipher::aes::Kernel::Armv8 {
+        return;
+    }
+    fn check<const K: usize>(size: KeySize) {
+        for i in 0..100u32 {
+            let key: [u8; K] = core::array::from_fn(|j| {
+                (i.wrapping_mul(97).wrapping_add(j as u32 * 31)) as u8
+            });
+            let want = expand_words(&key, size, sub_word);
+            // SAFETY: the list chose the row that needs the AES
+            // instructions.
+            let aes = unsafe { expand(&key, size) };
+            assert_eq!(aes.enc, want, "{size:?} key {i}");
+            let rounds = size.rounds();
+            assert_eq!(aes.dec[..4], want[4 * rounds..4 * rounds + 4]);
+            assert_eq!(aes.dec[4 * rounds..4 * rounds + 4], want[..4]);
+            assert_eq!(aes.dec[4 * rounds + 4..], want[4 * rounds + 4..]);
         }
-        fn check<const K: usize>(size: KeySize) {
-            for i in 0..100u32 {
-                let key: [u8; K] = core::array::from_fn(|j| {
-                    (i.wrapping_mul(97).wrapping_add(j as u32 * 31)) as u8
-                });
-                let want = expand_words(&key, size, sub_word);
-                // SAFETY: checked above.
-                let aes = unsafe { expand(&key, size) };
-                assert_eq!(aes.enc, want, "{size:?} key {i}");
-                let rounds = size.rounds();
-                assert_eq!(aes.dec[..4], want[4 * rounds..4 * rounds + 4]);
-                assert_eq!(aes.dec[4 * rounds..4 * rounds + 4], want[..4]);
-                assert_eq!(aes.dec[4 * rounds + 4..], want[4 * rounds + 4..]);
-            }
-        }
-        check::<16>(KeySize::Aes128);
-        check::<24>(KeySize::Aes192);
-        check::<32>(KeySize::Aes256);
     }
-
-    /// Returns the cipher, or `None` (skipping the test) without the
-    /// AES instructions.
-    fn aes<const K: usize>(key: &[u8; K]) -> Option<Aes<K>> {
-        Aes::<K>::supported().then(|| Aes::new(key))
-    }
-
-    fn unhex(s: &str) -> [u8; 32] {
-        let mut out = [0u8; 32];
-        for (i, pair) in s.as_bytes().chunks_exact(2).enumerate() {
-            let hex = core::str::from_utf8(pair).unwrap();
-            out[i] = u8::from_str_radix(hex, 16).unwrap();
-        }
-        out
-    }
-
-    fn check<const K: usize>(key: &str, plain: &str, cipher: &str) {
-        let key: [u8; K] = unhex(key)[..K].try_into().unwrap();
-        let plain: [u8; 16] = unhex(plain)[..16].try_into().unwrap();
-        let cipher: [u8; 16] = unhex(cipher)[..16].try_into().unwrap();
-        let Some(aes) = aes(&key) else { return };
-
-        let mut block = plain;
-        aes.encrypt_blocks(core::slice::from_mut(&mut block));
-        assert_eq!(block, cipher, "encrypt");
-        aes.decrypt_blocks(core::slice::from_mut(&mut block));
-        assert_eq!(block, plain, "decrypt");
-    }
-
-    // FIPS 197 Appendix C.
-    #[test]
-    fn fips197_aes128() {
-        check::<16>(
-            "000102030405060708090a0b0c0d0e0f",
-            "00112233445566778899aabbccddeeff",
-            "69c4e0d86a7b0430d8cdb78070b4c55a",
-        );
-    }
-
-    #[test]
-    fn fips197_aes192() {
-        check::<24>(
-            "000102030405060708090a0b0c0d0e0f1011121314151617",
-            "00112233445566778899aabbccddeeff",
-            "dda97ca4864cdfe06eaf70a0ec0d7191",
-        );
-    }
-
-    #[test]
-    fn fips197_aes256() {
-        check::<32>(
-            "000102030405060708090a0b0c0d0e0f\
-             101112131415161718191a1b1c1d1e1f",
-            "00112233445566778899aabbccddeeff",
-            "8ea2b7ca516745bfeafc49904b496089",
-        );
-    }
-
-    #[test]
-    fn round_counts() {
-        let Some(a) = aes(&[0; 16]) else { return };
-        assert_eq!(a.rounds(), 10);
-        assert_eq!(aes(&[0; 24]).unwrap().rounds(), 12);
-        assert_eq!(aes(&[0; 32]).unwrap().rounds(), 14);
-    }
+    check::<16>(KeySize::Aes128);
+    check::<24>(KeySize::Aes192);
+    check::<32>(KeySize::Aes256);
 }

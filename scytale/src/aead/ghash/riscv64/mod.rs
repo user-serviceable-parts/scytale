@@ -28,8 +28,10 @@
 
 #![allow(unsafe_code)]
 
-use super::{KERNELS, Kernel};
-use crate::features::{self, Features, riscv64::Feature as R};
+#[cfg(test)]
+use super::KERNELS;
+use super::Kernel;
+use crate::features::Chosen;
 
 mod zbc;
 mod zvbc;
@@ -38,24 +40,6 @@ pub(crate) mod zvkg;
 /// The field polynomial `x^128 + x^7 + x^2 + x + 1` without its
 /// leading term, written in GHASH's reversed bit order.
 const POLYNOMIAL: u64 = 0xc200_0000_0000_0000;
-
-/// The whole field multiplication in one instruction, on registers of
-/// a block or more.
-pub(crate) const ZVKG: Features = features::riscv(&[R::V, R::Zvkg]);
-/// The vector carry-less multiply, with the byte reverse from Zvkb
-/// (which Zvbb includes), on registers of a block or more.
-pub(super) const ZVBC: Features = features::riscv(&[R::V, R::Zvbc, R::Zvkb]);
-/// The scalar carry-less multiply, from Zbc.
-pub(super) const ZBC: Features = features::riscv(&[R::Zbc]);
-/// The same instruction, from Zbkc; the scalar cryptography profile
-/// brings this one and not Zbc.
-pub(super) const ZBKC: Features = features::riscv(&[R::Zbkc]);
-
-/// The best multiply the features in force allow, or none. The rows
-/// are the family's, in [`KERNELS`].
-fn choice() -> Option<Kernel> {
-    features::select(KERNELS)
-}
 
 /// The best multiply the extensions in `ext` offer, on a processor
 /// whose vector registers are `bytes` wide.
@@ -74,41 +58,55 @@ fn best_of(ext: u64, bytes: usize) -> Option<Kernel> {
 /// on it are safe; which backend answers is carried in the value, so
 /// there is no arm for "none".
 #[derive(Clone, Copy)]
-pub(crate) struct Multiply(Kernel);
+pub(crate) struct Multiply(Hw);
 
-/// The multiply, where the processor has one. Asked once.
-pub(crate) fn probe() -> Option<Multiply> {
-    choice().map(Multiply)
+/// The three multiplies, which a [`Multiply`] names. Apart from
+/// [`Kernel`] so that the portable row has no arm here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Hw {
+    Zvkg,
+    Zvbc,
+    Zbc,
 }
 
 impl Multiply {
+    /// The multiply, where the kernel list chose one.
+    pub(crate) fn of(chosen: Chosen<Kernel>) -> Option<Self> {
+        match chosen.kernel() {
+            Kernel::Zvkg => Some(Multiply(Hw::Zvkg)),
+            Kernel::Zvbc => Some(Multiply(Hw::Zvbc)),
+            Kernel::Zbc => Some(Multiply(Hw::Zbc)),
+            Kernel::Portable => None,
+        }
+    }
+
     /// How many blocks the group multiply takes at once.
     pub(crate) fn group(self) -> usize {
         match self.0 {
-            Kernel::Zvkg => zvkg::GROUP,
-            Kernel::Zvbc => zvbc::GROUP,
-            Kernel::Zbc => zbc::GROUP,
+            Hw::Zvkg => zvkg::GROUP,
+            Hw::Zvbc => zvbc::GROUP,
+            Hw::Zbc => zbc::GROUP,
         }
     }
 
     /// Prepares the subkey for [`Multiply::multiply`].
     pub(crate) fn prepare(self, h: &[u64; 2]) -> [u64; 2] {
         match self.0 {
-            Kernel::Zvkg => zvkg::prepare(h),
-            Kernel::Zvbc => zvbc::prepare(h),
-            Kernel::Zbc => zbc::prepare(h),
+            Hw::Zvkg => zvkg::prepare(h),
+            Hw::Zvbc => zvbc::prepare(h),
+            Hw::Zbc => zbc::prepare(h),
         }
     }
 
     /// Multiplies `value` by the prepared subkey `h`, in place.
     pub(crate) fn multiply(self, value: &mut [u64; 2], h: &[u64; 2]) {
-        // SAFETY: `self` was minted by `probe`, which confirmed the
-        // instructions of the backend it names.
+        // SAFETY: `self` was minted by `of`, from the list's choice of
+        // a row whose features were in force.
         unsafe {
             match self.0 {
-                Kernel::Zvkg => zvkg::multiply(value, h),
-                Kernel::Zvbc => zvbc::multiply(value, h),
-                Kernel::Zbc => zbc::multiply(value, h),
+                Hw::Zvkg => zvkg::multiply(value, h),
+                Hw::Zvbc => zvbc::multiply(value, h),
+                Hw::Zbc => zbc::multiply(value, h),
             }
         }
     }
@@ -131,9 +129,9 @@ impl Multiply {
         // SAFETY: as for `multiply`, and the length was just checked.
         unsafe {
             match self.0 {
-                Kernel::Zvkg => zvkg::multiply_group(value, powers, blocks),
-                Kernel::Zvbc => zvbc::multiply_group(value, powers, blocks),
-                Kernel::Zbc => zbc::multiply_group(value, powers, blocks),
+                Hw::Zvkg => zvkg::multiply_group(value, powers, blocks),
+                Hw::Zvbc => zvbc::multiply_group(value, powers, blocks),
+                Hw::Zbc => zbc::multiply_group(value, powers, blocks),
             }
         }
     }
@@ -177,136 +175,7 @@ fn finish(
 
 #[cfg(test)]
 mod tests {
-    extern crate std;
-
     use super::*;
-    use crate::aead::ghash::{BLOCK, MAX_GROUP, halve};
-    use std::eprintln;
-
-    /// A cheap spread of test values; the multiply is linear in each
-    /// operand, so agreement on a varied sample is strong evidence.
-    fn values(seed: u64) -> [u64; 2] {
-        let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
-        let mut next = || {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            x
-        };
-        [next(), next()]
-    }
-
-    /// Everything one backend has to offer, so that a test can drive
-    /// each of them rather than only the one this processor would
-    /// pick.
-    struct Backend {
-        name: &'static str,
-        choice: Kernel,
-        group: usize,
-        prepare: fn(&[u64; 2]) -> [u64; 2],
-        multiply: unsafe fn(&mut [u64; 2], &[u64; 2]),
-        multiply_group: unsafe fn(&mut [u64; 2], &[[u64; 2]; MAX_GROUP], &[u8]),
-    }
-
-    const BACKENDS: [Backend; 3] = [
-        Backend {
-            name: "zvkg",
-            choice: Kernel::Zvkg,
-            group: zvkg::GROUP,
-            prepare: zvkg::prepare,
-            multiply: zvkg::multiply,
-            multiply_group: zvkg::multiply_group,
-        },
-        Backend {
-            name: "zvbc",
-            choice: Kernel::Zvbc,
-            group: zvbc::GROUP,
-            prepare: zvbc::prepare,
-            multiply: zvbc::multiply,
-            multiply_group: zvbc::multiply_group,
-        },
-        Backend {
-            name: "zbc",
-            choice: Kernel::Zbc,
-            group: zbc::GROUP,
-            prepare: zbc::prepare,
-            multiply: zbc::multiply,
-            multiply_group: zbc::multiply_group,
-        },
-    ];
-
-    /// Whether this processor has `choice`, which is what decides
-    /// whether a test can run that backend's instructions at all.
-    fn here(choice: Kernel) -> bool {
-        features::allows(KERNELS, choice)
-    }
-
-    /// The portable multiply is the reference; every backend has to
-    /// agree with it, not just the one this processor chooses.
-    #[test]
-    #[allow(unsafe_code)]
-    fn every_backend_agrees_with_portable() {
-        for backend in &BACKENDS {
-            if !here(backend.choice) {
-                eprintln!("skipping: no {}", backend.name);
-                continue;
-            }
-            // Zero and one are what the folding is most likely to get
-            // wrong, and a random sample would not reach them.
-            let edges = [[0, 0], [1 << 63, 0], [0, 1], [!0, !0]];
-            let pairs = edges
-                .iter()
-                .flat_map(|&a| edges.iter().map(move |&b| (a, b)))
-                .chain((0..200).map(|s| (values(s ^ 0x5555_5555), values(s))));
-            for (start, h) in pairs {
-                let mut want = start;
-                super::super::multiply(&mut want, &h);
-                let mut got = start;
-                let scaled = (backend.prepare)(&h);
-                unsafe { (backend.multiply)(&mut got, &scaled) };
-                assert_eq!(got, want, "{}: {start:x?} * {h:x?}", backend.name);
-            }
-        }
-    }
-
-    /// A group multiply has to give what the same blocks give one at
-    /// a time.
-    #[test]
-    #[allow(unsafe_code)]
-    fn every_group_multiply_agrees_with_its_own_blocks() {
-        for backend in &BACKENDS {
-            if !here(backend.choice) || backend.group == 1 {
-                eprintln!("skipping: no {} group multiply", backend.name);
-                continue;
-            }
-            assert_eq!(backend.group, MAX_GROUP);
-            for seed in 0..50 {
-                let h = values(seed);
-                let scaled = (backend.prepare)(&h);
-                let mut powers = [[0u64; 2]; MAX_GROUP];
-                let mut power = [1u64 << 63, 0];
-                for slot in powers.iter_mut() {
-                    unsafe { (backend.multiply)(&mut power, &scaled) };
-                    *slot = (backend.prepare)(&power);
-                }
-
-                let blocks: [u8; MAX_GROUP * BLOCK] =
-                    core::array::from_fn(|i| (i as u64 ^ seed) as u8);
-                let start = values(seed ^ 0xaaaa_aaaa);
-
-                let mut want = start;
-                for block in blocks.chunks_exact(BLOCK) {
-                    want[0] ^= halve(&block[..8]);
-                    want[1] ^= halve(&block[8..]);
-                    super::super::multiply(&mut want, &h);
-                }
-
-                let mut got = start;
-                unsafe { (backend.multiply_group)(&mut got, &powers, &blocks) };
-                assert_eq!(got, want, "{}: seed {seed}", backend.name);
-            }
-        }
-    }
 
     /// Which backend each kind of real processor is given. The choice
     /// is a function of the extension bit set, so this is the whole of
@@ -320,8 +189,8 @@ mod tests {
         // that carry none.
         assert_eq!(best_of(profile::ZVKNG, 16), Some(Kernel::Zvkg));
         assert_eq!(best_of(profile::ZVKNC, 16), Some(Kernel::Zvbc));
-        assert_eq!(best_of(profile::ZVKN, 16), None);
-        assert_eq!(best_of(profile::RVA23, 16), None);
+        assert_eq!(best_of(profile::ZVKN, 16), Some(Kernel::Portable));
+        assert_eq!(best_of(profile::RVA23, 16), Some(Kernel::Portable));
 
         // Zkn has no vector unit and Zbkc with it, which is the whole
         // reason the scalar backend exists.
@@ -341,27 +210,9 @@ mod tests {
 
         // Registers too narrow for a 128-bit element group put the
         // vector backends out, and a vector profile has nothing else.
-        assert_eq!(best_of(profile::ZVKNG, 8), None);
-        assert_eq!(best_of(profile::ZVKNC, 8), None);
+        assert_eq!(best_of(profile::ZVKNG, 8), Some(Kernel::Portable));
+        assert_eq!(best_of(profile::ZVKNC, 8), Some(Kernel::Portable));
         // A processor with none of it has nothing.
-        assert_eq!(best_of(0, 0), None);
-    }
-
-    /// The dispatch has to pick a backend that is really there, and
-    /// report the group size of the one it picked.
-    #[test]
-    fn the_choice_is_one_the_processor_has() {
-        match choice() {
-            Some(chosen) => {
-                assert!(here(chosen));
-                let fast = probe().expect("a multiply");
-                let at = BACKENDS.iter().position(|b| b.choice == chosen);
-                assert_eq!(fast.group(), BACKENDS[at.unwrap()].group);
-                // Asking twice must give the same answer, now that
-                // the first call has cached it.
-                assert_eq!(choice(), Some(chosen));
-            }
-            None => assert!(probe().is_none()),
-        }
+        assert_eq!(best_of(0, 0), Some(Kernel::Portable));
     }
 }

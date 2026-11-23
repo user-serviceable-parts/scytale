@@ -19,6 +19,7 @@
 //! lays the counter block out and the server checks.
 
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{
     Error, hex, hex_value, int, key_of, opt_hex, text, unknown_test_type,
 };
@@ -26,17 +27,23 @@ use scytale::Random;
 use scytale::cipher::mode::Ctr;
 use serde_json::{Value, json};
 
-pub fn answer(doc: &Value, rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        let encrypt = match text(group, "direction")? {
-            "encrypt" => true,
-            "decrypt" => false,
-            other => return Err(Error::new(format!("direction {other}"))),
-        };
-        match text(group, "testType")? {
-            "AFT" => answer_tests(group, |t| aft(t, encrypt, rng)),
-            _ => Err(unknown_test_type(group)),
-        }
+        builder.try_build(|| {
+            let encrypt = match text(group, "direction")? {
+                "encrypt" => true,
+                "decrypt" => false,
+                other => return Err(Error::new(format!("direction {other}"))),
+            };
+            match text(group, "testType")? {
+                "AFT" => answer_tests(group, |t| aft(t, encrypt, rng)),
+                _ => Err(unknown_test_type(group)),
+            }
+        })
     })
 }
 
@@ -84,6 +91,7 @@ fn aft(t: &Value, encrypt: bool, rng: &mut dyn Random) -> Result<Value, Error> {
 #[cfg(test)]
 mod tests {
     use super::super::{find, fixed_rng};
+    use crate::profile::Builder;
     use crate::support::{hex, list};
     use serde_json::json;
 
@@ -91,7 +99,7 @@ mod tests {
     /// must carry an IV under which its ciphertext decrypts.
     #[test]
     fn encrypt_draws_an_iv() {
-        let mut rng = fixed_rng();
+        let mut rng = fixed_rng(&Builder::default()).unwrap();
         for suite in find("ACVP-AES-CTR") {
             let Some(doc) = super::super::vendored(suite) else {
                 continue;

@@ -80,11 +80,18 @@ sudo scripts/bench             # the same on a settled core, on Linux
 
 [BENCHMARKING.md](BENCHMARKING.md) is the guide to those last two.
 
-In the library's own test build, `SCYTALE_FEATURES` names the set of
-features in force, so `SCYTALE_FEATURES=none cargo test -p scytale
---lib` runs the suite with the hardware withheld: the portable kernels
-and every fallback, through the public types. It is for a developer
-after one kernel; CI tests each kernel once, as said below.
+Every kernel this processor can run is tested by `cargo test`, each
+once, through the public types: the kernel tests, `kernels::` in the
+library and `acvp_samples::` in `scytale-acvp`, print a line for each
+kernel saying whether it ran, and a kernel the processor lacks is
+reported as not run rather than passed. `SCYTALE_KERNELS` names the
+kernels to run, as those lines spell them, for a developer after one;
+CI runs the ones its runner lacks under an emulator, as said below.
+
+```sh
+cargo test -p scytale --lib kernels:: -- --nocapture
+SCYTALE_KERNELS="sha512/none" cargo test -p scytale --lib kernels::sha512
+```
 
 Each crate's README says what it is tested against. The Wycheproof
 and HPKE vectors are in `scytale/tests/vectors`, the ACVP vectors in
@@ -102,17 +109,18 @@ rustls-webpki at pinned releases and run their own test suites
 against these crates; the rustls one needs Go, a C compiler and `cpp`
 for BoGo. `scripts/test-openssl-interop` needs OpenSSL 3.
 
-Continuous integration covers the same ground on every push, and
-tests each kernel exactly once: every crate's tests and the vendored
-vectors natively on x86-64 and arm64 runners, under qemu's `max`
-processor for riscv64, and on 32-bit x86. A vector is answered by
-each kernel it tests and by no kernel twice. Older and newer
-processors of each architecture, the RVA22 and RVA23 profiles among
-them, are emulated for a dispatch check only: that the probes choose
-the right kernels there and that those kernels run. Then the library
-built for WebAssembly and for targets with no operating system, the
-style checks, the downstream suites, the interop, and the packaging
-of every crate.
+Continuous integration covers the same ground on every push, and tests
+each kernel exactly once: every crate's tests and the ACVP sample
+vectors natively on x86-64 and arm64 runners, then the kernels a
+runner lacks under an emulator that has them all, Intel SDE on x86-64
+and qemu's `max` on arm64; under qemu's `max` for riscv64; and on
+32-bit x86. A vector is answered by each kernel it tests and by no
+kernel twice. Older and newer processors of each architecture, the
+RVA22 and RVA23 profiles among them, are emulated for a dispatch check
+only: that the lists choose the right kernels there and that those
+kernels run. Then the library built for WebAssembly and for targets
+with no operating system, the style checks, the downstream suites, the
+interop, and the packaging of every crate.
 
 ## Security
 
