@@ -18,12 +18,12 @@
 //! The big-number arithmetic has instructions written out for some
 //! processors: the carry-chain products of [`limbs`] and
 //! [`montgomery`], and the vector table read of [`ec`]. Which of them
-//! an operation runs is chosen once, when it starts, and the
-//! arithmetic is then compiled once for each choice: it takes an
-//! [`Arith`], a value of no size whose type says what was chosen, so
-//! that every test of it inside the arithmetic is a constant and
-//! folds away. [`with_arith`] and [`ec::with_engine`] make the
-//! choice.
+//! a key runs is chosen once, when the key is made, and kept with it
+//! as a [`Choice`]. The arithmetic is compiled once for each choice:
+//! it takes an [`Arith`], a value of no size whose type says what
+//! was chosen, so that every test of it inside the arithmetic is a
+//! constant and folds away. [`with_arith`] and [`ec::with_engine`]
+//! turn the kept choice into that type, with one branch on it.
 
 pub(crate) mod ec;
 pub(crate) mod fe25519;
@@ -35,9 +35,9 @@ pub(crate) mod rsa;
 pub(crate) mod uint;
 
 /// What an operation's arithmetic may use: the proofs the lists
-/// handed out when it started, or none. Each kind answers the same
-/// way every time, by its type alone, so the compiler keeps only the
-/// code its answers reach.
+/// handed out when its key was made, or none. Each kind answers the
+/// same way every time, by its type alone, so the compiler keeps
+/// only the code its answers reach.
 pub(crate) trait Arith: Copy {
     /// The carry-chain products, where the list chose them.
     #[cfg(target_arch = "x86_64")]
@@ -123,20 +123,76 @@ impl Arith for WithBoth {
     }
 }
 
-/// Runs `$body` with `$a` bound to the [`Arith`] the big-number list
-/// [`limbs::KERNELS`] chooses, which it asks once, here; the body is
-/// compiled once for each kind. Given a choice already made, as
-/// `with_arith!(chosen, a => ...)`, it takes that one instead.
+/// The kinds of arithmetic a key may run, as the lists chose them
+/// when it was made. Each kind written out holds the proof its list
+/// handed out, so a key that has one may use it without asking
+/// again.
+#[derive(Clone, Copy)]
+pub(crate) enum Choice {
+    /// Nothing written out.
+    Portable,
+    /// The carry-chain products alone.
+    #[cfg(target_arch = "x86_64")]
+    Adx(limbs::x86_64::Adx),
+    /// The vector table read alone.
+    #[cfg(target_arch = "x86_64")]
+    Avx2(ec::x86_64::Avx2),
+    /// Both.
+    #[cfg(target_arch = "x86_64")]
+    Both(limbs::x86_64::Adx, ec::x86_64::Avx2),
+}
+
+impl Choice {
+    /// What the big-number list [`limbs::KERNELS`] chooses, asked
+    /// here: for a key whose arithmetic reads no table.
+    pub(crate) fn bignum() -> Self {
+        Self::of(crate::features::choose(limbs::KERNELS), None)
+    }
+
+    /// The kind the two lists' answers make together.
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn of(
+        adx: Option<crate::features::Chosen<limbs::Kernel>>,
+        avx2: Option<crate::features::Chosen<ec::Kernel>>,
+    ) -> Self {
+        let adx = adx.and_then(limbs::x86_64::Adx::of);
+        let avx2 = avx2.and_then(ec::x86_64::Avx2::of);
+        match (adx, avx2) {
+            (Some(x), Some(v)) => Choice::Both(x, v),
+            (Some(x), None) => Choice::Adx(x),
+            (None, Some(v)) => Choice::Avx2(v),
+            (None, None) => Choice::Portable,
+        }
+    }
+
+    /// Elsewhere every answer makes the one kind there is.
+    #[cfg(not(target_arch = "x86_64"))]
+    pub(crate) fn of(
+        _: Option<crate::features::Chosen<limbs::Kernel>>,
+        _: Option<crate::features::Chosen<ec::Kernel>>,
+    ) -> Self {
+        Choice::Portable
+    }
+
+    /// The carry-chain products, where the choice has them.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    pub(crate) fn adx(self) -> Option<limbs::x86_64::Adx> {
+        match self {
+            Choice::Adx(x) | Choice::Both(x, _) => Some(x),
+            Choice::Portable | Choice::Avx2(_) => None,
+        }
+    }
+}
+
+/// Runs `$body` with `$a` bound to the [`Arith`] a key's kept
+/// [`Choice`] names, as `with_arith!(choice, a => ...)`; the body is
+/// compiled once for each kind. Only the products matter here, so a
+/// choice with the table read too runs as the products alone.
 #[cfg(target_arch = "x86_64")]
 macro_rules! with_arith {
-    ($a:ident => $body:expr) => {
-        $crate::math::with_arith!(
-            $crate::features::choose($crate::math::limbs::KERNELS),
-            $a => $body
-        )
-    };
-    ($chosen:expr, $a:ident => $body:expr) => {
-        match ($chosen).and_then($crate::math::limbs::x86_64::Adx::of) {
+    ($choice:expr, $a:ident => $body:expr) => {
+        match ($choice).adx() {
             Some(adx) => {
                 let $a = $crate::math::WithAdx(adx);
                 $body
@@ -149,15 +205,11 @@ macro_rules! with_arith {
     };
 }
 
-/// Elsewhere there is nothing written out to choose.
+/// Elsewhere there is nothing written out to run.
 #[cfg(not(target_arch = "x86_64"))]
 macro_rules! with_arith {
-    ($a:ident => $body:expr) => {{
-        let $a = $crate::math::Portable;
-        $body
-    }};
-    ($chosen:expr, $a:ident => $body:expr) => {{
-        let _ = $chosen;
+    ($choice:expr, $a:ident => $body:expr) => {{
+        let _: $crate::math::Choice = $choice;
         let $a = $crate::math::Portable;
         $body
     }};

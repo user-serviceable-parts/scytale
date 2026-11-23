@@ -89,7 +89,9 @@ macro_rules! ecdh_curve {
             /// scalar when the private key was, so there is nothing
             /// left for this call to refuse.
             pub fn shared_secret(&self, public: &PublicKey) -> [u8; KEY_SIZE] {
-                crate::math::ec::with_engine!(&$constants, |e| {
+                // The operation is this key's, so it runs what this
+                // key chose, whatever the peer's key chose.
+                with_engine!(&$constants, self.public.choice, |e| {
                     let mut out = [0u8; KEY_SIZE];
                     self.secret.shared_secret(&e, &public.point, &mut out);
                     out

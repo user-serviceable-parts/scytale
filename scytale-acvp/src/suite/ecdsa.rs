@@ -17,6 +17,7 @@
 //! scheme is not offered, so those groups are skipped.
 
 use super::{answer_groups, answer_tests, skip};
+use crate::profile::Builder;
 use crate::support::{
     Error, Rng, hex, hex_value, opt_hex, opt_text, text, unknown_test_type,
 };
@@ -195,35 +196,50 @@ macro_rules! with_hash {
     };
 }
 
-pub fn answer(doc: &Value, rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
     match (text(doc, "algorithm")?, mode) {
         ("ECDSA", "keyGen") => answer_groups(doc, |group| {
-            aft(group)?;
-            with_curve!(group, C => key_gen::<C>(group, rng);
-                why => skip(group, why))
+            builder.try_build(|| {
+                aft(group)?;
+                with_curve!(group, C => key_gen::<C>(group, rng);
+                    why => skip(group, why))
+            })
         }),
         ("ECDSA", "keyVer") => answer_groups(doc, |group| {
-            aft(group)?;
-            with_curve!(group, C => key_ver::<C>(group);
-                why => skip(group, why))
+            builder.try_build(|| {
+                aft(group)?;
+                with_curve!(group, C => key_ver::<C>(group);
+                    why => skip(group, why))
+            })
         }),
         ("ECDSA", "sigVer") => answer_groups(doc, |group| {
-            aft(group)?;
-            with_curve!(group, C => with_hash!(group,
-                H => sig_ver::<C, H>(group);
-                why => skip(group, why)); why => skip(group, why))
+            builder.try_build(|| {
+                aft(group)?;
+                with_curve!(group, C => with_hash!(group,
+                    H => sig_ver::<C, H>(group);
+                    why => skip(group, why)); why => skip(group, why))
+            })
         }),
         (algorithm @ ("ECDSA" | "DetECDSA"), "sigGen") => {
             let exact = algorithm == "DetECDSA";
             answer_groups(doc, |group| {
-                aft(group)?;
-                if opt_text(group, "conformance") == Some("SP800-106") {
-                    return skip(group, "SP 800-106 hashing is not offered");
-                }
-                with_curve!(group, C => with_hash!(group,
-                    H => sig_gen::<C, H>(group, rng, exact);
-                    why => skip(group, why)); why => skip(group, why))
+                builder.try_build(|| {
+                    aft(group)?;
+                    if opt_text(group, "conformance") == Some("SP800-106") {
+                        return skip(
+                            group,
+                            "SP 800-106 hashing is not offered",
+                        );
+                    }
+                    with_curve!(group, C => with_hash!(group,
+                        H => sig_gen::<C, H>(group, rng, exact);
+                        why => skip(group, why)); why => skip(group, why))
+                })
             })
         }
         (algorithm, _) => {
@@ -427,7 +443,12 @@ mod tests {
         let Some(doc) = super::super::vendored(suite) else {
             return;
         };
-        let answered = answer(&doc, &mut fixed_rng()).unwrap();
+        let answered = answer(
+            &doc,
+            &mut fixed_rng(&Builder::default()).unwrap(),
+            &Builder::default(),
+        )
+        .unwrap();
         let mut cases = 0;
         for group in list(&answered, "testGroups").unwrap() {
             let stored = list(&doc, "testGroups")
@@ -465,7 +486,12 @@ mod tests {
             json!({ "tgId": 1, "testType": "AFT", "curve": "P-256",
                     "tests": [{ "tcId": 1 }] }),
         );
-        let answered = answer(&key_gen, &mut fixed_rng()).unwrap();
+        let answered = answer(
+            &key_gen,
+            &mut fixed_rng(&Builder::default()).unwrap(),
+            &Builder::default(),
+        )
+        .unwrap();
         let t = &answered["testGroups"][0]["tests"][0];
         let key = P256::private(&hex(t, "d").unwrap()).unwrap();
         assert_eq!(sec1(t, 32).unwrap().unwrap(), P256::public_of(&key));
@@ -476,7 +502,12 @@ mod tests {
                     "hashAlg": "SHA2-256",
                     "tests": [{ "tcId": 1, "message": "616263" }] }),
         );
-        let answered = answer(&sig_gen, &mut fixed_rng()).unwrap();
+        let answered = answer(
+            &sig_gen,
+            &mut fixed_rng(&Builder::default()).unwrap(),
+            &Builder::default(),
+        )
+        .unwrap();
         let g = &answered["testGroups"][0];
         let public = P256::public(&sec1(g, 32).unwrap().unwrap()).unwrap();
         let sig = signature(&g["tests"][0], 32).unwrap().unwrap();
@@ -492,7 +523,12 @@ mod tests {
         let Some(doc) = super::super::vendored(suite) else {
             return;
         };
-        let answered = answer(&doc, &mut fixed_rng()).unwrap();
+        let answered = answer(
+            &doc,
+            &mut fixed_rng(&Builder::default()).unwrap(),
+            &Builder::default(),
+        )
+        .unwrap();
         let group = &list(&answered, "testGroups").unwrap()[0];
         let stored = list(&doc, "testGroups")
             .unwrap()
@@ -525,7 +561,12 @@ mod tests {
         for group in prompt["testGroups"].as_array_mut().unwrap() {
             group.as_object_mut().unwrap().remove("d");
         }
-        let answered = answer(&prompt, &mut fixed_rng()).unwrap();
+        let answered = answer(
+            &prompt,
+            &mut fixed_rng(&Builder::default()).unwrap(),
+            &Builder::default(),
+        )
+        .unwrap();
         let group = &list(&answered, "testGroups").unwrap()[0];
         let find_group = |doc: &Value| {
             list(doc, "testGroups")

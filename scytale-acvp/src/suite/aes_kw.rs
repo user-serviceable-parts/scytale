@@ -7,29 +7,36 @@
 //! `testPassed` false.
 
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{Error, hex, hex_value, key_of, text, unknown_test_type};
 use scytale::Random;
 use scytale::cipher::mode::Kw;
 use serde_json::{Value, json};
 
-pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    _rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        let encrypt = match text(group, "direction")? {
-            "encrypt" => true,
-            "decrypt" => false,
-            other => return Err(Error::new(format!("direction {other}"))),
-        };
-        // The standard lets the wrapping be built on either direction
-        // of the cipher, and the suite exercises both.
-        let forward = match text(group, "kwCipher")? {
-            "cipher" => true,
-            "inverse" => false,
-            other => return Err(Error::new(format!("kwCipher {other}"))),
-        };
-        match text(group, "testType")? {
-            "AFT" => answer_tests(group, |t| aft(t, encrypt, forward)),
-            _ => Err(unknown_test_type(group)),
-        }
+        builder.try_build(|| {
+            let encrypt = match text(group, "direction")? {
+                "encrypt" => true,
+                "decrypt" => false,
+                other => return Err(Error::new(format!("direction {other}"))),
+            };
+            // The standard lets the wrapping be built on either direction
+            // of the cipher, and the suite exercises both.
+            let forward = match text(group, "kwCipher")? {
+                "cipher" => true,
+                "inverse" => false,
+                other => return Err(Error::new(format!("kwCipher {other}"))),
+            };
+            match text(group, "testType")? {
+                "AFT" => answer_tests(group, |t| aft(t, encrypt, forward)),
+                _ => Err(unknown_test_type(group)),
+            }
+        })
     })
 }
 

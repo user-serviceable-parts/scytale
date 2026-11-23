@@ -5,6 +5,7 @@
 //! with another label and seed.
 
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{Error, hex, hex_value, int, text, unknown_test_type};
 use scytale::hash::Hash;
 use scytale::hash::sha2::{Sha256, Sha384, Sha512};
@@ -15,23 +16,29 @@ use serde_json::{Value, json};
 /// The master secret's length, which TLS fixes.
 const MASTER_SECRET_LEN: usize = 48;
 
-pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    _rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        if text(group, "testType")? != "AFT" {
-            return Err(unknown_test_type(group));
-        }
-        if let Some(v) = group.get("tlsVersion").and_then(Value::as_str)
-            && v != "v1.2_ems"
-        {
-            return Err(Error::new(format!("tlsVersion {v}")));
-        }
-        let key_block_len = int(group, "keyBlockLength")? as usize / 8;
-        let alg = text(group, "hashAlg")?;
-        answer_tests(group, |t| match alg {
-            "SHA2-256" => case::<Sha256>(t, key_block_len),
-            "SHA2-384" => case::<Sha384>(t, key_block_len),
-            "SHA2-512" => case::<Sha512>(t, key_block_len),
-            other => Err(Error::new(format!("hashAlg {other}"))),
+        builder.try_build(|| {
+            if text(group, "testType")? != "AFT" {
+                return Err(unknown_test_type(group));
+            }
+            if let Some(v) = group.get("tlsVersion").and_then(Value::as_str)
+                && v != "v1.2_ems"
+            {
+                return Err(Error::new(format!("tlsVersion {v}")));
+            }
+            let key_block_len = int(group, "keyBlockLength")? as usize / 8;
+            let alg = text(group, "hashAlg")?;
+            answer_tests(group, |t| match alg {
+                "SHA2-256" => case::<Sha256>(t, key_block_len),
+                "SHA2-384" => case::<Sha384>(t, key_block_len),
+                "SHA2-512" => case::<Sha512>(t, key_block_len),
+                other => Err(Error::new(format!("hashAlg {other}"))),
+            })
         })
     })
 }

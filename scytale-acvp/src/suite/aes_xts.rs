@@ -16,6 +16,7 @@
 //! integer, as IEEE 1619 numbers its data units.
 
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{
     Error, hex, hex_value, int, key_of, opt_hex, opt_int, text,
     unknown_test_type,
@@ -24,26 +25,32 @@ use scytale::Random;
 use scytale::cipher::mode::Xts;
 use serde_json::{Value, json};
 
-pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    _rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        let encrypt = match text(group, "direction")? {
-            "encrypt" => true,
-            "decrypt" => false,
-            other => return Err(Error::new(format!("direction {other}"))),
-        };
-        let group_bits = opt_int(group, "payloadLen");
-        match text(group, "testType")? {
-            "AFT" => answer_tests(group, |t| {
-                let bits = match group_bits {
-                    Some(bits) => bits,
-                    None => int(t, "payloadLen")?,
-                } as usize;
-                let unit =
-                    opt_int(t, "dataUnitLen").map_or(bits, |u| u as usize);
-                aft(t, encrypt, bits, unit)
-            }),
-            _ => Err(unknown_test_type(group)),
-        }
+        builder.try_build(|| {
+            let encrypt = match text(group, "direction")? {
+                "encrypt" => true,
+                "decrypt" => false,
+                other => return Err(Error::new(format!("direction {other}"))),
+            };
+            let group_bits = opt_int(group, "payloadLen");
+            match text(group, "testType")? {
+                "AFT" => answer_tests(group, |t| {
+                    let bits = match group_bits {
+                        Some(bits) => bits,
+                        None => int(t, "payloadLen")?,
+                    } as usize;
+                    let unit =
+                        opt_int(t, "dataUnitLen").map_or(bits, |u| u as usize);
+                    aft(t, encrypt, bits, unit)
+                }),
+                _ => Err(unknown_test_type(group)),
+            }
+        })
     })
 }
 

@@ -333,25 +333,44 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - part: lms
-            filter: acvp_samples::lms
-          - part: slh-dsa signing
-            filter: acvp_samples::slh_dsa_siggen
-          - part: slh-dsa
-            filter: acvp_samples::slh_dsa --skip acvp_samples::slh_dsa_siggen
-          - part: ml-dsa, ml-kem
-            filter: acvp_samples::ml_dsa acvp_samples::ml_kem
-          - part: rsa, curves
+          - part: lms keygen
             filter: >-
-              acvp_samples::rsa acvp_samples::ecdsa acvp_samples::detecdsa
-              acvp_samples::eddsa acvp_samples::xecdh
+              --exact acvp_samples::lms_keygen_session_788050
+          - part: lms, sha2-384, sha2-512
+            filter: >-
+              --exact acvp_samples::lms_keygen acvp_samples::lms_siggen
+              acvp_samples::lms_siggen_session_788050
+              acvp_samples::lms_sigver
+              acvp_samples::lms_sigver_session_788050
+              acvp_samples::sha2_384 acvp_samples::sha2_512
+          - part: sha3-512, -384, -256
+            filter: >-
+              --exact acvp_samples::sha3_512 acvp_samples::sha3_384
+              acvp_samples::sha3_256
+          - part: sha3-224, sha2-224, kdf
+            filter: >-
+              --exact acvp_samples::sha3_224 acvp_samples::sha2_224
+              acvp_samples::kdf
+          - part: sha2-256, sha2-512/t, slh-dsa signing
+            filter: >-
+              --exact acvp_samples::sha2_256 acvp_samples::sha2_512_224
+              acvp_samples::sha2_512_256 acvp_samples::slh_dsa_siggen
           - part: the rest
             filter: >-
-              --skip acvp_samples::lms --skip acvp_samples::slh_dsa
-              --skip acvp_samples::ml_dsa --skip acvp_samples::ml_kem
-              --skip acvp_samples::rsa --skip acvp_samples::ecdsa
-              --skip acvp_samples::detecdsa --skip acvp_samples::eddsa
-              --skip acvp_samples::xecdh
+              --exact --skip acvp_samples::lms_keygen_session_788050
+              --skip acvp_samples::lms_keygen --skip
+              acvp_samples::lms_siggen --skip
+              acvp_samples::lms_siggen_session_788050 --skip
+              acvp_samples::lms_sigver --skip
+              acvp_samples::lms_sigver_session_788050 --skip
+              acvp_samples::sha2_384 --skip acvp_samples::sha2_512
+              --skip acvp_samples::sha3_512 --skip
+              acvp_samples::sha3_384 --skip acvp_samples::sha3_256
+              --skip acvp_samples::sha3_224 --skip
+              acvp_samples::sha2_224 --skip acvp_samples::kdf --skip
+              acvp_samples::sha2_256 --skip acvp_samples::sha2_512_224
+              --skip acvp_samples::sha2_512_256 --skip
+              acvp_samples::slh_dsa_siggen
     steps:
       - uses: actions/checkout@v7
 
@@ -416,7 +435,7 @@ jobs:
 
       - uses: actions/cache/save@v6
         # Saved once per key, by one job of those that share it.
-        if: ${{ matrix.part == 'lms' && steps.cache.outputs.cache-hit != 'true' }}
+        if: ${{ matrix.part == 'lms keygen' && steps.cache.outputs.cache-hit != 'true' }}
         with:
           path: |
             ~/.cargo/registry/index

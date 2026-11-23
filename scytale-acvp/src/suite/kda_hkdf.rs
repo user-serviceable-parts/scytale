@@ -12,6 +12,7 @@
 //! what the inputs derive.
 
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{
     Error, decode_hex, field, hex, hex_value, list, opt_hex, text,
     unknown_test_type,
@@ -44,61 +45,70 @@ macro_rules! with_hash {
     };
 }
 
-pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    _rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        let validate = match text(group, "testType")? {
-            "AFT" => false,
-            "VAL" => true,
-            _ => return Err(unknown_test_type(group)),
-        };
-        // A group is one flow or the other, named by its
-        // configuration; the multi-expansion one has no fixed-info
-        // pattern because each expansion carries its own.
-        match group.get("kdfConfiguration") {
-            Some(cfg) => {
-                if text(cfg, "fixedInfoPattern")? != "uPartyInfo||vPartyInfo||l"
-                {
-                    return Err(Error::new("fixedInfoPattern"));
-                }
-                if text(cfg, "fixedInfoEncoding")? != "concatenation" {
-                    return Err(Error::new("fixedInfoEncoding"));
-                }
-                let alg = text(cfg, "hmacAlg")?;
-                answer_tests(group, |t| {
-                    let dkm = with_hash!(alg, single(t))?;
-                    Ok(if validate {
-                        json!({ "testPassed": dkm == hex(t, "dkm")? })
-                    } else {
-                        json!({ "dkm": hex_value(&dkm) })
-                    })
-                })
-            }
-            None => {
-                let cfg = field(group, "kdfMultiExpansionConfiguration")?;
-                if text(cfg, "kdfType")? != "hkdf" {
-                    return Err(Error::new("kdfType"));
-                }
-                let alg = text(cfg, "hmacAlg")?;
-                answer_tests(group, |t| {
-                    let dkms = with_hash!(alg, multi(t))?;
-                    if validate {
-                        let mut want = Vec::new();
-                        for v in list(t, "dkms")? {
-                            want.push(
-                                v.as_str().and_then(decode_hex).ok_or_else(
-                                    || Error::new("dkms entry is not hex"),
-                                )?,
-                            );
-                        }
-                        Ok(json!({ "testPassed": dkms == want }))
-                    } else {
-                        let dkms: Vec<Value> =
-                            dkms.iter().map(|d| hex_value(d)).collect();
-                        Ok(json!({ "dkms": dkms }))
+        builder.try_build(|| {
+            let validate = match text(group, "testType")? {
+                "AFT" => false,
+                "VAL" => true,
+                _ => return Err(unknown_test_type(group)),
+            };
+            // A group is one flow or the other, named by its
+            // configuration; the multi-expansion one has no fixed-info
+            // pattern because each expansion carries its own.
+            match group.get("kdfConfiguration") {
+                Some(cfg) => {
+                    if text(cfg, "fixedInfoPattern")?
+                        != "uPartyInfo||vPartyInfo||l"
+                    {
+                        return Err(Error::new("fixedInfoPattern"));
                     }
-                })
+                    if text(cfg, "fixedInfoEncoding")? != "concatenation" {
+                        return Err(Error::new("fixedInfoEncoding"));
+                    }
+                    let alg = text(cfg, "hmacAlg")?;
+                    answer_tests(group, |t| {
+                        let dkm = with_hash!(alg, single(t))?;
+                        Ok(if validate {
+                            json!({ "testPassed": dkm == hex(t, "dkm")? })
+                        } else {
+                            json!({ "dkm": hex_value(&dkm) })
+                        })
+                    })
+                }
+                None => {
+                    let cfg = field(group, "kdfMultiExpansionConfiguration")?;
+                    if text(cfg, "kdfType")? != "hkdf" {
+                        return Err(Error::new("kdfType"));
+                    }
+                    let alg = text(cfg, "hmacAlg")?;
+                    answer_tests(group, |t| {
+                        let dkms = with_hash!(alg, multi(t))?;
+                        if validate {
+                            let mut want = Vec::new();
+                            for v in list(t, "dkms")? {
+                                want.push(
+                                    v.as_str()
+                                        .and_then(decode_hex)
+                                        .ok_or_else(|| {
+                                            Error::new("dkms entry is not hex")
+                                        })?,
+                                );
+                            }
+                            Ok(json!({ "testPassed": dkms == want }))
+                        } else {
+                            let dkms: Vec<Value> =
+                                dkms.iter().map(|d| hex_value(d)).collect();
+                            Ok(json!({ "dkms": dkms }))
+                        }
+                    })
+                }
             }
-        }
+        })
     })
 }
 

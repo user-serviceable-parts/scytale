@@ -14,6 +14,7 @@
 //! as extra keyGen coverage either.
 
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{Error, hex, hex_value, opt_hex, text, unknown_test_type};
 use scytale::Random;
 use scytale::kex::{x448, x25519};
@@ -35,12 +36,18 @@ const X448: Curve<{ x448::KEY_SIZE }> = Curve {
     function: x448::x448,
 };
 
-pub fn answer(doc: &Value, rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
-    answer_groups(doc, |group| match text(group, "curve")? {
-        "Curve25519" => answer_group(&X25519, mode, group, rng),
-        "Curve448" => answer_group(&X448, mode, group, rng),
-        curve => Err(Error::new(format!("no curve named {curve}"))),
+    answer_groups(doc, |group| {
+        builder.try_build(|| match text(group, "curve")? {
+            "Curve25519" => answer_group(&X25519, mode, group, rng),
+            "Curve448" => answer_group(&X448, mode, group, rng),
+            curve => Err(Error::new(format!("no curve named {curve}"))),
+        })
     })
 }
 
@@ -114,7 +121,12 @@ mod tests {
                 }],
             }],
         });
-        let answered = answer(&doc, &mut fixed_rng()).unwrap();
+        let answered = answer(
+            &doc,
+            &mut fixed_rng(&Builder::default()).unwrap(),
+            &Builder::default(),
+        )
+        .unwrap();
         let t = &answered["testGroups"][0]["tests"][0];
         let iut: [u8; 32] =
             key(&hex(t, "publicIut").unwrap(), "publicIut").unwrap();

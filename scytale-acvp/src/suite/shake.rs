@@ -4,45 +4,55 @@
 
 use super::sha::{Family, Message};
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{Error, hex_value, int, text, unknown_test_type};
 use scytale::Random;
 use scytale::hash::sha3::{Shake128, Shake256};
 use scytale::hash::{BitXof, XofReader};
 use serde_json::{Value, json};
 
-pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    _rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     match text(doc, "algorithm")? {
-        "SHAKE-128" => answer_as::<Shake128>(doc),
-        "SHAKE-256" => answer_as::<Shake256>(doc),
+        "SHAKE-128" => answer_as::<Shake128>(doc, builder),
+        "SHAKE-256" => answer_as::<Shake256>(doc, builder),
         other => Err(Error::new(format!("algorithm {other}"))),
     }
 }
 
-fn answer_as<X: BitXof + Default>(doc: &Value) -> Result<Value, Error> {
-    answer_groups(doc, |group| match text(group, "testType")? {
-        "AFT" | "VOT" => answer_tests(group, |t| {
-            let bits = int(t, "outLen")? as usize;
-            let mut out = vec![0u8; bits.div_ceil(8)];
-            squeeze::<X>(&Message::of(t)?, &mut out)?;
-            // A length that is not whole bytes keeps the last byte's
-            // low bits, numbered as FIPS 202 numbers them, and the
-            // rest zero.
-            if let (Some(last), true) =
-                (out.last_mut(), !bits.is_multiple_of(8))
-            {
-                *last &= (1u8 << (bits % 8)) - 1;
+fn answer_as<X: BitXof + Default>(
+    doc: &Value,
+    builder: &Builder,
+) -> Result<Value, Error> {
+    answer_groups(doc, |group| {
+        builder.try_build(|| match text(group, "testType")? {
+            "AFT" | "VOT" => answer_tests(group, |t| {
+                let bits = int(t, "outLen")? as usize;
+                let mut out = vec![0u8; bits.div_ceil(8)];
+                squeeze::<X>(&Message::of(t)?, &mut out)?;
+                // A length that is not whole bytes keeps the last byte's
+                // low bits, numbered as FIPS 202 numbers them, and the
+                // rest zero.
+                if let (Some(last), true) =
+                    (out.last_mut(), !bits.is_multiple_of(8))
+                {
+                    *last &= (1u8 << (bits % 8)) - 1;
+                }
+                Ok(json!({ "md": hex_value(&out), "outLen": bits }))
+            }),
+            "MCT" => {
+                let min_bits = int(group, "minOutLen")? as usize;
+                let max_bits = int(group, "maxOutLen")? as usize;
+                if min_bits < 16 || max_bits < min_bits {
+                    return Err(Error::new("output lengths out of range"));
+                }
+                answer_tests(group, |t| mct::<X>(t, min_bits, max_bits))
             }
-            Ok(json!({ "md": hex_value(&out), "outLen": bits }))
-        }),
-        "MCT" => {
-            let min_bits = int(group, "minOutLen")? as usize;
-            let max_bits = int(group, "maxOutLen")? as usize;
-            if min_bits < 16 || max_bits < min_bits {
-                return Err(Error::new("output lengths out of range"));
-            }
-            answer_tests(group, |t| mct::<X>(t, min_bits, max_bits))
-        }
-        _ => Err(unknown_test_type(group)),
+            _ => Err(unknown_test_type(group)),
+        })
     })
 }
 

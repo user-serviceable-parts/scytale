@@ -60,9 +60,9 @@ pub(crate) mod x86_64;
 
 use zeroize::Zeroize;
 
-use super::Arith;
 use super::montgomery::Montgomery;
 use super::uint::Uint;
+use super::{Arith, Choice};
 use crate::BlockType;
 use crate::Error;
 use crate::Pkcs8Form;
@@ -296,6 +296,26 @@ impl<const L: usize> Curve<L> {
         L == 4 && self.p.0[..] == super::montgomery::P256_PRIME[..]
     }
 
+    /// The arithmetic a key on this curve keeps, chosen here, when
+    /// the key is made, from the lists that have rows for it: P-256
+    /// asks both, P-384 the carry-chain list alone, and P-521 has
+    /// nothing to ask.
+    pub(crate) fn choose(&self) -> Choice {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if self.is_p256() {
+                return Choice::of(
+                    features::choose(super::limbs::KERNELS),
+                    features::choose(KERNELS),
+                );
+            }
+            if L == 6 {
+                return Choice::bignum();
+            }
+        }
+        Choice::Portable
+    }
+
     /// The width of a coordinate or scalar in bytes.
     pub(crate) const fn width(&self) -> usize {
         self.bits.div_ceil(8)
@@ -519,89 +539,66 @@ pub(crate) fn profiles<const L: usize>() -> &'static [Features] {
     }
 }
 
-/// Runs `$body` with `$e` bound to an [`Engine`] for `$curve`, of the
-/// kind the lists choose, which they are asked once, here; the body
-/// is compiled once for each kind the curve can take.
+/// Runs `$body` with `$e` bound to an [`Engine`] for `$curve`, of
+/// the kind a key's kept [`Choice`] names, which
+/// [`Curve::choose`] made when the key was; the body is compiled
+/// once for each kind the curve can take, and the kind is found by
+/// one branch on the choice.
 ///
-/// `with_engine!(curve, |e| ...)` asks the carry-chain list, which
-/// P-256 and P-384 have products written for. Only a fixed-base
-/// multiplication reads a table, so only an operation that makes one
-/// asks the table-read list as well, which P-256 alone has a vector
-/// read for: `with_engine!(fixed_base, curve, |e| ...)`. An engine of
-/// the first kind still multiplies the base point, by the portable
-/// read; asking for both everywhere would compile every other
-/// operation twice over for nothing.
-///
-/// Given the two choices already made, as
-/// `with_engine!(curve, adx, avx2, |e| ...)`, it takes those.
+/// `with_engine!(curve, choice, |e| ...)` takes the carry-chain
+/// products alone, which P-256 and P-384 have written out. Only a
+/// fixed-base multiplication reads a table, so only an operation
+/// that makes one takes the table read as well, which P-256 alone
+/// has a vector read for: `with_engine!(fixed_base, curve, choice,
+/// |e| ...)`. An engine of the first kind still multiplies the base
+/// point, by the portable read; taking both everywhere would compile
+/// every other operation twice over for nothing.
 ///
 /// The body is written as a closure so that it is formatted as one,
 /// but it is no closure: it is expanded in place, once per kind, and
 /// a `?` or `return` in it leaves the enclosing function.
 #[cfg(target_arch = "x86_64")]
 macro_rules! with_engine {
-    (fixed_base, $curve:expr, |$e:ident| $body:expr) => {
-        $crate::math::ec::with_engine!(
-            $curve,
-            $crate::features::choose($crate::math::limbs::KERNELS),
-            $crate::features::choose($crate::math::ec::KERNELS),
-            |$e| $body
-        )
-    };
-    ($curve:expr, |$e:ident| $body:expr) => {{
+    (fixed_base, $curve:expr, $choice:expr, |$e:ident| $body:expr) => {{
         let curve = $curve;
-        if curve.is_p256() || curve.limbs() == 6 {
-            let chosen = $crate::features::choose($crate::math::limbs::KERNELS);
-            match chosen.and_then($crate::math::limbs::x86_64::Adx::of) {
-                Some(x) => {
+        let choice: $crate::math::Choice = $choice;
+        // The width is a constant, so each curve compiles only its
+        // own arm: the vector read takes P-256's four-limb entries
+        // alone.
+        if curve.limbs() == 4 {
+            match choice {
+                $crate::math::Choice::Both(x, v) => {
+                    let kind = $crate::math::WithBoth(x, v);
+                    let $e = $crate::math::ec::Engine::new(curve, kind);
+                    $body
+                }
+                $crate::math::Choice::Adx(x) => {
                     let kind = $crate::math::WithAdx(x);
                     let $e = $crate::math::ec::Engine::new(curve, kind);
                     $body
                 }
-                None => {
+                $crate::math::Choice::Avx2(v) => {
+                    let kind = $crate::math::WithAvx2(v);
+                    let $e = $crate::math::ec::Engine::new(curve, kind);
+                    $body
+                }
+                $crate::math::Choice::Portable => {
                     let kind = $crate::math::Portable;
                     let $e = $crate::math::ec::Engine::new(curve, kind);
                     $body
                 }
             }
         } else {
-            let kind = $crate::math::Portable;
-            let $e = $crate::math::ec::Engine::new(curve, kind);
-            $body
+            $crate::math::ec::with_engine!(curve, choice, |$e| $body)
         }
     }};
-    ($curve:expr, $adx:expr, $avx2:expr, |$e:ident| $body:expr) => {{
+    ($curve:expr, $choice:expr, |$e:ident| $body:expr) => {{
         let curve = $curve;
-        // The written-out field code is P-256's alone, and the
-        // vector read takes only its four-limb table entries; P-384
-        // has the six-limb products; P-521 has nothing.
-        if curve.is_p256() {
-            let adx = ($adx).and_then($crate::math::limbs::x86_64::Adx::of);
-            let avx2 = ($avx2).and_then($crate::math::ec::x86_64::Avx2::of);
-            match (adx, avx2) {
-                (Some(x), Some(v)) => {
-                    let kind = $crate::math::WithBoth(x, v);
-                    let $e = $crate::math::ec::Engine::new(curve, kind);
-                    $body
-                }
-                (Some(x), None) => {
-                    let kind = $crate::math::WithAdx(x);
-                    let $e = $crate::math::ec::Engine::new(curve, kind);
-                    $body
-                }
-                (None, Some(v)) => {
-                    let kind = $crate::math::WithAvx2(v);
-                    let $e = $crate::math::ec::Engine::new(curve, kind);
-                    $body
-                }
-                (None, None) => {
-                    let kind = $crate::math::Portable;
-                    let $e = $crate::math::ec::Engine::new(curve, kind);
-                    $body
-                }
-            }
-        } else if curve.limbs() == 6 {
-            match ($adx).and_then($crate::math::limbs::x86_64::Adx::of) {
+        let choice: $crate::math::Choice = $choice;
+        // P-256 and P-384 have the products written out; P-521 has
+        // nothing, and compiles nothing else.
+        if curve.limbs() == 4 || curve.limbs() == 6 {
+            match choice.adx() {
                 Some(x) => {
                     let kind = $crate::math::WithAdx(x);
                     let $e = $crate::math::ec::Engine::new(curve, kind);
@@ -621,18 +618,14 @@ macro_rules! with_engine {
     }};
 }
 
-/// Elsewhere the curve code has no choice to make.
+/// Elsewhere the curve code has no choice to take.
 #[cfg(not(target_arch = "x86_64"))]
 macro_rules! with_engine {
-    (fixed_base, $curve:expr, |$e:ident| $body:expr) => {
-        $crate::math::ec::with_engine!($curve, |$e| $body)
+    (fixed_base, $curve:expr, $choice:expr, |$e:ident| $body:expr) => {
+        $crate::math::ec::with_engine!($curve, $choice, |$e| $body)
     };
-    ($curve:expr, |$e:ident| $body:expr) => {{
-        let $e = $crate::math::ec::Engine::new($curve, $crate::math::Portable);
-        $body
-    }};
-    ($curve:expr, $adx:expr, $avx2:expr, |$e:ident| $body:expr) => {{
-        let _ = ($adx, $avx2);
+    ($curve:expr, $choice:expr, |$e:ident| $body:expr) => {{
+        let _: $crate::math::Choice = $choice;
         let $e = $crate::math::ec::Engine::new($curve, $crate::math::Portable);
         $body
     }};
@@ -642,7 +635,7 @@ pub(crate) use with_engine;
 
 impl<'a, const L: usize, A: Arith> Engine<'a, L, A> {
     /// The engine for `curve`, of the kind `arith`, which
-    /// [`with_engine`] chose for it.
+    /// [`with_engine`] took from a key's choice.
     pub(crate) fn new(curve: &'a Curve<L>, arith: A) -> Self {
         let field = &curve.field;
         let order = &curve.order;
@@ -2419,7 +2412,7 @@ macro_rules! key_types {
     ) => {
         use crate::Error;
         use crate::Random;
-        use crate::math::ec::{Public, Secret};
+        use crate::math::ec::{Public, Secret, with_engine};
 
         /// The length of a private key.
         pub const KEY_SIZE: usize = $constants.width();
@@ -2460,16 +2453,23 @@ macro_rules! key_types {
         #[derive(Clone, Copy)]
         pub struct PublicKey {
             point: Public<$limbs>,
+            // The arithmetic chosen when the key was made, which a
+            // private key's operations take from its public half.
+            choice: crate::math::Choice,
         }
 
         impl PrivateKey {
             fn from_secret(
                 secret: Secret<$limbs>,
                 public: Public<$limbs>,
+                choice: crate::math::Choice,
             ) -> Self {
                 PrivateKey {
                     secret,
-                    public: PublicKey { point: public },
+                    public: PublicKey {
+                        point: public,
+                        choice,
+                    },
                 }
             }
 
@@ -2477,10 +2477,11 @@ macro_rules! key_types {
             /// rejection sampling, which fails once in 2^32 draws
             /// and is retried; the public point is derived.
             pub fn generate<R: Random>(rng: &mut R) -> Result<Self, Error> {
-                crate::math::ec::with_engine!(fixed_base, &$constants, |e| {
+                let choice = $constants.choose();
+                with_engine!(fixed_base, &$constants, choice, |e| {
                     let secret = Secret::generate(&e, rng)?;
                     let public = secret.public(&e);
-                    Ok(Self::from_secret(secret, public))
+                    Ok(Self::from_secret(secret, public, choice))
                 })
             }
 
@@ -2488,10 +2489,11 @@ macro_rules! key_types {
             /// in `[1, n - 1]`: [`Error::InvalidPrivateKey`] for zero
             /// or a value at or above the order.
             pub fn try_new(secret: &[u8; KEY_SIZE]) -> Result<Self, Error> {
-                crate::math::ec::with_engine!(fixed_base, &$constants, |e| {
+                let choice = $constants.choose();
+                with_engine!(fixed_base, &$constants, choice, |e| {
                     let secret = Secret::try_new(&e, secret)?;
                     let public = secret.public(&e);
-                    Ok(Self::from_secret(secret, public))
+                    Ok(Self::from_secret(secret, public, choice))
                 })
             }
 
@@ -2527,9 +2529,10 @@ macro_rules! key_types {
             pub fn try_from_der_with_form(
                 der: &[u8],
             ) -> Result<(Self, crate::Pkcs8Form), Error> {
-                crate::math::ec::with_engine!(fixed_base, &$constants, |e| {
+                let choice = $constants.choose();
+                with_engine!(fixed_base, &$constants, choice, |e| {
                     let (secret, public, form) = Secret::from_pkcs8(&e, der)?;
-                    Ok((Self::from_secret(secret, public), form))
+                    Ok((Self::from_secret(secret, public, choice), form))
                 })
             }
 
@@ -2540,9 +2543,10 @@ macro_rules! key_types {
             /// point is checked against the secret's own; the
             /// errors are as for [`try_from_der`](Self::try_from_der).
             pub fn try_from_sec1_der(der: &[u8]) -> Result<Self, Error> {
-                crate::math::ec::with_engine!(fixed_base, &$constants, |e| {
+                let choice = $constants.choose();
+                with_engine!(fixed_base, &$constants, choice, |e| {
                     let (secret, public) = Secret::from_sec1_der(&e, der)?;
-                    Ok(Self::from_secret(secret, public))
+                    Ok(Self::from_secret(secret, public, choice))
                 })
             }
 
@@ -2551,7 +2555,7 @@ macro_rules! key_types {
             /// buffer too small gets [`Error::OutputTooSmall`]. The
             /// output is a secret, to be wiped when done.
             pub fn der_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
-                crate::math::ec::with_engine!(&$constants, |e| {
+                with_engine!(&$constants, self.public.choice, |e| {
                     self.secret.pkcs8(&e, &self.public.point, out)
                 })
             }
@@ -2564,9 +2568,10 @@ macro_rules! key_types {
             /// exactly one well-formed block for this curve, an
             /// encrypted key included, is [`Error::InvalidEncoding`].
             pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
-                crate::math::ec::with_engine!(fixed_base, &$constants, |e| {
+                let choice = $constants.choose();
+                with_engine!(fixed_base, &$constants, choice, |e| {
                     let (secret, public) = Secret::from_pem(&e, pem)?;
-                    Ok(Self::from_secret(secret, public))
+                    Ok(Self::from_secret(secret, public, choice))
                 })
             }
 
@@ -2574,7 +2579,7 @@ macro_rules! key_types {
             /// LF line ends, into the front of `out`, returning the
             /// length, always [`PEM_SIZE`]. A secret, to be wiped.
             pub fn pem_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
-                crate::math::ec::with_engine!(&$constants, |e| {
+                with_engine!(&$constants, self.public.choice, |e| {
                     self.secret.pem(&e, &self.public.point, out)
                 })
             }
@@ -2586,16 +2591,18 @@ macro_rules! key_types {
             /// the parity of `y`. The point must lie on the curve;
             /// anything else is [`Error::InvalidPublicKey`].
             pub fn try_from_sec1(sec1: &[u8]) -> Result<Self, Error> {
-                crate::math::ec::with_engine!(&$constants, |e| {
+                let choice = $constants.choose();
+                with_engine!(&$constants, choice, |e| {
                     Ok(PublicKey {
                         point: Public::try_from_sec1(&e, sec1)?,
+                        choice,
                     })
                 })
             }
 
             /// The uncompressed SEC 1 encoding, `04 || x || y`.
             pub fn sec1_bytes(&self) -> [u8; PUBLIC_KEY_SIZE] {
-                crate::math::ec::with_engine!(&$constants, |e| {
+                with_engine!(&$constants, self.choice, |e| {
                     let mut out = [0u8; PUBLIC_KEY_SIZE];
                     self.point.sec1(&e, &mut out);
                     out
@@ -2606,9 +2613,11 @@ macro_rules! key_types {
             /// the form under `PUBLIC KEY` in a PEM file, which must
             /// name this curve; the point inside may be compressed.
             pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
-                crate::math::ec::with_engine!(&$constants, |e| {
+                let choice = $constants.choose();
+                with_engine!(&$constants, choice, |e| {
                     Ok(PublicKey {
                         point: Public::from_spki(&e, der)?,
+                        choice,
                     })
                 })
             }
@@ -2617,7 +2626,7 @@ macro_rules! key_types {
             /// uncompressed, into the front of `out`, returning the
             /// length, always [`PUBLIC_KEY_DER_SIZE`].
             pub fn der_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
-                crate::math::ec::with_engine!(&$constants, |e| {
+                with_engine!(&$constants, self.choice, |e| {
                     self.point.spki(&e, out)
                 })
             }
@@ -2625,9 +2634,11 @@ macro_rules! key_types {
             /// A key from a `PUBLIC KEY` PEM block, read as
             /// [`PrivateKey::try_from_pem`] reads its own.
             pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
-                crate::math::ec::with_engine!(&$constants, |e| {
+                let choice = $constants.choose();
+                with_engine!(&$constants, choice, |e| {
                     Ok(PublicKey {
                         point: Public::from_pem(&e, pem)?,
+                        choice,
                     })
                 })
             }
@@ -2636,7 +2647,7 @@ macro_rules! key_types {
             /// front of `out`, returning the length, always
             /// [`PUBLIC_KEY_PEM_SIZE`].
             pub fn pem_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
-                crate::math::ec::with_engine!(&$constants, |e| {
+                with_engine!(&$constants, self.choice, |e| {
                     self.point.pem(&e, out)
                 })
             }
@@ -2681,27 +2692,11 @@ pub(crate) mod tests {
         &buf[..hex.len() / 2]
     }
 
-    /// The two choices under one row: each list asked once, with
-    /// that row's features in force.
-    fn chosen_under(
-        under: &features::Under,
-    ) -> (
-        Option<features::Chosen<crate::math::limbs::Kernel>>,
-        Option<features::Chosen<Kernel>>,
-    ) {
-        under.build(|| {
-            (
-                features::choose(crate::math::limbs::KERNELS),
-                features::choose(KERNELS),
-            )
-        })
-    }
-
     /// The curves under one kernel of the table-read list: the read
     /// itself, and keys through the public types.
     pub(crate) fn kernel(under: &features::Under) {
-        let (adx, avx2) = chosen_under(under);
-        with_engine!(&P256, adx, avx2, |e| {
+        let choice = under.build(|| P256.choose());
+        with_engine!(fixed_base, &P256, choice, |e| {
             table_reads_keep_the_entry_the_digit_names(&e);
         });
         keys_match_the_portable_ones(under);
@@ -2711,25 +2706,25 @@ pub(crate) mod tests {
     /// written-out point operations against the formulas, and keys
     /// through the public types.
     pub(crate) fn bignum(under: &features::Under) {
-        let (adx, avx2) = chosen_under(under);
+        let choice = under.build(|| P256.choose());
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        with_engine!(&P256, adx, avx2, |e| {
+        with_engine!(fixed_base, &P256, choice, |e| {
             written_out_doubling_matches_the_formula(&e);
             written_out_mixed_addition_matches_the_formula(&e);
             written_out_addition_matches_the_formula(&e);
             written_out_inversion_matches_the_exponentiation(&e);
         });
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        let _ = (adx, avx2);
+        let _ = choice;
         keys_match_the_portable_ones(under);
     }
 
     /// Everything a P-256 and a P-384 key does, through the public
     /// types: key generation from fixed secrets, compressed points,
     /// deterministic signatures and their verification, and
-    /// agreement. Each operation chooses its kernel when it starts,
-    /// so each runs whole under the row, and the answers must be the
-    /// portable code's.
+    /// agreement. Each key chooses its kernels when it is made, under
+    /// the row, and every operation on it runs them, so the answers
+    /// must be the portable code's.
     fn keys_match_the_portable_ones(under: &features::Under) {
         use crate::kex::ecdh;
         use crate::sig::ecdsa;
@@ -2804,7 +2799,7 @@ pub(crate) mod tests {
     #[test]
     fn group_law_basics() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            with_engine!(fixed_base, curve, |e| {
+            with_engine!(fixed_base, curve, curve.choose(), |e| {
                 let g = generator(&e);
                 Public::try_from_affine(&e, curve.gx, curve.gy).unwrap();
                 let two_g = e.point_add(&g, &g);
@@ -2833,7 +2828,7 @@ pub(crate) mod tests {
     #[test]
     fn doubling_matches_the_general_addition() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            with_engine!(fixed_base, curve, |e| {
+            with_engine!(fixed_base, curve, curve.choose(), |e| {
                 let g = generator(&e);
                 let mut p = e.identity();
                 for _ in 0..8 {
@@ -3103,7 +3098,7 @@ pub(crate) mod tests {
     /// stands for, as the comb check below says of the combs.
     #[test]
     fn base_windows_are_multiples_of_g() {
-        with_engine!(fixed_base, &P256, |e| {
+        with_engine!(fixed_base, &P256, P256.choose(), |e| {
             let wanted = window_entries(&e);
             assert_eq!(P256.windows.len(), wanted.len() * BASE_ENTRIES);
             let tables = P256.windows.chunks_exact(BASE_ENTRIES);
@@ -3134,7 +3129,7 @@ pub(crate) mod tests {
     #[test]
     fn base_tables_are_multiples_of_g() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            with_engine!(fixed_base, curve, |e| {
+            with_engine!(fixed_base, curve, curve.choose(), |e| {
                 let bases = comb_bases(&e);
                 assert_eq!(curve.base.len(), TABLES * ENTRIES);
                 for (i, table) in curve.base.chunks_exact(ENTRIES).enumerate() {
@@ -3169,7 +3164,7 @@ pub(crate) mod tests {
     #[test]
     fn windowed_matches_the_complete_multiplication() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            with_engine!(fixed_base, curve, |e| {
+            with_engine!(fixed_base, curve, curve.choose(), |e| {
                 let g = generator(&e);
                 let (order_less_one, _) = curve.n.sub_borrow(&Uint::one());
                 let mut scalars = std::vec![
@@ -3218,7 +3213,7 @@ pub(crate) mod tests {
     #[test]
     fn vartime_matches_the_constant_time_multiplications() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            with_engine!(fixed_base, curve, |e| {
+            with_engine!(fixed_base, curve, curve.choose(), |e| {
                 let g = generator(&e);
                 let q = e.point_mul(&g, &Uint::from_limbs(&[7]));
                 let (order_less_one, _) = curve.n.sub_borrow(&Uint::one());
@@ -3263,7 +3258,7 @@ pub(crate) mod tests {
     #[test]
     fn fixed_base_matches_the_general_multiplication() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            with_engine!(fixed_base, curve, |e| {
+            with_engine!(fixed_base, curve, curve.choose(), |e| {
                 let g = generator(&e);
                 let (top, _) = curve.n.sub_borrow(&Uint::one());
                 let mut high = Uint::<L>::ZERO;
@@ -3290,7 +3285,7 @@ pub(crate) mod tests {
     #[test]
     fn public_keys_match_nist() {
         let mut buf = [0u8; 48];
-        with_engine!(fixed_base, &P256, |e| {
+        with_engine!(fixed_base, &P256, P256.choose(), |e| {
             let d = Secret::try_new(
                 &e,
                 unhex(
@@ -3317,7 +3312,7 @@ pub(crate) mod tests {
             );
         });
 
-        with_engine!(fixed_base, &P384, |e| {
+        with_engine!(fixed_base, &P384, P384.choose(), |e| {
             let d = Secret::try_new(
                 &e,
                 unhex(
@@ -3348,7 +3343,7 @@ pub(crate) mod tests {
     #[test]
     fn compressed_points() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            with_engine!(fixed_base, curve, |e| {
+            with_engine!(fixed_base, curve, curve.choose(), |e| {
                 let mut rng = crate::random::CtrDrbg::from_system().unwrap();
                 let mut sec1 = [0u8; 133];
                 let w = curve.width();
@@ -3410,7 +3405,7 @@ pub(crate) mod tests {
     #[test]
     fn near_order_scalars_multiply_correctly() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            with_engine!(fixed_base, curve, |e| {
+            with_engine!(fixed_base, curve, curve.choose(), |e| {
                 let g = generator(&e);
                 for j in 1..=64u64 {
                     let (k, _) =
@@ -3479,7 +3474,7 @@ pub(crate) mod tests {
     #[test]
     fn hedged_signatures_verify() {
         let mut buf = [0u8; 48];
-        with_engine!(fixed_base, &P256, |e| {
+        with_engine!(fixed_base, &P256, P256.choose(), |e| {
             let d =
                 Secret::try_new(&e, unhex(&"42".repeat(32), &mut buf)).unwrap();
             let mut plain = [0u8; 64];
@@ -3507,7 +3502,7 @@ pub(crate) mod tests {
     #[test]
     fn rfc6979_vectors() {
         let mut buf = [0u8; 48];
-        with_engine!(fixed_base, &P256, |e| {
+        with_engine!(fixed_base, &P256, P256.choose(), |e| {
             let d = Secret::try_new(
                 &e,
                 unhex(
@@ -3538,7 +3533,7 @@ pub(crate) mod tests {
             assert_eq!(sig, expected);
         });
 
-        with_engine!(fixed_base, &P384, |e| {
+        with_engine!(fixed_base, &P384, P384.choose(), |e| {
             let d = Secret::try_new(
                 &e,
                 unhex(
@@ -3568,7 +3563,7 @@ pub(crate) mod tests {
     /// changed signature, zero or out-of-range parts, another key.
     #[test]
     fn verify_refusals() {
-        with_engine!(fixed_base, &P256, |e| {
+        with_engine!(fixed_base, &P256, P256.choose(), |e| {
             let mut rng = crate::random::CtrDrbg::from_system().unwrap();
             let d = Secret::generate(&e, &mut rng).unwrap();
             let public = d.public(&e);
@@ -3604,7 +3599,7 @@ pub(crate) mod tests {
     /// key of the other curve or an off-curve point is refused.
     #[test]
     fn agreement() {
-        with_engine!(fixed_base, &P384, |e| {
+        with_engine!(fixed_base, &P384, P384.choose(), |e| {
             let mut rng = crate::random::CtrDrbg::from_system().unwrap();
             let a = Secret::generate(&e, &mut rng).unwrap();
             let b = Secret::generate(&e, &mut rng).unwrap();
@@ -3620,7 +3615,7 @@ pub(crate) mod tests {
     /// Scalars out of range are not keys.
     #[test]
     fn scalar_range() {
-        with_engine!(fixed_base, &P256, |e| {
+        with_engine!(fixed_base, &P256, P256.choose(), |e| {
             let mut buf = [0u8; 32];
             assert_eq!(
                 Secret::try_new(&e, &buf).err(),

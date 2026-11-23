@@ -16,6 +16,7 @@
 //! simply taken.
 
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{
     Error, flag, hex, hex_value, opt_hex, opt_int, text, unknown_test_type,
 };
@@ -106,21 +107,29 @@ fn array<const N: usize>(bytes: &[u8]) -> [u8; N] {
     out
 }
 
-pub fn answer(doc: &Value, rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
     answer_groups(doc, |group| {
-        let curve = match text(group, "curve")? {
-            "ED-25519" => &ED25519,
-            "ED-448" => &ED448,
-            other => return Err(Error::new(format!("no curve named {other}"))),
-        };
-        match (mode, text(group, "testType")?) {
-            ("keyGen", "AFT") => key_gen(curve, group, rng),
-            ("keyVer", "AFT") => key_ver(curve, group),
-            ("sigGen", "AFT" | "BFT") => sig_gen(curve, group, rng),
-            ("sigVer", "AFT") => sig_ver(curve, group),
-            _ => Err(unknown_test_type(group)),
-        }
+        builder.try_build(|| {
+            let curve = match text(group, "curve")? {
+                "ED-25519" => &ED25519,
+                "ED-448" => &ED448,
+                other => {
+                    return Err(Error::new(format!("no curve named {other}")));
+                }
+            };
+            match (mode, text(group, "testType")?) {
+                ("keyGen", "AFT") => key_gen(curve, group, rng),
+                ("keyVer", "AFT") => key_ver(curve, group),
+                ("sigGen", "AFT" | "BFT") => sig_gen(curve, group, rng),
+                ("sigVer", "AFT") => sig_ver(curve, group),
+                _ => Err(unknown_test_type(group)),
+            }
+        })
     })
 }
 
@@ -248,7 +257,12 @@ mod tests {
                 json!({ "tgId": 1, "testType": "AFT", "curve": name,
                         "tests": [{ "tcId": 1 }] }),
             );
-            let answered = answer(&key_gen, &mut fixed_rng()).unwrap();
+            let answered = answer(
+                &key_gen,
+                &mut fixed_rng(&Builder::default()).unwrap(),
+                &Builder::default(),
+            )
+            .unwrap();
             let t = &answered["testGroups"][0]["tests"][0];
             let d = hex(t, "d").unwrap();
             assert_eq!(d.len(), curve.key, "{name}");
@@ -261,7 +275,12 @@ mod tests {
                             "preHash": prehash,
                             "tests": [{ "tcId": 1, "message": "616263" }] }),
                 );
-                let answered = answer(&sig_gen, &mut fixed_rng()).unwrap();
+                let answered = answer(
+                    &sig_gen,
+                    &mut fixed_rng(&Builder::default()).unwrap(),
+                    &Builder::default(),
+                )
+                .unwrap();
                 let g = &answered["testGroups"][0];
                 let q = hex(g, "q").unwrap();
                 let sig = hex(&g["tests"][0], "signature").unwrap();

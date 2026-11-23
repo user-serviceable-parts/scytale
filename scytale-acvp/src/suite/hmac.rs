@@ -3,6 +3,7 @@
 //! name chooses the hash.
 
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{Error, hex, hex_value, int, text, unknown_test_type};
 use scytale::BlockType;
 use scytale::Random;
@@ -16,19 +17,23 @@ use scytale::mac::Mac;
 use scytale::mac::hmac::Hmac;
 use serde_json::{Value, json};
 
-pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    _rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     match text(doc, "algorithm")? {
-        "HMAC-SHA-1" => answer_as::<Sha1>(doc),
-        "HMAC-SHA2-224" => answer_as::<Sha224>(doc),
-        "HMAC-SHA2-256" => answer_as::<Sha256>(doc),
-        "HMAC-SHA2-384" => answer_as::<Sha384>(doc),
-        "HMAC-SHA2-512" => answer_as::<Sha512>(doc),
-        "HMAC-SHA2-512/224" => answer_as::<Sha512_224>(doc),
-        "HMAC-SHA2-512/256" => answer_as::<Sha512_256>(doc),
-        "HMAC-SHA3-224" => answer_as::<Sha3_224>(doc),
-        "HMAC-SHA3-256" => answer_as::<Sha3_256>(doc),
-        "HMAC-SHA3-384" => answer_as::<Sha3_384>(doc),
-        "HMAC-SHA3-512" => answer_as::<Sha3_512>(doc),
+        "HMAC-SHA-1" => answer_as::<Sha1>(doc, builder),
+        "HMAC-SHA2-224" => answer_as::<Sha224>(doc, builder),
+        "HMAC-SHA2-256" => answer_as::<Sha256>(doc, builder),
+        "HMAC-SHA2-384" => answer_as::<Sha384>(doc, builder),
+        "HMAC-SHA2-512" => answer_as::<Sha512>(doc, builder),
+        "HMAC-SHA2-512/224" => answer_as::<Sha512_224>(doc, builder),
+        "HMAC-SHA2-512/256" => answer_as::<Sha512_256>(doc, builder),
+        "HMAC-SHA3-224" => answer_as::<Sha3_224>(doc, builder),
+        "HMAC-SHA3-256" => answer_as::<Sha3_256>(doc, builder),
+        "HMAC-SHA3-384" => answer_as::<Sha3_384>(doc, builder),
+        "HMAC-SHA3-512" => answer_as::<Sha3_512>(doc, builder),
         other => Err(Error::new(format!("algorithm {other}"))),
     }
 }
@@ -38,28 +43,31 @@ pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
 /// constructor keys the MAC.
 fn answer_as<H: Hash + Clone + BlockType + Default>(
     doc: &Value,
+    builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        if text(group, "testType")? != "AFT" {
-            return Err(unknown_test_type(group));
-        }
-        let mac_bytes = int(group, "macLen")? as usize / 8;
-        answer_tests(group, |t| {
-            let mut mac = Hmac::<H>::new(&hex(t, "key")?);
-            let msg = hex(t, "msg")?;
-            mac.update(&msg);
-            let tag = mac.finalize();
-            let tag = tag.as_ref();
-            let truncated = tag
-                .get(..mac_bytes)
-                .ok_or_else(|| Error::new("macLen longer than the tag"))?;
-            // A full-length tag must verify too; `finalize` left the
-            // MAC keyed and at the start of a message.
-            if mac_bytes == tag.len() {
-                mac.update(&msg);
-                mac.verify(truncated)?;
+        builder.try_build(|| {
+            if text(group, "testType")? != "AFT" {
+                return Err(unknown_test_type(group));
             }
-            Ok(json!({ "mac": hex_value(truncated) }))
+            let mac_bytes = int(group, "macLen")? as usize / 8;
+            answer_tests(group, |t| {
+                let mut mac = Hmac::<H>::new(&hex(t, "key")?);
+                let msg = hex(t, "msg")?;
+                mac.update(&msg);
+                let tag = mac.finalize();
+                let tag = tag.as_ref();
+                let truncated = tag
+                    .get(..mac_bytes)
+                    .ok_or_else(|| Error::new("macLen longer than the tag"))?;
+                // A full-length tag must verify too; `finalize` left the
+                // MAC keyed and at the start of a message.
+                if mac_bytes == tag.len() {
+                    mac.update(&msg);
+                    mac.verify(truncated)?;
+                }
+                Ok(json!({ "mac": hex_value(truncated) }))
+            })
         })
     })
 }

@@ -6,18 +6,13 @@
 //! --exact acvp_samples::sha2_512`, and name kernels as its lines do
 //! in `SCYTALE_KERNELS`.
 
-use std::sync::Mutex;
-
 use scytale_acvp::suite::SUITES;
 
-/// Held for the whole of each suite's check. The set of features in
-/// force is process-wide, and each kernel's run puts its own in
-/// force, so the tests the harness runs at once must take turns;
-/// each one keeps every core busy meanwhile.
-static TURN: Mutex<()> = Mutex::new(());
-
+/// One suite's check. The harness runs as many at once as it runs
+/// any tests: each builds through its kernels' builders, which take
+/// turns only while something is built or run under another set, so
+/// suites need not take turns themselves.
 fn check(name: &str, directory: &str) {
-    let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
     if let Err(e) = scytale_acvp::vendored::check(name, directory) {
         panic!("{e}");
     }

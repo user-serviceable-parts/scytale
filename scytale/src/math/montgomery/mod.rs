@@ -664,13 +664,12 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::features::Chosen;
-    use crate::math::limbs;
+    use crate::math::Choice;
 
     /// The contexts under one kernel of the big-number list, chosen
     /// under its row: every property below with that kind.
-    pub(crate) fn kernel(chosen: Option<Chosen<limbs::Kernel>>) {
-        crate::math::with_arith!(chosen, kind => {
+    pub(crate) fn kernel(choice: Choice) {
+        crate::math::with_arith!(choice, kind => {
             square_matches_the_product(kind);
             products_match_plain_arithmetic(kind);
             domain_round_trip(kind);

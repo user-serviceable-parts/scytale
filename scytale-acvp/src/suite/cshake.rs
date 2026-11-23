@@ -9,6 +9,7 @@
 
 use super::sha::{Family, Message};
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{Error, hex, hex_value, int, text, unknown_test_type};
 use scytale::Random;
 use scytale::hash::sha3::{CShake128, CShake256};
@@ -18,29 +19,40 @@ use serde_json::{Value, json};
 /// The constructor of either width.
 type Start<X> = fn(&[u8], &[u8]) -> X;
 
-pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    _rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     match text(doc, "algorithm")? {
-        "cSHAKE-128" => answer_as(doc, CShake128::new),
-        "cSHAKE-256" => answer_as(doc, CShake256::new),
+        "cSHAKE-128" => answer_as(doc, CShake128::new, builder),
+        "cSHAKE-256" => answer_as(doc, CShake256::new, builder),
         other => Err(Error::new(format!("algorithm {other}"))),
     }
 }
 
-fn answer_as<X: BitXof>(doc: &Value, start: Start<X>) -> Result<Value, Error> {
-    answer_groups(doc, |group| match text(group, "testType")? {
-        "AFT" => answer_tests(group, |t| {
-            let bits = int(t, "outLen")? as usize;
-            let name = text(t, "functionName")?.as_bytes();
-            let custom = customization(group, t)?;
-            let out = squeeze(&Message::of(t)?, name, &custom, bits, start)?;
-            Ok(json!({ "md": hex_value(&out), "outLen": bits }))
-        }),
-        "MCT" => {
-            let lengths = Lengths::of(group)?;
-            let steps = mct_steps(doc);
-            answer_tests(group, |t| mct(t, &lengths, steps, start))
-        }
-        _ => Err(unknown_test_type(group)),
+fn answer_as<X: BitXof>(
+    doc: &Value,
+    start: Start<X>,
+    builder: &Builder,
+) -> Result<Value, Error> {
+    answer_groups(doc, |group| {
+        builder.try_build(|| match text(group, "testType")? {
+            "AFT" => answer_tests(group, |t| {
+                let bits = int(t, "outLen")? as usize;
+                let name = text(t, "functionName")?.as_bytes();
+                let custom = customization(group, t)?;
+                let out =
+                    squeeze(&Message::of(t)?, name, &custom, bits, start)?;
+                Ok(json!({ "md": hex_value(&out), "outLen": bits }))
+            }),
+            "MCT" => {
+                let lengths = Lengths::of(group)?;
+                let steps = mct_steps(doc);
+                answer_tests(group, |t| mct(t, &lengths, steps, start))
+            }
+            _ => Err(unknown_test_type(group)),
+        })
     })
 }
 

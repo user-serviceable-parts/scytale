@@ -16,6 +16,7 @@
 //! bytes is the bytes it needs with the bits past its end cleared.
 
 use super::{answer_groups, answer_tests, skip};
+use crate::profile::Builder;
 use crate::support::{
     Error, hex, hex_value, int, key_of, opt_hex, opt_int, text,
     unknown_test_type,
@@ -38,42 +39,56 @@ use serde_json::{Value, json};
 /// middle break has room on both sides.
 const FIXED_DATA_LEN: usize = 32;
 
-pub fn answer(doc: &Value, rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     match doc.get("mode").and_then(Value::as_str) {
-        None => answer_kdf(doc, rng),
-        Some("KMAC") => answer_kmac(doc),
+        None => answer_kdf(doc, rng, builder),
+        Some("KMAC") => answer_kmac(doc, builder),
         Some(other) => Err(Error::new(format!("mode {other}"))),
     }
 }
 
-fn answer_kdf(doc: &Value, rng: &mut dyn Random) -> Result<Value, Error> {
+fn answer_kdf(
+    doc: &Value,
+    rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        if text(group, "testType")? != "AFT" {
-            return Err(unknown_test_type(group));
-        }
-        let mac = text(group, "macMode")?;
-        if mac == "CMAC-TDES" {
-            return skip(group, "no Triple DES");
-        }
-        answer_tests(group, |t| {
-            let key = hex(t, "keyIn")?;
-            match mac {
-                "CMAC-AES128" => cmac::<Aes128>(&key, group, t, rng),
-                "CMAC-AES192" => cmac::<Aes192>(&key, group, t, rng),
-                "CMAC-AES256" => cmac::<Aes256>(&key, group, t, rng),
-                "HMAC-SHA-1" => hmac::<Sha1>(&key, group, t, rng),
-                "HMAC-SHA2-224" => hmac::<Sha224>(&key, group, t, rng),
-                "HMAC-SHA2-256" => hmac::<Sha256>(&key, group, t, rng),
-                "HMAC-SHA2-384" => hmac::<Sha384>(&key, group, t, rng),
-                "HMAC-SHA2-512" => hmac::<Sha512>(&key, group, t, rng),
-                "HMAC-SHA2-512/224" => hmac::<Sha512_224>(&key, group, t, rng),
-                "HMAC-SHA2-512/256" => hmac::<Sha512_256>(&key, group, t, rng),
-                "HMAC-SHA3-224" => hmac::<Sha3_224>(&key, group, t, rng),
-                "HMAC-SHA3-256" => hmac::<Sha3_256>(&key, group, t, rng),
-                "HMAC-SHA3-384" => hmac::<Sha3_384>(&key, group, t, rng),
-                "HMAC-SHA3-512" => hmac::<Sha3_512>(&key, group, t, rng),
-                other => Err(Error::new(format!("macMode {other}"))),
+        builder.try_build(|| {
+            if text(group, "testType")? != "AFT" {
+                return Err(unknown_test_type(group));
             }
+            let mac = text(group, "macMode")?;
+            if mac == "CMAC-TDES" {
+                return skip(group, "no Triple DES");
+            }
+            answer_tests(group, |t| {
+                let key = hex(t, "keyIn")?;
+                match mac {
+                    "CMAC-AES128" => cmac::<Aes128>(&key, group, t, rng),
+                    "CMAC-AES192" => cmac::<Aes192>(&key, group, t, rng),
+                    "CMAC-AES256" => cmac::<Aes256>(&key, group, t, rng),
+                    "HMAC-SHA-1" => hmac::<Sha1>(&key, group, t, rng),
+                    "HMAC-SHA2-224" => hmac::<Sha224>(&key, group, t, rng),
+                    "HMAC-SHA2-256" => hmac::<Sha256>(&key, group, t, rng),
+                    "HMAC-SHA2-384" => hmac::<Sha384>(&key, group, t, rng),
+                    "HMAC-SHA2-512" => hmac::<Sha512>(&key, group, t, rng),
+                    "HMAC-SHA2-512/224" => {
+                        hmac::<Sha512_224>(&key, group, t, rng)
+                    }
+                    "HMAC-SHA2-512/256" => {
+                        hmac::<Sha512_256>(&key, group, t, rng)
+                    }
+                    "HMAC-SHA3-224" => hmac::<Sha3_224>(&key, group, t, rng),
+                    "HMAC-SHA3-256" => hmac::<Sha3_256>(&key, group, t, rng),
+                    "HMAC-SHA3-384" => hmac::<Sha3_384>(&key, group, t, rng),
+                    "HMAC-SHA3-512" => hmac::<Sha3_512>(&key, group, t, rng),
+                    other => Err(Error::new(format!("macMode {other}"))),
+                }
+            })
         })
     })
 }
@@ -181,35 +196,40 @@ fn case<M: Mac>(
     Ok(answer)
 }
 
-fn answer_kmac(doc: &Value) -> Result<Value, Error> {
+fn answer_kmac(doc: &Value, builder: &Builder) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        if text(group, "testType")? != "AFT" {
-            return Err(unknown_test_type(group));
-        }
-        let kdf = match text(group, "macMode")? {
-            "KMAC-128" => sp800_108::kmac128,
-            "KMAC-256" => sp800_108::kmac256,
-            other => return Err(Error::new(format!("macMode {other}"))),
-        };
-        answer_tests(group, |t| {
-            let bits = int(t, "derivedKeyLength")?;
-            if !bits.is_multiple_of(8) {
-                return Err(Error::new("derivedKeyLength is not whole bytes"));
+        builder.try_build(|| {
+            if text(group, "testType")? != "AFT" {
+                return Err(unknown_test_type(group));
             }
-            let mut out = vec![0u8; bits as usize / 8];
-            kdf(
-                &hex(t, "keyDerivationKey")?,
-                &hex(t, "label")?,
-                &hex(t, "context")?,
-                &mut out,
-            );
-            Ok(json!({ "derivedKey": hex_value(&out) }))
+            let kdf = match text(group, "macMode")? {
+                "KMAC-128" => sp800_108::kmac128,
+                "KMAC-256" => sp800_108::kmac256,
+                other => return Err(Error::new(format!("macMode {other}"))),
+            };
+            answer_tests(group, |t| {
+                let bits = int(t, "derivedKeyLength")?;
+                if !bits.is_multiple_of(8) {
+                    return Err(Error::new(
+                        "derivedKeyLength is not whole bytes",
+                    ));
+                }
+                let mut out = vec![0u8; bits as usize / 8];
+                kdf(
+                    &hex(t, "keyDerivationKey")?,
+                    &hex(t, "label")?,
+                    &hex(t, "context")?,
+                    &mut out,
+                );
+                Ok(json!({ "derivedKey": hex_value(&out) }))
+            })
         })
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::profile::Builder;
     use serde_json::json;
 
     /// A live prompt gives only the key: the made-up fixed data and
@@ -225,8 +245,8 @@ mod tests {
                 "tests": [{"tcId": 1, "keyIn": "000102030405060708090A0B"}]
             }]
         });
-        let mut rng = super::super::fixed_rng();
-        let live = super::answer(&doc, &mut rng).unwrap();
+        let mut rng = super::super::fixed_rng(&Builder::default()).unwrap();
+        let live = super::answer(&doc, &mut rng, &Builder::default()).unwrap();
         let answered = &live["testGroups"][0]["tests"][0];
         assert_eq!(answered["fixedData"].as_str().unwrap().len(), 64);
         assert_eq!(answered["breakLocation"], 128);
@@ -234,8 +254,8 @@ mod tests {
         let test = &mut doc["testGroups"][0]["tests"][0];
         test["fixedData"] = answered["fixedData"].clone();
         test["breakLocation"] = json!(128);
-        let mut rng = super::super::fixed_rng();
-        let again = super::answer(&doc, &mut rng).unwrap();
+        let mut rng = super::super::fixed_rng(&Builder::default()).unwrap();
+        let again = super::answer(&doc, &mut rng, &Builder::default()).unwrap();
         assert_eq!(again["testGroups"][0]["tests"][0], *answered);
     }
 
@@ -255,8 +275,9 @@ mod tests {
                 }]
             }]
         });
-        let mut rng = super::super::fixed_rng();
-        let answered = super::answer(&doc, &mut rng).unwrap();
+        let mut rng = super::super::fixed_rng(&Builder::default()).unwrap();
+        let answered =
+            super::answer(&doc, &mut rng, &Builder::default()).unwrap();
         let key = &answered["testGroups"][0]["tests"][0]["keyOut"];
         assert_eq!(key.as_str().unwrap().len(), 2);
     }

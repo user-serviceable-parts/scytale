@@ -6,6 +6,7 @@
 
 use super::cshake::{Lengths, customization, mct_steps, rightmost_16};
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{
     Error, decode_hex, flag, hex_value, int, list, text, unknown_test_type,
 };
@@ -47,31 +48,37 @@ macro_rules! tuple {
 tuple!(TupleHash128);
 tuple!(TupleHash256);
 
-pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    _rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     match text(doc, "algorithm")? {
-        "TupleHash-128" => answer_as::<TupleHash128>(doc),
-        "TupleHash-256" => answer_as::<TupleHash256>(doc),
+        "TupleHash-128" => answer_as::<TupleHash128>(doc, builder),
+        "TupleHash-256" => answer_as::<TupleHash256>(doc, builder),
         other => Err(Error::new(format!("algorithm {other}"))),
     }
 }
 
-fn answer_as<T: Tuple>(doc: &Value) -> Result<Value, Error> {
+fn answer_as<T: Tuple>(doc: &Value, builder: &Builder) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        let xof = flag(group, "xof")?;
-        match text(group, "testType")? {
-            "AFT" => answer_tests(group, |t| {
-                let bits = int(t, "outLen")? as usize;
-                let custom = customization(group, t)?;
-                let out = hash::<T>(&tuple_of(t)?, &custom, xof, bits)?;
-                Ok(json!({ "md": hex_value(&out), "outLen": bits }))
-            }),
-            "MCT" => {
-                let lengths = Lengths::of(group)?;
-                let steps = mct_steps(doc);
-                answer_tests(group, |t| mct::<T>(t, xof, &lengths, steps))
+        builder.try_build(|| {
+            let xof = flag(group, "xof")?;
+            match text(group, "testType")? {
+                "AFT" => answer_tests(group, |t| {
+                    let bits = int(t, "outLen")? as usize;
+                    let custom = customization(group, t)?;
+                    let out = hash::<T>(&tuple_of(t)?, &custom, xof, bits)?;
+                    Ok(json!({ "md": hex_value(&out), "outLen": bits }))
+                }),
+                "MCT" => {
+                    let lengths = Lengths::of(group)?;
+                    let steps = mct_steps(doc);
+                    answer_tests(group, |t| mct::<T>(t, xof, &lengths, steps))
+                }
+                _ => Err(unknown_test_type(group)),
             }
-            _ => Err(unknown_test_type(group)),
-        }
+        })
     })
 }
 

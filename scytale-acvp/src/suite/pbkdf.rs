@@ -2,6 +2,7 @@
 //! `hmacAlg` names.
 
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{Error, hex, hex_value, int, text, unknown_test_type};
 use scytale::Random;
 use scytale::hash::sha1::Sha1;
@@ -12,26 +13,32 @@ use scytale::hash::sha3::{Sha3_224, Sha3_256, Sha3_384, Sha3_512};
 use scytale::kdf::pbkdf2::pbkdf2;
 use serde_json::{Value, json};
 
-pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    _rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        if text(group, "testType")? != "AFT" {
-            return Err(unknown_test_type(group));
-        }
-        let derive = match text(group, "hmacAlg")? {
-            "SHA-1" => pbkdf2::<Sha1>,
-            "SHA2-224" => pbkdf2::<Sha224>,
-            "SHA2-256" => pbkdf2::<Sha256>,
-            "SHA2-384" => pbkdf2::<Sha384>,
-            "SHA2-512" => pbkdf2::<Sha512>,
-            "SHA2-512/224" => pbkdf2::<Sha512_224>,
-            "SHA2-512/256" => pbkdf2::<Sha512_256>,
-            "SHA3-224" => pbkdf2::<Sha3_224>,
-            "SHA3-256" => pbkdf2::<Sha3_256>,
-            "SHA3-384" => pbkdf2::<Sha3_384>,
-            "SHA3-512" => pbkdf2::<Sha3_512>,
-            other => return Err(Error::new(format!("hmacAlg {other}"))),
-        };
-        answer_tests(group, |t| derived(t, derive))
+        builder.try_build(|| {
+            if text(group, "testType")? != "AFT" {
+                return Err(unknown_test_type(group));
+            }
+            let derive = match text(group, "hmacAlg")? {
+                "SHA-1" => pbkdf2::<Sha1>,
+                "SHA2-224" => pbkdf2::<Sha224>,
+                "SHA2-256" => pbkdf2::<Sha256>,
+                "SHA2-384" => pbkdf2::<Sha384>,
+                "SHA2-512" => pbkdf2::<Sha512>,
+                "SHA2-512/224" => pbkdf2::<Sha512_224>,
+                "SHA2-512/256" => pbkdf2::<Sha512_256>,
+                "SHA3-224" => pbkdf2::<Sha3_224>,
+                "SHA3-256" => pbkdf2::<Sha3_256>,
+                "SHA3-384" => pbkdf2::<Sha3_384>,
+                "SHA3-512" => pbkdf2::<Sha3_512>,
+                other => return Err(Error::new(format!("hmacAlg {other}"))),
+            };
+            answer_tests(group, |t| derived(t, derive))
+        })
     })
 }
 

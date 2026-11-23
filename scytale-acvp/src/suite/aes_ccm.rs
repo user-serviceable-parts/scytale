@@ -6,6 +6,7 @@
 //! the tag on its end, both in the prompt and in the answer.
 
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{
     Error, hex, hex_value, int, key_of, text, unknown_test_type,
 };
@@ -14,24 +15,30 @@ use scytale::aead::Ccm;
 use scytale::cipher::BlockCipher;
 use serde_json::{Value, json};
 
-pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    _rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        let encrypt = match text(group, "direction")? {
-            "encrypt" => true,
-            "decrypt" => false,
-            other => return Err(Error::new(format!("direction {other}"))),
-        };
-        let tag_len = int(group, "tagLen")? as usize / 8;
-        match text(group, "testType")? {
-            "AFT" => answer_tests(group, |t| {
-                let key = hex(t, "key")?;
-                aes_width!(key, C => {
-                    let ccm = Ccm::<C>::new(&key_of::<C>(&key)?);
-                    aft(&ccm, t, encrypt, tag_len)
-                })
-            }),
-            _ => Err(unknown_test_type(group)),
-        }
+        builder.try_build(|| {
+            let encrypt = match text(group, "direction")? {
+                "encrypt" => true,
+                "decrypt" => false,
+                other => return Err(Error::new(format!("direction {other}"))),
+            };
+            let tag_len = int(group, "tagLen")? as usize / 8;
+            match text(group, "testType")? {
+                "AFT" => answer_tests(group, |t| {
+                    let key = hex(t, "key")?;
+                    aes_width!(key, C => {
+                        let ccm = Ccm::<C>::new(&key_of::<C>(&key)?);
+                        aft(&ccm, t, encrypt, tag_len)
+                    })
+                }),
+                _ => Err(unknown_test_type(group)),
+            }
+        })
     })
 }
 

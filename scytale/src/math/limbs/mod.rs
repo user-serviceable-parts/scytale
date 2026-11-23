@@ -857,8 +857,8 @@ pub(crate) mod tests {
     /// below with the kind the row's list chooses, and the same row
     /// through the Montgomery contexts, RSA, and the curves.
     pub(crate) fn kernel(under: &features::Under) {
-        let chosen = under.build(|| features::choose(KERNELS));
-        crate::math::with_arith!(chosen, kind => {
+        let choice = under.build(crate::math::Choice::bignum);
+        crate::math::with_arith!(choice, kind => {
             products_match_plain_arithmetic(kind);
             domain_round_trip(kind);
             modexp_identities(kind);
@@ -867,7 +867,7 @@ pub(crate) mod tests {
             public_exponent_agrees_with_the_windowed_one(kind);
             reduce_matches_the_slow_remainder(kind);
         });
-        crate::math::montgomery::tests::kernel(chosen);
+        crate::math::montgomery::tests::kernel(choice);
         crate::math::rsa::tests::kernel(under);
         crate::math::ec::tests::bignum(under);
     }

@@ -12,6 +12,10 @@
 //! [`Feature::Isolated`], reaches every row the processor can run,
 //! and a vector set answered under each of them must come out the
 //! same.
+//!
+//! The set in force is the process's, so a profile is put in force
+//! only through a [`Builder`], which several threads may share: see
+//! there.
 
 use crate::suite::Suite;
 use crate::support::{Error, FixedEntropy};
@@ -36,6 +40,7 @@ use scytale::mac::poly1305::Poly1305;
 use scytale::random::{CtrDrbg, MIN_SEED};
 use scytale::sig::{self, ecdsa};
 use serde_json::Value;
+use std::sync::{Condvar, Mutex, PoisonError};
 
 /// The seed every profile's generator starts from, so the answers
 /// a run compares drew the same randomness.
@@ -55,10 +60,127 @@ impl Seed {
         Ok(seed)
     }
 
-    /// A generator over the seed. Its own source is deterministic
-    /// too, so even a reseed does not part two runs.
-    pub fn rng(&self) -> Result<CtrDrbg<FixedEntropy>, Error> {
-        Ok(CtrDrbg::try_new_seeded(&self.0, FixedEntropy::default())?)
+    /// A generator over the seed, built by `builder`. Its own source
+    /// is deterministic too, so even a reseed does not part two runs.
+    pub fn rng(
+        &self,
+        builder: &Builder,
+    ) -> Result<CtrDrbg<FixedEntropy>, Error> {
+        builder.try_build(|| {
+            CtrDrbg::try_new_seeded(&self.0, FixedEntropy::default())
+        })
+    }
+}
+
+/// Where the drivers build the library's objects and run them: under
+/// one feature profile, or under the set the processor offers, as a
+/// program that never calls [`features::set`] would.
+///
+/// A type chooses its kernel from the set in force when it is built,
+/// and some objects build others as they are used: a GCM-SIV message
+/// builds its own cipher and POLYVAL, a hash-based signature or a KDF
+/// starts a hash for every call, and the generator rekeys its cipher.
+/// So a driver runs a whole test group inside [`build`](Self::build),
+/// not just its constructors, and steps outside only to feed an
+/// object it built, as the large-data hashes do.
+///
+/// The set in force is process-wide, so a builder takes a turn: it
+/// waits while builds under another set are running, puts its own in
+/// force if it is first, and the last build of a turn puts the set
+/// detected back. Builds under the same set share the turn, so the
+/// suites with no kernel of their own, whose signatures run for
+/// minutes, run side by side, and with them every kernel the
+/// processor's whole set selects.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Builder(Option<Features>);
+
+/// The set the running builds share, and how many there are.
+struct Turn {
+    set: Features,
+    builds: usize,
+}
+
+static TURN: Mutex<Turn> = Mutex::new(Turn {
+    set: Features::new(),
+    builds: 0,
+});
+
+/// Signalled when a turn ends.
+static ENDED: Condvar = Condvar::new();
+
+impl Builder {
+    /// A builder under `profile`, or the error [`features::set`]
+    /// gives when the processor lacks some of it, which is found out
+    /// here, once, rather than at every build.
+    pub fn try_new(profile: Features) -> Result<Self, Error> {
+        let builder = Builder(Some(profile));
+        builder.build(|| ())?;
+        Ok(builder)
+    }
+
+    /// The profile this builder puts in force, or `None` for the set
+    /// detected.
+    pub fn profile(&self) -> Option<Features> {
+        self.0
+    }
+
+    /// The set in force while this builder builds.
+    pub fn set(&self) -> Features {
+        self.0.unwrap_or_else(features::detected)
+    }
+
+    /// Runs `build` with this builder's set in force.
+    pub fn build<T>(&self, build: impl FnOnce() -> T) -> Result<T, Error> {
+        let _turn = self.enter()?;
+        Ok(build())
+    }
+
+    /// As [`build`](Self::build), for a build that may fail.
+    pub fn try_build<T, E>(
+        &self,
+        build: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, Error>
+    where
+        Error: From<E>,
+    {
+        let _turn = self.enter()?;
+        Ok(build()?)
+    }
+
+    /// Waits until this builder's set is in force or nothing is
+    /// building, and joins the turn. A build that starts another
+    /// under the same builder joins its own turn, so nesting is safe.
+    fn enter(&self) -> Result<Building, Error> {
+        let wanted = self.set();
+        let mut turn = TURN.lock().unwrap_or_else(PoisonError::into_inner);
+        while turn.builds > 0 && turn.set != wanted {
+            turn = ENDED.wait(turn).unwrap_or_else(PoisonError::into_inner);
+        }
+        // Between turns the set detected is in force, which is what a
+        // builder without a profile wants, so only a profile is set.
+        if turn.builds == 0
+            && let Some(profile) = self.0
+        {
+            features::set(profile)?;
+        }
+        turn.set = wanted;
+        turn.builds += 1;
+        Ok(Building)
+    }
+}
+
+/// One build's share of a turn. Dropped however the build ends, so
+/// that a panic does not leave the next turn a narrowed set.
+struct Building;
+
+impl Drop for Building {
+    fn drop(&mut self) {
+        let mut turn = TURN.lock().unwrap_or_else(PoisonError::into_inner);
+        turn.builds -= 1;
+        if turn.builds == 0 {
+            features::reset();
+            ENDED.notify_all();
+        }
     }
 }
 
@@ -133,21 +255,17 @@ pub fn walk() -> (Vec<Features>, Vec<Features>) {
     let mut runnable = Vec::new();
     let mut refused = Vec::new();
     for profile in candidates() {
-        match features::set(profile) {
-            Ok(()) => runnable.push(profile),
+        match Builder::try_new(profile) {
+            Ok(_) => runnable.push(profile),
             Err(_) => refused.push(profile),
         }
     }
-    features::reset();
     (runnable, refused)
 }
 
 /// Answers `doc` under each of `profiles` from the same seed and
 /// returns the answer, or the first difference as an error with exit
 /// status 2 naming both profiles and the case.
-///
-/// Process-wide: the set in force changes while this runs, and is
-/// put back after.
 pub fn answer_under(
     suite: &Suite,
     doc: &Value,
@@ -156,10 +274,10 @@ pub fn answer_under(
 ) -> Result<Value, Error> {
     let mut first: Option<(Features, Value)> = None;
     for &profile in profiles {
-        features::set(profile)?;
-        let answered =
-            seed.rng().and_then(|mut rng| (suite.answer)(doc, &mut rng));
-        features::reset();
+        let answered = Builder::try_new(profile).and_then(|builder| {
+            let mut rng = seed.rng(&builder)?;
+            (suite.answer)(doc, &mut rng, &builder)
+        });
         let answered = answered
             .map_err(|e| Error::new(format!("under {profile}: {e}")))?;
         match &first {
@@ -240,10 +358,11 @@ mod tests {
     #[test]
     fn same_seed_same_bytes() {
         let seed = Seed::fixed();
+        let builder = Builder::default();
         let mut x = [0u8; 32];
         let mut y = [0u8; 32];
-        seed.rng().unwrap().fill(&mut x).unwrap();
-        seed.rng().unwrap().fill(&mut y).unwrap();
+        seed.rng(&builder).unwrap().fill(&mut x).unwrap();
+        seed.rng(&builder).unwrap().fill(&mut y).unwrap();
         assert_eq!(x, y);
         assert_ne!(x, [0u8; 32]);
     }

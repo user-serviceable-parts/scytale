@@ -20,15 +20,20 @@
 //!
 //! The work is cut into units, a test group each, or a single case of
 //! a large-data group, of SLH-DSA signing or of LMS key generation,
-//! since those cases are minutes apiece under emulation. One worker
-//! per core takes the next unit, heaviest first, with the kernel's
-//! profile in force throughout.
+//! since those cases are minutes apiece under emulation. A unit is
+//! answered under each kernel that tests it, and the units of every
+//! kernel of the suite go to one pool: one worker per core takes the
+//! next, heaviest first, and answers it through its kernel's
+//! [`Builder`], so that kernels and suites run side by side and only
+//! wait for one another while something is being built or run under
+//! another set; see there.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
+use scytale::Random;
 use scytale::aead::{Ccm, Gcm, GcmSiv, Xpn};
 use scytale::cipher::aes::Aes128;
 use scytale::cipher::mode::{Cbc, Ctr, Xts};
@@ -40,6 +45,7 @@ use scytale::kem::ml_kem::ml_kem_768;
 use scytale::sig::{ecdsa, rsa};
 use serde_json::Value;
 
+use crate::profile::Builder;
 use crate::suite::{SUITES, Suite, compare, fixed_rng, vendored};
 use crate::support::Error;
 
@@ -275,13 +281,34 @@ pub fn units(suite: usize, doc: &Value) -> Vec<Unit> {
     out
 }
 
-/// Answers `unit` of `doc` with a fresh fixed generator and compares
-/// the answer with `doc`; returns the cases compared, or `None` for a
-/// group the driver skipped.
+/// A generator that notes any draw made while its builder's set is
+/// not in force. A driver that draws outside the builder has very
+/// likely built outside it too, and a build there takes whatever set
+/// another thread has put in force; the answers cannot show it, since
+/// every kernel answers alike, but a draw can.
+struct Watched<R> {
+    rng: R,
+    set: Features,
+    strayed: bool,
+}
+
+impl<R: Random> Random for Watched<R> {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), scytale::Error> {
+        if features::get() != self.set {
+            self.strayed = true;
+        }
+        self.rng.fill(out)
+    }
+}
+
+/// Answers `unit` of `doc` under `builder` with a fresh fixed
+/// generator and compares the answer with `doc`; returns the cases
+/// compared, or `None` for a group the driver skipped.
 pub fn answer_unit(
     suite: &Suite,
     doc: &Value,
     unit: &Unit,
+    builder: &Builder,
 ) -> Result<Option<usize>, Error> {
     let mut group = doc["testGroups"][unit.group].clone();
     if let Some(case) = unit.case {
@@ -290,19 +317,26 @@ pub fn answer_unit(
     }
     let mut cut = doc.clone();
     cut["testGroups"] = Value::Array(vec![group]);
-    let mut rng = fixed_rng();
-    let answered = (suite.answer)(&cut, &mut rng)?;
+    let mut rng = Watched {
+        rng: fixed_rng(builder)?,
+        set: builder.set(),
+        strayed: false,
+    };
+    let answered = (suite.answer)(&cut, &mut rng, builder)?;
+    if rng.strayed {
+        return Err(Error::new("drew randomness outside the builder"));
+    }
     if answered["testGroups"].as_array().is_some_and(Vec::is_empty) {
         return Ok(None);
     }
-    compare(suite, doc, &answered).map(Some)
+    compare(suite, doc, &answered, builder).map(Some)
 }
 
 /// The seconds between two lines of progress.
 const PROGRESS: u64 = 60;
 
 /// Whether a line of progress is due at `now`, in seconds since the
-/// kernel began: when [`PROGRESS`] have passed since the last, which
+/// suite began: when [`PROGRESS`] have passed since the last, which
 /// `said` holds. One caller of those that ask at once is told yes.
 fn progress_due(said: &AtomicU64, now: u64) -> bool {
     let last = said.load(Ordering::Relaxed);
@@ -376,19 +410,29 @@ pub fn kernels(
 /// for a group the driver skipped, or what went wrong.
 type Outcome = Result<Option<usize>, String>;
 
-/// Answers the units `list` of `all` under the profile in force, one
-/// worker per core taking the next, heaviest first, and returns each
-/// unit's index and outcome. A panicking driver is one unit's failure,
-/// not the end of the run. `name` heads the lines of progress.
+/// One unit of `all` to answer under one kernel: their indices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Task {
+    kernel: usize,
+    unit: usize,
+}
+
+/// Answers `tasks`, each a unit of `all` under its kernel's builder
+/// in `builders`, one worker per core taking the next, heaviest
+/// first, and returns each task with its outcome. A panicking driver
+/// is one task's failure, not the end of the run. `name` heads the
+/// lines of progress.
 fn answer_all(
     name: &str,
     suite: &Suite,
     doc: &Value,
     all: &[Unit],
-    list: &[usize],
-) -> Vec<(usize, Outcome)> {
-    let mut order = list.to_vec();
-    order.sort_by_key(|&i| std::cmp::Reverse(all[i].weight));
+    builders: &[Builder],
+    tasks: &[Task],
+) -> Vec<(Task, Outcome)> {
+    let mut order = tasks.to_vec();
+    // Stable, so units of a weight go in kernel order.
+    order.sort_by_key(|t| std::cmp::Reverse(all[t.unit].weight));
     // WebAssembly has no threads: spawning one aborts the run.
     let workers = if cfg!(target_family = "wasm") {
         1
@@ -399,19 +443,21 @@ fn answer_all(
     };
     let next = AtomicUsize::new(0);
     let outcomes = Mutex::new(Vec::with_capacity(order.len()));
-    // The table is printed when the kernel is done, which under
+    // The table is printed when the suite is done, which under
     // emulation is a long silence; a line a minute says how far it
     // has got.
-    let total: u64 = order.iter().map(|&i| all[i].weight).sum();
+    let total: u64 = order.iter().map(|t| all[t.unit].weight).sum();
     let began = Instant::now();
     let said = AtomicU64::new(0);
     let finished = AtomicUsize::new(0);
     let weighed = AtomicU64::new(0);
     let work = || {
-        while let Some(&i) = order.get(next.fetch_add(1, Ordering::Relaxed)) {
-            let unit = &all[i];
+        while let Some(&task) = order.get(next.fetch_add(1, Ordering::Relaxed))
+        {
+            let unit = &all[task.unit];
+            let builder = &builders[task.kernel];
             let outcome = match catch_unwind(AssertUnwindSafe(|| {
-                answer_unit(suite, doc, unit)
+                answer_unit(suite, doc, unit, builder)
             })) {
                 Ok(Ok(count)) => Ok(count),
                 Ok(Err(e)) => Err(e.message),
@@ -433,7 +479,7 @@ fn answer_all(
             outcomes
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push((i, outcome));
+                .push((task, outcome));
             let units = finished.fetch_add(1, Ordering::Relaxed) + 1;
             let weight =
                 weighed.fetch_add(unit.weight, Ordering::Relaxed) + unit.weight;
@@ -467,9 +513,9 @@ fn answer_all(
 /// Fails if any kernel's run fails, and on a suite that answers fewer
 /// cases than its minimum when every unit was answered.
 ///
-/// Process-wide: each kernel's profile is put in force while it runs,
-/// and the set detected put back after, so the caller must let
-/// nothing else build meanwhile.
+/// The kernels run at once, each unit building through its kernel's
+/// [`Builder`], so suites may be checked from several threads at
+/// once too.
 pub fn check(name: &str, directory: &str) -> Result<(), Error> {
     let s = SUITES
         .iter()
@@ -484,11 +530,14 @@ pub fn check(name: &str, directory: &str) -> Result<(), Error> {
     let all = units(s, &doc);
     let selected = selected();
     let hardware = features::detected();
-    // Each unit's cases, the first time any kernel answers it.
-    let mut answered: Vec<Option<usize>> = vec![None; all.len()];
-    let mut lines = Vec::new();
-    let mut failed = Vec::new();
-    for (profile, list) in kernels(&types, &doc, &all) {
+    let kernels = kernels(&types, &doc, &all);
+    // Each kernel's name, and its builder if it is to run or else
+    // why not; the processor's refusals are found here, once.
+    let mut names = Vec::with_capacity(kernels.len());
+    let mut builders = Vec::with_capacity(kernels.len());
+    let mut states = Vec::with_capacity(kernels.len());
+    let mut tasks = Vec::new();
+    for (k, (profile, list)) in kernels.iter().enumerate() {
         // A suite with no kernel of its own runs once, on whatever
         // the processor dispatches to; its name says that, rather
         // than spelling out a set that differs from machine to
@@ -496,45 +545,61 @@ pub fn check(name: &str, directory: &str) -> Result<(), Error> {
         let kernel = if types.is_empty() {
             format!("{name}/default")
         } else {
-            format!("{name}/{}", short_name(profile))
+            format!("{name}/{}", short_name(*profile))
         };
         let missing = profile.without(Feature::Isolated) - hardware;
-        let state = if selected.as_ref().is_some_and(|s| !s.contains(&kernel)) {
-            "not selected".into()
-        } else if features::set(profile).is_err() {
-            format!("not run: needs {}", short_name(missing))
+        let built = if selected.as_ref().is_some_and(|s| !s.contains(&kernel)) {
+            Err("not selected".to_string())
+        } else if types.is_empty() {
+            Ok(Builder::default())
         } else {
-            // Put back on the way out however it is left, so that a
-            // panic does not leave the next test a narrowed set.
-            struct Reset;
-            impl Drop for Reset {
-                fn drop(&mut self) {
-                    features::reset();
-                }
-            }
-            let reset = Reset;
-            let outcomes = answer_all(&kernel, suite, &doc, &all, &list);
-            drop(reset);
-            let mut errors = Vec::new();
-            for (i, outcome) in outcomes {
-                match outcome {
-                    Ok(count) => {
-                        answered[i].get_or_insert(count.unwrap_or(0));
-                    }
-                    Err(e) => errors.push(e),
-                }
-            }
-            if errors.is_empty() {
-                "run".into()
-            } else {
-                errors.sort();
-                for e in errors {
-                    eprintln!("{kernel}: {directory}: {e}");
-                }
-                failed.push(kernel.clone());
-                "FAILED".into()
-            }
+            Builder::try_new(*profile)
+                .map_err(|_| format!("not run: needs {}", short_name(missing)))
         };
+        match built {
+            Ok(builder) => {
+                tasks.extend(list.iter().map(|&unit| Task { kernel: k, unit }));
+                builders.push(builder);
+                states.push(None);
+            }
+            Err(state) => {
+                // Holds the kernel's place; no task names it.
+                builders.push(Builder::default());
+                states.push(Some(state));
+            }
+        }
+        names.push(kernel);
+    }
+    let mut outcomes = answer_all(name, suite, &doc, &all, &builders, &tasks);
+    // In kernel order, so that a unit's cases are counted as the
+    // first kernel to answer it found them, whatever order the
+    // workers finished in.
+    outcomes.sort_by_key(|(t, _)| (t.kernel, t.unit));
+    // Each unit's cases, the first time any kernel answers it.
+    let mut answered: Vec<Option<usize>> = vec![None; all.len()];
+    let mut errors: Vec<Vec<String>> = vec![Vec::new(); kernels.len()];
+    for (task, outcome) in outcomes {
+        match outcome {
+            Ok(count) => {
+                answered[task.unit].get_or_insert(count.unwrap_or(0));
+            }
+            Err(e) => errors[task.kernel].push(e),
+        }
+    }
+    let mut lines = Vec::new();
+    let mut failed = Vec::new();
+    for ((kernel, state), mut errors) in names.iter().zip(states).zip(errors) {
+        let state = state.unwrap_or_else(|| {
+            if errors.is_empty() {
+                return "run".into();
+            }
+            errors.sort();
+            for e in errors.drain(..) {
+                eprintln!("{kernel}: {directory}: {e}");
+            }
+            failed.push(kernel.clone());
+            "FAILED".into()
+        });
         lines.push(format!("  {kernel:<40} {state}"));
     }
     let cases: usize = answered.iter().flatten().sum();
@@ -678,6 +743,44 @@ mod tests {
         // Verifying is an ordinary case.
         let verified = of("sigVer");
         assert_eq!((verified[0].case, verified[0].weight), (None, 10));
+    }
+
+    /// A driver that draws outside its builder fails its unit, which
+    /// can be seen only under a profile the processor would not pick
+    /// by itself: under the set detected, outside looks like inside.
+    #[test]
+    fn a_draw_outside_the_builder_fails_the_unit() {
+        if features::detected().is_empty() {
+            return;
+        }
+        let suite = |answer| Suite {
+            directory: "x",
+            algorithm: "x",
+            mode: None,
+            revision: "1.0",
+            answer,
+            verify: None,
+            minimum: 0,
+        };
+        let inside = suite(|doc, rng, builder| {
+            builder.try_build(|| rng.fill(&mut [0u8; 8]))?;
+            Ok(json!({ "testGroups": [], "vsId": doc["vsId"] }))
+        });
+        let outside = suite(|doc, rng, _| {
+            rng.fill(&mut [0u8; 8])?;
+            Ok(json!({ "testGroups": [], "vsId": doc["vsId"] }))
+        });
+        let doc = json!({"testGroups": [{"tgId": 1, "tests": []}]});
+        let unit = Unit {
+            suite: 0,
+            group: 0,
+            case: None,
+            weight: 1,
+        };
+        let portable = Builder::try_new(Features::new()).unwrap();
+        assert_eq!(answer_unit(&inside, &doc, &unit, &portable), Ok(None));
+        let e = answer_unit(&outside, &doc, &unit, &portable).unwrap_err();
+        assert_eq!(e.message, "drew randomness outside the builder");
     }
 
     #[test]

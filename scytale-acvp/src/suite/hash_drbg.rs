@@ -13,6 +13,7 @@
 //! taken out. Every hash the files name is one the crate has.
 
 use super::{answer_groups, answer_tests, skip};
+use crate::profile::Builder;
 use crate::support::{
     Error, NoEntropy, flag, hex, hex_value, int, list, opt_text, text,
     unknown_test_type,
@@ -90,24 +91,30 @@ macro_rules! dispatch {
     };
 }
 
-pub fn answer(doc: &Value, _rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    _rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     let hmac = match text(doc, "algorithm")? {
         "hashDRBG" => false,
         "hmacDRBG" => true,
         other => return Err(Error::new(format!("algorithm {other}"))),
     };
     answer_groups(doc, |group| {
-        if text(group, "testType")? != "AFT" {
-            return Err(unknown_test_type(group));
-        }
-        if flag(group, "derFunc")? {
-            return Err(Error::new("derFunc is set"));
-        }
-        if hmac {
-            dispatch!(HmacDrbg, group)
-        } else {
-            dispatch!(HashDrbg, group)
-        }
+        builder.try_build(|| {
+            if text(group, "testType")? != "AFT" {
+                return Err(unknown_test_type(group));
+            }
+            if flag(group, "derFunc")? {
+                return Err(Error::new("derFunc is set"));
+            }
+            if hmac {
+                dispatch!(HmacDrbg, group)
+            } else {
+                dispatch!(HashDrbg, group)
+            }
+        })
     })
 }
 

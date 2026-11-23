@@ -122,7 +122,7 @@ macro_rules! ecdsa_curve {
             ) -> Result<[u8; SIGNATURE_SIZE], Error> {
                 let mut noise = [0u8; KEY_SIZE];
                 rng.fill(&mut noise)?;
-                crate::math::ec::with_engine!(fixed_base, &$constants, |e| {
+                with_engine!(fixed_base, &$constants, self.public.choice, |e| {
                     let mut out = [0u8; SIGNATURE_SIZE];
                     let hedge = Some(&noise[..]);
                     let signed =
@@ -142,7 +142,7 @@ macro_rules! ecdsa_curve {
                 &self,
                 message: &[u8],
             ) -> Result<[u8; SIGNATURE_SIZE], Error> {
-                crate::math::ec::with_engine!(fixed_base, &$constants, |e| {
+                with_engine!(fixed_base, &$constants, self.public.choice, |e| {
                     let mut out = [0u8; SIGNATURE_SIZE];
                     self.secret.sign::<H>(&e, message, None, &mut out)?;
                     Ok(out)
@@ -160,7 +160,7 @@ macro_rules! ecdsa_curve {
                 message: &[u8],
                 signature: &[u8; SIGNATURE_SIZE],
             ) -> Result<(), Error> {
-                crate::math::ec::with_engine!(&$constants, |e| {
+                with_engine!(&$constants, self.choice, |e| {
                     self.point.verify::<H>(&e, message, signature)
                 })
             }

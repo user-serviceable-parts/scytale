@@ -9,6 +9,7 @@
 //! since the vendored signatures were made with NIST's own key.
 
 use super::{answer_groups, answer_tests};
+use crate::profile::Builder;
 use crate::support::{Error, Rng, hex, hex_value, text};
 use scytale::Random;
 use scytale::sig::lms::{Lmots, Lms, PrivateKey, PublicKey};
@@ -23,29 +24,36 @@ fn sets(group: &Value) -> Result<(Lms, Lmots), Error> {
     Ok((lms, ots))
 }
 
-pub fn answer(doc: &Value, rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
     answer_groups(doc, |group| {
-        let (lms, ots) = sets(group)?;
-        match mode {
-            "keyGen" => answer_tests(group, |t| key_gen(lms, ots, t)),
-            "sigGen" => {
-                let mut key = PrivateKey::generate(&mut Rng(rng), lms, ots)?;
-                let public = key.public_key().clone();
-                let answered =
-                    answer_tests(group, |t| sig_gen(&mut key, rng, t))?;
-                Ok(answered.map(|mut answered| {
-                    let key = hex_value(&public.bytes()[..public.len()]);
-                    answered["publicKey"] = key;
-                    answered
-                }))
+        builder.try_build(|| {
+            let (lms, ots) = sets(group)?;
+            match mode {
+                "keyGen" => answer_tests(group, |t| key_gen(lms, ots, t)),
+                "sigGen" => {
+                    let mut key =
+                        PrivateKey::generate(&mut Rng(rng), lms, ots)?;
+                    let public = key.public_key().clone();
+                    let answered =
+                        answer_tests(group, |t| sig_gen(&mut key, rng, t))?;
+                    Ok(answered.map(|mut answered| {
+                        let key = hex_value(&public.bytes()[..public.len()]);
+                        answered["publicKey"] = key;
+                        answered
+                    }))
+                }
+                "sigVer" => {
+                    let public = PublicKey::new(&hex(group, "publicKey")?)?;
+                    answer_tests(group, |t| sig_ver(&public, t))
+                }
+                other => Err(Error::new(format!("mode {other}"))),
             }
-            "sigVer" => {
-                let public = PublicKey::new(&hex(group, "publicKey")?)?;
-                answer_tests(group, |t| sig_ver(&public, t))
-            }
-            other => Err(Error::new(format!("mode {other}"))),
-        }
+        })
     })
 }
 

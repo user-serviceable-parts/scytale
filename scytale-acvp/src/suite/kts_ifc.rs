@@ -23,6 +23,7 @@
 //! identifier, then the responder's, then the label from the case.
 
 use super::{answer_groups, answer_tests, skip};
+use crate::profile::Builder;
 use crate::support::{
     Error, Rng, field, hex, hex_value, int, opt_hex, opt_text, text,
     unknown_test_type,
@@ -43,25 +44,31 @@ const PARTY_INFO: &str = "l||uPartyInfo||vPartyInfo||label";
 /// The modulus every group uses, in bytes.
 const MODULUS_LEN: usize = 256;
 
-pub fn answer(doc: &Value, rng: &mut dyn Random) -> Result<Value, Error> {
+pub fn answer(
+    doc: &Value,
+    rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        if text(group, "testType")? != "AFT" {
-            return Err(unknown_test_type(group));
-        }
-        if let Some(why) = skip_reason(group)? {
-            return skip(group, &why);
-        }
-        let responder = match text(group, "kasRole")? {
-            "responder" => true,
-            "initiator" => false,
-            other => return Err(Error::new(format!("kasRole {other}"))),
-        };
-        answer_tests(group, |t| {
-            if responder {
-                respond(group, t)
-            } else {
-                initiate(group, t, rng)
+        builder.try_build(|| {
+            if text(group, "testType")? != "AFT" {
+                return Err(unknown_test_type(group));
             }
+            if let Some(why) = skip_reason(group)? {
+                return skip(group, &why);
+            }
+            let responder = match text(group, "kasRole")? {
+                "responder" => true,
+                "initiator" => false,
+                other => return Err(Error::new(format!("kasRole {other}"))),
+            };
+            answer_tests(group, |t| {
+                if responder {
+                    respond(group, t)
+                } else {
+                    initiate(group, t, rng)
+                }
+            })
         })
     })
 }
@@ -373,7 +380,12 @@ mod tests {
                 t.as_object_mut().unwrap().remove("iutK");
             }
         }
-        let answered = answer(&doc, &mut fixed_rng()).unwrap();
+        let answered = answer(
+            &doc,
+            &mut fixed_rng(&Builder::default()).unwrap(),
+            &Builder::default(),
+        )
+        .unwrap();
         let mut initiated = 0;
         for (g, a) in list(&doc, "testGroups")
             .unwrap()
@@ -422,7 +434,12 @@ mod tests {
                 }
             }
         }
-        let answered = answer(&doc, &mut fixed_rng()).unwrap();
+        let answered = answer(
+            &doc,
+            &mut fixed_rng(&Builder::default()).unwrap(),
+            &Builder::default(),
+        )
+        .unwrap();
         let mut initiated = 0;
         for (g, a) in list(&doc, "testGroups")
             .unwrap()
@@ -464,7 +481,12 @@ mod tests {
         let group = groups[0].as_object_mut().unwrap();
         group.remove("kasMode");
         assert_eq!(skip_reason(&doc["testGroups"][0]).unwrap(), None);
-        let answered = answer(&doc, &mut fixed_rng()).unwrap();
+        let answered = answer(
+            &doc,
+            &mut fixed_rng(&Builder::default()).unwrap(),
+            &Builder::default(),
+        )
+        .unwrap();
         assert!(answered["testGroups"][0]["tests"][0].get("dkm").is_some());
 
         doc["testGroups"][0]["kasMode"] = json!("kdfKc");
