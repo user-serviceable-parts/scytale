@@ -52,7 +52,8 @@
 
 #![allow(unsafe_code)]
 
-use crate::features::{self, Features, x86_64::Feature as F};
+use super::Kernel;
+use crate::features::Chosen;
 use zeroize::Zeroize;
 
 /// Bytes in a block.
@@ -102,31 +103,6 @@ impl Drop for Powers {
         self.weights.0.zeroize();
     }
 }
-
-/// Which loop the bulk of a message runs through.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Kernel {
-    /// Four blocks at once in the vector registers.
-    Avx2,
-    /// Plain Rust, a block at a time, on any processor.
-    Portable,
-}
-
-/// The kernels, best first, each with what it needs.
-pub(crate) const KERNELS: &[(Kernel, Features)] =
-    &[(Kernel::Avx2, AVX2), (Kernel::Portable, Features::new())];
-
-/// What the list publishes: the needs, without the names.
-pub(crate) const PROFILES: [Features; KERNELS.len()] =
-    features::profiles_of(KERNELS);
-
-/// Whether the processor and operating system support AVX2.
-pub(super) fn supported() -> bool {
-    features::allows(KERNELS, Kernel::Avx2)
-}
-
-/// What the AVX2 row needs.
-const AVX2: Features = features::x86(&[F::Avx, F::Avx2]);
 
 /// Multiplies two values in the field, with the limbs carried far
 /// enough that another multiplication cannot overflow.
@@ -245,15 +221,28 @@ impl Drop for Lanes {
     }
 }
 
+/// The proof the kernel list chose the vector loop. No public
+/// constructor: a value exists only by way of [`Avx2::of`].
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Avx2(());
+
+impl Avx2 {
+    /// The vector loop, where the list chose it.
+    pub(super) fn of(chosen: Chosen<Kernel>) -> Option<Self> {
+        (chosen.kernel() == Kernel::Avx2).then_some(Avx2(()))
+    }
+}
+
 /// Runs `data`, a whole number of groups, through the four chains.
 ///
 /// `data` must be at least one group; the caller splits it so, and
 /// this is a debug check on that rather than a branch on every call.
-pub(super) fn bulk(lanes: &mut Lanes, powers: &Powers, data: &[u8]) {
+pub(super) fn bulk(_: Avx2, lanes: &mut Lanes, powers: &Powers, data: &[u8]) {
     debug_assert!(!data.is_empty() && data.len().is_multiple_of(SPAN));
-    // SAFETY: `supported` was confirmed before these powers were
-    // built, `lanes` is the five limbs the loop expects, the tables
-    // are the ones built beside them, and `data` is whole groups.
+    // SAFETY: the `Avx2` passed is the proof the list chose this
+    // kernel, so the processor has its instructions; `lanes` is the
+    // five limbs the loop expects, the tables are the ones built
+    // beside them, and `data` is whole groups.
     unsafe {
         multiply_groups(
             lanes.limbs.0.as_mut_ptr().cast::<u64>(),

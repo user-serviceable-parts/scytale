@@ -14,11 +14,21 @@ env:
   # The vectors are in the checkout. A suite that cannot find them
   # skips and passes, so here not finding them is a failure.
   SCYTALE_VECTORS: required
+  # Intel's Software Development Emulator, for the x86-64 kernels a
+  # runner lacks: the Linux kit, pinned by its hash, checked against
+  # Intel's signature when the pin was chosen.
+  SDE_URL: https://downloadmirror.intel.com/924984/sde-external-10.13.1-2026-07-28-lin.tar.xz
+  SDE_SHA256: 94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50
 
 jobs:
-  # Every architecture runs its own tests natively: no emulation, so
-  # the assembly is exercised on real hardware. The vendored vector
-  # files are in the checkout, so the full suites run.
+  # Every architecture runs its own tests natively first, so the
+  # assembly is exercised on real hardware wherever the runner has the
+  # instructions. Each kernel test prints a line per kernel, and a
+  # kernel the runner cannot run is `not run`, never a pass; the step
+  # after runs exactly those under an emulator that has everything the
+  # library uses, Intel SDE on x86-64 and QEMU's `max` on AArch64, and
+  # fails if any of them is still not run there. So every kernel runs,
+  # natively where it can, whatever runner the pool hands out.
   #
   # The RISC-V runners are the RISE ones, installed as a GitHub App.
   test:
@@ -28,17 +38,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Both runners have every extension the library uses, and
-          # the inventory holds them to it: one that lacks something
-          # fails there instead of skipping rows in silence. On x86
-          # that is also the only test of the wide GCM rows, since
-          # QEMU does not emulate VPCLMULQDQ.
           - arch: x86-64
             runner: ubuntu-latest
-            expect_all: 1
+            target: x86_64-unknown-linux-gnu
           - arch: arm64
             runner: ubuntu-24.04-arm
-            expect_all: 1
+            target: aarch64-unknown-linux-gnu
           # The RISE runner is off until the RVA23 machines arrive:
           # it has no extension the library uses, so it tests only
           # the portable code, which the emulated jobs test in a
@@ -64,9 +69,9 @@ jobs:
       # The compiled dependencies, keyed on the lock file and kept
       # between runs; the workspace crates are rebuilt every time,
       # since they change. Jobs that build the same thing share one
-      # key, and one of them saves it at the end of the job, so
-      # sixteen shards do not upload sixteen copies. Only actions
-      # GitHub owns are allowed here, which rules out rust-cache.
+      # key, and one of them saves it at the end of the job. Only
+      # actions GitHub owns are allowed here, which rules out
+      # rust-cache.
       - uses: actions/cache/restore@v6
         id: cache
         with:
@@ -88,33 +93,82 @@ jobs:
           grep -m1 -E '^(isa|Features|flags)' /proc/cpuinfo || true
 
       - name: Test
-        # Every crate's tests, once. Of scytale-acvp only its own
-        # unit tests: the check against the vendored vectors is its
-        # `vendored` test and has jobs of its own below.
+        # Every crate's tests, once, but for the kernel tests, which
+        # run in the next step where their tables can be read. Of
+        # scytale-acvp only its own unit tests: the check against
+        # the vendored vectors has jobs of its own below.
         run: |
           cargo test --release --workspace --exclude scytale-acvp \
-              -- --skip vectors::inventory
+              -- --skip kernels::
           cargo test --release -p scytale-acvp --lib --bins
 
-      - name: Test with the features in force edited
-        # These change a process-wide setting, so they are ignored by
-        # default and run here alone, single-threaded. The second is
-        # where the kernels with no ACVP suite, below the one the
-        # processor picks, answer their vectors.
+      - name: The largest LMS tree
+        # Minutes in a debug build, so ignored by default; here in
+        # release, where it is quick enough to run every time.
         run: |
-          cargo test --release -p scytale --lib -- \
-              features::tests::alone vectors::alone \
-              --ignored --test-threads=1
+          cargo test --release -p scytale --lib -- --ignored --exact \
+              sig::lms::tests::h15_walks_its_tree
 
-      - name: Implementations tested
-        # The binary is built by now, so this costs a second and
-        # says which implementations this processor could run. The
-        # suites live in the library's own test build, since an
-        # integration test cannot see the implementations. The runs
-        # above skip it, so this is its only run.
-        run: cargo test --release --lib vectors::inventory -- --nocapture
+      - name: Kernels, natively
+        id: native
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --release -p scytale --lib kernels:: -- --nocapture \
+              | tee kernels.log
+          missing=$(grep -oE '^  [a-z0-9_]+/[^ ]+ +not run' kernels.log \
+              | awk '{print $1}' | tr '\n' ' ')
+          echo "missing=$missing" >> "$GITHUB_OUTPUT"
+
+      # SDE is Intel's, pinned by version and hash and fetched only
+      # when the runner lacks something; the cache keeps the download
+      # between runs.
+      - uses: actions/cache/restore@v6
+        id: sde
+        if: ${{ matrix.arch == 'x86-64' && steps.native.outputs.missing != '' }}
+        with:
+          path: ~/sde
+          key: sde-${{ env.SDE_SHA256 }}
+
+      - name: Fetch SDE
+        if: ${{ matrix.arch == 'x86-64' && steps.native.outputs.missing != '' && steps.sde.outputs.cache-hit != 'true' }}
+        run: |
+          curl -sSfL -o sde.tar.xz "$SDE_URL"
+          echo "$SDE_SHA256  sde.tar.xz" | sha256sum -c
+          mkdir -p ~/sde
+          tar -xJf sde.tar.xz -C ~/sde --strip-components=1
+
+      - uses: actions/cache/save@v6
+        if: ${{ matrix.arch == 'x86-64' && steps.native.outputs.missing != '' && steps.sde.outputs.cache-hit != 'true' }}
+        with:
+          path: ~/sde
+          key: sde-${{ env.SDE_SHA256 }}
+
+      - name: Install QEMU
+        if: ${{ matrix.arch == 'arm64' && steps.native.outputs.missing != '' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user
+
+      - name: Kernels the runner lacks, emulated
+        # Exactly the kernels the native run left out, and every one
+        # of them must run here: an emulator that lacks one fails the
+        # job rather than leaving it untested.
+        if: ${{ steps.native.outputs.missing != '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          name=$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')
+          case ${{ matrix.arch }} in
+              x86-64) runner="$HOME/sde/sde64 -future --" ;;
+              arm64) runner="qemu-aarch64 -cpu max" ;;
+          esac
+          export "CARGO_TARGET_${name}_RUNNER=$runner"
+          cargo test --release -p scytale --lib kernels:: -- --nocapture \
+              | tee emulated.log
+          ! grep -E ' not run' emulated.log
         env:
-          SCYTALE_EXPECT_ALL: ${{ matrix.expect_all }}
+          SCYTALE_KERNELS: ${{ steps.native.outputs.missing }}
 
       - name: Clippy
         # The same profile as the tests, so this analyses the code
@@ -140,14 +194,13 @@ jobs:
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
   # The check against the vendored vectors on the native runners:
-  # every suite in full, and every kernel the processor can run
-  # answering the vectors that test it, each exactly once; see
-  # scytale-acvp/README.md. The work is spread over jobs by
-  # SCYTALE_SHARD, each taking an equal share by weight. Only the
-  # `vendored` test runs here: the crate's unit tests run once, in
+  # one test per suite, every kernel answering the vectors that test
+  # it exactly once, natively where the runner can and then under the
+  # same emulators as above for the rest; see scytale-acvp/README.md.
+  # Only the `vendored` tests run here: the crate's unit tests run in
   # the job above.
   vendored:
-    name: test (${{ matrix.arch }}, shard ${{ matrix.shard }})
+    name: test (${{ matrix.arch }}, vendored)
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -155,10 +208,10 @@ jobs:
         include:
           - arch: x86-64
             runner: ubuntu-latest
-            shard: 1/1
+            target: x86_64-unknown-linux-gnu
           - arch: arm64
             runner: ubuntu-24.04-arm
-            shard: 1/1
+            target: aarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v7
 
@@ -185,14 +238,57 @@ jobs:
           key: >-
             vendored-${{ matrix.arch }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Test
-        run: cargo test --release -p scytale-acvp --test vendored
+      - name: Vendored vectors, natively
+        id: native
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --release -p scytale-acvp --test vendored \
+              -- --nocapture | tee vendored.log
+          missing=$(grep -oE '^  [a-z0-9_]+/[^ ]+ +not run' vendored.log \
+              | awk '{print $1}' | tr '\n' ' ')
+          echo "missing=$missing" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache/restore@v6
+        id: sde
+        if: ${{ matrix.arch == 'x86-64' && steps.native.outputs.missing != '' }}
+        with:
+          path: ~/sde
+          key: sde-${{ env.SDE_SHA256 }}
+
+      - name: Fetch SDE
+        if: ${{ matrix.arch == 'x86-64' && steps.native.outputs.missing != '' && steps.sde.outputs.cache-hit != 'true' }}
+        run: |
+          curl -sSfL -o sde.tar.xz "$SDE_URL"
+          echo "$SDE_SHA256  sde.tar.xz" | sha256sum -c
+          mkdir -p ~/sde
+          tar -xJf sde.tar.xz -C ~/sde --strip-components=1
+
+      - name: Install QEMU
+        if: ${{ matrix.arch == 'arm64' && steps.native.outputs.missing != '' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user
+
+      - name: Vendored vectors the runner lacks, emulated
+        if: ${{ steps.native.outputs.missing != '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          name=$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')
+          case ${{ matrix.arch }} in
+              x86-64) runner="$HOME/sde/sde64 -future --" ;;
+              arm64) runner="qemu-aarch64 -cpu max" ;;
+          esac
+          export "CARGO_TARGET_${name}_RUNNER=$runner"
+          cargo test --release -p scytale-acvp --test vendored \
+              -- --nocapture | tee emulated.log
+          ! grep -E ' not run' emulated.log
         env:
-          SCYTALE_SHARD: ${{ matrix.shard }}
+          SCYTALE_KERNELS: ${{ steps.native.outputs.missing }}
 
       - uses: actions/cache/save@v6
-        # Saved once per key, by one job of those that share it.
-        if: ${{ startsWith(matrix.shard, '1/') && steps.cache.outputs.cache-hit != 'true' }}
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         with:
           path: |
             ~/.cargo/registry/index
@@ -204,32 +300,42 @@ jobs:
   # The same check for RISC-V, which has no native runner: under
   # QEMU's `max` processor, which has every extension the library
   # uses, so every RISC-V kernel answers the vectors that test it.
-  # Under emulation that is too long for one job, so the run is
-  # spread over the shards listed here, each taking an equal share by
-  # weight; the count is the one number in the list. Each log says
-  # the weight it took of the whole. More shards than these would not
-  # finish sooner: the tallest LMS tree is one case of some
-  # twenty-five minutes on one core, and a shard is done no earlier
-  # than its longest case.
+  # Under emulation that is too long for one job, so the suites are
+  # spread over the jobs here by test name, the heavy ones apart. A
+  # job is done no earlier than its longest case, and the tallest LMS
+  # tree is one case of some twenty-five minutes on one core.
   #
   # The container is for its QEMU, as below. The arm64 runners are
-  # an experiment: on the x86-64 pool two or three shards a run took
-  # three times as long as the same shards in other runs, every suite
+  # an experiment: on the x86-64 pool two or three jobs a run took
+  # three times as long as the same jobs in other runs, every suite
   # and the compile alike, which the steps around the test measure.
   vendored-emulated:
-    name: test (riscv64, max, shard ${{ matrix.shard }})
+    name: test (riscv64, max, ${{ matrix.part }})
     runs-on: ubuntu-24.04-arm
     container: debian:trixie
     strategy:
       fail-fast: false
       matrix:
-        shard:
-          - 1/6
-          - 2/6
-          - 3/6
-          - 4/6
-          - 5/6
-          - 6/6
+        include:
+          - part: lms
+            filter: vendored::lms
+          - part: slh-dsa signing
+            filter: vendored::slh_dsa_siggen
+          - part: slh-dsa
+            filter: vendored::slh_dsa --skip vendored::slh_dsa_siggen
+          - part: ml-dsa, ml-kem
+            filter: vendored::ml_dsa vendored::ml_kem
+          - part: rsa, curves
+            filter: >-
+              vendored::rsa vendored::ecdsa vendored::detecdsa
+              vendored::eddsa vendored::xecdh
+          - part: the rest
+            filter: >-
+              --skip vendored::lms --skip vendored::slh_dsa
+              --skip vendored::ml_dsa --skip vendored::ml_kem
+              --skip vendored::rsa --skip vendored::ecdsa
+              --skip vendored::detecdsa --skip vendored::eddsa
+              --skip vendored::xecdh
     steps:
       - uses: actions/checkout@v7
 
@@ -259,7 +365,7 @@ jobs:
       - name: Measure the machine
         # The processor, the cores, the kernel's cpu counters (steal
         # is the eighth field) and a fixed native hash, so a slow
-        # shard can be told from a slow machine.
+        # job can be told from a slow machine.
         shell: bash
         run: |
           uname -m; nproc
@@ -267,23 +373,23 @@ jobs:
           head -1 /proc/stat
           time (head -c 1G /dev/zero | sha256sum)
 
-      - name: Test as max, shard ${{ matrix.shard }}
+      - name: Test as max, ${{ matrix.part }}
         # Without the session, which would want the target's TLS
-        # library.
+        # library. Every kernel must run: `max` has every extension.
+        shell: bash
         run: |
+          set -o pipefail
           cargo test --release -p scytale-acvp --no-default-features \
-              --test vendored --target riscv64gc-unknown-linux-gnu
+              --test vendored --target riscv64gc-unknown-linux-gnu \
+              -- --nocapture ${{ matrix.filter }} | tee vendored.log
+          ! grep -E ' not run' vendored.log
         env:
           CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER:
             riscv64-linux-gnu-gcc
           CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER:
             qemu-riscv64 -cpu max -L /usr/riscv64-linux-gnu
-          SCYTALE_SHARD: ${{ matrix.shard }}
 
       - name: Measure the machine after
-        # The processor, the cores, the kernel's cpu counters (steal
-        # is the eighth field) and a fixed native hash, so a slow
-        # shard can be told from a slow machine.
         shell: bash
         if: ${{ always() }}
         run: |
@@ -294,7 +400,7 @@ jobs:
 
       - uses: actions/cache/save@v6
         # Saved once per key, by one job of those that share it.
-        if: ${{ startsWith(matrix.shard, '1/') && steps.cache.outputs.cache-hit != 'true' }}
+        if: ${{ matrix.part == 'lms' && steps.cache.outputs.cache-hit != 'true' }}
         with:
           path: |
             ~/.cargo/registry/index
@@ -324,16 +430,18 @@ jobs:
       matrix:
         include:
           # One row for the library's tests and the lints and, apart
-          # from it, the check against the vendored vectors in
-          # shards, which carry nothing else.
+          # from it, the check against the vendored vectors in two
+          # parts by test name, which carry nothing else.
           - name: x86, 32-bit
             target: i686-unknown-linux-musl
-          - name: x86, 32-bit, shard 1/2
+          - name: x86, 32-bit, vendored, heavy
             target: i686-unknown-linux-musl
-            shard: 1/2
-          - name: x86, 32-bit, shard 2/2
+            filter: vendored::lms vendored::slh_dsa vendored::ml_dsa
+          - name: x86, 32-bit, vendored, the rest
             target: i686-unknown-linux-musl
-            shard: 2/2
+            filter: >-
+              --skip vendored::lms --skip vendored::slh_dsa
+              --skip vendored::ml_dsa
     env:
       CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
     steps:
@@ -358,39 +466,36 @@ jobs:
             narrow-${{ matrix.target }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Test
-        # As the native job, for a target. The inventory goes first
-        # and alone so that its table is in the log, portable rows
-        # though they all are.
-        if: ${{ !matrix.shard }}
+        # As the native job, for a target: the kernel tests apart, so
+        # that their tables, portable rows though they all are, are in
+        # the log.
+        if: ${{ !matrix.filter }}
         run: |
-          cargo test --release -p scytale --lib --target ${{ matrix.target }} \
-              vectors::inventory -- --nocapture
           cargo test --release --workspace --exclude scytale-acvp \
-              --target ${{ matrix.target }} -- --skip vectors::inventory
+              --target ${{ matrix.target }} -- --skip kernels::
           cargo test --release -p scytale --lib --target ${{ matrix.target }} \
-              -- features::tests::alone vectors::alone \
-              --ignored --test-threads=1
+              kernels:: -- --nocapture
         env:
           # Per target, because a plain RUSTFLAGS would replace these
           # rather than add to them and the linker flag would be lost.
           CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS:
             -D warnings -C linker-flavor=ld.lld
 
-      - name: Test the vendored vectors, shard ${{ matrix.shard }}
-        # This shard's share of the check, and nothing else.
-        if: ${{ matrix.shard }}
+      - name: Test the vendored vectors, ${{ matrix.name }}
+        # This row's suites, and nothing else.
+        if: ${{ matrix.filter }}
         run: |
           cargo test --release -p scytale-acvp --no-default-features \
-              --test vendored --target ${{ matrix.target }}
+              --test vendored --target ${{ matrix.target }} \
+              -- --nocapture ${{ matrix.filter }}
         env:
-          SCYTALE_SHARD: ${{ matrix.shard }}
           CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS:
             -D warnings -C linker-flavor=ld.lld
 
       - name: Clippy
         # Some code is built only where there is no hardware backend,
         # and the targets above never show it to the lints.
-        if: ${{ !matrix.shard }}
+        if: ${{ !matrix.filter }}
         run: |
           cargo clippy --workspace --exclude scytale-acvp --all-targets \
               --release --target ${{ matrix.target }} -- -D warnings
@@ -403,7 +508,7 @@ jobs:
 
       - uses: actions/cache/save@v6
         # Saved once per key, by the library row.
-        if: ${{ !matrix.shard && steps.cache.outputs.cache-hit != 'true' }}
+        if: ${{ !matrix.filter && steps.cache.outputs.cache-hit != 'true' }}
         with:
           path: |
             ~/.cargo/registry/index
@@ -421,21 +526,19 @@ jobs:
   # VEX-encoded, which Westmere and the Silvermont and Goldmont Atoms
   # cannot run.
   #
-  # So each set of features the probes tell apart gets a processor
-  # here, emulated, and a dispatch check on it. `features` is what
-  # that processor has, of the features any backend needs, and the
-  # inventory test holds every probe to it in both directions: a
-  # backend offered without its features fails, and so does one
-  # withheld from a processor that has them, which would otherwise
-  # pass in silence as a skipped test. It also checks the emulator
-  # offers what is written here, so a list cannot go stale. Then the
-  # tests that compare each kernel with the portable code run, which
-  # all have `agree` in their names: every kernel the processor
-  # reaches executes there, and one that traps fails the row.
+  # So each set of features the lists tell apart gets a processor
+  # here, emulated, and the kernel tests run on it: every kernel whose
+  # row the processor meets executes, and one that traps fails the
+  # row, while the rest say `not run`. The detection tests run there
+  # too, which hold the processor's own answers to the standard
+  # library's. A row marked `expect_all` is a processor with every
+  # extension the library uses, and fails if any kernel is not run,
+  # so a kernel no machine here can run fails instead of being
+  # skipped forever.
   #
-  # That is all a row proves, and all it runs: that the probes choose
-  # the right kernels on that set of features, and that those kernels
-  # run on that processor. Whether each kernel is right is settled
+  # That is all a row proves: that the lists choose the right kernels
+  # on that set of features, and that those kernels run on that
+  # processor. Whether each kernel is right is settled
   # once, where every kernel can run: the library's tests and the
   # check against the vendored vectors on the native runners for
   # x86-64 and aarch64, and for RISC-V, which has no native runner,
@@ -457,62 +560,48 @@ jobs:
           # all of it.
           - arch: x86_64
             cpu: Nehalem
-            features: ssse3 sse4.1
           # AES-NI without AVX.
           - arch: x86_64
             cpu: Westmere
-            features: ssse3 sse4.1 aes pclmulqdq
           # AVX without AVX2 or BMI2.
           - arch: x86_64
             cpu: SandyBridge
-            features: ssse3 sse4.1 aes pclmulqdq avx
           # AVX2 and BMI2 without ADX.
           - arch: x86_64
             cpu: Haswell
-            features: ssse3 sse4.1 aes pclmulqdq avx avx2 bmi1 bmi2
           # ADX without the SHA extensions or VAES: Broadwell through
           # Comet Lake, and the Xeons of those years.
           - arch: x86_64
             cpu: Skylake-Client
-            features: ssse3 sse4.1 aes pclmulqdq avx avx2 bmi1 bmi2 adx
           # An Atom: the SHA extensions without AVX.
           - arch: x86_64
             cpu: Denverton
-            features: ssse3 sse4.1 aes pclmulqdq sha
           # The SHA extensions and ADX without VAES: Zen 1 and 2.
           # (QEMU's Milan model has no VAES either, so it would
           # decide the same.)
           - arch: x86_64
             cpu: EPYC-Rome
-            features: >-
-              ssse3 sse4.1 aes pclmulqdq avx avx2 bmi1 bmi2 adx sha
           # Everything QEMU emulates, which is VAES without
           # VPCLMULQDQ: the wide AES modes without wide GCM.
           - arch: x86_64
             cpu: max
-            features: >-
-              ssse3 sse4.1 aes pclmulqdq avx avx2 bmi1 bmi2 adx sha vaes
           # ARMv8.0 with the cryptography extension.
           - arch: aarch64
             cpu: cortex-a53
-            features: aes pmull sha1 sha2
           # SHA-512 and SHA-3 as well, which is everything any
           # backend uses, so every row must run: one that cannot
           # would otherwise skip forever. (QEMU's `max` adds nothing
           # the library looks for.)
           - arch: aarch64
             cpu: neoverse-v1
-            features: aes pmull sha1 sha2 sha512 sha3
             expect_all: 1
           # The RVA22 profile: of what the library looks for, Zbb.
           - arch: riscv64
             cpu: rva22u64
-            features: zbb
           # The RVA23 profile: the vector extension, and Zvbb with
           # the Zvkb it includes.
           - arch: riscv64
             cpu: rva23u64
-            features: v zbb zvbb zvkb
           # The vector and scalar cryptography extensions, which no
           # runner has and no profile requires: the only place these
           # kernels run at all, so this row is not a dispatch check
@@ -521,9 +610,6 @@ jobs:
           # vectors, in the vendored-emulated job above.
           - arch: riscv64
             cpu: max
-            features: >-
-              v zbb zbc zbkb zbkc zkne zknd zknh zvkned zvknha zvknhb
-              zvbb zvbc zvkb zvkg
             expect_all: 1
             whole: 1
     steps:
@@ -567,10 +653,12 @@ jobs:
 
       - name: Test as ${{ matrix.cpu }}
         # Cargo reads the linker and the runner from variables named
-        # for the target. The inventory goes first and alone so that
-        # its table is in the log. Then the dispatch check, or on
-        # the `whole` row the library's tests.
+        # for the target. The kernel tests, with their tables in the
+        # log, and the detection tests; or on the `whole` row the
+        # library's tests.
+        shell: bash
         run: |
+          set -o pipefail
           arch=${{ matrix.arch }}
           name=$(echo "$TARGET" | tr 'a-z-' 'A-Z_')
           runner="qemu-$arch -cpu ${{ matrix.cpu }}"
@@ -580,23 +668,17 @@ jobs:
           fi
           export "CARGO_TARGET_${name}_RUNNER=$runner"
           cargo test --release -p scytale --lib --target "$TARGET" \
-              -- --nocapture vectors::inventory
-          alone=features::tests::alone
+              kernels:: -- --nocapture | tee kernels.log
           if [ -n "${{ matrix.whole }}" ]; then
               cargo test --release --workspace --exclude scytale-acvp \
-                  --lib --target "$TARGET" -- --skip vectors::inventory
-              alone="$alone vectors::alone"
+                  --lib --target "$TARGET" -- --skip kernels::
           else
               cargo test --release -p scytale --lib --target "$TARGET" \
-                  agree
+                  arch:: features::
           fi
-          cargo test --release -p scytale --lib --target "$TARGET" \
-              -- $alone --ignored --test-threads=1
-        env:
-          SCYTALE_CPU_FEATURES: ${{ matrix.features }}
-          # Empty for the rows that do not set it, which the
-          # inventory reads as unset.
-          SCYTALE_EXPECT_ALL: ${{ matrix.expect_all }}
+          if [ -n "${{ matrix.expect_all }}" ]; then
+              ! grep -E ' not run' kernels.log
+          fi
 
       - name: Clippy
         # The lints for the target, which the native runner used to

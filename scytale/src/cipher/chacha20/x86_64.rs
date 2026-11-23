@@ -25,32 +25,23 @@
 
 #![allow(unsafe_code)]
 
+use super::Kernel;
+use crate::features::Chosen;
 use zeroize::Zeroize;
 
-use super::{BLOCK_SIZE, Backend, Cipher, Sealed};
+use super::{BLOCK_SIZE, Backend, Sealed};
 use crate::align::At32;
-use crate::features;
-
-/// ChaCha20 with AVX2.
-pub type ChaCha20 = Cipher<Avx2>;
-
-/// Whether the processor and operating system support AVX2: the
-/// instructions (leaf 7, EBX bit 5) and the OS saving the upper
-/// register halves (XCR0 bits 1 and 2), as for VAES.
-pub(crate) fn has_avx2() -> bool {
-    features::allows(super::KERNELS, super::Kernel::Avx2)
-}
 
 /// The keystream generator with AVX2.
-// No public constructor: a value exists only by way of `probe`.
+// No public constructor: a value exists only by way of `of`.
 #[derive(Clone, Copy)]
 pub struct Avx2(());
 
 impl Sealed for Avx2 {}
 
 impl Backend for Avx2 {
-    fn probe() -> Option<Self> {
-        has_avx2().then_some(Avx2(()))
+    fn of(chosen: Chosen<Kernel>) -> Option<Self> {
+        (chosen.kernel() == Kernel::Avx2).then_some(Avx2(()))
     }
 
     fn xor(
@@ -60,7 +51,7 @@ impl Backend for Avx2 {
         counter: u32,
         data: &mut [u8],
     ) {
-        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // SAFETY: `self` was minted by `of`, which confirmed the
         // instructions.
         unsafe { xor(key, nonce, counter, data) }
     }
@@ -486,28 +477,5 @@ unsafe fn group4(state: &[u32; 16], data: *mut u8) {
             out("ymm12") _, out("ymm13") _, out("ymm14") _, out("ymm15") _,
             options(nostack),
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::Error;
-    use crate::cipher::chacha20::tests::check_known_answers;
-
-    #[test]
-    fn known_answers() {
-        if has_avx2() {
-            check_known_answers::<Avx2>();
-        }
-    }
-
-    #[test]
-    fn probe_agrees_with_constructor() {
-        let result = ChaCha20::try_new(&crate::Key::from([0u8; 32]));
-        assert_eq!(result.is_ok(), has_avx2());
-        if !has_avx2() {
-            assert_eq!(result.err(), Some(Error::NotSupported));
-        }
     }
 }

@@ -9,6 +9,8 @@
 //! by writing the field arithmetic out again.
 
 use super::ghash::{BLOCK, Ghash, MAX_GROUP, multiply_by_x};
+#[cfg(target_arch = "x86_64")]
+use crate::features;
 use zeroize::Zeroize;
 
 /// Blocks reversed at a time on the way into GHASH.
@@ -74,8 +76,9 @@ impl Inner {
     ) -> Self {
         #[cfg(target_arch = "x86_64")]
         if let Some(hash) = (bytes >= WORTH_IT)
-            .then(|| super::gcm::x86_64::Polyval::new(key))
+            .then(|| features::choose(super::gcm::KERNELS))
             .flatten()
+            .and_then(|chosen| super::gcm::x86_64::Polyval::new(key, chosen))
         {
             return Inner::Native(hash);
         }
@@ -266,8 +269,8 @@ mod tests {
         }
     }
 
-    /// The loop written out is taken exactly where the features in
-    /// force meet the row it borrows, GCM's narrower one. It has no
+    /// The loop written out is taken exactly where GCM's list chooses
+    /// one of the rows whose loop it borrows. It has no
     /// row of its own, so nothing else holds its constructor to that;
     /// a value built without the check would run code the processor
     /// has not.
@@ -277,11 +280,14 @@ mod tests {
         use crate::aead::gcm::KERNELS;
         use crate::features;
         use crate::kernel::Kernel;
-        let p = Polyval::new(&hex::<16>(H), WORTH_IT);
-        assert_eq!(
-            matches!(p.inner, Inner::Native(_)),
-            features::allows(KERNELS, Kernel::Aesni)
-        );
+        features::build_alone(|| {
+            let p = Polyval::new(&hex::<16>(H), WORTH_IT);
+            let row = features::select(KERNELS);
+            assert_eq!(
+                matches!(p.inner, Inner::Native(_)),
+                matches!(row, Some(Kernel::Aesni | Kernel::Vaes))
+            );
+        });
     }
 
     /// The subkey from RFC 8452's worked example, reused throughout

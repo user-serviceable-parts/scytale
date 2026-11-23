@@ -13,7 +13,7 @@
 //! coming in.
 
 #![allow(unsafe_code)]
-use crate::features::{self, Features, aarch64::Feature};
+use crate::features::Chosen;
 
 /// The field polynomial `x^128 + x^7 + x^2 + x + 1` without its
 /// leading term, written in the reversed bit order.
@@ -149,12 +149,21 @@ pub(crate) unsafe fn multiply_group(
 #[derive(Clone, Copy)]
 pub(crate) struct Multiply(());
 
-/// The multiply, where the processor has it. Asked once.
-pub(crate) fn probe() -> Option<Multiply> {
-    has_carryless_multiply().then_some(Multiply(()))
-}
-
 impl Multiply {
+    /// The multiply, where GCM's list chose its ARMv8 row, which
+    /// needs PMULL as well as the AES instructions.
+    pub(crate) fn for_gcm(
+        chosen: Chosen<crate::kernel::Kernel>,
+    ) -> Option<Self> {
+        (chosen.kernel() == crate::kernel::Kernel::Armv8)
+            .then_some(Multiply(()))
+    }
+
+    /// The multiply, where the kernel list chose it.
+    pub(crate) fn of(chosen: Chosen<super::Kernel>) -> Option<Self> {
+        (chosen.kernel() == super::Kernel::Pmull).then_some(Multiply(()))
+    }
+
     /// How many blocks the group multiply takes at once, asked as a
     /// call because one architecture decides it at run time.
     pub(crate) fn group(self) -> usize {
@@ -168,7 +177,7 @@ impl Multiply {
 
     /// Multiplies `value` by the prepared subkey `h`, in place.
     pub(crate) fn multiply(self, value: &mut [u64; 2], h: &[u64; 2]) {
-        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // SAFETY: `self` was minted by `of`, which confirmed the
         // instructions.
         unsafe { multiply(value, h) }
     }
@@ -192,14 +201,6 @@ impl Multiply {
         unsafe { multiply_group(value, powers, blocks) }
     }
 }
-
-/// Whether the polynomial multiply is available.
-pub(crate) fn has_carryless_multiply() -> bool {
-    features::allows(super::KERNELS, super::Kernel::Pmull)
-}
-
-/// What [`has_carryless_multiply`] asks for.
-pub(crate) const PMULL: Features = features::arm(&[Feature::Pmull]);
 
 /// Prepares the subkey for [`multiply`].
 pub(crate) fn prepare(h: &[u64; 2]) -> [u64; 2] {

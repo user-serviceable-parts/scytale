@@ -68,12 +68,6 @@ use core::fmt;
 
 use engine::{Engine32, Engine64, Variant32, Variant64};
 
-#[cfg(target_arch = "aarch64")]
-use crate::features::aarch64::Feature as A;
-#[cfg(target_arch = "riscv64")]
-use crate::features::riscv64::Feature as R;
-#[cfg(target_arch = "x86_64")]
-use crate::features::x86_64::Feature as X;
 use crate::features::{self, Dispatcher, Features};
 use crate::hash::{BitHash, Hash};
 use crate::{BlockType, Error};
@@ -246,67 +240,48 @@ pub(crate) enum Kernel {
     Portable,
 }
 
-/// What the SHA extensions' loops need: the rounds are the SHA
-/// instructions, and around them the loop shuffles bytes (SSSE3) and
-/// inserts and blends words (SSE4.1). Every processor with the SHA
-/// instructions has both, but a hypervisor can hide one and not the
-/// other, and asking costs nothing.
-#[cfg(target_arch = "x86_64")]
-pub(crate) const SHA_NI: Features =
-    features::x86(&[X::Sha, X::Ssse3, X::Sse41]);
-/// What the AVX2 SHA-512 loop needs: the schedule is AVX2, and the
-/// rounds use `andn` (BMI1) and `rorx` (BMI2).
-#[cfg(target_arch = "x86_64")]
-pub(crate) const AVX2_512: Features =
-    features::x86(&[X::Avx2, X::Bmi1, X::Bmi2]);
-/// The ARMv8 SHA-256 instructions.
-#[cfg(target_arch = "aarch64")]
-pub(crate) const ARMV8_256: Features = features::arm(&[A::Sha2]);
-/// The ARMv8 SHA-512 instructions.
-#[cfg(target_arch = "aarch64")]
-pub(crate) const ARMV8_512: Features = features::arm(&[A::Sha512]);
-/// Vector SHA-256: the vector unit, the SHA-256 instructions, and the
-/// byte reverse from Zvkb, which Zvbb also brings.
-#[cfg(target_arch = "riscv64")]
-pub(crate) const ZVKNH_256: Features =
-    features::riscv(&[R::V, R::Zvknha, R::Zvkb]);
-/// Vector SHA-512: only Zvknhb has it.
-#[cfg(target_arch = "riscv64")]
-pub(crate) const ZVKNH_512: Features =
-    features::riscv(&[R::V, R::Zvknhb, R::Zvkb]);
-/// The scalar sigma instructions.
-#[cfg(target_arch = "riscv64")]
-pub(crate) const ZKNH: Features = features::riscv(&[R::Zknh]);
+features::kernels! {
+    enum Kernel;
 
-/// The kernels for SHA-224 and SHA-256, best first, each with what it
-/// needs; the first whose needs are in force is the one a new hash
-/// gets. The portable code needs nothing, so the search always ends.
-pub(crate) const KERNELS32: &[(Kernel, Features)] = &[
-    #[cfg(target_arch = "x86_64")]
-    (Kernel::ShaNi, SHA_NI),
-    #[cfg(target_arch = "aarch64")]
-    (Kernel::Armv8, ARMV8_256),
-    #[cfg(target_arch = "riscv64")]
-    (Kernel::Zvknh, ZVKNH_256),
-    #[cfg(target_arch = "riscv64")]
-    (Kernel::Zknh, ZKNH),
-    (Kernel::Portable, Features::new()),
-];
+    /// The kernels for SHA-224 and SHA-256, best first; the first
+    /// whose needs are in force is the one a new hash gets.
+    ///
+    /// SHA-NI: the rounds are the SHA instructions, and around them
+    /// the loop shuffles bytes (SSSE3) and inserts and blends words
+    /// (SSE4.1). Every processor with the SHA instructions has both,
+    /// but a hypervisor can hide one and not the other. Vector
+    /// SHA-256 needs the byte reverse from Zvkb, which Zvbb also
+    /// brings.
+    pub(crate) const KERNELS32 for sha256 tested by tests::kernel_256 = [
+        #[cfg(target_arch = "x86_64")]
+        ShaNi => (x86_64: Sha, Ssse3, Sse41),
+        #[cfg(target_arch = "aarch64")]
+        Armv8 => (aarch64: Sha2),
+        #[cfg(target_arch = "riscv64")]
+        Zvknh => (riscv64: V, Zvknha, Zvkb),
+        #[cfg(target_arch = "riscv64")]
+        Zknh => (riscv64: Zknh),
+        Portable => (),
+    ];
 
-/// The kernels for SHA-384, SHA-512 and the truncated SHA-512s. A
-/// processor may have the SHA-256 instructions and not these, which
-/// is why the two families are listed apart.
-pub(crate) const KERNELS64: &[(Kernel, Features)] = &[
-    #[cfg(target_arch = "x86_64")]
-    (Kernel::Avx2, AVX2_512),
-    #[cfg(target_arch = "aarch64")]
-    (Kernel::Armv8, ARMV8_512),
-    #[cfg(target_arch = "riscv64")]
-    (Kernel::Zvknh, ZVKNH_512),
-    #[cfg(target_arch = "riscv64")]
-    (Kernel::Zknh, ZKNH),
-    (Kernel::Portable, Features::new()),
-];
+    /// The kernels for SHA-384, SHA-512 and the truncated SHA-512s. A
+    /// processor may have the SHA-256 instructions and not these,
+    /// which is why the two families are listed apart.
+    ///
+    /// AVX2: the schedule is AVX2, and the rounds use `andn` (BMI1)
+    /// and `rorx` (BMI2). Vector SHA-512 is Zvknhb's alone.
+    pub(crate) const KERNELS64 for sha512 tested by tests::kernel_512 = [
+        #[cfg(target_arch = "x86_64")]
+        Avx2 => (x86_64: Avx2, Bmi1, Bmi2),
+        #[cfg(target_arch = "aarch64")]
+        Armv8 => (aarch64: Sha512),
+        #[cfg(target_arch = "riscv64")]
+        Zvknh => (riscv64: V, Zvknhb, Zvkb),
+        #[cfg(target_arch = "riscv64")]
+        Zknh => (riscv64: Zknh),
+        Portable => (),
+    ];
+}
 
 /// What the two lists publish: their needs, without the names.
 const PROFILES32: [Features; KERNELS32.len()] =
@@ -341,16 +316,14 @@ macro_rules! automatic {
             /// Starts a hash with the best implementation the
             /// features in force allow.
             pub fn new() -> Self {
-                let inner = match features::select($kernels) {
+                let inner = match features::choose($kernels) {
                     $(
                         #[cfg(target_arch = $arch)]
-                        Some(Kernel::$choice) => {
-                            match <$path as $compress>::probe() {
-                                Some(c) => $inner::$choice($engine::with(c)),
-                                // The list chose it, so this is not
-                                // taken unless the features changed
-                                // between the two reads; portable is
-                                // right if they did.
+                        Some(c) if c.kernel() == Kernel::$choice => {
+                            // `of` answers for the choice just made,
+                            // so the fallback is never taken.
+                            match <$path as $compress>::of(c) {
+                                Some(f) => $inner::$choice($engine::with(f)),
                                 None => $inner::Portable($engine::with(
                                     portable::Compress,
                                 )),
@@ -372,35 +345,6 @@ macro_rules! automatic {
                     )*
                     $inner::Portable(_) => Kernel::Portable,
                 }
-            }
-
-            /// The kernels this family chooses among, with their
-            /// needs.
-            #[cfg(test)]
-            pub(crate) fn kernels() -> &'static [(Kernel, Features)] {
-                $kernels
-            }
-
-            /// Starts a hash on `kernel` alone, or `None` where the
-            /// set in force does not allow it. The vector suites and
-            /// the cross-checks reach each kernel this way, through
-            /// the same type that dispatches to it.
-            #[cfg(test)]
-            pub(crate) fn with_kernel(kernel: Kernel) -> Option<Self> {
-                if !features::available($kernels, kernel) {
-                    return None;
-                }
-                let inner = match kernel {
-                    $(
-                        #[cfg(target_arch = $arch)]
-                        Kernel::$choice => {
-                            let c = <$path as $compress>::probe()?;
-                            $inner::$choice($engine::with(c))
-                        }
-                    )*
-                    _ => $inner::Portable($engine::with(portable::Compress)),
-                };
-                Some($name(inner))
             }
 
             /// The needs of each kernel this architecture has, best
@@ -624,33 +568,12 @@ pub(crate) mod tests {
     ];
 
     /// Hashes a message given as a repeated piece, in pieces.
-    fn digest<H: Hash>(example: &Example, start: fn() -> H) -> H::Output {
+    fn digest<H: Hash>(example: &Example, start: impl Fn() -> H) -> H::Output {
         let mut hash = start();
         for _ in 0..example.repeat {
             hash.update(example.message);
         }
         hash.finalize()
-    }
-
-    /// Checks the four variants of one implementation against the
-    /// FIPS 180-4 examples.
-    pub(crate) fn check_known_answers<A, B, C, D>(
-        a: fn() -> A,
-        b: fn() -> B,
-        c: fn() -> C,
-        d: fn() -> D,
-    ) where
-        A: Hash<Output = [u8; 28]>,
-        B: Hash<Output = [u8; 32]>,
-        C: Hash<Output = [u8; 48]>,
-        D: Hash<Output = [u8; 64]>,
-    {
-        for example in &EXAMPLES {
-            assert_eq!(digest(example, a), hex(example.sha224)[..28]);
-            assert_eq!(digest(example, b), hex(example.sha256)[..32]);
-            assert_eq!(digest(example, c), hex(example.sha384)[..48]);
-            assert_eq!(digest(example, d), hex(example.sha512)[..64]);
-        }
     }
 
     /// Checks one kernel against the portable one over every length
@@ -682,41 +605,52 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn known_answers() {
-        check_known_answers(Sha224::new, Sha256::new, Sha384::new, Sha512::new);
+    /// SHA-224 and SHA-256 under one kernel, built through the public
+    /// types: the FIPS 180-4 examples, and agreement with the
+    /// portable code at every length up to a few blocks, whole and in
+    /// pieces.
+    pub(crate) fn kernel_256(under: &features::Under) {
+        for example in &EXAMPLES {
+            let sha224 = digest(example, || under.build(Sha224::new));
+            assert_eq!(sha224, hex(example.sha224)[..28]);
+            let sha256 = digest(example, || under.build(Sha256::new));
+            assert_eq!(sha256, hex(example.sha256)[..32]);
+        }
+        check_matches_portable(
+            || under.build(Sha224::new),
+            || features::build_portable(Sha224::new),
+        );
+        check_matches_portable(
+            || under.build(Sha256::new),
+            || features::build_portable(Sha256::new),
+        );
     }
 
-    /// Every kernel this processor can build agrees with the portable
-    /// code, for each of the six digests. The kernels this processor
-    /// cannot build are reported rather than passed over in silence;
-    /// the inventory audits those skips.
-    #[test]
-    fn every_kernel_agrees_with_the_portable_code() {
-        fn check<H>(
-            kernels: &[(Kernel, Features)],
-            with_kernel: fn(Kernel) -> Option<H>,
-        ) where
-            H: Hash,
-            H::Output: PartialEq + core::fmt::Debug,
-        {
-            for &(kernel, _) in kernels {
-                if with_kernel(kernel).is_none() {
-                    std::eprintln!("{kernel:?} not available; skipping");
-                    continue;
-                }
-                check_matches_portable(
-                    || with_kernel(kernel).expect("available"),
-                    || with_kernel(Kernel::Portable).expect("portable"),
-                );
-            }
+    /// SHA-384, SHA-512 and the truncated SHA-512s under one kernel,
+    /// as [`kernel_256`] does the shorter two.
+    pub(crate) fn kernel_512(under: &features::Under) {
+        for example in &EXAMPLES {
+            let sha384 = digest(example, || under.build(Sha384::new));
+            assert_eq!(sha384, hex(example.sha384)[..48]);
+            let sha512 = digest(example, || under.build(Sha512::new));
+            assert_eq!(sha512, hex(example.sha512)[..64]);
         }
-        check(Sha224::kernels(), Sha224::with_kernel);
-        check(Sha256::kernels(), Sha256::with_kernel);
-        check(Sha384::kernels(), Sha384::with_kernel);
-        check(Sha512::kernels(), Sha512::with_kernel);
-        check(Sha512_224::kernels(), Sha512_224::with_kernel);
-        check(Sha512_256::kernels(), Sha512_256::with_kernel);
+        check_matches_portable(
+            || under.build(Sha384::new),
+            || features::build_portable(Sha384::new),
+        );
+        check_matches_portable(
+            || under.build(Sha512::new),
+            || features::build_portable(Sha512::new),
+        );
+        check_matches_portable(
+            || under.build(Sha512_224::new),
+            || features::build_portable(Sha512_224::new),
+        );
+        check_matches_portable(
+            || under.build(Sha512_256::new),
+            || features::build_portable(Sha512_256::new),
+        );
     }
 
     /// The SHA-512/t starting values are SHA-512 of "SHA-512/t" from
@@ -837,7 +771,7 @@ pub(crate) mod tests {
             // The same bit string, hashed by the portable code with
             // the bits fed the same way, must agree; and it must
             // differ from the message without them.
-            let mut p = portable::Sha384::try_new().expect("portable");
+            let mut p = features::build_portable(Sha384::new);
             p.update(&data[..len]);
             assert_eq!(p.finalize_bits(0xa0, 3).unwrap(), bits);
             let mut whole = Sha384::new();
@@ -893,10 +827,20 @@ pub(crate) mod tests {
 
     #[test]
     fn picks_the_first_kernel_whose_needs_are_met() {
-        let sha256 = Auto32::<variant::Sha256>::new();
-        features::dispatches(KERNELS32, Sha256::profiles(), sha256.kernel());
-        let sha512 = Auto64::<variant::Sha512>::new();
-        features::dispatches(KERNELS64, Sha512::profiles(), sha512.kernel());
+        features::build_alone(|| {
+            let sha256 = Auto32::<variant::Sha256>::new();
+            features::dispatches(
+                KERNELS32,
+                Sha256::profiles(),
+                sha256.kernel(),
+            );
+            let sha512 = Auto64::<variant::Sha512>::new();
+            features::dispatches(
+                KERNELS64,
+                Sha512::profiles(),
+                sha512.kernel(),
+            );
+        });
         assert_eq!(Sha224::profiles(), Sha256::profiles());
         assert_eq!(Sha384::profiles(), Sha512_256::profiles());
     }
@@ -945,18 +889,6 @@ macro_rules! digest {
                 $auto::<variant::$variant>::profiles()
             }
 
-            /// The kernels this hash chooses among, with their needs.
-            #[cfg(test)]
-            pub(crate) fn kernels() -> &'static [(Kernel, Features)] {
-                $auto::<variant::$variant>::kernels()
-            }
-
-            /// Starts a hash on `kernel` alone, or `None` where the
-            /// set in force does not allow it.
-            #[cfg(test)]
-            pub(crate) fn with_kernel(kernel: Kernel) -> Option<Self> {
-                $auto::with_kernel(kernel).map($name)
-            }
         }
 
         impl features::sealed::Sealed for $name {}

@@ -81,19 +81,6 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Cmac<C> {
         Self::with_engine(key, MacEngine::new())
     }
 
-    /// The MAC over the chaining loop of the kernel named, or `None`
-    /// where this processor cannot run it or it is not written for
-    /// this cipher. The kernels are CBC's.
-    #[cfg(test)]
-    pub(crate) fn with_kernel(
-        key: &C::Key,
-        kernel: crate::kernel::Kernel,
-    ) -> Option<Self> {
-        let kernels = crate::cipher::mode::cbc::kernels::<C>();
-        crate::features::available(kernels, kernel).then_some(())?;
-        Some(Self::with_engine(key, MacEngine::with(kernel)?))
-    }
-
     fn with_engine(key: &C::Key, engine: MacEngine<C>) -> Self {
         let cipher = C::new(key);
         let mut l = [0u8; BLOCK];
@@ -234,7 +221,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Cmac<C> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::Error;
     use crate::Key;
@@ -351,48 +338,35 @@ mod tests {
         }
     }
 
-    /// Every chaining loop this processor has gives the tag the
-    /// portable one does, at every key width, at lengths from nothing
-    /// to many blocks, in one piece and in two.
-    #[test]
-    fn the_engines_agree() {
-        use crate::cipher::mode::cbc::KERNELS;
-        use crate::kernel::Kernel;
+    /// CMAC under one of CBC's kernels, whose chaining loop it
+    /// borrows, against the portable code at every key width, at
+    /// lengths from nothing to many blocks, in one piece and in two.
+    /// Run by CBC's meta test.
+    pub(crate) fn kernel(under: &crate::features::Under) {
         let data: std::vec::Vec<u8> =
             (0..1000u32).map(|i| (i * 7 + 3) as u8).collect();
         fn each<C: BlockCipher<Block = [u8; BLOCK]>>(
+            under: &crate::features::Under,
             key: &C::Key,
             data: &[u8],
         ) {
-            let mut engines = 0;
-            for &(kernel, _) in KERNELS {
-                let Some(mut mac) = Cmac::<C>::with_kernel(key, kernel) else {
-                    continue;
-                };
-                engines += 1;
-                for len in [0, 1, 16, 17, 32, 48, 64, 200, 1000] {
-                    let mut reference =
-                        Cmac::<C>::with_kernel(key, Kernel::Portable)
-                            .expect("portable");
-                    reference.update(&data[..len]);
-                    let expected = reference.finalize();
-                    mac.update(&data[..len]);
-                    assert_eq!(mac.finalize(), expected, "{len}");
-                    let half = len / 2;
-                    mac.update(&data[..half]);
-                    mac.update(&data[half..len]);
-                    assert_eq!(
-                        mac.finalize(),
-                        expected,
-                        "{len} in two, {kernel:?}"
-                    );
-                }
+            let mut mac = under.build(|| Cmac::<C>::new(key));
+            for len in [0, 1, 16, 17, 32, 48, 64, 200, 1000] {
+                let mut reference =
+                    crate::features::build_portable(|| Cmac::<C>::new(key));
+                reference.update(&data[..len]);
+                let expected = reference.finalize();
+                mac.update(&data[..len]);
+                assert_eq!(mac.finalize(), expected, "{len}");
+                let half = len / 2;
+                mac.update(&data[..half]);
+                mac.update(&data[half..len]);
+                assert_eq!(mac.finalize(), expected, "{len} in two");
             }
-            assert!(engines >= 1);
         }
-        each::<Aes128>(&Key::from([3u8; 16]), &data);
-        each::<Aes192>(&Key::from([4u8; 24]), &data);
-        each::<Aes256>(&Key::from([5u8; 32]), &data);
+        each::<Aes128>(under, &Key::from([3u8; 16]), &data);
+        each::<Aes192>(under, &Key::from([4u8; 24]), &data);
+        each::<Aes256>(under, &Key::from([5u8; 32]), &data);
     }
 
     /// A wrong tag and a short one are both refused.

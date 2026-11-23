@@ -20,45 +20,28 @@
 
 #![allow(unsafe_code)]
 
-use crate::features::{self, Features, x86_64::Feature as F};
+use crate::features::Chosen;
 use crate::math::montgomery::x86_64::Adx;
 use crate::math::uint::Uint;
 
-use super::{Affine, Jacobian};
+use super::{Affine, Jacobian, Kernel};
 
 /// Four-limb values in the frame a point operation works in.
 pub(crate) const SLOTS: usize = 21;
 
 /// The table read, where the processor has the instructions. A value
-/// exists only by way of [`probe`], so holding one is the proof.
+/// exists only by way of [`Avx2::of`], so holding one is the proof.
 #[derive(Clone, Copy)]
 pub(crate) struct Avx2(());
 
-/// Which table read a point multiplication runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Kernel {
-    /// The whole table swept with vector compares and blends.
-    Avx2,
-    /// Plain Rust, on any processor.
-    Portable,
+impl Avx2 {
+    /// The proof, where the list chose the AVX2 row: AVX2 (CPUID leaf
+    /// 7, EBX bit 5) with the operating system saving the upper
+    /// halves of the registers (XCR0 bits 1 and 2).
+    pub(crate) fn of(chosen: Chosen<Kernel>) -> Option<Self> {
+        (chosen.kernel() == Kernel::Avx2).then_some(Avx2(()))
+    }
 }
-
-/// The kernels, best first, each with what it needs.
-pub(crate) const KERNELS: &[(Kernel, Features)] =
-    &[(Kernel::Avx2, AVX2), (Kernel::Portable, Features::new())];
-
-/// What the list publishes: the needs, without the names.
-pub(crate) const PROFILES: [Features; KERNELS.len()] =
-    features::profiles_of(KERNELS);
-
-/// AVX2 (CPUID leaf 7, EBX bit 5) with the operating system saving
-/// the upper halves of the registers (XCR0 bits 1 and 2). Asked once.
-pub(crate) fn probe() -> Option<Avx2> {
-    features::allows(KERNELS, Kernel::Avx2).then_some(Avx2(()))
-}
-
-/// What the AVX2 row needs.
-const AVX2: Features = features::x86(&[F::Avx, F::Avx2]);
 
 impl Avx2 {
     /// The entry of `table` whose position, counted from one, is
@@ -83,7 +66,7 @@ impl Avx2 {
         // calls; checking here covers both.
         assert!(!table.is_empty());
         let mut out = [Uint::<L>::ZERO; 2];
-        // SAFETY: `self` came from `probe`, so the instructions are
+        // SAFETY: `self` came from `of`, so the instructions are
         // there; the entries are four limbs, which is what the caller
         // holding one stands for, and the count is the table's own,
         // which was just confirmed nonzero.
@@ -962,7 +945,7 @@ impl Adx {
         io[0][..L].copy_from_slice(&p.x.0);
         io[1][..L].copy_from_slice(&p.y.0);
         io[2][..L].copy_from_slice(&p.z.0);
-        // SAFETY: `self` was minted by `probe`, which hands one out
+        // SAFETY: `self` was minted by `of`, which hands one out
         // only where the instructions are there, and the caller holds
         // one only for this prime, whose values are four limbs.
         unsafe {

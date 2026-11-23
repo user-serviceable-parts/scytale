@@ -16,6 +16,7 @@ use super::engine::{Compress32, Compress64};
 use super::engine::{Engine32, Engine64};
 #[cfg(test)]
 use super::variant;
+use crate::features::Chosen;
 
 // Named for the vector suites, which drive each engine in turn; the
 // dispatching types reach it directly.
@@ -279,7 +280,7 @@ impl Functions64 for Compress {
 }
 
 impl Compress32 for Compress {
-    fn probe() -> Option<Self> {
+    fn of(_: Chosen<super::Kernel>) -> Option<Self> {
         Some(Compress)
     }
 
@@ -289,27 +290,11 @@ impl Compress32 for Compress {
 }
 
 impl Compress64 for Compress {
-    fn probe() -> Option<Self> {
+    fn of(_: Chosen<super::Kernel>) -> Option<Self> {
         Some(Compress)
     }
 
     fn compress(self, state: &mut [u64; 8], blocks: &[[u8; 128]]) {
         compress512::<Compress>(state, blocks)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::hash::sha2::tests::check_known_answers;
-
-    #[test]
-    fn known_answers() {
-        check_known_answers(
-            || Sha224::try_new().expect("portable"),
-            || Sha256::try_new().expect("portable"),
-            || Sha384::try_new().expect("portable"),
-            || Sha512::try_new().expect("portable"),
-        );
     }
 }

@@ -50,10 +50,6 @@ use crate::{BlockType, Error};
 
 /// Which compression function a hash runs on.
 ///
-/// SHA-1 keeps no kernel in the value: each call to [`compress`]
-/// takes the first row the set in force meets, which costs one load,
-/// and the inventory accounts for the instructions through the same
-/// list as everywhere else.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kernel {
     /// The SHA extensions, which carry SHA-1 beside SHA-256.
@@ -66,20 +62,21 @@ pub(crate) enum Kernel {
     Portable,
 }
 
-/// The ARMv8 SHA-1 instructions, which a processor reports apart from
-/// its SHA-256 ones.
-#[cfg(target_arch = "aarch64")]
-const ARMV8: Features =
-    features::arm(&[crate::features::aarch64::Feature::Sha1]);
+features::kernels! {
+    enum Kernel;
 
-/// The kernels, best first, each with what it needs.
-pub(crate) const KERNELS: &[(Kernel, Features)] = &[
-    #[cfg(target_arch = "x86_64")]
-    (Kernel::ShaNi, crate::hash::sha2::SHA_NI),
-    #[cfg(target_arch = "aarch64")]
-    (Kernel::Armv8, ARMV8),
-    (Kernel::Portable, Features::new()),
-];
+    /// The kernels, best first. The SHA extensions carry SHA-1 beside
+    /// SHA-256, and their loop shuffles bytes (SSSE3) and inserts
+    /// words (SSE4.1) around the rounds; AArch64 reports its SHA-1
+    /// instructions apart from its SHA-256 ones.
+    pub(crate) const KERNELS for sha1 tested by tests::kernel = [
+        #[cfg(target_arch = "x86_64")]
+        ShaNi => (x86_64: Sha, Ssse3, Sse41),
+        #[cfg(target_arch = "aarch64")]
+        Armv8 => (aarch64: Sha1),
+        Portable => (),
+    ];
+}
 
 /// What the list publishes: the needs, without the names.
 const PROFILES: [Features; KERNELS.len()] = features::profiles_of(KERNELS);
@@ -98,20 +95,59 @@ pub struct Sha1 {
     /// Whole bytes taken so far; wraps at the length the padding
     /// cannot express, which no real message reaches.
     bytes: u64,
+    /// The compression function, chosen when the hash was made.
+    compressor: Compressor,
 }
 
 const IV: [u32; 5] =
     [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0];
 
-/// The compression function over whole blocks, on the first kernel
-/// the set in force allows.
-fn compress(state: &mut [u32; 5], blocks: &[[u8; 64]]) {
-    match features::select(KERNELS) {
-        #[cfg(target_arch = "aarch64")]
-        Some(Kernel::Armv8) => aarch64::compress(state, blocks),
-        #[cfg(target_arch = "x86_64")]
-        Some(Kernel::ShaNi) => x86_64::compress(state, blocks),
-        _ => portable(state, blocks),
+/// The compression function a hash was built with: chosen once, when
+/// it was made, and carrying the proof of its instructions.
+#[derive(Clone, Copy, Debug)]
+enum Compressor {
+    #[cfg(target_arch = "x86_64")]
+    ShaNi(x86_64::ShaNi),
+    #[cfg(target_arch = "aarch64")]
+    Armv8(aarch64::Armv8),
+    Portable,
+}
+
+impl Compressor {
+    /// The first kernel the set in force allows.
+    fn chosen() -> Self {
+        match features::choose(KERNELS) {
+            #[cfg(target_arch = "x86_64")]
+            Some(c) if c.kernel() == Kernel::ShaNi => x86_64::ShaNi::of(c)
+                .map_or(Compressor::Portable, Compressor::ShaNi),
+            #[cfg(target_arch = "aarch64")]
+            Some(c) if c.kernel() == Kernel::Armv8 => aarch64::Armv8::of(c)
+                .map_or(Compressor::Portable, Compressor::Armv8),
+            _ => Compressor::Portable,
+        }
+    }
+
+    /// Folds whole blocks into `state`.
+    fn compress(self, state: &mut [u32; 5], blocks: &[[u8; 64]]) {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Compressor::ShaNi(token) => x86_64::compress(token, state, blocks),
+            #[cfg(target_arch = "aarch64")]
+            Compressor::Armv8(token) => aarch64::compress(token, state, blocks),
+            Compressor::Portable => portable(state, blocks),
+        }
+    }
+
+    /// Which kernel this is.
+    #[cfg(test)]
+    fn kernel(self) -> Kernel {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Compressor::ShaNi(_) => Kernel::ShaNi,
+            #[cfg(target_arch = "aarch64")]
+            Compressor::Armv8(_) => Kernel::Armv8,
+            Compressor::Portable => Kernel::Portable,
+        }
     }
 }
 
@@ -173,6 +209,7 @@ impl Sha1 {
             used: 0,
             dirty: 0,
             bytes: 0,
+            compressor: Compressor::chosen(),
         }
     }
 
@@ -187,14 +224,14 @@ impl Sha1 {
         if self.used > 56 {
             self.block[self.used..].fill(0);
             let block = self.block;
-            compress(&mut self.state, &[block]);
+            self.compressor.compress(&mut self.state, &[block]);
             self.used = 0;
         }
         self.block[self.used..56].fill(0);
         let bits = (self.bytes << 3) | extra;
         self.block[56..].copy_from_slice(&bits.to_be_bytes());
         let block = self.block;
-        compress(&mut self.state, &[block]);
+        self.compressor.compress(&mut self.state, &[block]);
         // The length is not message, but it says something about one,
         // and eight stores are cheap.
         self.block[56..].zeroize();
@@ -239,6 +276,7 @@ impl Clone for Sha1 {
             used: self.used,
             dirty: self.dirty,
             bytes: self.bytes,
+            compressor: self.compressor,
         }
     }
 }
@@ -275,11 +313,11 @@ impl Hash for Sha1 {
                 return;
             }
             let block = self.block;
-            compress(&mut self.state, &[block]);
+            self.compressor.compress(&mut self.state, &[block]);
             self.used = 0;
         }
         let (blocks, rest) = data.as_chunks::<64>();
-        compress(&mut self.state, blocks);
+        self.compressor.compress(&mut self.state, blocks);
         self.block[..rest.len()].copy_from_slice(rest);
         self.used = rest.len();
         self.dirty = self.dirty.max(self.used);
@@ -336,7 +374,7 @@ impl fmt::Debug for Sha1 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn unhex(hex: &str) -> [u8; 20] {
@@ -346,6 +384,49 @@ mod tests {
             *byte = u8::from_str_radix(s, 16).unwrap();
         }
         out
+    }
+
+    /// SHA-1 under one kernel, built through the public type: the
+    /// known answers, and the portable code's digest at every length
+    /// up to several blocks, whole and in pieces.
+    pub(crate) fn kernel(under: &features::Under) {
+        let digest = |data: &[u8]| {
+            let mut hash = under.build(Sha1::new);
+            hash.update(data);
+            hash.finalize()
+        };
+        assert_eq!(
+            digest(b"abc"),
+            unhex("a9993e364706816aba3e25717850c26c9cd0d89d")
+        );
+        let mut hash = under.build(Sha1::new);
+        for _ in 0..1000 {
+            hash.update(&[b'a'; 1000]);
+        }
+        assert_eq!(
+            hash.finalize(),
+            unhex("34aa973cd4c4daa4f61eeb2bdbad27316534016f")
+        );
+        let data: [u8; 600] = core::array::from_fn(|i| (i * 31 + 5) as u8);
+        for len in 0..data.len() {
+            let mut reference = features::build_portable(Sha1::new);
+            reference.update(&data[..len]);
+            let want = reference.finalize();
+            assert_eq!(digest(&data[..len]), want, "len {len}");
+            let mut pieces = under.build(Sha1::new);
+            for part in data[..len].chunks(67) {
+                pieces.update(part);
+            }
+            assert_eq!(pieces.finalize(), want, "len {len} in pieces");
+        }
+    }
+
+    #[test]
+    fn picks_the_first_kernel_whose_needs_are_met() {
+        features::build_alone(|| {
+            let kernel = Sha1::new().compressor.kernel();
+            features::dispatches(KERNELS, Sha1::profiles(), kernel);
+        });
     }
 
     /// FIPS 180-4's examples and the NIST CAVP one-million-`a` case.
@@ -390,41 +471,6 @@ mod tests {
                 assert_eq!(hash.finalize(), whole, "len {len} piece {piece}");
             }
         }
-    }
-
-    /// The instructions give the state the portable compression does,
-    /// block by block and over runs of blocks, from states other
-    /// than the initial one.
-    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-    #[test]
-    fn the_instructions_match_portable() {
-        #[cfg(target_arch = "aarch64")]
-        use aarch64::compress as written_out;
-        #[cfg(target_arch = "x86_64")]
-        use x86_64::compress as written_out;
-
-        // The one hardware row is the first; the portable row is
-        // the one that needs nothing.
-        let hardware = KERNELS[0].0;
-        if !features::allows(KERNELS, hardware) {
-            std::eprintln!("{hardware:?} not available; skipping");
-            return;
-        }
-        let mut blocks = [[0u8; 64]; 9];
-        for (i, block) in blocks.iter_mut().enumerate() {
-            for (j, byte) in block.iter_mut().enumerate() {
-                *byte = (i * 31 + j * 7 + 5) as u8;
-            }
-        }
-        let mut expected = IV;
-        let mut actual = IV;
-        for n in 1..=blocks.len() {
-            portable(&mut expected, &blocks[..n]);
-            written_out(&mut actual, &blocks[..n]);
-            assert_eq!(actual, expected, "{n} blocks");
-        }
-        written_out(&mut actual, &[]);
-        assert_eq!(actual, expected, "no blocks");
     }
 
     /// Nothing of a message is left in the buffer after a reset or a

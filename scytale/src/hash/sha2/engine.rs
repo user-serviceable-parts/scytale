@@ -25,6 +25,7 @@ use core::marker::PhantomData;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::features::Chosen;
 use crate::hash::{BitHash, Hash};
 use crate::{BlockType, ByteArray, Error};
 
@@ -43,10 +44,11 @@ pub(crate) use sealed::Sealed;
 /// call, and the one `unsafe` block in a hardware module is where
 /// the value is minted.
 pub trait Compress32: Sealed + Copy {
-    /// The function, where the features in force allow it.
+    /// The function, where the kernel list chose it: `None` for a
+    /// choice that is not this function's.
     // An architecture with no SHA-256 instructions has no caller.
     #[allow(dead_code)]
-    fn probe() -> Option<Self>;
+    fn of(chosen: Chosen<super::Kernel>) -> Option<Self>;
 
     /// Folds every block into `state`.
     fn compress(self, state: &mut [u32; 8], blocks: &[[u8; 64]]);
@@ -55,10 +57,11 @@ pub trait Compress32: Sealed + Copy {
 /// A SHA-512 family compression function. Sealed; see
 /// [`Compress32`] for what a value of the type means.
 pub trait Compress64: Sealed + Copy {
-    /// The function, where the features in force allow it.
+    /// The function, where the kernel list chose it: `None` for a
+    /// choice that is not this function's.
     // An architecture with no SHA-512 instructions has no caller.
     #[allow(dead_code)]
-    fn probe() -> Option<Self>;
+    fn of(chosen: Chosen<super::Kernel>) -> Option<Self>;
 
     /// Folds every block into `state`.
     fn compress(self, state: &mut [u64; 8], blocks: &[[u8; 128]]);
@@ -129,20 +132,6 @@ macro_rules! engine {
             /// from the probe.
             pub(crate) fn with(compress: C) -> Self {
                 Self::from_state(compress, V::IV)
-            }
-
-            /// Asks the probe itself, for a backend named rather
-            /// than chosen.
-            ///
-            /// This is the one construction in the module that can
-            /// fail, and why it is not in [`Hash`]: naming a backend
-            /// the processor has not got is a real error, where the
-            /// dispatching types always have portable code to fall
-            /// back on. Only the vector suites name one, so it
-            /// exists only for them.
-            #[cfg(test)]
-            pub(crate) fn try_new() -> Result<Self, Error> {
-                C::probe().map(Self::with).ok_or(Error::NotSupported)
             }
 
             /// Starts from `iv` instead of the variant's own value,

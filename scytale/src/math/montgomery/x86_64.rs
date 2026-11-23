@@ -20,22 +20,10 @@
 #![allow(unsafe_code)]
 
 use super::P256_PRIME;
-use crate::features;
-use crate::math::limbs::x86_64::{KERNELS, Kernel};
+/// The proof the products here take: the limb arithmetic's, since the
+/// two are one instruction set and one row of one list.
+pub(crate) use crate::math::limbs::x86_64::Adx;
 use crate::math::uint::Uint;
-
-/// The product, where the processor has the instructions. A value
-/// exists only by way of [`probe`], so holding one is the proof and
-/// the call on it is safe.
-#[derive(Clone, Copy)]
-pub(crate) struct Adx(());
-
-/// The product, where the processor reports ADX (CPUID leaf 7, EBX
-/// bit 19) and BMI2 for `mulx` (bit 8): the same row as the limb
-/// arithmetic's, since the two are one instruction set. Asked once.
-pub(crate) fn probe() -> Option<Adx> {
-    features::allows(KERNELS, Kernel::Adx).then_some(Adx(()))
-}
 
 impl Adx {
     /// `a b / 2^256 mod p` for the P-256 prime, with `b` below `p`
@@ -53,7 +41,7 @@ impl Adx {
     ) -> Uint<L> {
         debug_assert_eq!(L, 4);
         let mut out = Uint::<L>::ZERO;
-        // SAFETY: `self` was minted by `probe`, which hands one out
+        // SAFETY: `self` was minted by `of`, which hands one out
         // only where the instructions are there, and the caller holds
         // one only for this prime, whose values are four limbs.
         unsafe {
@@ -395,7 +383,7 @@ impl Adx {
         inv: u64,
     ) -> Uint<L> {
         debug_assert_eq!(L, 4);
-        // SAFETY: `self` was minted by `probe`, which hands one out
+        // SAFETY: `self` was minted by `of`, which hands one out
         // only where the instructions are; the caller holds one for a
         // four-limb modulus, and `inv` is that modulus's.
         let value = unsafe {
@@ -541,7 +529,7 @@ impl Adx {
         modulus: &Uint<L>,
     ) -> Uint<L> {
         debug_assert_eq!(L, 6);
-        // SAFETY: `self` was minted by `probe`, which hands one out
+        // SAFETY: `self` was minted by `of`, which hands one out
         // only where the instructions are; the caller holds one for a
         // six-limb modulus, and the context is as this asks.
         let (value, top) = unsafe { mul6_rows(a.0.as_ptr(), context.as_ptr()) };

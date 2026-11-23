@@ -46,11 +46,10 @@ use super::{BLOCK, Direction};
 // architecture is.
 use crate::align::{At16, At32};
 use crate::cipher::BlockCipher;
-use crate::cipher::aes::x86_64::AESNI;
 use crate::cipher::aes::x86_64::Schedule;
 pub(crate) use crate::cipher::aes::x86_64::{Keys, keys};
 use crate::cipher::mode::{ByteOrder, add_counter};
-use crate::features::{self, Features, x86_64::Feature as F};
+use crate::features::Chosen;
 use crate::kernel::Kernel;
 use zeroize::Zeroize;
 
@@ -269,30 +268,6 @@ unsafe fn wide_powers_of(h: &[u64; 2]) -> At32<[[u64; 2]; 2 * WIDE_AGGREGATE]> {
     wide
 }
 
-/// What the loops here need: AES-NI and SSSE3, as the cipher asks,
-/// and `pclmulqdq` with AVX.
-///
-/// AVX is asked for not to work on wider registers but for the way
-/// the instructions are written down. The VEX encoding of the same
-/// 128-bit instructions takes three operands where the original takes
-/// two, so a product can be written somewhere other than over one of
-/// its own inputs. Without it every multiplication needs a copy of
-/// its operand first, and those copies contend for the very ports the
-/// cipher is trying to use. It is a separate question from VAES, and
-/// answered yes by every processor built since about 2011.
-pub(crate) const NARROW: Features =
-    AESNI.union(features::x86(&[F::Pclmulqdq, F::Avx]));
-
-/// What the wider loop needs: [`NARROW`], and VAES with VPCLMULQDQ,
-/// which have shipped together on every processor that has either
-/// (leaf 7, ECX bits 9 and 10), AVX2 (leaf 7, EBX bit 5), and the
-/// operating system saving the upper halves. Only ever narrowing
-/// what [`NARROW`] allows: a processor with these runs the wider loop
-/// over as much of a message as it covers and the narrower one over
-/// the rest.
-pub(crate) const WIDE: Features =
-    NARROW.union(features::x86(&[F::Avx2, F::Vaes, F::Vpclmulqdq]));
-
 /// What AES-GCM's bulk work needs and what it does not change: the
 /// way to the round keys, and the powers of the hash subkey.
 ///
@@ -355,19 +330,35 @@ impl Subkey {
     /// VAES also wants a table four times the work to build: worth it
     /// for a key that many messages go under, not for one derived per
     /// message as GCM-SIV derives its own.
-    pub(crate) fn of(h: &[u8; BLOCK], kernel: Kernel) -> Option<Self> {
-        let wide = match kernel {
+    pub(crate) fn of(h: &[u8; BLOCK], chosen: Chosen<Kernel>) -> Option<Self> {
+        let wide = match chosen.kernel() {
             Kernel::Vaes => true,
             Kernel::Aesni => false,
             _ => return None,
         };
+        Some(Self::built(h, wide))
+    }
+
+    /// The narrower table alone, where either of this file's rows
+    /// was chosen: for a key derived per message, which the wider
+    /// table would cost more to build for than it saves.
+    fn narrow(h: &[u8; BLOCK], chosen: Chosen<Kernel>) -> Option<Self> {
+        match chosen.kernel() {
+            Kernel::Vaes | Kernel::Aesni => Some(Self::built(h, false)),
+            _ => None,
+        }
+    }
+
+    /// The tables, once a row of this file's has been chosen.
+    fn built(h: &[u8; BLOCK], wide: bool) -> Self {
         let h = prepare(&[halve(&h[..8]), halve(&h[8..])]);
-        // SAFETY: the kernel was chosen from a row whose needs the
-        // processor meets, which is these instructions.
+        // SAFETY: only `of` and `narrow` call this, for a row the
+        // list chose, whose features were in force: these
+        // instructions, and the wider ones for the wider table.
         let powers = unsafe { powers_of(&h) };
         // SAFETY: as above.
         let wide = wide.then(|| unsafe { wide_powers_of(&h) });
-        Some(Subkey { powers, wide })
+        Subkey { powers, wide }
     }
 }
 
@@ -377,10 +368,10 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     /// written for. That the processor has the instructions is
     /// settled by whoever chose the kernel, from its row in the
     /// mode's list.
-    pub(crate) fn of(h: &[u8; BLOCK], kernel: Kernel) -> Option<Self> {
+    pub(crate) fn of(h: &[u8; BLOCK], chosen: Chosen<Kernel>) -> Option<Self> {
         Some(Engine {
             keys: keys::<C>()?,
-            subkey: Subkey::of(h, kernel)?,
+            subkey: Subkey::of(h, chosen)?,
         })
     }
 
@@ -572,15 +563,15 @@ pub(crate) struct Polyval {
 }
 
 impl Polyval {
-    /// The hash under converted key `key`, or `None` where the
-    /// features in force have not the instructions for it.
-    ///
-    /// Not chosen from a row of its own: the hash stands alone, so it
-    /// asks for the row whose loop it borrows, GCM's narrower one.
-    pub(crate) fn new(key: &[u8; BLOCK]) -> Option<Self> {
-        features::allows(super::KERNELS, Kernel::Aesni).then_some(())?;
+    /// The hash under converted key `key`, where GCM's list chose
+    /// one of this file's rows: it borrows the narrower loop, whose
+    /// needs both rows have. `None` otherwise.
+    pub(crate) fn new(
+        key: &[u8; BLOCK],
+        chosen: Chosen<Kernel>,
+    ) -> Option<Self> {
         Some(Polyval {
-            subkey: Subkey::of(key, Kernel::Aesni)?,
+            subkey: Subkey::narrow(key, chosen)?,
             digest: Digest::new(false),
         })
     }

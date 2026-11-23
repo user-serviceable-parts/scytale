@@ -21,29 +21,20 @@
 
 #![allow(unsafe_code)]
 
-use super::super::{BLOCK_SIZE, Backend, CONSTANTS, Cipher, Sealed};
-use crate::features;
-
-/// ChaCha20 on the general registers.
-pub type ChaCha20 = Cipher<Zbb>;
-
-/// Whether the scalar rotate is available. Zbb and Zbkb both have it,
-/// and either will do. RVA23 requires Zbb, so anything that conforms
-/// to the profile has it.
-pub(crate) fn has_zbb() -> bool {
-    features::allows(super::super::KERNELS, super::super::Kernel::Zbb)
-}
+use super::super::Kernel;
+use super::super::{BLOCK_SIZE, Backend, CONSTANTS, Sealed};
+use crate::features::Chosen;
 
 /// The keystream generator on the general registers.
-// No public constructor: a value exists only by way of `probe`.
+// No public constructor: a value exists only by way of `of`.
 #[derive(Clone, Copy)]
 pub struct Zbb(());
 
 impl Sealed for Zbb {}
 
 impl Backend for Zbb {
-    fn probe() -> Option<Self> {
-        has_zbb().then_some(Zbb(()))
+    fn of(chosen: Chosen<Kernel>) -> Option<Self> {
+        (chosen.kernel() == Kernel::Zbb).then_some(Zbb(()))
     }
 
     fn xor(
@@ -53,7 +44,7 @@ impl Backend for Zbb {
         counter: u32,
         data: &mut [u8],
     ) {
-        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // SAFETY: `self` was minted by `of`, which confirmed the
         // instructions.
         unsafe { xor(key, nonce, counter, data) }
     }
@@ -178,45 +169,5 @@ unsafe fn keystream_block(state: &[u32; 16], out: &mut [u32; 16]) {
             w15 = out(reg) _,
             options(nostack),
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::cipher::chacha20::tests::check_known_answers;
-
-    #[test]
-    fn known_answers() {
-        if has_zbb() {
-            check_known_answers::<Zbb>();
-        }
-    }
-
-    #[test]
-    fn probes_agree_with_constructors() {
-        assert_eq!(
-            ChaCha20::try_new(&crate::Key::from([0u8; 32])).is_ok(),
-            has_zbb()
-        );
-    }
-
-    /// `roriw` is in Zbb, which RVA23 requires, and in Zbkb, which
-    /// comes with the scalar cryptography set. Either will do, and
-    /// no vector unit is wanted.
-    #[test]
-    fn the_rotate_comes_from_either_extension() {
-        use crate::arch::riscv64::{EXT_ZBB, EXT_ZBKB, detected_from, profile};
-        use crate::cipher::chacha20::{ZBB, ZBKB};
-
-        let has = |ext| {
-            let found = detected_from(ext, 0);
-            ZBB.is_subset(found) || ZBKB.is_subset(found)
-        };
-        assert!(has(profile::RVA23));
-        assert!(has(profile::ZKN));
-        assert!(has(EXT_ZBB));
-        assert!(has(EXT_ZBKB));
-        assert!(!has(0));
     }
 }

@@ -89,10 +89,11 @@ macro_rules! ecdh_curve {
             /// scalar when the private key was, so there is nothing
             /// left for this call to refuse.
             pub fn shared_secret(&self, public: &PublicKey) -> [u8; KEY_SIZE] {
-                let e = Engine::new(&$constants);
-                let mut out = [0u8; KEY_SIZE];
-                self.secret.shared_secret(&e, &public.point, &mut out);
-                out
+                crate::math::ec::with_engine!(&$constants, |e| {
+                    let mut out = [0u8; KEY_SIZE];
+                    self.secret.shared_secret(&e, &public.point, &mut out);
+                    out
+                })
             }
         }
     };

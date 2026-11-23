@@ -109,12 +109,12 @@ also compared byte for byte against the portable one across a range of
 buffer lengths, so the paths that only some processors take get the
 same scrutiny as the rest.
 
-What a given machine actually ran, and what it skipped for want of
-instructions, is a command away in a checkout of the
+What a given machine actually ran, and what it could not for want
+of instructions, is a command away in a checkout of the
 [repository][repo]:
 
 ```sh
-cargo test --lib vectors::inventory -- --nocapture
+cargo test --lib kernels:: -- --nocapture
 ```
 
 **Fast.** Where a processor has instructions for a primitive, scytale

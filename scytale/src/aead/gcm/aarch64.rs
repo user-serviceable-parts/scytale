@@ -46,7 +46,7 @@ use crate::align::At16;
 use crate::cipher::BlockCipher;
 use crate::cipher::aes::aarch64::Schedule;
 pub(crate) use crate::cipher::aes::aarch64::{Keys, keys};
-use crate::features::{self, Features};
+use crate::features::Chosen;
 use crate::kernel::Kernel;
 use zeroize::Zeroize;
 
@@ -74,16 +74,6 @@ static OFFSETS: At16<[u32; 4 * GROUP + 4]> = {
 static BSWAP: At16<[u8; BLOCK]> =
     At16([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
 
-/// What the loops here need: the AES instructions and the carry-less
-/// multiply.
-pub(crate) const ARMV8: Features =
-    crate::cipher::aes::ARMV8.union(ghash::aarch64::PMULL);
-
-/// Whether the loops here can run: their row in GCM's list.
-fn supported() -> bool {
-    features::allows(super::KERNELS, Kernel::Armv8)
-}
-
 /// Everything the hash works out from the subkey and never changes.
 #[derive(Clone)]
 pub(crate) struct Subkey {
@@ -109,11 +99,8 @@ impl Drop for Subkey {
 impl Subkey {
     /// The powers of hash subkey `h`, or `None` where this processor
     /// has not the instructions to use them.
-    fn new(h: &[u8; BLOCK]) -> Option<Self> {
-        if !supported() {
-            return None;
-        }
-        let fast = ghash::aarch64::probe()?;
+    fn new(h: &[u8; BLOCK], chosen: Chosen<Kernel>) -> Option<Self> {
+        let fast = ghash::aarch64::Multiply::for_gcm(chosen)?;
         let h = fast.prepare(&[ghash::halve(&h[..8]), ghash::halve(&h[8..])]);
         let powers = ghash::powers_of(fast, &h);
         Some(Subkey { h, powers })
@@ -145,13 +132,10 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     ///
     /// There is one kernel here, so anything but [`Kernel::Armv8`] is
     /// answered with nothing.
-    pub(crate) fn of(h: &[u8; BLOCK], kernel: Kernel) -> Option<Self> {
-        if kernel != Kernel::Armv8 {
-            return None;
-        }
+    pub(crate) fn of(h: &[u8; BLOCK], chosen: Chosen<Kernel>) -> Option<Self> {
         Some(Engine {
             keys: keys::<C>()?,
-            subkey: Subkey::new(h)?,
+            subkey: Subkey::new(h, chosen)?,
         })
     }
 

@@ -18,6 +18,7 @@
 //! FIPS 202 look the way they do. Only the padding knows any of
 //! this; the permutation sees whole lanes.
 
+use crate::features::Chosen;
 use core::fmt;
 use core::marker::PhantomData;
 
@@ -47,10 +48,11 @@ const MAX_RATE: usize = 168;
 /// one `unsafe` block in a hardware module is where the value is
 /// minted.
 pub trait Permutation: Sealed + Copy {
-    /// The permutation, where the features in force allow it.
+    /// The permutation, where the kernel list chose it: `None` for a
+    /// choice that is not this permutation's.
     // An architecture with no SHA-3 instructions has no caller.
     #[allow(dead_code)]
-    fn probe() -> Option<Self>;
+    fn of(chosen: Chosen<super::Kernel>) -> Option<Self>;
 
     /// Applies the permutation to `state`.
     fn permute(self, state: &mut [u64; LANES]);
@@ -256,19 +258,6 @@ impl<P: Permutation, V: Variant> Sponge<P, V> {
             state: State::new(permutation),
             _marker: PhantomData,
         }
-    }
-
-    /// Asks the probe itself, for a permutation named rather than
-    /// chosen.
-    ///
-    /// This is the one construction in the module that can fail, and
-    /// why it is not in [`Xof`]: naming a backend the processor has
-    /// not got is a real error, where the dispatching types always
-    /// have portable code to fall back on. Only the vector suites
-    /// name one, so it exists only for them.
-    #[cfg(test)]
-    pub(crate) fn try_new() -> Result<Self, Error> {
-        P::probe().map(Self::with).ok_or(Error::NotSupported)
     }
 
     fn reset(&mut self) {

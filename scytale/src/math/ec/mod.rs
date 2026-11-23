@@ -60,6 +60,7 @@ pub(crate) mod x86_64;
 
 use zeroize::Zeroize;
 
+use super::Arith;
 use super::montgomery::Montgomery;
 use super::uint::Uint;
 use crate::BlockType;
@@ -68,6 +69,7 @@ use crate::Pkcs8Form;
 use crate::Random;
 use crate::codec::pem;
 use crate::der::{self, Reader, Writer};
+use crate::features::{self, Features};
 use crate::hash::Hash;
 use crate::mac::Mac;
 use crate::mac::hmac::Hmac;
@@ -278,6 +280,22 @@ const fn from_hex<const L: usize>(hex: &str) -> Uint<L> {
 }
 
 impl<const L: usize> Curve<L> {
+    /// The width in limbs, for a choice that depends on it.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    pub(crate) const fn limbs(&self) -> usize {
+        L
+    }
+
+    /// Whether this is P-256, whose field has its products and point
+    /// operations written out. Asked of the width first, which is a
+    /// constant, so that no other curve compares its prime.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[inline(always)]
+    pub(crate) fn is_p256(&self) -> bool {
+        L == 4 && self.p.0[..] == super::montgomery::P256_PRIME[..]
+    }
+
     /// The width of a coordinate or scalar in bytes.
     pub(crate) const fn width(&self) -> usize {
         self.bits.div_ceil(8)
@@ -434,19 +452,15 @@ impl<const L: usize> Point<L> {
 /// and the constants the formulas need already in the field's
 /// domain. Built for each operation, from contexts the curve
 /// constants already hold: two Montgomery products and nothing else.
-pub(crate) struct Engine<'a, const L: usize> {
+///
+/// `A` is the kind of arithmetic the operation chose, once, in
+/// [`with_engine`]; every formula here is compiled once per kind, so
+/// none of them asks again.
+pub(crate) struct Engine<'a, const L: usize, A: Arith> {
     curve: &'a Curve<L>,
     field: &'a Montgomery<L>,
     order: &'a Montgomery<L>,
-    /// The P-256 field product written out for this processor, asked
-    /// once for an operation rather than once for every product.
-    #[cfg(target_arch = "x86_64")]
-    fast: Option<crate::math::montgomery::x86_64::Adx>,
-    /// The table read written out for this processor, asked the same
-    /// way. Four-limb entries only, so the wider curve scans its
-    /// table as the compiler makes it.
-    #[cfg(target_arch = "x86_64")]
-    vector: Option<x86_64::Avx2>,
+    arith: A,
     /// Whether the written-out A64 point and field code applies:
     /// it is P-256's arithmetic, not any four-limb curve's, so the
     /// prime has to match and not merely the width.
@@ -458,63 +472,216 @@ pub(crate) struct Engine<'a, const L: usize> {
     one: Uint<L>,
 }
 
+/// Which table read a fixed-base multiplication runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kernel {
+    /// The whole table swept with vector compares and blends.
+    #[cfg(target_arch = "x86_64")]
+    Avx2,
+    /// Plain Rust, on any processor.
+    Portable,
+}
+
+features::kernels! {
+    enum Kernel;
+
+    /// The table reads, best first: AVX2, with the operating system
+    /// keeping the wider registers (AVX), then plain Rust. Only
+    /// P-256 reads a table of four-limb entries, which is all the
+    /// vector read takes.
+    pub(crate) const KERNELS for p256_table tested by tests::kernel = [
+        #[cfg(target_arch = "x86_64")]
+        Avx2 => (x86_64: Avx, Avx2),
+        Portable => (),
+    ];
+}
+
+/// What the list publishes: the rows' needs.
+pub(crate) const PROFILES: [Features; KERNELS.len()] =
+    features::profiles_of(KERNELS);
+
 /// The feature profiles a key over a curve of `L` limbs tells apart,
 /// best first; see [`crate::features::Dispatcher`]. P-256 has the
 /// carry-chain field arithmetic and the vector table read, chosen
 /// apart, so its rows are the two lists joined; P-384 has the
 /// arithmetic alone; P-521 has nothing written for it. Elsewhere
-/// than x86-64 the curve code has no choice to make.
-pub(crate) fn profiles<const L: usize>() -> &'static [crate::features::Features]
-{
-    use crate::features::Features;
-    #[cfg(target_arch = "x86_64")]
-    {
-        use crate::features;
-        use crate::math::limbs::x86_64::PROFILES as ADX;
-        const P256: [Features;
-            features::combined_len(&ADX, &x86_64::PROFILES)] =
-            features::combined(&ADX, &x86_64::PROFILES);
-        const NONE: [Features; 1] = [Features::new()];
-        match L {
-            4 => &P256,
-            6 => &ADX,
-            _ => &NONE,
-        }
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        const NONE: [Features; 1] = [Features::new()];
-        &NONE
+/// than x86-64 each list is one row that needs nothing, and so is
+/// every curve's.
+pub(crate) fn profiles<const L: usize>() -> &'static [Features] {
+    use crate::math::limbs::PROFILES as ADX;
+    const P256: [Features; features::combined_len(&ADX, &PROFILES)] =
+        features::combined(&ADX, &PROFILES);
+    const NONE: [Features; 1] = [Features::new()];
+    match L {
+        4 => &P256,
+        6 => &ADX,
+        _ => &NONE,
     }
 }
 
-impl<'a, const L: usize> Engine<'a, L> {
-    pub(crate) fn new(curve: &'a Curve<L>) -> Self {
+/// Runs `$body` with `$e` bound to an [`Engine`] for `$curve`, of the
+/// kind the lists choose, which they are asked once, here; the body
+/// is compiled once for each kind the curve can take.
+///
+/// `with_engine!(curve, |e| ...)` asks the carry-chain list, which
+/// P-256 and P-384 have products written for. Only a fixed-base
+/// multiplication reads a table, so only an operation that makes one
+/// asks the table-read list as well, which P-256 alone has a vector
+/// read for: `with_engine!(fixed_base, curve, |e| ...)`. An engine of
+/// the first kind still multiplies the base point, by the portable
+/// read; asking for both everywhere would compile every other
+/// operation twice over for nothing.
+///
+/// Given the two choices already made, as
+/// `with_engine!(curve, adx, avx2, |e| ...)`, it takes those.
+///
+/// The body is written as a closure so that it is formatted as one,
+/// but it is no closure: it is expanded in place, once per kind, and
+/// a `?` or `return` in it leaves the enclosing function.
+#[cfg(target_arch = "x86_64")]
+macro_rules! with_engine {
+    (fixed_base, $curve:expr, |$e:ident| $body:expr) => {
+        $crate::math::ec::with_engine!(
+            $curve,
+            $crate::features::choose($crate::math::limbs::KERNELS),
+            $crate::features::choose($crate::math::ec::KERNELS),
+            |$e| $body
+        )
+    };
+    ($curve:expr, |$e:ident| $body:expr) => {{
+        let curve = $curve;
+        if curve.is_p256() || curve.limbs() == 6 {
+            let chosen = $crate::features::choose($crate::math::limbs::KERNELS);
+            match chosen.and_then($crate::math::limbs::x86_64::Adx::of) {
+                Some(x) => {
+                    let kind = $crate::math::WithAdx(x);
+                    let $e = $crate::math::ec::Engine::new(curve, kind);
+                    $body
+                }
+                None => {
+                    let kind = $crate::math::Portable;
+                    let $e = $crate::math::ec::Engine::new(curve, kind);
+                    $body
+                }
+            }
+        } else {
+            let kind = $crate::math::Portable;
+            let $e = $crate::math::ec::Engine::new(curve, kind);
+            $body
+        }
+    }};
+    ($curve:expr, $adx:expr, $avx2:expr, |$e:ident| $body:expr) => {{
+        let curve = $curve;
+        // The written-out field code is P-256's alone, and the
+        // vector read takes only its four-limb table entries; P-384
+        // has the six-limb products; P-521 has nothing.
+        if curve.is_p256() {
+            let adx = ($adx).and_then($crate::math::limbs::x86_64::Adx::of);
+            let avx2 = ($avx2).and_then($crate::math::ec::x86_64::Avx2::of);
+            match (adx, avx2) {
+                (Some(x), Some(v)) => {
+                    let kind = $crate::math::WithBoth(x, v);
+                    let $e = $crate::math::ec::Engine::new(curve, kind);
+                    $body
+                }
+                (Some(x), None) => {
+                    let kind = $crate::math::WithAdx(x);
+                    let $e = $crate::math::ec::Engine::new(curve, kind);
+                    $body
+                }
+                (None, Some(v)) => {
+                    let kind = $crate::math::WithAvx2(v);
+                    let $e = $crate::math::ec::Engine::new(curve, kind);
+                    $body
+                }
+                (None, None) => {
+                    let kind = $crate::math::Portable;
+                    let $e = $crate::math::ec::Engine::new(curve, kind);
+                    $body
+                }
+            }
+        } else if curve.limbs() == 6 {
+            match ($adx).and_then($crate::math::limbs::x86_64::Adx::of) {
+                Some(x) => {
+                    let kind = $crate::math::WithAdx(x);
+                    let $e = $crate::math::ec::Engine::new(curve, kind);
+                    $body
+                }
+                None => {
+                    let kind = $crate::math::Portable;
+                    let $e = $crate::math::ec::Engine::new(curve, kind);
+                    $body
+                }
+            }
+        } else {
+            let kind = $crate::math::Portable;
+            let $e = $crate::math::ec::Engine::new(curve, kind);
+            $body
+        }
+    }};
+}
+
+/// Elsewhere the curve code has no choice to make.
+#[cfg(not(target_arch = "x86_64"))]
+macro_rules! with_engine {
+    (fixed_base, $curve:expr, |$e:ident| $body:expr) => {
+        $crate::math::ec::with_engine!($curve, |$e| $body)
+    };
+    ($curve:expr, |$e:ident| $body:expr) => {{
+        let $e = $crate::math::ec::Engine::new($curve, $crate::math::Portable);
+        $body
+    }};
+    ($curve:expr, $adx:expr, $avx2:expr, |$e:ident| $body:expr) => {{
+        let _ = ($adx, $avx2);
+        let $e = $crate::math::ec::Engine::new($curve, $crate::math::Portable);
+        $body
+    }};
+}
+
+pub(crate) use with_engine;
+
+impl<'a, const L: usize, A: Arith> Engine<'a, L, A> {
+    /// The engine for `curve`, of the kind `arith`, which
+    /// [`with_engine`] chose for it.
+    pub(crate) fn new(curve: &'a Curve<L>, arith: A) -> Self {
         let field = &curve.field;
         let order = &curve.order;
+        // The written-out P-256 code is taken on the width alone, a
+        // constant; a four-limb curve is P-256, and the choice is
+        // never made for one that is not.
         #[cfg(target_arch = "x86_64")]
-        let fast = (L == 4 && curve.p.0[..] == super::montgomery::P256_PRIME)
-            .then(crate::math::montgomery::x86_64::probe)
-            .flatten();
-        #[cfg(target_arch = "x86_64")]
-        let vector = (L == 4).then(x86_64::probe).flatten();
+        debug_assert!(arith.adx().is_none() || L != 4 || curve.is_p256());
         #[cfg(target_arch = "aarch64")]
-        let p256 = L == 4 && curve.p.0[..] == super::montgomery::P256_PRIME;
-        let one = field.to_mont(&Uint::one());
-        let b = field.to_mont(&curve.b);
+        let p256 = curve.is_p256();
+        let one = field.to_mont(arith, &Uint::one());
+        let b = field.to_mont(arith, &curve.b);
         Engine {
             curve,
             field,
             order,
+            arith,
             #[cfg(target_arch = "aarch64")]
             p256,
-            #[cfg(target_arch = "x86_64")]
-            fast,
-            #[cfg(target_arch = "x86_64")]
-            vector,
             b,
             one,
         }
+    }
+
+    /// The P-256 field code written out for this processor, where
+    /// the kind has it: a constant for each kind and width.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    fn fast(&self) -> Option<crate::math::montgomery::x86_64::Adx> {
+        if L == 4 { self.arith.adx() } else { None }
+    }
+
+    /// The vector table read, where the kind has it. Four-limb
+    /// entries only, so the wider curves scan their tables as the
+    /// compiler makes it.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    fn vector(&self) -> Option<x86_64::Avx2> {
+        if L == 4 { self.arith.avx2() } else { None }
     }
 
     // The field, everything in the Montgomery domain.
@@ -526,7 +693,7 @@ impl<'a, const L: usize> Engine<'a, L> {
     #[inline(always)]
     fn mul(&self, a: &Uint<L>, b: &Uint<L>) -> Uint<L> {
         #[cfg(target_arch = "x86_64")]
-        if let Some(fast) = self.fast {
+        if let Some(fast) = self.fast() {
             return fast.mul(a, b);
         }
         self.portable_mul(a, b)
@@ -537,7 +704,7 @@ impl<'a, const L: usize> Engine<'a, L> {
     #[inline(always)]
     fn sqr(&self, a: &Uint<L>) -> Uint<L> {
         #[cfg(target_arch = "x86_64")]
-        if let Some(fast) = self.fast {
+        if let Some(fast) = self.fast() {
             return fast.sqr(a);
         }
         self.portable_sqr(a)
@@ -547,7 +714,7 @@ impl<'a, const L: usize> Engine<'a, L> {
     /// for it, kept out of line as the product is.
     #[inline(never)]
     fn portable_sqr(&self, a: &Uint<L>) -> Uint<L> {
-        self.field.sqr(a)
+        self.field.sqr(self.arith, a)
     }
 
     /// The product for a width or a modulus with nothing written out
@@ -556,7 +723,7 @@ impl<'a, const L: usize> Engine<'a, L> {
     /// with that cost more than the call.
     #[inline(never)]
     fn portable_mul(&self, a: &Uint<L>, b: &Uint<L>) -> Uint<L> {
-        self.field.mul(a, b)
+        self.field.mul(self.arith, a, b)
     }
 
     fn add(&self, a: &Uint<L>, b: &Uint<L>) -> Uint<L> {
@@ -570,7 +737,7 @@ impl<'a, const L: usize> Engine<'a, L> {
     /// `a^-1`, by Fermat: `a^(p-2)`. Zero maps to zero.
     fn invert(&self, a: &Uint<L>) -> Uint<L> {
         #[cfg(target_arch = "x86_64")]
-        if let Some(fast) = self.fast {
+        if let Some(fast) = self.fast() {
             return fast.invert(a);
         }
         #[cfg(target_arch = "aarch64")]
@@ -793,9 +960,13 @@ impl<'a, const L: usize> Engine<'a, L> {
     ///
     /// The identity has `Z = 0`, and doubling it leaves `Z = 0`, so
     /// that case needs nothing.
+    // Out of line: for a kind with the processor's block this is
+    // that block, thousands of instructions, and inlined it would be
+    // copied into every one of its many callers.
+    #[inline(never)]
     fn jacobian_double(&self, p: &Jacobian<L>) -> Jacobian<L> {
         #[cfg(target_arch = "x86_64")]
-        if let Some(fast) = self.fast {
+        if let Some(fast) = self.fast() {
             return fast.jacobian_double(p);
         }
         #[cfg(target_arch = "aarch64")]
@@ -840,6 +1011,10 @@ impl<'a, const L: usize> Engine<'a, L> {
     /// answer when `p` is the identity, and `p` is the answer when
     /// `q` is. Opposite points are the one case the formula does
     /// handle, leaving `Z = 0`, which is what they add to.
+    // Out of line: for a kind with the processor's block this is
+    // that block, thousands of instructions, and inlined it would be
+    // copied into every one of its many callers.
+    #[inline(never)]
     fn jacobian_add(
         &self,
         p: &Jacobian<L>,
@@ -856,7 +1031,7 @@ impl<'a, const L: usize> Engine<'a, L> {
             return out;
         }
         #[cfg(target_arch = "x86_64")]
-        if let Some(fast) = self.fast {
+        if let Some(fast) = self.fast() {
             let mut out = fast.jacobian_add(p, q);
             // Equal points, which the formula cannot do itself, are
             // read off the sum: it is zero throughout only for them.
@@ -947,6 +1122,10 @@ impl<'a, const L: usize> Engine<'a, L> {
     /// the addition that takes the double alongside.
     ///
     /// [`jacobian_add`]: Self::jacobian_add
+    // Out of line: for a kind with the processor's block this is
+    // that block, thousands of instructions, and inlined it would be
+    // copied into every one of its many callers.
+    #[inline(never)]
     fn jacobian_add_affine(
         &self,
         p: &Jacobian<L>,
@@ -966,7 +1145,7 @@ impl<'a, const L: usize> Engine<'a, L> {
             return out;
         }
         #[cfg(target_arch = "x86_64")]
-        if let Some(fast) = self.fast {
+        if let Some(fast) = self.fast() {
             let mut out = fast.jacobian_add_affine(p, q);
             out.cmov(
                 &Jacobian {
@@ -1074,7 +1253,7 @@ impl<'a, const L: usize> Engine<'a, L> {
     #[inline(always)]
     fn select(&self, table: &[[[u64; L]; 2]], digit: u64) -> Affine<L> {
         #[cfg(target_arch = "x86_64")]
-        if let Some(vector) = self.vector {
+        if let Some(vector) = self.vector() {
             let (x, y) = vector.select(table, digit);
             return Affine { x, y };
         }
@@ -1449,15 +1628,15 @@ impl<'a, const L: usize> Engine<'a, L> {
             return None;
         }
         let zi = self.invert(&p.z);
-        let x = self.field.from_mont(&self.mul(&p.x, &zi));
-        let y = self.field.from_mont(&self.mul(&p.y, &zi));
+        let x = self.field.from_mont(self.arith, &self.mul(&p.x, &zi));
+        let y = self.field.from_mont(self.arith, &self.mul(&p.y, &zi));
         Some((x, y))
     }
 
     fn lift(&self, public: &Public<L>) -> Point<L> {
         Point {
-            x: self.field.to_mont(&public.x),
-            y: self.field.to_mont(&public.y),
+            x: self.field.to_mont(self.arith, &public.x),
+            y: self.field.to_mont(self.arith, &public.y),
             z: self.one,
         }
     }
@@ -1465,20 +1644,31 @@ impl<'a, const L: usize> Engine<'a, L> {
     // The scalar ring, in plain form.
 
     fn scalar_mul(&self, a: &Uint<L>, b: &Uint<L>) -> Uint<L> {
-        self.order.mulmod(a, b)
+        self.order.mulmod(self.arith, a, b)
     }
 
     fn scalar_invert(&self, a: &Uint<L>) -> Uint<L> {
         let (exponent, _) = self.curve.n.sub_borrow(&Uint::from_limbs(&[2]));
-        self.order.exp_public(a, &exponent)
+        self.order.exp_public(self.arith, a, &exponent)
     }
 
+    fn reduce_scalar(&self, a: &Uint<L>) -> Uint<L> {
+        self.curve.reduce_scalar(a)
+    }
+
+    fn scalar_in_range(&self, a: &Uint<L>) -> bool {
+        self.curve.scalar_in_range(a)
+    }
+}
+
+/// The scalars, which need the order and no arithmetic.
+impl<const L: usize> Curve<L> {
     /// A value below `2^bits` reduced modulo `n`, which takes one
     /// conditional subtraction because `n` is above `2^(bits - 1)`
     /// on every curve here. Everything reduced is a coordinate,
     /// below `p`, or a digest cut to the curve's bits.
     fn reduce_scalar(&self, a: &Uint<L>) -> Uint<L> {
-        let (reduced, borrow) = a.sub_borrow(&self.curve.n);
+        let (reduced, borrow) = a.sub_borrow(&self.n);
         let mut out = *a;
         out.cmov(&reduced, 1 - borrow);
         out
@@ -1487,16 +1677,16 @@ impl<'a, const L: usize> Engine<'a, L> {
     /// Whether `a` is a scalar a key or a signature may hold: in
     /// `[1, n - 1]`.
     fn scalar_in_range(&self, a: &Uint<L>) -> bool {
-        !a.is_zero() && a.less_than(&self.curve.n) == 1
+        !a.is_zero() && a.less_than(&self.n) == 1
     }
 
     /// The leftmost `bits` of a digest as a scalar, as FIPS 186-5
     /// section 6.4.1 and RFC 6979's `bits2int` both define; a
     /// shorter digest is the whole of it.
     fn hash_to_scalar(&self, digest: &[u8]) -> Uint<L> {
-        let take = digest.len().min(self.curve.width());
+        let take = digest.len().min(self.width());
         let value = Uint::from_be_bytes(&digest[..take]);
-        let excess = (8 * take).saturating_sub(self.curve.bits);
+        let excess = (8 * take).saturating_sub(self.bits);
         self.reduce_scalar(&value.shr(excess))
     }
 }
@@ -1527,7 +1717,10 @@ const GENERATE_TRIES: usize = 100;
 impl<const L: usize> Secret<L> {
     /// A scalar from its big-endian bytes, exactly the curve's
     /// width, refused unless in `[1, n - 1]`.
-    pub(crate) fn try_new(e: &Engine<L>, bytes: &[u8]) -> Result<Self, Error> {
+    pub(crate) fn try_new<A: Arith>(
+        e: &Engine<L, A>,
+        bytes: &[u8],
+    ) -> Result<Self, Error> {
         if bytes.len() != e.curve.width() {
             return Err(Error::InvalidKeyLength(bytes.len()));
         }
@@ -1541,8 +1734,8 @@ impl<const L: usize> Secret<L> {
     /// A fresh scalar, by rejection: random bytes of the width, the
     /// bits past the curve's cleared, kept when in range, which
     /// nearly always they are.
-    pub(crate) fn generate<R: Random>(
-        e: &Engine<L>,
+    pub(crate) fn generate<R: Random, A: Arith>(
+        e: &Engine<L, A>,
         rng: &mut R,
     ) -> Result<Self, Error> {
         let mut buf = [[0u8; 8]; L];
@@ -1573,7 +1766,7 @@ impl<const L: usize> Secret<L> {
     }
 
     /// The public point, `d * G`.
-    pub(crate) fn public(&self, e: &Engine<L>) -> Public<L> {
+    pub(crate) fn public<A: Arith>(&self, e: &Engine<L, A>) -> Public<L> {
         let p = e.mul_base(&self.d);
         // A scalar in range times a generator of prime order is
         // never the identity, which is the only point `to_affine`
@@ -1588,9 +1781,9 @@ impl<const L: usize> Secret<L> {
 
     /// The x-coordinate of `d * Q`, the ECDH shared secret, into
     /// `out` of the curve's width.
-    pub(crate) fn shared_secret(
+    pub(crate) fn shared_secret<A: Arith>(
         &self,
-        e: &Engine<L>,
+        e: &Engine<L, A>,
         public: &Public<L>,
         out: &mut [u8],
     ) {
@@ -1618,50 +1811,57 @@ impl<const L: usize> Secret<L> {
     /// when `noise` holds the curve's width of random bytes.
     pub(crate) fn sign<H: Hash + Clone + BlockType + Default>(
         &self,
-        e: &Engine<L>,
+        e: &Engine<L, impl Arith>,
         message: &[u8],
         noise: Option<&[u8]>,
         out: &mut [u8],
     ) -> Result<(), Error> {
-        let width = e.curve.width();
-        debug_assert_eq!(out.len(), 2 * width);
-        let z = e.hash_to_scalar(H::digest(message).as_ref());
-
-        // `int2octets(x)` and `bits2octets(h1)`, each of the width.
-        let mut d_bytes = [[0u8; 8]; L];
-        self.d.to_be_bytes(&mut d_bytes.as_flattened_mut()[..width]);
-        let mut z_bytes = [[0u8; 8]; L];
-        z.to_be_bytes(&mut z_bytes.as_flattened_mut()[..width]);
-        let mut nonce = Nonce::<H>::try_new(
-            &d_bytes.as_flattened()[..width],
-            &z_bytes.as_flattened()[..width],
-            noise,
-        )?;
-        d_bytes.zeroize();
-
+        debug_assert_eq!(out.len(), 2 * e.curve.width());
+        // The hashing here is the hash's alone and the arithmetic the
+        // kind's alone. Each is kept out of line, so that neither is
+        // compiled again for every pairing of a hash with a kind.
+        let (z, mut nonce) =
+            Nonce::<H>::for_message(e.curve, &self.d, message, noise)?;
         loop {
-            let mut k = nonce.next(e)?;
-            let r = match e.to_affine(&e.mul_base(&k)) {
-                Some((x, _)) => e.reduce_scalar(&x),
-                None => Uint::ZERO,
-            };
-            // s = k^-1 (z + r d) mod n.
-            let mut rd = e.scalar_mul(&r, &self.d);
-            let mut sum = z.add_mod(&rd, &e.curve.n);
-            let mut k_inverse = e.scalar_invert(&k);
-            let s = e.scalar_mul(&k_inverse, &sum);
+            let mut k = nonce.next(e.curve)?;
+            let signed = self.sign_with(e, &z, &k, out);
             k.zeroize();
-            rd.zeroize();
-            sum.zeroize();
-            k_inverse.zeroize();
-            if r.is_zero() || s.is_zero() {
-                continue;
+            if signed {
+                return Ok(());
             }
-            let (r_out, s_out) = out.split_at_mut(width);
-            r.to_be_bytes(r_out);
-            s.to_be_bytes(s_out);
-            return Ok(());
         }
+    }
+
+    /// `r || s` for the digest's scalar `z` and the nonce `k`, into
+    /// `out`; false, with nothing written, where either is zero and
+    /// the nonce has to be replaced.
+    #[inline(never)]
+    fn sign_with<A: Arith>(
+        &self,
+        e: &Engine<L, A>,
+        z: &Uint<L>,
+        k: &Uint<L>,
+        out: &mut [u8],
+    ) -> bool {
+        let r = match e.to_affine(&e.mul_base(k)) {
+            Some((x, _)) => e.reduce_scalar(&x),
+            None => Uint::ZERO,
+        };
+        // s = k^-1 (z + r d) mod n.
+        let mut rd = e.scalar_mul(&r, &self.d);
+        let mut sum = z.add_mod(&rd, &e.curve.n);
+        let mut k_inverse = e.scalar_invert(k);
+        let s = e.scalar_mul(&k_inverse, &sum);
+        rd.zeroize();
+        sum.zeroize();
+        k_inverse.zeroize();
+        if r.is_zero() || s.is_zero() {
+            return false;
+        }
+        let (r_out, s_out) = out.split_at_mut(e.curve.width());
+        r.to_be_bytes(r_out);
+        s.to_be_bytes(s_out);
+        true
     }
 }
 
@@ -1669,16 +1869,16 @@ impl<const L: usize> Public<L> {
     /// A point from its plain affine coordinates, checked to lie on
     /// the curve; the identity has no such coordinates and so is
     /// never accepted.
-    fn try_from_affine(
-        e: &Engine<L>,
+    fn try_from_affine<A: Arith>(
+        e: &Engine<L, A>,
         x: Uint<L>,
         y: Uint<L>,
     ) -> Result<Self, Error> {
         if x.less_than(&e.curve.p) == 0 || y.less_than(&e.curve.p) == 0 {
             return Err(Error::InvalidPublicKey);
         }
-        let xm = e.field.to_mont(&x);
-        let ym = e.field.to_mont(&y);
+        let xm = e.field.to_mont(e.arith, &x);
+        let ym = e.field.to_mont(e.arith, &y);
         if e.mul(&ym, &ym).0 != e.rhs(&xm).0 {
             return Err(Error::InvalidPublicKey);
         }
@@ -1689,8 +1889,8 @@ impl<const L: usize> Public<L> {
     /// `03` followed by `x` alone, the tag giving the parity of the
     /// `y` to recover. Anything else, the identity's lone zero byte
     /// included, is [`Error::InvalidPublicKey`].
-    pub(crate) fn try_from_sec1(
-        e: &Engine<L>,
+    pub(crate) fn try_from_sec1<A: Arith>(
+        e: &Engine<L, A>,
         sec1: &[u8],
     ) -> Result<Self, Error> {
         let width = e.curve.width();
@@ -1708,10 +1908,10 @@ impl<const L: usize> Public<L> {
                 if x.less_than(&e.curve.p) == 0 {
                     return Err(Error::InvalidPublicKey);
                 }
-                let xm = e.field.to_mont(&x);
+                let xm = e.field.to_mont(e.arith, &x);
                 let root =
                     e.sqrt(&e.rhs(&xm)).ok_or(Error::InvalidPublicKey)?;
-                let mut y = e.field.from_mont(&root);
+                let mut y = e.field.from_mont(e.arith, &root);
                 // The root and its negation have opposite parity,
                 // since p is odd; the tag says which was meant.
                 if y.is_odd() != (*tag == 0x03) {
@@ -1725,7 +1925,7 @@ impl<const L: usize> Public<L> {
 
     /// The uncompressed SEC 1 encoding, `04 || x || y`, into `out`
     /// of one more than twice the curve's width.
-    pub(crate) fn sec1(&self, e: &Engine<L>, out: &mut [u8]) {
+    pub(crate) fn sec1<A: Arith>(&self, e: &Engine<L, A>, out: &mut [u8]) {
         let width = e.curve.width();
         debug_assert_eq!(out.len(), 1 + 2 * width);
         out[0] = 0x04;
@@ -1736,8 +1936,20 @@ impl<const L: usize> Public<L> {
     /// Checks an ECDSA signature `r || s` over `message`.
     pub(crate) fn verify<H: Hash + Default>(
         &self,
-        e: &Engine<L>,
+        e: &Engine<L, impl Arith>,
         message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), Error> {
+        // As in signing, the hash and the arithmetic apart.
+        self.verify_digest(e, digest::<H>(message).as_ref(), signature)
+    }
+
+    /// [`verify`](Self::verify), given the message's digest.
+    #[inline(never)]
+    fn verify_digest<A: Arith>(
+        &self,
+        e: &Engine<L, A>,
+        digest: &[u8],
         signature: &[u8],
     ) -> Result<(), Error> {
         let width = e.curve.width();
@@ -1749,7 +1961,7 @@ impl<const L: usize> Public<L> {
         if !e.scalar_in_range(&r) || !e.scalar_in_range(&s) {
             return Err(Error::InvalidSignature);
         }
-        let z = e.hash_to_scalar(H::digest(message).as_ref());
+        let z = e.curve.hash_to_scalar(digest);
         // R = (z / s) G + (r / s) Q, whose x must be r modulo n.
         let w = e.scalar_invert(&s);
         let u1 = e.scalar_mul(&z, &w);
@@ -1762,6 +1974,12 @@ impl<const L: usize> Public<L> {
             Err(Error::InvalidSignature)
         }
     }
+}
+
+/// The digest of `message`, out of line: see [`Secret::sign`].
+#[inline(never)]
+fn digest<H: Hash + Default>(message: &[u8]) -> H::Output {
+    H::digest(message)
 }
 
 /// Feeds `n` zero bytes to `mac`, whatever the hash's block size.
@@ -1796,6 +2014,32 @@ struct Nonce<H: Hash + Clone + BlockType + Default> {
 }
 
 impl<H: Hash + Clone + BlockType + Default> Nonce<H> {
+    /// The generator for a signature by the private scalar `d` over
+    /// `message` on `curve`, with the digest's scalar it was seeded
+    /// with: steps a through g. Out of line: see [`Secret::sign`].
+    #[inline(never)]
+    fn for_message<const L: usize>(
+        curve: &Curve<L>,
+        d: &Uint<L>,
+        message: &[u8],
+        noise: Option<&[u8]>,
+    ) -> Result<(Uint<L>, Self), Error> {
+        let width = curve.width();
+        let z = curve.hash_to_scalar(H::digest(message).as_ref());
+        // `int2octets(x)` and `bits2octets(h1)`, each of the width.
+        let mut d_bytes = [[0u8; 8]; L];
+        d.to_be_bytes(&mut d_bytes.as_flattened_mut()[..width]);
+        let mut z_bytes = [[0u8; 8]; L];
+        z.to_be_bytes(&mut z_bytes.as_flattened_mut()[..width]);
+        let nonce = Self::try_new(
+            &d_bytes.as_flattened()[..width],
+            &z_bytes.as_flattened()[..width],
+            noise,
+        );
+        d_bytes.zeroize();
+        Ok((z, nonce?))
+    }
+
     /// Steps b through g, given `int2octets(x)`, `bits2octets(h1)`
     /// and, hedged, `Z`.
     fn try_new(
@@ -1852,11 +2096,12 @@ impl<H: Hash + Clone + BlockType + Default> Nonce<H> {
     /// candidate out of range is skipped as the RFC says, and a
     /// previous one that the signature rejected has been skipped
     /// the same way.
+    #[inline(never)]
     fn next<const L: usize>(
         &mut self,
-        e: &Engine<L>,
+        curve: &Curve<L>,
     ) -> Result<Uint<L>, Error> {
-        let width = e.curve.width();
+        let width = curve.width();
         loop {
             let mut t = [[0u8; 8]; L];
             let mut filled = 0;
@@ -1868,10 +2113,10 @@ impl<H: Hash + Clone + BlockType + Default> Nonce<H> {
                 filled += take;
             }
             let k = Uint::from_be_bytes(&t.as_flattened()[..width])
-                .shr(8 * width - e.curve.bits);
+                .shr(8 * width - curve.bits);
             t.zeroize();
             self.seed_again()?;
-            if e.scalar_in_range(&k) {
+            if curve.scalar_in_range(&k) {
                 return Ok(k);
             }
         }
@@ -1924,7 +2169,10 @@ fn algorithm_identifier<const L: usize>(curve: &Curve<L>, w: &mut Writer) {
 
 impl<const L: usize> Public<L> {
     /// A point from a SubjectPublicKeyInfo naming this curve.
-    pub(crate) fn from_spki(e: &Engine<L>, der: &[u8]) -> Result<Self, Error> {
+    pub(crate) fn from_spki<A: Arith>(
+        e: &Engine<L, A>,
+        der: &[u8],
+    ) -> Result<Self, Error> {
         let (algorithm, point) = der::read_spki(der)?;
         if !is_this_curve(e.curve, &algorithm) {
             return Err(Error::WrongAlgorithm);
@@ -1933,9 +2181,9 @@ impl<const L: usize> Public<L> {
     }
 
     /// The SubjectPublicKeyInfo, with the point uncompressed.
-    pub(crate) fn spki(
+    pub(crate) fn spki<A: Arith>(
         &self,
-        e: &Engine<L>,
+        e: &Engine<L, A>,
         out: &mut [u8],
     ) -> Result<usize, Error> {
         let mut sec1 = [0u8; SCRATCH];
@@ -1948,15 +2196,18 @@ impl<const L: usize> Public<L> {
         )
     }
 
-    pub(crate) fn from_pem(e: &Engine<L>, pem: &[u8]) -> Result<Self, Error> {
+    pub(crate) fn from_pem<A: Arith>(
+        e: &Engine<L, A>,
+        pem: &[u8],
+    ) -> Result<Self, Error> {
         let mut der = [0u8; SCRATCH];
         let (_, n) = pem::decode_one_of(&[PUBLIC_LABEL], pem, &mut der)?;
         Self::from_spki(e, &der[..n])
     }
 
-    pub(crate) fn pem(
+    pub(crate) fn pem<A: Arith>(
         &self,
-        e: &Engine<L>,
+        e: &Engine<L, A>,
         out: &mut [u8],
     ) -> Result<usize, Error> {
         let mut der = [0u8; SCRATCH];
@@ -1970,8 +2221,8 @@ impl<const L: usize> Secret<L> {
     /// if any. Its parameters, when present, must name this curve;
     /// inside PKCS#8 they are usually left out, since the outer
     /// algorithm identifier already says.
-    fn from_ec_private_key(
-        e: &Engine<L>,
+    fn from_ec_private_key<A: Arith>(
+        e: &Engine<L, A>,
         der: &[u8],
     ) -> Result<(Self, Option<Public<L>>), Error> {
         let mut outer = Reader::new(der);
@@ -2014,9 +2265,9 @@ impl<const L: usize> Secret<L> {
     /// The public point, derived, and checked against the one the
     /// structure carried when it carried one: a pair that disagrees
     /// has been corrupted.
-    fn with_public(
+    fn with_public<A: Arith>(
         self,
-        e: &Engine<L>,
+        e: &Engine<L, A>,
         carried: Option<Public<L>>,
     ) -> Result<(Self, Public<L>), Error> {
         let public = self.public(e);
@@ -2029,8 +2280,8 @@ impl<const L: usize> Secret<L> {
     }
 
     /// A key from a PKCS#8 PrivateKeyInfo naming this curve.
-    pub(crate) fn from_pkcs8(
-        e: &Engine<L>,
+    pub(crate) fn from_pkcs8<A: Arith>(
+        e: &Engine<L, A>,
         der: &[u8],
     ) -> Result<(Self, Public<L>, Pkcs8Form), Error> {
         let info = der::read_pkcs8(der)?;
@@ -2047,8 +2298,8 @@ impl<const L: usize> Secret<L> {
     }
 
     /// A key from a bare ECPrivateKey, the `EC PRIVATE KEY` form.
-    pub(crate) fn from_sec1_der(
-        e: &Engine<L>,
+    pub(crate) fn from_sec1_der<A: Arith>(
+        e: &Engine<L, A>,
         der: &[u8],
     ) -> Result<(Self, Public<L>), Error> {
         let (secret, carried) = Self::from_ec_private_key(e, der)?;
@@ -2058,9 +2309,9 @@ impl<const L: usize> Secret<L> {
     /// The PKCS#8 PrivateKeyInfo, around an ECPrivateKey that
     /// carries the public point and leaves the parameters to the
     /// outer identifier, which is the form OpenSSL writes.
-    pub(crate) fn pkcs8(
+    pub(crate) fn pkcs8<A: Arith>(
         &self,
-        e: &Engine<L>,
+        e: &Engine<L, A>,
         public: &Public<L>,
         out: &mut [u8],
     ) -> Result<usize, Error> {
@@ -2087,8 +2338,8 @@ impl<const L: usize> Secret<L> {
     }
 
     /// Either private form from a PEM block, told apart by its label.
-    pub(crate) fn from_pem(
-        e: &Engine<L>,
+    pub(crate) fn from_pem<A: Arith>(
+        e: &Engine<L, A>,
         pem: &[u8],
     ) -> Result<(Self, Public<L>), Error> {
         let mut der = [0u8; SCRATCH];
@@ -2102,9 +2353,9 @@ impl<const L: usize> Secret<L> {
     }
 
     /// The PKCS#8 form as a `PRIVATE KEY` PEM block.
-    pub(crate) fn pem(
+    pub(crate) fn pem<A: Arith>(
         &self,
-        e: &Engine<L>,
+        e: &Engine<L, A>,
         public: &Public<L>,
         out: &mut [u8],
     ) -> Result<usize, Error> {
@@ -2168,7 +2419,7 @@ macro_rules! key_types {
     ) => {
         use crate::Error;
         use crate::Random;
-        use crate::math::ec::{Engine, Public, Secret};
+        use crate::math::ec::{Public, Secret};
 
         /// The length of a private key.
         pub const KEY_SIZE: usize = $constants.width();
@@ -2226,20 +2477,22 @@ macro_rules! key_types {
             /// rejection sampling, which fails once in 2^32 draws
             /// and is retried; the public point is derived.
             pub fn generate<R: Random>(rng: &mut R) -> Result<Self, Error> {
-                let e = Engine::new(&$constants);
-                let secret = Secret::generate(&e, rng)?;
-                let public = secret.public(&e);
-                Ok(Self::from_secret(secret, public))
+                crate::math::ec::with_engine!(fixed_base, &$constants, |e| {
+                    let secret = Secret::generate(&e, rng)?;
+                    let public = secret.public(&e);
+                    Ok(Self::from_secret(secret, public))
+                })
             }
 
             /// A key from its secret scalar, big-endian, which must be
             /// in `[1, n - 1]`: [`Error::InvalidPrivateKey`] for zero
             /// or a value at or above the order.
             pub fn try_new(secret: &[u8; KEY_SIZE]) -> Result<Self, Error> {
-                let e = Engine::new(&$constants);
-                let secret = Secret::try_new(&e, secret)?;
-                let public = secret.public(&e);
-                Ok(Self::from_secret(secret, public))
+                crate::math::ec::with_engine!(fixed_base, &$constants, |e| {
+                    let secret = Secret::try_new(&e, secret)?;
+                    let public = secret.public(&e);
+                    Ok(Self::from_secret(secret, public))
+                })
             }
 
             /// The secret scalar, big-endian. The caller holds a
@@ -2274,9 +2527,10 @@ macro_rules! key_types {
             pub fn try_from_der_with_form(
                 der: &[u8],
             ) -> Result<(Self, crate::Pkcs8Form), Error> {
-                let e = Engine::new(&$constants);
-                let (secret, public, form) = Secret::from_pkcs8(&e, der)?;
-                Ok((Self::from_secret(secret, public), form))
+                crate::math::ec::with_engine!(fixed_base, &$constants, |e| {
+                    let (secret, public, form) = Secret::from_pkcs8(&e, der)?;
+                    Ok((Self::from_secret(secret, public), form))
+                })
             }
 
             /// A key from a bare `ECPrivateKey` (RFC 5915), the DER
@@ -2286,9 +2540,10 @@ macro_rules! key_types {
             /// point is checked against the secret's own; the
             /// errors are as for [`try_from_der`](Self::try_from_der).
             pub fn try_from_sec1_der(der: &[u8]) -> Result<Self, Error> {
-                let e = Engine::new(&$constants);
-                let (secret, public) = Secret::from_sec1_der(&e, der)?;
-                Ok(Self::from_secret(secret, public))
+                crate::math::ec::with_engine!(fixed_base, &$constants, |e| {
+                    let (secret, public) = Secret::from_sec1_der(&e, der)?;
+                    Ok(Self::from_secret(secret, public))
+                })
             }
 
             /// Writes the key as a `PrivateKeyInfo` into the front of
@@ -2296,8 +2551,9 @@ macro_rules! key_types {
             /// buffer too small gets [`Error::OutputTooSmall`]. The
             /// output is a secret, to be wiped when done.
             pub fn der_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
-                let e = Engine::new(&$constants);
-                self.secret.pkcs8(&e, &self.public.point, out)
+                crate::math::ec::with_engine!(&$constants, |e| {
+                    self.secret.pkcs8(&e, &self.public.point, out)
+                })
             }
 
             /// A key from a PEM block (RFC 7468) labelled
@@ -2308,17 +2564,19 @@ macro_rules! key_types {
             /// exactly one well-formed block for this curve, an
             /// encrypted key included, is [`Error::InvalidEncoding`].
             pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
-                let e = Engine::new(&$constants);
-                let (secret, public) = Secret::from_pem(&e, pem)?;
-                Ok(Self::from_secret(secret, public))
+                crate::math::ec::with_engine!(fixed_base, &$constants, |e| {
+                    let (secret, public) = Secret::from_pem(&e, pem)?;
+                    Ok(Self::from_secret(secret, public))
+                })
             }
 
             /// Writes the key as a `PRIVATE KEY` PEM block, ASCII with
             /// LF line ends, into the front of `out`, returning the
             /// length, always [`PEM_SIZE`]. A secret, to be wiped.
             pub fn pem_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
-                let e = Engine::new(&$constants);
-                self.secret.pem(&e, &self.public.point, out)
+                crate::math::ec::with_engine!(&$constants, |e| {
+                    self.secret.pem(&e, &self.public.point, out)
+                })
             }
         }
 
@@ -2328,27 +2586,30 @@ macro_rules! key_types {
             /// the parity of `y`. The point must lie on the curve;
             /// anything else is [`Error::InvalidPublicKey`].
             pub fn try_from_sec1(sec1: &[u8]) -> Result<Self, Error> {
-                let e = Engine::new(&$constants);
-                Ok(PublicKey {
-                    point: Public::try_from_sec1(&e, sec1)?,
+                crate::math::ec::with_engine!(&$constants, |e| {
+                    Ok(PublicKey {
+                        point: Public::try_from_sec1(&e, sec1)?,
+                    })
                 })
             }
 
             /// The uncompressed SEC 1 encoding, `04 || x || y`.
             pub fn sec1_bytes(&self) -> [u8; PUBLIC_KEY_SIZE] {
-                let e = Engine::new(&$constants);
-                let mut out = [0u8; PUBLIC_KEY_SIZE];
-                self.point.sec1(&e, &mut out);
-                out
+                crate::math::ec::with_engine!(&$constants, |e| {
+                    let mut out = [0u8; PUBLIC_KEY_SIZE];
+                    self.point.sec1(&e, &mut out);
+                    out
+                })
             }
 
             /// A key from its DER `SubjectPublicKeyInfo` (RFC 5480),
             /// the form under `PUBLIC KEY` in a PEM file, which must
             /// name this curve; the point inside may be compressed.
             pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
-                let e = Engine::new(&$constants);
-                Ok(PublicKey {
-                    point: Public::from_spki(&e, der)?,
+                crate::math::ec::with_engine!(&$constants, |e| {
+                    Ok(PublicKey {
+                        point: Public::from_spki(&e, der)?,
+                    })
                 })
             }
 
@@ -2356,16 +2617,18 @@ macro_rules! key_types {
             /// uncompressed, into the front of `out`, returning the
             /// length, always [`PUBLIC_KEY_DER_SIZE`].
             pub fn der_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
-                let e = Engine::new(&$constants);
-                self.point.spki(&e, out)
+                crate::math::ec::with_engine!(&$constants, |e| {
+                    self.point.spki(&e, out)
+                })
             }
 
             /// A key from a `PUBLIC KEY` PEM block, read as
             /// [`PrivateKey::try_from_pem`] reads its own.
             pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
-                let e = Engine::new(&$constants);
-                Ok(PublicKey {
-                    point: Public::from_pem(&e, pem)?,
+                crate::math::ec::with_engine!(&$constants, |e| {
+                    Ok(PublicKey {
+                        point: Public::from_pem(&e, pem)?,
+                    })
                 })
             }
 
@@ -2373,8 +2636,9 @@ macro_rules! key_types {
             /// front of `out`, returning the length, always
             /// [`PUBLIC_KEY_PEM_SIZE`].
             pub fn pem_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
-                let e = Engine::new(&$constants);
-                self.point.pem(&e, out)
+                crate::math::ec::with_engine!(&$constants, |e| {
+                    self.point.pem(&e, out)
+                })
             }
         }
     };
@@ -2383,7 +2647,7 @@ macro_rules! key_types {
 pub(crate) use key_types;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::hash::sha2::{Sha256, Sha384, Sha512};
     use std::vec;
@@ -2392,17 +2656,17 @@ mod tests {
     /// The generator, in the field's domain. Only the tests need
     /// it by itself: every multiplication of it goes through the
     /// comb table instead.
-    fn generator<const L: usize>(e: &Engine<L>) -> Point<L> {
+    fn generator<const L: usize, A: Arith>(e: &Engine<L, A>) -> Point<L> {
         Point {
-            x: e.field.to_mont(&e.curve.gx),
-            y: e.field.to_mont(&e.curve.gy),
+            x: e.field.to_mont(e.arith, &e.curve.gx),
+            y: e.field.to_mont(e.arith, &e.curve.gy),
             z: e.one,
         }
     }
 
     /// Affine coordinates as limbs, comparable.
-    fn affine<const L: usize>(
-        e: &Engine<L>,
+    fn affine<const L: usize, A: Arith>(
+        e: &Engine<L, A>,
         p: &Point<L>,
     ) -> Option<([u64; L], [u64; L])> {
         e.to_affine(p).map(|(x, y)| (x.0, y.0))
@@ -2415,6 +2679,111 @@ mod tests {
             *byte = u8::from_str_radix(s, 16).unwrap();
         }
         &buf[..hex.len() / 2]
+    }
+
+    /// The two choices under one row: each list asked once, with
+    /// that row's features in force.
+    fn chosen_under(
+        under: &features::Under,
+    ) -> (
+        Option<features::Chosen<crate::math::limbs::Kernel>>,
+        Option<features::Chosen<Kernel>>,
+    ) {
+        under.build(|| {
+            (
+                features::choose(crate::math::limbs::KERNELS),
+                features::choose(KERNELS),
+            )
+        })
+    }
+
+    /// The curves under one kernel of the table-read list: the read
+    /// itself, and keys through the public types.
+    pub(crate) fn kernel(under: &features::Under) {
+        let (adx, avx2) = chosen_under(under);
+        with_engine!(&P256, adx, avx2, |e| {
+            table_reads_keep_the_entry_the_digit_names(&e);
+        });
+        keys_match_the_portable_ones(under);
+    }
+
+    /// The curves under one kernel of the big-number list: the
+    /// written-out point operations against the formulas, and keys
+    /// through the public types.
+    pub(crate) fn bignum(under: &features::Under) {
+        let (adx, avx2) = chosen_under(under);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        with_engine!(&P256, adx, avx2, |e| {
+            written_out_doubling_matches_the_formula(&e);
+            written_out_mixed_addition_matches_the_formula(&e);
+            written_out_addition_matches_the_formula(&e);
+            written_out_inversion_matches_the_exponentiation(&e);
+        });
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        let _ = (adx, avx2);
+        keys_match_the_portable_ones(under);
+    }
+
+    /// Everything a P-256 and a P-384 key does, through the public
+    /// types: key generation from fixed secrets, compressed points,
+    /// deterministic signatures and their verification, and
+    /// agreement. Each operation chooses its kernel when it starts,
+    /// so each runs whole under the row, and the answers must be the
+    /// portable code's.
+    fn keys_match_the_portable_ones(under: &features::Under) {
+        use crate::kex::ecdh;
+        use crate::sig::ecdsa;
+
+        let p256 = || {
+            let ours = ecdsa::p256::PrivateKey::try_new(&[0x42; 32])
+                .expect("in range");
+            let public = ours.public_key().sec1_bytes();
+            let signature = ours
+                .sign_deterministic::<Sha256>(b"message")
+                .expect("signs");
+            let verified = ours
+                .public_key()
+                .verify::<Sha256>(b"message", &signature)
+                .is_ok();
+            let mut compressed = [0u8; 33];
+            compressed.copy_from_slice(&public[..33]);
+            compressed[0] = 0x02 | (public[64] & 1);
+            let decompressed =
+                ecdsa::p256::PublicKey::try_from_sec1(&compressed)
+                    .expect("on the curve")
+                    .sec1_bytes();
+            let a =
+                ecdh::p256::PrivateKey::try_new(&[0x42; 32]).expect("in range");
+            let b =
+                ecdh::p256::PrivateKey::try_new(&[0x24; 32]).expect("in range");
+            let shared = a.shared_secret(b.public_key());
+            (public, signature, verified, decompressed, shared)
+        };
+        let got = under.build(p256);
+        assert!(got.2, "P-256 verifies");
+        assert_eq!(got, features::build_portable(p256), "P-256");
+
+        let p384 = || {
+            let ours = ecdsa::p384::PrivateKey::try_new(&[0x42; 48])
+                .expect("in range");
+            let public = ours.public_key().sec1_bytes();
+            let signature = ours
+                .sign_deterministic::<Sha384>(b"message")
+                .expect("signs");
+            let verified = ours
+                .public_key()
+                .verify::<Sha384>(b"message", &signature)
+                .is_ok();
+            let a =
+                ecdh::p384::PrivateKey::try_new(&[0x42; 48]).expect("in range");
+            let b =
+                ecdh::p384::PrivateKey::try_new(&[0x24; 48]).expect("in range");
+            let shared = a.shared_secret(b.public_key());
+            (public, signature, verified, shared)
+        };
+        let got = under.build(p384);
+        assert!(got.2, "P-384 verifies");
+        assert_eq!(got, features::build_portable(p384), "P-384");
     }
 
     /// Both field primes are the ones the Montgomery reduction has
@@ -2435,23 +2804,24 @@ mod tests {
     #[test]
     fn group_law_basics() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            let e = Engine::new(curve);
-            let g = generator(&e);
-            Public::try_from_affine(&e, curve.gx, curve.gy).unwrap();
-            let two_g = e.point_add(&g, &g);
-            let by_mul = e.point_mul(&g, &Uint::from_limbs(&[2]));
-            assert_eq!(affine(&e, &two_g), affine(&e, &by_mul));
-            let (x, y) = e.to_affine(&two_g).unwrap();
-            Public::try_from_affine(&e, x, y).unwrap();
-            // Identity plus G is G; n G is the identity; (n-1) G = -G.
-            let id = e.identity();
-            assert_eq!(affine(&e, &e.point_add(&id, &g)), affine(&e, &g));
-            assert!(e.to_affine(&e.point_mul(&g, &curve.n)).is_none());
-            let (minus_one, _) = curve.n.sub_borrow(&Uint::one());
-            let (x, y) = e.to_affine(&e.point_mul(&g, &minus_one)).unwrap();
-            assert_eq!(x.0, curve.gx.0);
-            assert_eq!(y.0, Uint::ZERO.sub_mod(&curve.gy, &curve.p).0);
-            assert!(e.to_affine(&e.point_mul(&g, &Uint::ZERO)).is_none());
+            with_engine!(fixed_base, curve, |e| {
+                let g = generator(&e);
+                Public::try_from_affine(&e, curve.gx, curve.gy).unwrap();
+                let two_g = e.point_add(&g, &g);
+                let by_mul = e.point_mul(&g, &Uint::from_limbs(&[2]));
+                assert_eq!(affine(&e, &two_g), affine(&e, &by_mul));
+                let (x, y) = e.to_affine(&two_g).unwrap();
+                Public::try_from_affine(&e, x, y).unwrap();
+                // Identity plus G is G; n G is the identity; (n-1) G = -G.
+                let id = e.identity();
+                assert_eq!(affine(&e, &e.point_add(&id, &g)), affine(&e, &g));
+                assert!(e.to_affine(&e.point_mul(&g, &curve.n)).is_none());
+                let (minus_one, _) = curve.n.sub_borrow(&Uint::one());
+                let (x, y) = e.to_affine(&e.point_mul(&g, &minus_one)).unwrap();
+                assert_eq!(x.0, curve.gx.0);
+                assert_eq!(y.0, Uint::ZERO.sub_mod(&curve.gy, &curve.p).0);
+                assert!(e.to_affine(&e.point_mul(&g, &Uint::ZERO)).is_none());
+            })
         }
         check(&P256);
         check(&P384);
@@ -2463,16 +2833,17 @@ mod tests {
     #[test]
     fn doubling_matches_the_general_addition() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            let e = Engine::new(curve);
-            let g = generator(&e);
-            let mut p = e.identity();
-            for _ in 0..8 {
-                assert_eq!(
-                    affine(&e, &e.point_double(&p)),
-                    affine(&e, &e.point_add(&p, &p)),
-                );
-                p = e.point_add(&p, &g);
-            }
+            with_engine!(fixed_base, curve, |e| {
+                let g = generator(&e);
+                let mut p = e.identity();
+                for _ in 0..8 {
+                    assert_eq!(
+                        affine(&e, &e.point_double(&p)),
+                        affine(&e, &e.point_add(&p, &p)),
+                    );
+                    p = e.point_add(&p, &g);
+                }
+            })
         }
         check(&P256);
         check(&P384);
@@ -2481,7 +2852,9 @@ mod tests {
 
     /// The bases each comb's table is built from: block `j` of comb
     /// `i` stands for `2^(j block + i span) G`.
-    fn comb_bases<const L: usize>(e: &Engine<L>) -> [[Point<L>; COMB]; TABLES] {
+    fn comb_bases<const L: usize, A: Arith>(
+        e: &Engine<L, A>,
+    ) -> [[Point<L>; COMB]; TABLES] {
         let block = block::<L>();
         let span = block.div_ceil(TABLES);
         let mut bases = [[e.identity(); COMB]; TABLES];
@@ -2504,8 +2877,8 @@ mod tests {
 
     /// The entry a digit stands for: the sum of the comb's bases over
     /// the digit's set bits.
-    fn comb_entry<const L: usize>(
-        e: &Engine<L>,
+    fn comb_entry<const L: usize, A: Arith>(
+        e: &Engine<L, A>,
         bases: &[Point<L>; COMB],
         digit: usize,
     ) -> Point<L> {
@@ -2523,9 +2896,7 @@ mod tests {
     /// instructions this is the vectorised read; the expectation
     /// here is written out rather than taken from the scan it
     /// replaced.
-    #[test]
-    fn table_reads_keep_the_entry_the_digit_names() {
-        let e = Engine::new(&P256);
+    fn table_reads_keep_the_entry_the_digit_names<A: Arith>(e: &Engine<4, A>) {
         let mut table = [[[0u64; 4]; 2]; BASE_ENTRIES];
         for (i, entry) in table.iter_mut().enumerate() {
             for (j, limb) in entry.iter_mut().flatten().enumerate() {
@@ -2545,12 +2916,12 @@ mod tests {
         }
     }
 
-    /// Whether this processor takes the written-out blocks: on
-    /// x86-64 they need ADX and BMI2, and on A64 they are baseline.
+    /// Whether the engine takes the written-out blocks: on x86-64
+    /// where its kind has ADX and BMI2, and on A64 always.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    fn written_out<const L: usize>(e: &Engine<L>) -> bool {
+    fn written_out<const L: usize, A: Arith>(e: &Engine<L, A>) -> bool {
         #[cfg(target_arch = "x86_64")]
-        return e.fast.is_some();
+        return e.fast().is_some();
         #[cfg(target_arch = "aarch64")]
         return e.p256;
     }
@@ -2558,14 +2929,12 @@ mod tests {
     /// The doubling written out for the processor agrees with the
     /// formula as Rust reads it, on points whose coordinates run to
     /// the ends of the field.
-    #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    fn written_out_doubling_matches_the_formula() {
-        let e = Engine::new(&P256);
-        if !written_out(&e) {
+    fn written_out_doubling_matches_the_formula<A: Arith>(e: &Engine<4, A>) {
+        if !written_out(e) {
             return;
         }
-        let mut point = e.to_jacobian(&generator(&e));
+        let mut point = e.to_jacobian(&generator(e));
         for i in 0..64 {
             assert_eq!(
                 e.jacobian_double(&point).x.0,
@@ -2614,14 +2983,14 @@ mod tests {
     /// the formula as Rust reads it, on points whose coordinates run
     /// to the ends of the field, and where the point added to is the
     /// identity.
-    #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    fn written_out_mixed_addition_matches_the_formula() {
-        let e = Engine::new(&P256);
-        if !written_out(&e) {
+    fn written_out_mixed_addition_matches_the_formula<A: Arith>(
+        e: &Engine<4, A>,
+    ) {
+        if !written_out(e) {
             return;
         }
-        let g = e.to_jacobian(&generator(&e));
+        let g = e.to_jacobian(&generator(e));
         let table = e.normalise(&[e.jacobian_double(&g)]);
         // Adding the same multiple each time keeps the two points
         // distinct, which is the case the formula is for.
@@ -2651,14 +3020,12 @@ mod tests {
     /// with the formula as Rust reads it, on distinct points, on
     /// equal ones, on a pair of inverses, and where either side is
     /// the identity.
-    #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    fn written_out_addition_matches_the_formula() {
-        let e = Engine::new(&P256);
-        if !written_out(&e) {
+    fn written_out_addition_matches_the_formula<A: Arith>(e: &Engine<4, A>) {
+        if !written_out(e) {
             return;
         }
-        let g = e.to_jacobian(&generator(&e));
+        let g = e.to_jacobian(&generator(e));
         let two = e.jacobian_double(&g);
         let four = e.jacobian_double(&two);
         let minus = Jacobian {
@@ -2688,11 +3055,11 @@ mod tests {
 
     /// The inversion chain written out for the processor is the
     /// same value as the exponentiation it replaces.
-    #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    fn written_out_inversion_matches_the_exponentiation() {
-        let e = Engine::new(&P256);
-        if !written_out(&e) {
+    fn written_out_inversion_matches_the_exponentiation<A: Arith>(
+        e: &Engine<4, A>,
+    ) {
+        if !written_out(e) {
             return;
         }
         let mut value = e.one;
@@ -2710,8 +3077,8 @@ mod tests {
 
     /// The multiples one per-window table holds, window by window:
     /// entry `j` of window `w` is `(j + 1) 2^(BASE_WINDOW w) G`.
-    fn window_entries<const L: usize>(
-        e: &Engine<L>,
+    fn window_entries<const L: usize, A: Arith>(
+        e: &Engine<L, A>,
     ) -> std::vec::Vec<std::vec::Vec<Point<L>>> {
         let count = (64 * L + 1).div_ceil(BASE_WINDOW);
         let mut shifted = generator(e);
@@ -2736,17 +3103,28 @@ mod tests {
     /// stands for, as the comb check below says of the combs.
     #[test]
     fn base_windows_are_multiples_of_g() {
-        let e = Engine::new(&P256);
-        let wanted = window_entries(&e);
-        assert_eq!(P256.windows.len(), wanted.len() * BASE_ENTRIES);
-        let tables = P256.windows.chunks_exact(BASE_ENTRIES);
-        for (w, (table, multiples)) in tables.zip(&wanted).enumerate() {
-            for (j, (entry, point)) in table.iter().zip(multiples).enumerate() {
-                let (x, y) = e.to_affine(point).expect("a multiple of G");
-                assert_eq!(e.field.to_mont(&x).0, entry[0], "{w} {j} x");
-                assert_eq!(e.field.to_mont(&y).0, entry[1], "{w} {j} y");
+        with_engine!(fixed_base, &P256, |e| {
+            let wanted = window_entries(&e);
+            assert_eq!(P256.windows.len(), wanted.len() * BASE_ENTRIES);
+            let tables = P256.windows.chunks_exact(BASE_ENTRIES);
+            for (w, (table, multiples)) in tables.zip(&wanted).enumerate() {
+                for (j, (entry, point)) in
+                    table.iter().zip(multiples).enumerate()
+                {
+                    let (x, y) = e.to_affine(point).expect("a multiple of G");
+                    assert_eq!(
+                        e.field.to_mont(e.arith, &x).0,
+                        entry[0],
+                        "{w} {j} x"
+                    );
+                    assert_eq!(
+                        e.field.to_mont(e.arith, &y).0,
+                        entry[1],
+                        "{w} {j} y"
+                    );
+                }
             }
-        }
+        })
     }
 
     /// Every entry of every comb table is the multiple of `G` it
@@ -2756,86 +3134,30 @@ mod tests {
     #[test]
     fn base_tables_are_multiples_of_g() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            let e = Engine::new(curve);
-            let bases = comb_bases(&e);
-            assert_eq!(curve.base.len(), TABLES * ENTRIES);
-            for (i, table) in curve.base.chunks_exact(ENTRIES).enumerate() {
-                for (j, entry) in table.iter().enumerate() {
-                    let sum = comb_entry(&e, &bases[i], j + 1);
-                    let (x, y) = e.to_affine(&sum).expect("a sum of bases");
-                    assert_eq!(e.field.to_mont(&x).0, entry[0], "{i} {j} x");
-                    assert_eq!(e.field.to_mont(&y).0, entry[1], "{i} {j} y");
+            with_engine!(fixed_base, curve, |e| {
+                let bases = comb_bases(&e);
+                assert_eq!(curve.base.len(), TABLES * ENTRIES);
+                for (i, table) in curve.base.chunks_exact(ENTRIES).enumerate() {
+                    for (j, entry) in table.iter().enumerate() {
+                        let sum = comb_entry(&e, &bases[i], j + 1);
+                        let (x, y) = e.to_affine(&sum).expect("a sum of bases");
+                        assert_eq!(
+                            e.field.to_mont(e.arith, &x).0,
+                            entry[0],
+                            "{i} {j} x"
+                        );
+                        assert_eq!(
+                            e.field.to_mont(e.arith, &y).0,
+                            entry[1],
+                            "{i} {j} y"
+                        );
+                    }
                 }
-            }
+            })
         }
         check(&P256);
         check(&P384);
         check(&P521);
-    }
-
-    /// Prints the tables in the form `base.rs` holds them. Ignored:
-    /// it is how that file is made, not a check on it, and
-    /// `base_tables_are_multiples_of_g` is the check.
-    #[test]
-    #[ignore = "writes the table in base.rs; run it to rebuild that"]
-    fn print_base_tables() {
-        fn print<const L: usize>(name: &str, curve: &Curve<L>) {
-            let e = Engine::new(curve);
-            let bases = comb_bases(&e);
-            std::println!(
-                "pub(crate) const {}: [[[u64; {}]; 2]; {}] = [",
-                name,
-                L,
-                TABLES * ENTRIES
-            );
-            for table in bases.iter() {
-                for digit in 1..=ENTRIES {
-                    let sum = comb_entry(&e, table, digit);
-                    let (x, y) = e.to_affine(&sum).expect("a sum of bases");
-                    let hex = |v: Uint<L>| {
-                        let words: std::vec::Vec<std::string::String> =
-                            v.0.iter()
-                                .map(|w| std::format!("0x{w:016x}"))
-                                .collect();
-                        words.join(", ")
-                    };
-                    std::println!(
-                        "    [[{}],\n     [{}]],",
-                        hex(e.field.to_mont(&x)),
-                        hex(e.field.to_mont(&y))
-                    );
-                }
-            }
-            std::println!("];");
-        }
-        print("P256_BASE", &P256);
-        print("P384_BASE", &P384);
-        print("P521_BASE", &P521);
-
-        let e = Engine::new(&P256);
-        let tables = window_entries(&e);
-        std::println!(
-            "pub(crate) static P256_WINDOWS: [[[u64; 4]; 2]; {}] = [",
-            tables.len() * BASE_ENTRIES
-        );
-        for table in &tables {
-            for point in table {
-                let (x, y) = e.to_affine(point).expect("a multiple of G");
-                let hex = |v: Uint<4>| {
-                    let words: std::vec::Vec<std::string::String> =
-                        v.0.iter()
-                            .map(|w| std::format!("0x{w:016x}"))
-                            .collect();
-                    words.join(", ")
-                };
-                std::println!(
-                    "    [[{}],\n     [{}]],",
-                    hex(e.field.to_mont(&x)),
-                    hex(e.field.to_mont(&y))
-                );
-            }
-        }
-        std::println!("];");
     }
 
     /// The windowed multiplication in Jacobian coordinates agrees
@@ -2847,38 +3169,44 @@ mod tests {
     #[test]
     fn windowed_matches_the_complete_multiplication() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            let e = Engine::new(curve);
-            let g = generator(&e);
-            let (order_less_one, _) = curve.n.sub_borrow(&Uint::one());
-            let mut scalars = std::vec![
-                Uint::<L>::ZERO,
-                Uint::one(),
-                Uint::from_limbs(&[2]),
-                Uint::from_limbs(&[16]),
-                Uint::from_limbs(&[31]),
-                Uint::from_limbs(&[32]),
-                Uint::from_limbs(&[0x21084210]),
-                order_less_one,
-                curve.n,
-            ];
-            // Every limb the same, so every window is the same digit.
-            scalars.push(Uint([0x1084210842108421; L]));
-            let mut x = Uint::<L>::from_limbs(&[0x9e3779b97f4a7c15]);
-            for _ in 0..8 {
-                x = e.order.mulmod(&x, &Uint::from_limbs(&[0x100000001]));
-                scalars.push(x);
-            }
-            for k in scalars {
-                let want = affine(&e, &e.point_mul_complete(&g, &k));
-                let got = affine(&e, &e.point_mul(&g, &k));
-                assert_eq!(want, got, "{:?}", k.0);
-            }
-            // And the identity as the point, which has no inverse to
-            // take: every multiple of it is itself.
-            let identity = e.identity();
-            assert!(
-                e.to_affine(&e.point_mul(&identity, &Uint::one())).is_none()
-            );
+            with_engine!(fixed_base, curve, |e| {
+                let g = generator(&e);
+                let (order_less_one, _) = curve.n.sub_borrow(&Uint::one());
+                let mut scalars = std::vec![
+                    Uint::<L>::ZERO,
+                    Uint::one(),
+                    Uint::from_limbs(&[2]),
+                    Uint::from_limbs(&[16]),
+                    Uint::from_limbs(&[31]),
+                    Uint::from_limbs(&[32]),
+                    Uint::from_limbs(&[0x21084210]),
+                    order_less_one,
+                    curve.n,
+                ];
+                // Every limb the same, so every window is the same digit.
+                scalars.push(Uint([0x1084210842108421; L]));
+                let mut x = Uint::<L>::from_limbs(&[0x9e3779b97f4a7c15]);
+                for _ in 0..8 {
+                    x = e.order.mulmod(
+                        e.arith,
+                        &x,
+                        &Uint::from_limbs(&[0x100000001]),
+                    );
+                    scalars.push(x);
+                }
+                for k in scalars {
+                    let want = affine(&e, &e.point_mul_complete(&g, &k));
+                    let got = affine(&e, &e.point_mul(&g, &k));
+                    assert_eq!(want, got, "{:?}", k.0);
+                }
+                // And the identity as the point, which has no inverse to
+                // take: every multiple of it is itself.
+                let identity = e.identity();
+                assert!(
+                    e.to_affine(&e.point_mul(&identity, &Uint::one()))
+                        .is_none()
+                );
+            })
         }
         check(&P256);
         check(&P384);
@@ -2890,33 +3218,38 @@ mod tests {
     #[test]
     fn vartime_matches_the_constant_time_multiplications() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            let e = Engine::new(curve);
-            let g = generator(&e);
-            let q = e.point_mul(&g, &Uint::from_limbs(&[7]));
-            let (order_less_one, _) = curve.n.sub_borrow(&Uint::one());
-            let mut scalars = std::vec![
-                Uint::<L>::ZERO,
-                Uint::one(),
-                Uint::from_limbs(&[2]),
-                Uint::from_limbs(&[15]),
-                Uint::from_limbs(&[16]),
-                order_less_one,
-            ];
-            let mut x = Uint::<L>::from_limbs(&[0x9e3779b97f4a7c15]);
-            for _ in 0..6 {
-                x = e.order.mulmod(&x, &Uint::from_limbs(&[0x100000001]));
-                scalars.push(x);
-            }
-            for a in &scalars {
-                for b in &scalars {
-                    let want = affine(
-                        &e,
-                        &e.point_add(&e.point_mul(&q, a), &e.mul_base(b)),
+            with_engine!(fixed_base, curve, |e| {
+                let g = generator(&e);
+                let q = e.point_mul(&g, &Uint::from_limbs(&[7]));
+                let (order_less_one, _) = curve.n.sub_borrow(&Uint::one());
+                let mut scalars = std::vec![
+                    Uint::<L>::ZERO,
+                    Uint::one(),
+                    Uint::from_limbs(&[2]),
+                    Uint::from_limbs(&[15]),
+                    Uint::from_limbs(&[16]),
+                    order_less_one,
+                ];
+                let mut x = Uint::<L>::from_limbs(&[0x9e3779b97f4a7c15]);
+                for _ in 0..6 {
+                    x = e.order.mulmod(
+                        e.arith,
+                        &x,
+                        &Uint::from_limbs(&[0x100000001]),
                     );
-                    let got = affine(&e, &e.mul_add_vartime(&q, a, b));
-                    assert_eq!(want, got, "{:?} {:?}", a.0, b.0);
+                    scalars.push(x);
                 }
-            }
+                for a in &scalars {
+                    for b in &scalars {
+                        let want = affine(
+                            &e,
+                            &e.point_add(&e.point_mul(&q, a), &e.mul_base(b)),
+                        );
+                        let got = affine(&e, &e.mul_add_vartime(&q, a, b));
+                        assert_eq!(want, got, "{:?} {:?}", a.0, b.0);
+                    }
+                }
+            })
         }
         check(&P256);
         check(&P384);
@@ -2930,21 +3263,22 @@ mod tests {
     #[test]
     fn fixed_base_matches_the_general_multiplication() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            let e = Engine::new(curve);
-            let g = generator(&e);
-            let (top, _) = curve.n.sub_borrow(&Uint::one());
-            let mut high = Uint::<L>::ZERO;
-            high.0[L - 1] = 1 << 63;
-            let mut spread = Uint::<L>::ZERO;
-            for (i, limb) in spread.0.iter_mut().enumerate() {
-                *limb = 0x0f1e2d3c4b5a6978u64.rotate_left(i as u32 * 7);
-            }
-            for k in [Uint::ZERO, Uint::one(), top, high, spread] {
-                assert_eq!(
-                    affine(&e, &e.mul_base(&k)),
-                    affine(&e, &e.point_mul(&g, &k)),
-                );
-            }
+            with_engine!(fixed_base, curve, |e| {
+                let g = generator(&e);
+                let (top, _) = curve.n.sub_borrow(&Uint::one());
+                let mut high = Uint::<L>::ZERO;
+                high.0[L - 1] = 1 << 63;
+                let mut spread = Uint::<L>::ZERO;
+                for (i, limb) in spread.0.iter_mut().enumerate() {
+                    *limb = 0x0f1e2d3c4b5a6978u64.rotate_left(i as u32 * 7);
+                }
+                for k in [Uint::ZERO, Uint::one(), top, high, spread] {
+                    assert_eq!(
+                        affine(&e, &e.mul_base(&k)),
+                        affine(&e, &e.point_mul(&g, &k)),
+                    );
+                }
+            })
         }
         check(&P256);
         check(&P384);
@@ -2956,53 +3290,57 @@ mod tests {
     #[test]
     fn public_keys_match_nist() {
         let mut buf = [0u8; 48];
-        let e = Engine::new(&P256);
-        let d = Secret::try_new(
-            &e,
+        with_engine!(fixed_base, &P256, |e| {
+            let d = Secret::try_new(
+                &e,
+                unhex(
+                    "bf049d775057f1199612f4bd6ab0af69\
+                     5a78fb488453e261ca3c277ad57e55db",
+                    &mut buf,
+                ),
+            )
+            .unwrap();
+            let public = d.public(&e);
+            let mut sec1 = [0u8; 65];
+            public.sec1(&e, &mut sec1);
+            let mut expected = [0u8; 65];
             unhex(
-                "bf049d775057f1199612f4bd6ab0af69\
-                 5a78fb488453e261ca3c277ad57e55db",
-                &mut buf,
-            ),
-        )
-        .unwrap();
-        let public = d.public(&e);
-        let mut sec1 = [0u8; 65];
-        public.sec1(&e, &mut sec1);
-        let mut expected = [0u8; 65];
-        unhex(
-            "04c6e20135457dc6f738e60cf6999d2416f31d7c12afea248434a547a9aa8a34b0\
-             6e5610c1cfc091ad58aa43f2b8a96d9561ee80594c5bc5dc4cb08be679aa45ff",
-            &mut expected,
-        );
-        assert_eq!(sec1, expected);
-        assert_eq!(
-            Public::try_from_sec1(&e, &expected).unwrap().x.0,
-            public.x.0
-        );
+                "04c6e20135457dc6f738e60cf6999d2416f31d7c12afea248434a547a9aa\
+                 8a34b06e5610c1cfc091ad58aa43f2b8a96d9561ee80594c5bc5dc4cb08b\
+                 e679aa45ff",
+                &mut expected,
+            );
+            assert_eq!(sec1, expected);
+            assert_eq!(
+                Public::try_from_sec1(&e, &expected).unwrap().x.0,
+                public.x.0
+            );
+        });
 
-        let e = Engine::new(&P384);
-        let d = Secret::try_new(
-            &e,
+        with_engine!(fixed_base, &P384, |e| {
+            let d = Secret::try_new(
+                &e,
+                unhex(
+                    "958baeccb7bb953aa92fce3a136a7b8a\
+                     68001c4ed00cf7da6fcf83c0f552636d\
+                     0063e7c8a511cc45534f1a7f0f7dd959",
+                    &mut buf,
+                ),
+            )
+            .unwrap();
+            let public = d.public(&e);
+            let mut sec1 = [0u8; 97];
+            public.sec1(&e, &mut sec1);
+            let mut expected = [0u8; 97];
             unhex(
-                "958baeccb7bb953aa92fce3a136a7b8a\
-                 68001c4ed00cf7da6fcf83c0f552636d\
-                 0063e7c8a511cc45534f1a7f0f7dd959",
-                &mut buf,
-            ),
-        )
-        .unwrap();
-        let public = d.public(&e);
-        let mut sec1 = [0u8; 97];
-        public.sec1(&e, &mut sec1);
-        let mut expected = [0u8; 97];
-        unhex(
-            "0419f324cf1cbc7d17c1284f1d887eecafb1e11f4c9709566b3094fe3152f63fdb\
-             c937018f93918b80a84d4a9ffb8e132c75a66d983f39cca1dddebb881969adea\
-             be03b8c84b16e9e8b1de4b79ba3c41701145762eb90cc59c5f61f568d0601c08",
-            &mut expected,
-        );
-        assert_eq!(sec1, expected);
+                "0419f324cf1cbc7d17c1284f1d887eecafb1e11f4c9709566b3094fe3152\
+                 f63fdbc937018f93918b80a84d4a9ffb8e132c75a66d983f39cca1dddebb\
+                 881969adeabe03b8c84b16e9e8b1de4b79ba3c41701145762eb90cc59c5f\
+                 61f568d0601c08",
+                &mut expected,
+            );
+            assert_eq!(sec1, expected);
+        })
     }
 
     /// Compressed points decompress to the same key, with either
@@ -3010,51 +3348,55 @@ mod tests {
     #[test]
     fn compressed_points() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            let e = Engine::new(curve);
-            let mut rng = crate::random::CtrDrbg::from_system().unwrap();
-            let mut sec1 = [0u8; 133];
-            let w = curve.width();
-            for _ in 0..4 {
-                let public = Secret::generate(&e, &mut rng).unwrap().public(&e);
-                public.sec1(&e, &mut sec1[..1 + 2 * w]);
-                let mut compressed = [0u8; 67];
-                compressed[..1 + w].copy_from_slice(&sec1[..1 + w]);
-                compressed[0] = 0x02 | (sec1[2 * w] & 1);
-                let back =
-                    Public::try_from_sec1(&e, &compressed[..1 + w]).unwrap();
-                assert_eq!(back.y.0, public.y.0);
-                // The other parity is the negated point, also valid.
-                compressed[0] ^= 1;
-                let other =
-                    Public::try_from_sec1(&e, &compressed[..1 + w]).unwrap();
-                assert_eq!(
-                    other.y.0,
-                    Uint::ZERO.sub_mod(&public.y, &curve.p).0
-                );
-                // A point off the curve, and the wrong lengths.
-                sec1[1 + 2 * w - 1] ^= 1;
-                assert!(Public::try_from_sec1(&e, &sec1[..1 + 2 * w]).is_err());
-                assert!(Public::try_from_sec1(&e, &sec1[..2 * w]).is_err());
-                assert!(Public::try_from_sec1(&e, &[0]).is_err());
-            }
-            // Among small x, some have no y: those are refused, and
-            // the rest decompress to points that re-encode.
-            let mut refused = 0;
-            for x in 1..20u8 {
-                let mut compressed = [0u8; 67];
-                compressed[0] = 0x02;
-                compressed[w] = x;
-                match Public::try_from_sec1(&e, &compressed[..1 + w]) {
-                    Ok(p) => {
-                        p.sec1(&e, &mut sec1[..1 + 2 * w]);
-                        assert_eq!(sec1[1..1 + w], compressed[1..1 + w]);
-                        assert_eq!(sec1[2 * w] & 1, 0);
-                    }
-                    Err(Error::InvalidPublicKey) => refused += 1,
-                    Err(e) => panic!("{e}"),
+            with_engine!(fixed_base, curve, |e| {
+                let mut rng = crate::random::CtrDrbg::from_system().unwrap();
+                let mut sec1 = [0u8; 133];
+                let w = curve.width();
+                for _ in 0..4 {
+                    let public =
+                        Secret::generate(&e, &mut rng).unwrap().public(&e);
+                    public.sec1(&e, &mut sec1[..1 + 2 * w]);
+                    let mut compressed = [0u8; 67];
+                    compressed[..1 + w].copy_from_slice(&sec1[..1 + w]);
+                    compressed[0] = 0x02 | (sec1[2 * w] & 1);
+                    let back = Public::try_from_sec1(&e, &compressed[..1 + w])
+                        .unwrap();
+                    assert_eq!(back.y.0, public.y.0);
+                    // The other parity is the negated point, also valid.
+                    compressed[0] ^= 1;
+                    let other = Public::try_from_sec1(&e, &compressed[..1 + w])
+                        .unwrap();
+                    assert_eq!(
+                        other.y.0,
+                        Uint::ZERO.sub_mod(&public.y, &curve.p).0
+                    );
+                    // A point off the curve, and the wrong lengths.
+                    sec1[1 + 2 * w - 1] ^= 1;
+                    assert!(
+                        Public::try_from_sec1(&e, &sec1[..1 + 2 * w]).is_err()
+                    );
+                    assert!(Public::try_from_sec1(&e, &sec1[..2 * w]).is_err());
+                    assert!(Public::try_from_sec1(&e, &[0]).is_err());
                 }
-            }
-            assert!(refused > 0, "no non-residue among small x");
+                // Among small x, some have no y: those are refused, and
+                // the rest decompress to points that re-encode.
+                let mut refused = 0;
+                for x in 1..20u8 {
+                    let mut compressed = [0u8; 67];
+                    compressed[0] = 0x02;
+                    compressed[w] = x;
+                    match Public::try_from_sec1(&e, &compressed[..1 + w]) {
+                        Ok(p) => {
+                            p.sec1(&e, &mut sec1[..1 + 2 * w]);
+                            assert_eq!(sec1[1..1 + w], compressed[1..1 + w]);
+                            assert_eq!(sec1[2 * w] & 1, 0);
+                        }
+                        Err(Error::InvalidPublicKey) => refused += 1,
+                        Err(e) => panic!("{e}"),
+                    }
+                }
+                assert!(refused > 0, "no non-residue among small x");
+            })
         }
         check(&P256);
         check(&P384);
@@ -3068,14 +3410,16 @@ mod tests {
     #[test]
     fn near_order_scalars_multiply_correctly() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            let e = Engine::new(curve);
-            let g = generator(&e);
-            for j in 1..=64u64 {
-                let (k, _) = curve.n.sub_borrow(&Uint::from_limbs(&[2 * j]));
-                let want = affine(&e, &e.point_mul_complete(&g, &k));
-                assert_eq!(affine(&e, &e.point_mul(&g, &k)), want, "{j}");
-                assert_eq!(affine(&e, &e.mul_base(&k)), want, "{j}");
-            }
+            with_engine!(fixed_base, curve, |e| {
+                let g = generator(&e);
+                for j in 1..=64u64 {
+                    let (k, _) =
+                        curve.n.sub_borrow(&Uint::from_limbs(&[2 * j]));
+                    let want = affine(&e, &e.point_mul_complete(&g, &k));
+                    assert_eq!(affine(&e, &e.point_mul(&g, &k)), want, "{j}");
+                    assert_eq!(affine(&e, &e.mul_base(&k)), want, "{j}");
+                }
+            })
         }
         check(&P256);
         check(&P384);
@@ -3135,25 +3479,27 @@ mod tests {
     #[test]
     fn hedged_signatures_verify() {
         let mut buf = [0u8; 48];
-        let e = Engine::new(&P256);
-        let d = Secret::try_new(&e, unhex(&"42".repeat(32), &mut buf)).unwrap();
-        let mut plain = [0u8; 64];
-        d.sign::<Sha256>(&e, b"m", None, &mut plain).unwrap();
-        let mut a = [0u8; 64];
-        d.sign::<Sha256>(&e, b"m", Some(&[1; 32]), &mut a).unwrap();
-        let mut b = [0u8; 64];
-        d.sign::<Sha256>(&e, b"m", Some(&[2; 32]), &mut b).unwrap();
-        for sig in [&plain, &a, &b] {
-            d.public(&e).verify::<Sha256>(&e, b"m", sig).unwrap();
-        }
-        assert_ne!(a, plain);
-        assert_ne!(a, b);
-        // The same noise gives the same signature: the randomness is
-        // the only thing that varies.
-        let mut again = [0u8; 64];
-        d.sign::<Sha256>(&e, b"m", Some(&[1; 32]), &mut again)
-            .unwrap();
-        assert_eq!(a, again);
+        with_engine!(fixed_base, &P256, |e| {
+            let d =
+                Secret::try_new(&e, unhex(&"42".repeat(32), &mut buf)).unwrap();
+            let mut plain = [0u8; 64];
+            d.sign::<Sha256>(&e, b"m", None, &mut plain).unwrap();
+            let mut a = [0u8; 64];
+            d.sign::<Sha256>(&e, b"m", Some(&[1; 32]), &mut a).unwrap();
+            let mut b = [0u8; 64];
+            d.sign::<Sha256>(&e, b"m", Some(&[2; 32]), &mut b).unwrap();
+            for sig in [&plain, &a, &b] {
+                d.public(&e).verify::<Sha256>(&e, b"m", sig).unwrap();
+            }
+            assert_ne!(a, plain);
+            assert_ne!(a, b);
+            // The same noise gives the same signature: the randomness is
+            // the only thing that varies.
+            let mut again = [0u8; 64];
+            d.sign::<Sha256>(&e, b"m", Some(&[1; 32]), &mut again)
+                .unwrap();
+            assert_eq!(a, again);
+        })
     }
 
     /// RFC 6979 appendix A.2.5 and A.2.6: deterministic signatures
@@ -3161,132 +3507,140 @@ mod tests {
     #[test]
     fn rfc6979_vectors() {
         let mut buf = [0u8; 48];
-        let e = Engine::new(&P256);
-        let d = Secret::try_new(
-            &e,
+        with_engine!(fixed_base, &P256, |e| {
+            let d = Secret::try_new(
+                &e,
+                unhex(
+                    "c9afa9d845ba75166b5c215767b1d693\
+                     4e50c3db36e89b127b8a622b120f6721",
+                    &mut buf,
+                ),
+            )
+            .unwrap();
+            let mut sig = [0u8; 64];
+            d.sign::<Sha256>(&e, b"sample", None, &mut sig).unwrap();
+            let mut expected = [0u8; 64];
             unhex(
-                "c9afa9d845ba75166b5c215767b1d693\
-                 4e50c3db36e89b127b8a622b120f6721",
-                &mut buf,
-            ),
-        )
-        .unwrap();
-        let mut sig = [0u8; 64];
-        d.sign::<Sha256>(&e, b"sample", None, &mut sig).unwrap();
-        let mut expected = [0u8; 64];
-        unhex(
-            "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716\
-             f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8",
-            &mut expected,
-        );
-        assert_eq!(sig, expected);
-        d.public(&e).verify::<Sha256>(&e, b"sample", &sig).unwrap();
-        d.sign::<Sha256>(&e, b"test", None, &mut sig).unwrap();
-        unhex(
-            "f1abb023518351cd71d881567b1ea663ed3efcf6c5132b354f28d3b0b7d38367\
-             019f4113742a2b14bd25926b49c649155f267e60d3814b4c0cc84250e46f0083",
-            &mut expected,
-        );
-        assert_eq!(sig, expected);
+                "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf\
+                 3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f\
+                 843acda8",
+                &mut expected,
+            );
+            assert_eq!(sig, expected);
+            d.public(&e).verify::<Sha256>(&e, b"sample", &sig).unwrap();
+            d.sign::<Sha256>(&e, b"test", None, &mut sig).unwrap();
+            unhex(
+                "f1abb023518351cd71d881567b1ea663ed3efcf6c5132b354f28d3b0b7d3\
+                 8367019f4113742a2b14bd25926b49c649155f267e60d3814b4c0cc84250\
+                 e46f0083",
+                &mut expected,
+            );
+            assert_eq!(sig, expected);
+        });
 
-        let e = Engine::new(&P384);
-        let d = Secret::try_new(
-            &e,
+        with_engine!(fixed_base, &P384, |e| {
+            let d = Secret::try_new(
+                &e,
+                unhex(
+                    "6b9d3dad2e1b8c1c05b19875b6659f4d\
+                     e23c3b667bf297ba9aa47740787137d8\
+                     96d5724e4c70a825f872c9ea60d2edf5",
+                    &mut buf,
+                ),
+            )
+            .unwrap();
+            let mut sig = [0u8; 96];
+            d.sign::<Sha384>(&e, b"sample", None, &mut sig).unwrap();
+            let mut expected = [0u8; 96];
             unhex(
-                "6b9d3dad2e1b8c1c05b19875b6659f4d\
-                 e23c3b667bf297ba9aa47740787137d8\
-                 96d5724e4c70a825f872c9ea60d2edf5",
-                &mut buf,
-            ),
-        )
-        .unwrap();
-        let mut sig = [0u8; 96];
-        d.sign::<Sha384>(&e, b"sample", None, &mut sig).unwrap();
-        let mut expected = [0u8; 96];
-        unhex(
-            "94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad133c\
-             81a648152e44acf96e36dd1e80fabe4699ef4aeb15f178cea1fe40db2603138f\
-             130e740a19624526203b6351d0a3a94fa329c145786e679e7b82c71a38628ac8",
-            &mut expected,
-        );
-        assert_eq!(sig, expected);
-        d.public(&e).verify::<Sha384>(&e, b"sample", &sig).unwrap();
+                "94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad\
+                 133c81a648152e44acf96e36dd1e80fabe4699ef4aeb15f178cea1fe40db\
+                 2603138f130e740a19624526203b6351d0a3a94fa329c145786e679e7b82\
+                 c71a38628ac8",
+                &mut expected,
+            );
+            assert_eq!(sig, expected);
+            d.public(&e).verify::<Sha384>(&e, b"sample", &sig).unwrap();
+        })
     }
 
     /// Verification refuses what it should: a changed message, a
     /// changed signature, zero or out-of-range parts, another key.
     #[test]
     fn verify_refusals() {
-        let e = Engine::new(&P256);
-        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
-        let d = Secret::generate(&e, &mut rng).unwrap();
-        let public = d.public(&e);
-        let mut sig = [0u8; 64];
-        d.sign::<Sha256>(&e, b"message", None, &mut sig).unwrap();
-        public.verify::<Sha256>(&e, b"message", &sig).unwrap();
-        let bad = |s: &[u8], m: &[u8]| {
-            assert_eq!(
-                public.verify::<Sha256>(&e, m, s),
-                Err(Error::InvalidSignature)
-            );
-        };
-        bad(&sig, b"messagf");
-        let mut t = sig;
-        t[0] ^= 1;
-        bad(&t, b"message");
-        t = sig;
-        t[63] ^= 1;
-        bad(&t, b"message");
-        t = sig;
-        t[..32].fill(0);
-        bad(&t, b"message");
-        t = sig;
-        t[32..].fill(0xff);
-        bad(&t, b"message");
-        bad(&sig[..63], b"message");
-        let other = Secret::generate(&e, &mut rng).unwrap().public(&e);
-        assert!(other.verify::<Sha256>(&e, b"message", &sig).is_err());
+        with_engine!(fixed_base, &P256, |e| {
+            let mut rng = crate::random::CtrDrbg::from_system().unwrap();
+            let d = Secret::generate(&e, &mut rng).unwrap();
+            let public = d.public(&e);
+            let mut sig = [0u8; 64];
+            d.sign::<Sha256>(&e, b"message", None, &mut sig).unwrap();
+            public.verify::<Sha256>(&e, b"message", &sig).unwrap();
+            let bad = |s: &[u8], m: &[u8]| {
+                assert_eq!(
+                    public.verify::<Sha256>(&e, m, s),
+                    Err(Error::InvalidSignature)
+                );
+            };
+            bad(&sig, b"messagf");
+            let mut t = sig;
+            t[0] ^= 1;
+            bad(&t, b"message");
+            t = sig;
+            t[63] ^= 1;
+            bad(&t, b"message");
+            t = sig;
+            t[..32].fill(0);
+            bad(&t, b"message");
+            t = sig;
+            t[32..].fill(0xff);
+            bad(&t, b"message");
+            bad(&sig[..63], b"message");
+            let other = Secret::generate(&e, &mut rng).unwrap().public(&e);
+            assert!(other.verify::<Sha256>(&e, b"message", &sig).is_err());
+        })
     }
 
     /// Both sides of an agreement land on the same secret, and a
     /// key of the other curve or an off-curve point is refused.
     #[test]
     fn agreement() {
-        let e = Engine::new(&P384);
-        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
-        let a = Secret::generate(&e, &mut rng).unwrap();
-        let b = Secret::generate(&e, &mut rng).unwrap();
-        let mut ab = [0u8; 48];
-        let mut ba = [0u8; 48];
-        a.shared_secret(&e, &b.public(&e), &mut ab);
-        b.shared_secret(&e, &a.public(&e), &mut ba);
-        assert_eq!(ab, ba);
-        assert_ne!(ab, [0u8; 48]);
+        with_engine!(fixed_base, &P384, |e| {
+            let mut rng = crate::random::CtrDrbg::from_system().unwrap();
+            let a = Secret::generate(&e, &mut rng).unwrap();
+            let b = Secret::generate(&e, &mut rng).unwrap();
+            let mut ab = [0u8; 48];
+            let mut ba = [0u8; 48];
+            a.shared_secret(&e, &b.public(&e), &mut ab);
+            b.shared_secret(&e, &a.public(&e), &mut ba);
+            assert_eq!(ab, ba);
+            assert_ne!(ab, [0u8; 48]);
+        })
     }
 
     /// Scalars out of range are not keys.
     #[test]
     fn scalar_range() {
-        let e = Engine::new(&P256);
-        let mut buf = [0u8; 32];
-        assert_eq!(
-            Secret::try_new(&e, &buf).err(),
-            Some(Error::InvalidPrivateKey)
-        );
-        P256.n.to_be_bytes(&mut buf);
-        assert_eq!(
-            Secret::try_new(&e, &buf).err(),
-            Some(Error::InvalidPrivateKey)
-        );
-        buf[31] -= 1;
-        assert!(Secret::try_new(&e, &buf).is_ok());
-        assert_eq!(
-            Secret::try_new(&e, &buf[..31]).err(),
-            Some(Error::InvalidKeyLength(31))
-        );
-        assert_eq!(
-            Secret::try_new(&e, &[1u8; 48]).err(),
-            Some(Error::InvalidKeyLength(48))
-        );
+        with_engine!(fixed_base, &P256, |e| {
+            let mut buf = [0u8; 32];
+            assert_eq!(
+                Secret::try_new(&e, &buf).err(),
+                Some(Error::InvalidPrivateKey)
+            );
+            P256.n.to_be_bytes(&mut buf);
+            assert_eq!(
+                Secret::try_new(&e, &buf).err(),
+                Some(Error::InvalidPrivateKey)
+            );
+            buf[31] -= 1;
+            assert!(Secret::try_new(&e, &buf).is_ok());
+            assert_eq!(
+                Secret::try_new(&e, &buf[..31]).err(),
+                Some(Error::InvalidKeyLength(31))
+            );
+            assert_eq!(
+                Secret::try_new(&e, &[1u8; 48]).err(),
+                Some(Error::InvalidKeyLength(48))
+            );
+        })
     }
 }

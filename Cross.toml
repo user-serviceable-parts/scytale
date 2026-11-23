@@ -13,7 +13,6 @@ passthrough = ["SCYTALE_VECTORS"]
 # extensions; see the Dockerfile.
 dockerfile = "scripts/cross/riscv64gc-unknown-linux-gnu.Dockerfile"
 # qemu's default RISC-V CPU lacks the crypto extensions; the script
-# sets QEMU_CPU so the emulated CPU has them, and says which it
-# expects in SCYTALE_CPU_FEATURES, which the inventory test holds
-# the probes to.
-env.passthrough = ["QEMU_CPU", "SCYTALE_CPU_FEATURES", "SCYTALE_SHARD"]
+# sets QEMU_CPU so the emulated CPU has them. SCYTALE_KERNELS picks
+# which kernels the kernel tests run.
+env.passthrough = ["QEMU_CPU", "SCYTALE_KERNELS"]

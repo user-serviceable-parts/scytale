@@ -39,6 +39,7 @@
 
 use crate::cipher::BlockCipher;
 use crate::cipher::aes::x86_64::{Keys, keys};
+use crate::features::Chosen;
 use crate::kernel::Kernel;
 
 /// The block the loop works in.
@@ -64,8 +65,8 @@ impl<C: BlockCipher> Engine<C> {
     /// registers to do. That the processor has the instructions is
     /// settled by whoever chose the kernel, from its row in counter
     /// mode's list.
-    pub(crate) fn of(kernel: Kernel) -> Option<Self> {
-        match kernel {
+    pub(crate) fn of(chosen: Chosen<Kernel>) -> Option<Self> {
+        match chosen.kernel() {
             Kernel::Vaes | Kernel::Aesni => Some(Engine { keys: keys::<C>()? }),
             _ => None,
         }

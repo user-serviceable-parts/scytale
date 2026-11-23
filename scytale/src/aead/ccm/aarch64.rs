@@ -45,6 +45,7 @@
 use crate::cipher::BlockCipher;
 use crate::cipher::aes::aarch64::{Keys, keys};
 use crate::cipher::mode::ctr::aarch64::{BSWAP, GROUP, OFFSETS};
+use crate::features::Chosen;
 use crate::kernel::Kernel;
 
 /// The block the loop works in.
@@ -74,8 +75,8 @@ impl<C: BlockCipher> Engine<C> {
     ///
     /// The extension has one kernel here, so anything but
     /// [`Kernel::Armv8`] is answered with nothing.
-    pub(crate) fn of(kernel: Kernel) -> Option<Self> {
-        if kernel != Kernel::Armv8 {
+    pub(crate) fn of(chosen: Chosen<Kernel>) -> Option<Self> {
+        if chosen.kernel() != Kernel::Armv8 {
             return None;
         }
         Some(Engine { keys: keys::<C>()? })

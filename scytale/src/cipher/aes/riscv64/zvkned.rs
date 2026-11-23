@@ -21,10 +21,8 @@
 
 use core::fmt;
 
-use super::has_zvkned;
-use crate::cipher::BlockCipher;
 use crate::cipher::aes::{BLOCK_SIZE, KeySize, MAX_WORDS, expand_words};
-use crate::{BlockType, Key, KeyType};
+use crate::features::Chosen;
 use zeroize::ZeroizeOnDrop;
 
 /// An AES cipher with an expanded key, using the Zvkned instructions.
@@ -50,27 +48,16 @@ impl<const K: usize> fmt::Debug for Aes<K> {
 }
 
 impl<const K: usize> Aes<K> {
-    /// Whether this processor can run this implementation.
-    pub(crate) fn supported() -> bool {
-        has_zvkned()
-    }
-
-    /// Expands `key`.
-    ///
-    /// # Panics
-    /// If the processor lacks the Zvkned instructions. The type is private and
-    /// is named only after the probe has confirmed them, so the
-    /// panic is unreachable from outside this crate.
-    pub(crate) fn new(key: &[u8; K]) -> Self {
-        const {
-            assert!(
-                K == 16 || K == 24 || K == 32,
-                "AES keys are 16, 24 or 32 bytes"
-            )
-        };
-        assert!(Self::supported(), "the Zvkned instructions not available");
-        // SAFETY: just confirmed present.
-        unsafe { Self::new_unchecked(key) }
+    /// Expands `key` where the kernel list chose this kernel, and
+    /// `None` for any other choice.
+    pub(crate) fn new(
+        key: &[u8; K],
+        chosen: Chosen<super::super::Kernel>,
+    ) -> Option<Self> {
+        // SAFETY: only the list makes a `Chosen`, and only for a row
+        // whose features were in force; this is that row.
+        (chosen.kernel() == super::super::Kernel::Zvkned)
+            .then(|| unsafe { Self::new_unchecked(key) })
     }
 
     /// Expands `key` without checking for the instructions.
@@ -154,36 +141,6 @@ impl<const K: usize> super::Keyed for Aes<K> {
     /// instructions do.
     fn schedule(&self) -> Option<super::Schedule<'_>> {
         Some(super::Schedule::new(&self.keys, self.rounds()))
-    }
-}
-
-impl<const K: usize> BlockType for Aes<K> {
-    type Block = [u8; BLOCK_SIZE];
-
-    fn zero_block() -> Self::Block {
-        [0; BLOCK_SIZE]
-    }
-}
-
-impl<const K: usize> KeyType for Aes<K> {
-    type Key = Key<[u8; K]>;
-
-    fn zero_key() -> Self::Key {
-        Key::zeroed()
-    }
-}
-
-impl<const K: usize> BlockCipher for Aes<K> {
-    fn new(key: &Self::Key) -> Self {
-        Aes::new(key.array())
-    }
-
-    fn encrypt(&self, blocks: &mut [Self::Block]) {
-        Aes::encrypt_blocks(self, blocks)
-    }
-
-    fn decrypt(&self, blocks: &mut [Self::Block]) {
-        Aes::decrypt_blocks(self, blocks)
     }
 }
 
@@ -526,73 +483,3 @@ vaes_body!(
     "vaesdm.vs",
     "vaesdf.vs"
 );
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Returns the cipher, or `None` (skipping the test) without
-    /// Zvkned.
-    fn aes<const K: usize>(key: &[u8; K]) -> Option<Aes<K>> {
-        Aes::<K>::supported().then(|| Aes::new(key))
-    }
-
-    fn unhex(s: &str) -> [u8; 32] {
-        let mut out = [0u8; 32];
-        for (i, pair) in s.as_bytes().chunks_exact(2).enumerate() {
-            let hex = core::str::from_utf8(pair).unwrap();
-            out[i] = u8::from_str_radix(hex, 16).unwrap();
-        }
-        out
-    }
-
-    fn check<const K: usize>(key: &str, plain: &str, cipher: &str) {
-        let key: [u8; K] = unhex(key)[..K].try_into().unwrap();
-        let plain: [u8; 16] = unhex(plain)[..16].try_into().unwrap();
-        let cipher: [u8; 16] = unhex(cipher)[..16].try_into().unwrap();
-        let Some(aes) = aes(&key) else { return };
-
-        let mut block = plain;
-        aes.encrypt_blocks(core::slice::from_mut(&mut block));
-        assert_eq!(block, cipher, "encrypt");
-        aes.decrypt_blocks(core::slice::from_mut(&mut block));
-        assert_eq!(block, plain, "decrypt");
-    }
-
-    // FIPS 197 Appendix C.
-    #[test]
-    fn fips197_aes128() {
-        check::<16>(
-            "000102030405060708090a0b0c0d0e0f",
-            "00112233445566778899aabbccddeeff",
-            "69c4e0d86a7b0430d8cdb78070b4c55a",
-        );
-    }
-
-    #[test]
-    fn fips197_aes192() {
-        check::<24>(
-            "000102030405060708090a0b0c0d0e0f1011121314151617",
-            "00112233445566778899aabbccddeeff",
-            "dda97ca4864cdfe06eaf70a0ec0d7191",
-        );
-    }
-
-    #[test]
-    fn fips197_aes256() {
-        check::<32>(
-            "000102030405060708090a0b0c0d0e0f\
-             101112131415161718191a1b1c1d1e1f",
-            "00112233445566778899aabbccddeeff",
-            "8ea2b7ca516745bfeafc49904b496089",
-        );
-    }
-
-    #[test]
-    fn round_counts() {
-        let Some(a) = aes(&[0; 16]) else { return };
-        assert_eq!(a.rounds(), 10);
-        assert_eq!(aes(&[0; 24]).unwrap().rounds(), 12);
-        assert_eq!(aes(&[0; 32]).unwrap().rounds(), 14);
-    }
-}

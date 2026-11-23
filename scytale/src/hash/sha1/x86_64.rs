@@ -8,7 +8,9 @@
 
 #![allow(unsafe_code)]
 
+use super::Kernel;
 use crate::align::At16;
+use crate::features::Chosen;
 
 /// Reverses all sixteen bytes of a register: four big-endian words
 /// loaded from a block come out as numbers, in the order the
@@ -16,14 +18,26 @@ use crate::align::At16;
 static REVERSE: At16<[u8; 16]> =
     At16([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
 
-/// Folds `blocks` into `state` on SHA-NI. Chosen from the row that
-/// needs the instructions, so they are here.
-pub(crate) fn compress(state: &mut [u32; 5], blocks: &[[u8; 64]]) {
+/// The proof the kernel list chose SHA-NI. No public constructor:
+/// a value exists only by way of [`ShaNi::of`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ShaNi(());
+
+impl ShaNi {
+    /// The compression function, where the list chose it.
+    pub(crate) fn of(chosen: Chosen<Kernel>) -> Option<Self> {
+        (chosen.kernel() == Kernel::ShaNi).then_some(ShaNi(()))
+    }
+}
+
+/// Folds `blocks` into `state` on SHA-NI.
+pub(crate) fn compress(_: ShaNi, state: &mut [u32; 5], blocks: &[[u8; 64]]) {
     if blocks.is_empty() {
         return;
     }
-    // SAFETY: the row this was chosen from needs the instructions,
-    // and `blocks` is that many whole blocks, at least one.
+    // SAFETY: the token is the list's choice of this row, whose
+    // features were in force, and `blocks` is that many whole
+    // blocks, at least one.
     unsafe { compress_blocks(state, blocks.as_ptr().cast(), blocks.len()) }
 }
 

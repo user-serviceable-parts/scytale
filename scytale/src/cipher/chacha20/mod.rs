@@ -55,22 +55,18 @@
 //! where it can.
 
 #[cfg(target_arch = "aarch64")]
-pub mod aarch64;
-pub mod portable;
+pub(crate) mod aarch64;
+pub(crate) mod portable;
 #[cfg(target_arch = "riscv64")]
-pub mod riscv64;
+pub(crate) mod riscv64;
 #[cfg(target_arch = "x86_64")]
-pub mod x86_64;
+pub(crate) mod x86_64;
 
 use core::fmt;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-#[cfg(target_arch = "riscv64")]
-use crate::features::riscv64::Feature as R;
-#[cfg(target_arch = "x86_64")]
-use crate::features::x86_64::Feature as X;
-use crate::features::{self, Dispatcher, Features};
+use crate::features::{self, Chosen, Dispatcher, Features};
 use crate::{Error, Key, KeyType};
 
 /// The key length, in bytes.
@@ -102,18 +98,24 @@ pub(crate) use sealed::Sealed;
 /// A keystream generator. Sealed.
 ///
 /// A value of the type is the proof that this processor can run it:
-/// [`probe`](Backend::probe) is the only way to make one, the
+/// [`of`](Backend::of), from the kernel list's choice, is the only
+/// way to make one, the
 /// hardware ones have no public constructor, and the cipher holds the
 /// value it was given. So the generator is a safe call, and the one
 /// `unsafe` block in a hardware module is where the value is minted.
-pub trait Backend: Sealed + Copy {
-    /// The generator, where this processor can run it. Asked once.
-    fn probe() -> Option<Self>;
-
-    /// Whether this processor can run it.
-    fn supported() -> bool {
-        Self::probe().is_some()
-    }
+pub(crate) trait Backend: Sealed + Copy {
+    /// The generator, where the kernel list chose it: `None` for a
+    /// choice that is not this generator's.
+    // The portable generator is never asked: it is the fallback.
+    #[cfg_attr(
+        not(any(
+            target_arch = "aarch64",
+            target_arch = "riscv64",
+            target_arch = "x86_64"
+        )),
+        allow(dead_code)
+    )]
+    fn of(chosen: Chosen<Kernel>) -> Option<Self>;
 
     /// Xors the keystream for consecutive blocks from `counter` into
     /// `data`, whose length is a whole number of blocks.
@@ -188,22 +190,13 @@ pub fn hchacha20(
 /// ChaCha20 over the keystream generator `B`. The type for callers
 /// is [`ChaCha20`], which picks `B`; the per-architecture modules
 /// name the others.
-pub struct Cipher<B: Backend> {
+pub(crate) struct Cipher<B: Backend> {
     key: Words,
     /// The generator, which is the proof the processor can run it.
     backend: B,
 }
 
 impl<B: Backend> Cipher<B> {
-    /// Takes the key.
-    ///
-    /// [`Error::NotSupported`] where this processor cannot run `B`.
-    pub fn try_new(key: &Key<[u8; KEY_SIZE]>) -> Result<Self, Error> {
-        B::probe()
-            .map(|backend| Self::with(backend, key))
-            .ok_or(Error::NotSupported)
-    }
-
     /// Takes `key` under `backend`, which the caller got from the
     /// probe.
     pub(crate) fn with(backend: B, key: &Key<[u8; KEY_SIZE]>) -> Self {
@@ -397,7 +390,7 @@ impl fmt::Debug for Position {
 }
 
 /// A message in progress under a borrowed cipher.
-pub struct Stream<'a, B: Backend> {
+pub(crate) struct Stream<'a, B: Backend> {
     cipher: &'a Cipher<B>,
     position: Position,
 }
@@ -423,7 +416,7 @@ impl<B: Backend> fmt::Debug for Stream<'_, B> {
 
 /// A message in progress under a cipher of its own; see
 /// [`Cipher::into_stream`].
-pub struct OwnedStream<B: Backend> {
+pub(crate) struct OwnedStream<B: Backend> {
     cipher: Cipher<B>,
     position: Position,
 }
@@ -465,48 +458,38 @@ pub(crate) enum Kernel {
     /// RISC-V scalar rotates, Zbb or Zbkb.
     #[cfg(target_arch = "riscv64")]
     Zbb,
-    /// Plain Rust, on any processor. Never chosen on AArch64, where
-    /// NEON needs nothing either and comes first; the fallback arm
-    /// there is named after it all the same.
-    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+    /// Plain Rust, on any processor. Not a kernel on AArch64, where
+    /// NEON needs nothing either and every processor has it; the
+    /// portable code is still the fallback there.
+    #[cfg(not(target_arch = "aarch64"))]
     Portable,
 }
 
-/// AVX2 with the operating system saving the upper register halves.
-#[cfg(target_arch = "x86_64")]
-pub(crate) const AVX2: Features = features::x86(&[X::Avx, X::Avx2]);
-/// The vector rotate `vror.vi`, from Zvkb (which Zvbb includes), on
-/// registers of a block or more.
-#[cfg(target_arch = "riscv64")]
-pub(crate) const ZVKB: Features = features::riscv(&[R::V, R::Zvkb]);
-/// The scalar rotate, which Zbb has.
-#[cfg(target_arch = "riscv64")]
-pub(crate) const ZBB: Features = features::riscv(&[R::Zbb]);
-/// The same rotate, which Zbkb has as well; a processor with the
-/// scalar cryptography and not Zbb takes this row.
-#[cfg(target_arch = "riscv64")]
-pub(crate) const ZBKB: Features = features::riscv(&[R::Zbkb]);
+features::kernels! {
+    enum Kernel;
 
-/// The kernels, best first, each with what it needs; the first whose
-/// needs are in force is the one a new cipher gets. One kernel may
-/// appear twice, under two sets that each suffice. Every AArch64
-/// processor has NEON, so there the list ends with it and the
-/// portable code is never reached: two rows needing nothing would
-/// leave the second unreachable by any edit to the features.
-pub(crate) const KERNELS: &[(Kernel, Features)] = &[
-    #[cfg(target_arch = "x86_64")]
-    (Kernel::Avx2, AVX2),
-    #[cfg(target_arch = "aarch64")]
-    (Kernel::Neon, Features::new()),
-    #[cfg(target_arch = "riscv64")]
-    (Kernel::Zvkb, ZVKB),
-    #[cfg(target_arch = "riscv64")]
-    (Kernel::Zbb, ZBB),
-    #[cfg(target_arch = "riscv64")]
-    (Kernel::Zbb, ZBKB),
-    #[cfg(not(target_arch = "aarch64"))]
-    (Kernel::Portable, Features::new()),
-];
+    /// The kernels, best first; the first whose needs are in force is
+    /// the one a new cipher gets. AVX2 with the operating system
+    /// keeping the wider registers (AVX). The vector rotate
+    /// `vror.vi` is Zvkb's (which Zvbb includes); the scalar rotate
+    /// is Zbb's, and Zbkb's as well, so that kernel is listed twice,
+    /// under either. Every AArch64 processor has NEON, so there the
+    /// list ends with it.
+    pub(crate) const KERNELS for chacha20 tested by tests::kernel = [
+        #[cfg(target_arch = "x86_64")]
+        Avx2 => (x86_64: Avx, Avx2),
+        #[cfg(target_arch = "aarch64")]
+        Neon => (),
+        #[cfg(target_arch = "riscv64")]
+        Zvkb => (riscv64: V, Zvkb),
+        #[cfg(target_arch = "riscv64")]
+        Zbb => (riscv64: Zbb),
+        #[cfg(target_arch = "riscv64")]
+        Zbb => (riscv64: Zbkb),
+        #[cfg(not(target_arch = "aarch64"))]
+        Portable => (),
+    ];
+}
 
 /// What the list publishes: the needs, without the names.
 pub(crate) const PROFILES: [Features; KERNELS.len()] =
@@ -586,78 +569,26 @@ impl ChaCha20 {
     /// force allow. The last kernel in the list needs nothing, so
     /// this cannot fail.
     pub fn new(key: &Key<[u8; KEY_SIZE]>) -> Self {
-        // The list chose the arm, so the backend's own probe
-        // answers yes unless the features changed between the two
-        // reads; the portable fallback in each arm is right if they
-        // did.
-        let portable =
-            || Inner::Portable(Cipher::with(portable::Portable, key));
-        let inner = match features::select(KERNELS) {
-            #[cfg(target_arch = "x86_64")]
-            Some(Kernel::Avx2) => match x86_64::Avx2::probe() {
-                Some(b) => Inner::Avx2(Cipher::with(b, key)),
-                None => portable(),
-            },
-            #[cfg(target_arch = "aarch64")]
-            Some(Kernel::Neon) => match aarch64::Neon::probe() {
-                Some(b) => Inner::Neon(Cipher::with(b, key)),
-                None => portable(),
-            },
-            #[cfg(target_arch = "riscv64")]
-            Some(Kernel::Zvkb) => match riscv64::Zvkb::probe() {
-                Some(b) => Inner::Zvkb(Cipher::with(b, key)),
-                None => portable(),
-            },
-            #[cfg(target_arch = "riscv64")]
-            Some(Kernel::Zbb) => match riscv64::Zbb::probe() {
-                Some(b) => Inner::Zbb(Cipher::with(b, key)),
-                None => portable(),
-            },
-            _ => portable(),
-        };
+        let built =
+            match features::choose(KERNELS) {
+                #[cfg(target_arch = "x86_64")]
+                Some(c) if c.kernel() == Kernel::Avx2 => x86_64::Avx2::of(c)
+                    .map(|b| Inner::Avx2(Cipher::with(b, key))),
+                #[cfg(target_arch = "aarch64")]
+                Some(c) if c.kernel() == Kernel::Neon => aarch64::Neon::of(c)
+                    .map(|b| Inner::Neon(Cipher::with(b, key))),
+                #[cfg(target_arch = "riscv64")]
+                Some(c) if c.kernel() == Kernel::Zvkb => riscv64::Zvkb::of(c)
+                    .map(|b| Inner::Zvkb(Cipher::with(b, key))),
+                #[cfg(target_arch = "riscv64")]
+                Some(c) if c.kernel() == Kernel::Zbb => riscv64::Zbb::of(c)
+                    .map(|b| Inner::Zbb(Cipher::with(b, key))),
+                _ => None,
+            };
+        let inner = built.unwrap_or_else(|| {
+            Inner::Portable(Cipher::with(portable::Portable, key))
+        });
         ChaCha20(inner)
-    }
-
-    /// The kernels this cipher chooses among, with their needs.
-    #[cfg(test)]
-    pub(crate) fn kernels() -> &'static [(Kernel, Features)] {
-        KERNELS
-    }
-
-    /// Takes the key under `kernel` alone, or `None` where the set in
-    /// force does not allow it. The vector suites and the cross-checks
-    /// reach each kernel this way, through the same type that
-    /// dispatches to it.
-    #[cfg(test)]
-    pub(crate) fn with_kernel(
-        key: &Key<[u8; KEY_SIZE]>,
-        kernel: Kernel,
-    ) -> Option<Self> {
-        if !features::available(KERNELS, kernel) {
-            return None;
-        }
-        let inner = match kernel {
-            #[cfg(target_arch = "x86_64")]
-            Kernel::Avx2 => {
-                Inner::Avx2(Cipher::with(x86_64::Avx2::probe()?, key))
-            }
-            #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => {
-                Inner::Neon(Cipher::with(aarch64::Neon::probe()?, key))
-            }
-            #[cfg(target_arch = "riscv64")]
-            Kernel::Zvkb => {
-                Inner::Zvkb(Cipher::with(riscv64::Zvkb::probe()?, key))
-            }
-            #[cfg(target_arch = "riscv64")]
-            Kernel::Zbb => {
-                Inner::Zbb(Cipher::with(riscv64::Zbb::probe()?, key))
-            }
-            Kernel::Portable => {
-                Inner::Portable(Cipher::with(portable::Portable, key))
-            }
-        };
-        Some(ChaCha20(inner))
     }
 
     /// Which kernel this cipher is running on.
@@ -672,7 +603,12 @@ impl ChaCha20 {
             Inner::Zvkb(_) => Kernel::Zvkb,
             #[cfg(target_arch = "riscv64")]
             Inner::Zbb(_) => Kernel::Zbb,
+            #[cfg(not(target_arch = "aarch64"))]
             Inner::Portable(_) => Kernel::Portable,
+            // Built only where the list chose nothing, which it
+            // always does.
+            #[cfg(target_arch = "aarch64")]
+            Inner::Portable(_) => unreachable!("NEON needs nothing"),
         }
     }
 
@@ -829,38 +765,6 @@ pub(crate) mod tests {
         359f0861d807ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab7\
         7937365af90bbf74a35be6b40b8eedf2785e42874d";
 
-    /// Checks one implementation against the RFC's worked examples.
-    pub(crate) fn check_known_answers<B: Backend>() {
-        let cipher = Cipher::<B>::try_new(&Key::from(KEY)).unwrap();
-        let mut data = *PLAIN;
-        cipher.encrypt(&NONCE, 1, &mut data).unwrap();
-        assert_eq!(data, hex::<114>(CIPHER));
-        cipher.decrypt(&NONCE, 1, &mut data).unwrap();
-        assert_eq!(&data, PLAIN);
-
-        // Section 2.3.2: the block function on its own.
-        let cipher = Cipher::<B>::try_new(&Key::from(KEY)).unwrap();
-        let nonce = [0, 0, 0, 0x09, 0, 0, 0, 0x4a, 0, 0, 0, 0];
-        let block = cipher.keystream_block(&nonce, 1);
-        assert_eq!(block[..16], hex::<16>("10f1e7e4d13b5915500fdd1fa32071c4"));
-        assert_eq!(block[48..], hex::<16>("b5129cd1de164eb9cbd083e8a2503c4e"));
-
-        // Section 2.6.2: the Poly1305 key generation block.
-        let key = hex::<32>(
-            "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e\
-             9f",
-        );
-        let cipher = Cipher::<B>::try_new(&Key::from(key)).unwrap();
-        let nonce = hex::<12>("000000000001020304050607");
-        assert_eq!(
-            cipher.keystream_block(&nonce, 0)[..32],
-            hex::<32>(
-                "8ad5a08b905f81cc815040274ab29471a833b637e3fd0da508dbb8e2fdd1\
-                 a646"
-            )
-        );
-    }
-
     /// Checks one implementation against the portable one over many
     /// lengths, counters and chunkings.
     #[cfg_attr(
@@ -871,55 +775,79 @@ pub(crate) mod tests {
         )),
         allow(dead_code)
     )]
-    #[test]
-    fn known_answers() {
-        let cipher = ChaCha20::new(&Key::from(KEY));
+    /// ChaCha20 under one kernel, built through the public type: the
+    /// RFC 8439 examples, agreement with the portable code across
+    /// lengths, counters and chunkings, and Wycheproof's keystream
+    /// cases.
+    pub(crate) fn kernel(under: &features::Under) {
+        let build =
+            |key: [u8; 32]| under.build(|| ChaCha20::new(&Key::from(key)));
+        // Section 2.4.2: the sunscreen message.
+        let cipher = build(KEY);
         let mut data = *PLAIN;
         cipher.encrypt(&NONCE, 1, &mut data).unwrap();
         assert_eq!(data, hex::<114>(CIPHER));
+        cipher.decrypt(&NONCE, 1, &mut data).unwrap();
+        assert_eq!(&data, PLAIN);
+        // Section 2.3.2: the block function, as the keystream over
+        // zeros.
+        let nonce = [0, 0, 0, 0x09, 0, 0, 0, 0x4a, 0, 0, 0, 0];
+        let mut block = [0u8; 64];
+        cipher.encrypt(&nonce, 1, &mut block).unwrap();
+        assert_eq!(block[..16], hex::<16>("10f1e7e4d13b5915500fdd1fa32071c4"));
+        assert_eq!(block[48..], hex::<16>("b5129cd1de164eb9cbd083e8a2503c4e"));
+        // Section 2.6.2: the Poly1305 key generation block.
+        let cipher = build(hex::<32>(
+            "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e\
+             9f",
+        ));
+        let mut block = [0u8; 32];
+        cipher
+            .encrypt(&hex::<12>("000000000001020304050607"), 0, &mut block)
+            .unwrap();
+        assert_eq!(
+            block,
+            hex::<32>(
+                "8ad5a08b905f81cc815040274ab29471a833b637e3fd0da508dbb8e2fdd1\
+                 a646"
+            )
+        );
+        agrees(under);
+        crate::vectors::support::wycheproof::chacha20_poly1305::run_cipher(
+            &|key| under.build(|| ChaCha20::new(key)),
+        );
     }
 
-    /// Every kernel this processor can build agrees with the portable
-    /// code across lengths, counters and chunkings. The portable code
-    /// is reached directly: on AArch64 it is not a row, since every
-    /// processor there has NEON. The kernels this processor cannot
-    /// build are reported rather than passed over in silence; the
-    /// inventory audits those skips.
-    #[test]
-    fn every_kernel_agrees_with_the_portable_code() {
+    /// One kernel against the portable code.
+    fn agrees(under: &features::Under) {
         let key = Key::from(KEY);
+        let cipher = under.build(|| ChaCha20::new(&key));
         let reference = Cipher::with(portable::Portable, &key);
         let data: [u8; 1100] = core::array::from_fn(|i| (i * 13 + 7) as u8);
-        for &(kernel, _) in KERNELS {
-            let Some(cipher) = ChaCha20::with_kernel(&key, kernel) else {
-                std::eprintln!("{kernel:?} not available; skipping");
-                continue;
-            };
-            for len in [
-                0usize, 1, 63, 64, 65, 127, 128, 255, 256, 257, 511, 512, 513,
-                1024, 1100,
-            ] {
-                for counter in [0u32, 1, 7, u32::MAX - 20] {
-                    let tag = format!("{kernel:?} len {len} counter {counter}");
-                    let mut want = data;
-                    let mut got = data;
-                    let want_result =
-                        reference.encrypt(&NONCE, counter, &mut want[..len]);
-                    let got_result =
-                        cipher.encrypt(&NONCE, counter, &mut got[..len]);
-                    assert_eq!(want_result, got_result, "{tag}");
-                    assert_eq!(want[..len], got[..len], "{tag}");
-                    // The same message in pieces.
-                    let mut pieces = data;
-                    let mut stream = cipher.stream(&NONCE, counter);
-                    let mut ok = Ok(());
-                    for chunk in pieces[..len].chunks_mut(37) {
-                        ok = ok.and(stream.update(chunk));
-                    }
-                    assert_eq!(ok, got_result, "{tag} pieces");
-                    if ok.is_ok() {
-                        assert_eq!(pieces[..len], want[..len], "{tag} pieces");
-                    }
+        for len in [
+            0usize, 1, 63, 64, 65, 127, 128, 255, 256, 257, 511, 512, 513,
+            1024, 1100,
+        ] {
+            for counter in [0u32, 1, 7, u32::MAX - 20] {
+                let tag = format!("len {len} counter {counter}");
+                let mut want = data;
+                let mut got = data;
+                let want_result =
+                    reference.encrypt(&NONCE, counter, &mut want[..len]);
+                let got_result =
+                    cipher.encrypt(&NONCE, counter, &mut got[..len]);
+                assert_eq!(want_result, got_result, "{tag}");
+                assert_eq!(want[..len], got[..len], "{tag}");
+                // The same message in pieces.
+                let mut pieces = data;
+                let mut stream = cipher.stream(&NONCE, counter);
+                let mut ok = Ok(());
+                for chunk in pieces[..len].chunks_mut(37) {
+                    ok = ok.and(stream.update(chunk));
+                }
+                assert_eq!(ok, got_result, "{tag} pieces");
+                if ok.is_ok() {
+                    assert_eq!(pieces[..len], want[..len], "{tag} pieces");
                 }
             }
         }
@@ -1029,8 +957,14 @@ pub(crate) mod tests {
 
     #[test]
     fn picks_the_first_kernel_whose_needs_are_met() {
-        let cipher = ChaCha20::new(&Key::from([0u8; 32]));
-        features::dispatches(KERNELS, ChaCha20::profiles(), cipher.kernel());
+        features::build_alone(|| {
+            let cipher = ChaCha20::new(&Key::from([0u8; 32]));
+            features::dispatches(
+                KERNELS,
+                ChaCha20::profiles(),
+                cipher.kernel(),
+            );
+        });
     }
 
     #[test]

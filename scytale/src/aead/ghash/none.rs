@@ -7,6 +7,8 @@
 // The signatures have to match the real ones.
 #![allow(unsafe_code)]
 
+use crate::features::Chosen;
+
 /// The carry-less multiply this architecture does not have. There
 /// is no value of the type, so a hash holding one cannot exist, and
 /// the calls below are never made; the type says so rather than a
@@ -14,9 +16,11 @@
 #[derive(Clone, Copy)]
 pub(crate) enum Multiply {}
 
-/// Never anything: there is no multiply to find.
-pub(crate) fn probe() -> Option<Multiply> {
-    None
+impl Multiply {
+    /// Never anything: there is no multiply to choose.
+    pub(crate) fn of(_: Chosen<super::Kernel>) -> Option<Self> {
+        None
+    }
 }
 
 impl Multiply {

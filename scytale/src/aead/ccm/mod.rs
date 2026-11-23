@@ -193,28 +193,6 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
         ctr::profiles::<C>()
     }
 
-    /// The mode over the kernel named, or `None` where the set in
-    /// force does not meet its needs or it is not written for this
-    /// cipher.
-    ///
-    /// For the tests and the vector suites, which run every kernel
-    /// rather than only the one [`new`](Self::new) would take. The
-    /// kernel is counter mode's, whose constructor settles that the
-    /// set in force allows it; the MAC runs the chaining loop of that
-    /// name, or the portable one where CBC has none.
-    #[cfg(test)]
-    pub(crate) fn with_kernel(key: &C::Key, kernel: Kernel) -> Option<Self> {
-        Some(Ccm {
-            ctr: Ctr::with_kernel(key, kernel)?,
-            chain: MacEngine::with(kernel)
-                .or_else(|| MacEngine::with(Kernel::Portable))?,
-            #[cfg(target_arch = "aarch64")]
-            native: aarch64::Engine::of(kernel),
-            #[cfg(target_arch = "x86_64")]
-            native: x86_64::Engine::of(kernel),
-        })
-    }
-
     /// Which kernel this mode was built with: counter mode's, which
     /// the MAC and the interleaved loop follow.
     #[cfg(test)]
@@ -369,14 +347,14 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
 /// there is one written for it.
 #[cfg(target_arch = "aarch64")]
 fn best_native<C: BlockCipher>() -> Option<aarch64::Engine<C>> {
-    features::select(ctr::kernels::<C>()).and_then(aarch64::Engine::of)
+    features::choose(ctr::kernels::<C>()).and_then(aarch64::Engine::of)
 }
 
 /// The interleaved loop for the kernel counter mode would take, where
 /// there is one written for it.
 #[cfg(target_arch = "x86_64")]
 fn best_native<C: BlockCipher>() -> Option<x86_64::Engine<C>> {
-    features::select(ctr::kernels::<C>()).and_then(x86_64::Engine::of)
+    features::choose(ctr::kernels::<C>()).and_then(x86_64::Engine::of)
 }
 
 /// Refuses nonce and tag lengths the standard does not define, and a
@@ -465,7 +443,7 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Mac<'a, C> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::Key;
     use crate::cipher::aes::{Aes128, Aes256};
@@ -484,17 +462,10 @@ mod tests {
             .collect()
     }
 
-    /// Every kernel this processor has, under `key`.
-    fn every(key: &[u8; 16]) -> Vec<Ccm<Aes128>> {
-        KERNELS
-            .iter()
-            .filter_map(|&(k, _)| Ccm::with_kernel(&Key::from(*key), k))
-            .collect()
-    }
-
     /// Seals `pt`, checks the ciphertext and tag against `expected`
     /// (ciphertext followed by tag), and opens it again.
     fn known(
+        under: &crate::features::Under,
         key: &[u8; 16],
         nonce: &str,
         aad: &[u8],
@@ -505,9 +476,8 @@ mod tests {
         let nonce = unhex(nonce);
         let expected = unhex(expected);
         let (ct, tag) = expected.split_at(expected.len() - tag_len);
-        let modes = every(key);
-        assert!(!modes.is_empty());
-        for ccm in modes {
+        {
+            let ccm = under.build(|| Ccm::<Aes128>::new(&Key::from(*key)));
             let mut data = pt.to_vec();
             let mut got = vec![0u8; tag_len];
             ccm.encrypt(&nonce, aad, &mut data, &mut got)
@@ -526,14 +496,26 @@ mod tests {
 
     /// `n` bytes counting up from `start`, wrapping, the pattern the
     /// published examples are built from.
+    /// CCM under one of counter mode's kernels, whose loops it
+    /// borrows, through the public type: NIST's and RFC 3610's
+    /// examples. Run by CTR's meta test.
+    pub(crate) fn kernel(under: &crate::features::Under) {
+        sp800_38c_example_1(under);
+        sp800_38c_example_2(under);
+        sp800_38c_example_3(under);
+        sp800_38c_example_4(under);
+        rfc3610_packets_1_to_3(under);
+        kernels_agree(under);
+    }
+
     fn counting(start: u8, n: usize) -> Vec<u8> {
         (0..n).map(|i| start.wrapping_add(i as u8)).collect()
     }
 
     /// SP 800-38C appendix C, example 1: the shortest nonce and tag.
-    #[test]
-    fn sp800_38c_example_1() {
+    fn sp800_38c_example_1(under: &crate::features::Under) {
         known(
+            under,
             &SP800_38C_KEY,
             "10111213141516",
             &counting(0, 8),
@@ -544,9 +526,9 @@ mod tests {
     }
 
     /// Example 2: an 8-byte nonce and 6-byte tag.
-    #[test]
-    fn sp800_38c_example_2() {
+    fn sp800_38c_example_2(under: &crate::features::Under) {
         known(
+            under,
             &SP800_38C_KEY,
             "1011121314151617",
             &counting(0, 16),
@@ -557,9 +539,9 @@ mod tests {
     }
 
     /// Example 3: a 12-byte nonce and 8-byte tag.
-    #[test]
-    fn sp800_38c_example_3() {
+    fn sp800_38c_example_3(under: &crate::features::Under) {
         known(
+            under,
             &SP800_38C_KEY,
             "101112131415161718191a1b",
             &counting(0, 20),
@@ -572,9 +554,9 @@ mod tests {
 
     /// Example 4: 65,536 bytes of additional data, past the two-byte
     /// length, so the `ff fe` form is what is exercised.
-    #[test]
-    fn sp800_38c_example_4() {
+    fn sp800_38c_example_4(under: &crate::features::Under) {
         known(
+            under,
             &SP800_38C_KEY,
             "101112131415161718191a1b1c",
             &counting(0, 65536),
@@ -592,9 +574,9 @@ mod tests {
 
     /// RFC 3610 packet vectors 1 to 3: an 8-byte header, a 13-byte
     /// nonce and an 8-byte tag, over payloads either side of a block.
-    #[test]
-    fn rfc3610_packets_1_to_3() {
+    fn rfc3610_packets_1_to_3(under: &crate::features::Under) {
         known(
+            under,
             &RFC3610_KEY,
             "00000003020100a0a1a2a3a4a5",
             &counting(0, 8),
@@ -604,6 +586,7 @@ mod tests {
             8,
         );
         known(
+            under,
             &RFC3610_KEY,
             "00000004030201a0a1a2a3a4a5",
             &counting(0, 8),
@@ -613,6 +596,7 @@ mod tests {
             8,
         );
         known(
+            under,
             &RFC3610_KEY,
             "00000005040302a0a1a2a3a4a5",
             &counting(0, 8),
@@ -717,12 +701,13 @@ mod tests {
         assert_eq!(&sealed, b"a message longer than a block");
     }
 
-    /// Every kernel agrees with the one `new` picks, across
-    /// lengths that land either side of block and group boundaries.
-    #[test]
-    fn kernels_agree() {
+    /// One kernel agrees with the portable code, across lengths
+    /// that land either side of block and group boundaries.
+    fn kernels_agree(under: &crate::features::Under) {
         let key = [0x33u8; 16];
-        let reference = Ccm::<Aes128>::new(&Key::from(key));
+        let reference = crate::features::build_portable(|| {
+            Ccm::<Aes128>::new(&Key::from(key))
+        });
         let aad = counting(1, 37);
         for len in [0, 1, 15, 16, 17, 255, 256, 257, 1000] {
             let pt = counting(5, len);
@@ -731,13 +716,12 @@ mod tests {
             reference
                 .encrypt(&[1u8; 11], &aad, &mut want, &mut want_tag)
                 .expect("encrypt");
-            for ccm in every(&key) {
-                let mut got = pt.clone();
-                let mut tag = [0u8; 16];
-                ccm.encrypt(&[1u8; 11], &aad, &mut got, &mut tag)
-                    .expect("encrypt");
-                assert_eq!((got, tag), (want.clone(), want_tag));
-            }
+            let ccm = under.build(|| Ccm::<Aes128>::new(&Key::from(key)));
+            let mut got = pt.clone();
+            let mut tag = [0u8; 16];
+            ccm.encrypt(&[1u8; 11], &aad, &mut got, &mut tag)
+                .expect("encrypt");
+            assert_eq!((got, tag), (want.clone(), want_tag));
         }
     }
 }

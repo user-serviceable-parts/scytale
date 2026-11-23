@@ -13,10 +13,9 @@
 
 #![allow(unsafe_code)]
 
-use super::{BLOCK_SIZE, Backend, Cipher, Sealed};
-
-/// ChaCha20 with NEON.
-pub type ChaCha20 = Cipher<Neon>;
+use super::Kernel;
+use super::{BLOCK_SIZE, Backend, Sealed};
+use crate::features::Chosen;
 
 /// The keystream generator with NEON, which every AArch64 processor
 /// has.
@@ -27,8 +26,8 @@ pub struct Neon(());
 impl Sealed for Neon {}
 
 impl Backend for Neon {
-    fn probe() -> Option<Self> {
-        Some(Neon(()))
+    fn of(chosen: Chosen<Kernel>) -> Option<Self> {
+        (chosen.kernel() == Kernel::Neon).then_some(Neon(()))
     }
 
     fn xor(
@@ -198,21 +197,5 @@ unsafe fn group4(states: &[[u32; 16]; GROUP], data: *mut u8) {
             out("v16") _, out("v17") _, out("v18") _, out("v19") _,
             options(nostack),
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::cipher::chacha20::tests::check_known_answers;
-
-    #[test]
-    fn known_answers() {
-        check_known_answers::<Neon>();
-    }
-
-    #[test]
-    fn probe_agrees_with_constructor() {
-        assert!(ChaCha20::try_new(&crate::Key::from([0u8; 32])).is_ok());
     }
 }

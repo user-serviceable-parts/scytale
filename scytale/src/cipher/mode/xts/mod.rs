@@ -111,15 +111,7 @@ pub struct Xts<C: BlockCipher<Block = [u8; BLOCK]>> {
 /// features in force meet. The tests and the vector suites do name
 /// them, so that every kernel is validated and not only the one this
 /// machine would pick.
-pub(crate) const KERNELS: &[(Kernel, Features)] = &[
-    #[cfg(target_arch = "x86_64")]
-    (Kernel::Vaes, crate::cipher::aes::x86_64::VAES256),
-    #[cfg(target_arch = "x86_64")]
-    (Kernel::Aesni, crate::cipher::aes::x86_64::AESNI_AVX),
-    #[cfg(target_arch = "aarch64")]
-    (Kernel::Armv8, crate::cipher::aes::ARMV8),
-    (Kernel::Portable, Features::new()),
-];
+pub(crate) const KERNELS: &[(Kernel, Features)] = crate::kernel::XTS;
 
 /// What the list publishes: the needs, without the names.
 const PROFILES: [Features; KERNELS.len()] = features::profiles_of(KERNELS);
@@ -204,6 +196,30 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
         }
     }
 
+    /// This engine where it can read `cipher`'s schedule, and the
+    /// portable one where it cannot. The cipher chose its own kernel
+    /// from its own reading of the set in force; a set changed in
+    /// between can leave it on code whose schedule these loops cannot
+    /// load, and the engine must then not be the one that tries.
+    #[cfg_attr(
+        not(any(target_arch = "aarch64", target_arch = "x86_64")),
+        allow(unused_variables)
+    )]
+    fn over(self, cipher: &C) -> Self {
+        match self {
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            Engine::Native(_)
+                if !native::keys_either_way::<C>().is_some_and(|keys| {
+                    keys(cipher, false).is_some()
+                        && keys(cipher, true).is_some()
+                }) =>
+            {
+                Engine::Generic(core::marker::PhantomData)
+            }
+            engine => engine,
+        }
+    }
+
     /// Which kernel this engine runs.
     #[cfg(test)]
     fn kernel(&self) -> Kernel {
@@ -240,10 +256,12 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
         if constant_time::equal(data.as_ref(), tweak.as_ref()) {
             return Err(Error::InvalidKeyLength(2 * data.as_ref().len()));
         }
+        let (data, tweak) = (C::new(data), C::new(tweak));
+        let engine = Engine::new().over(&data).over(&tweak);
         Ok(Xts {
-            data: C::new(data),
-            tweak: C::new(tweak),
-            engine: Engine::new(),
+            data,
+            tweak,
+            engine,
         })
     }
 
@@ -252,29 +270,6 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
     /// instructions cannot read, the portable one alone.
     pub fn profiles() -> &'static [Features] {
         profiles::<C>()
-    }
-
-    /// The mode over the kernel named, or `None` where the set in
-    /// force does not meet its needs or it is not written for this
-    /// cipher.
-    ///
-    /// For the tests and the vector suites, which run every kernel
-    /// rather than only the one [`try_new`](Self::try_new) would
-    /// take. The virtual features are granted, so the table-driven
-    /// cipher is to be had without editing the set; see
-    /// [`features::available`].
-    #[cfg(test)]
-    pub(crate) fn with_kernel(
-        data: &C::Key,
-        tweak: &C::Key,
-        kernel: Kernel,
-    ) -> Option<Self> {
-        features::available(kernels::<C>(), kernel).then_some(())?;
-        Some(Xts {
-            data: C::new(data),
-            tweak: C::new(tweak),
-            engine: Engine::with(kernel)?,
-        })
     }
 
     /// Which kernel this mode was built with.
@@ -514,13 +509,12 @@ pub(crate) fn alpha(tweak: u128) -> u128 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     extern crate std;
 
     use super::*;
     use crate::Key;
     use crate::cipher::aes::Aes128;
-    use std::vec::Vec;
 
     const MAX: usize = 80;
 
@@ -601,8 +595,7 @@ mod tests {
     /// Every kernel this processor has must agree, at every
     /// length around the group boundaries of both widths, with and
     /// without a block to steal from.
-    #[test]
-    fn the_engines_agree() {
+    pub(crate) fn kernel(under: &features::Under) {
         const MAX: usize = 5 * 16 * BLOCK + 7;
         let data = Key::from([0x44u8; 16]);
         let tweak = Key::from([0x55u8; 16]);
@@ -612,16 +605,9 @@ mod tests {
             *b = (i * 11 + 5) as u8;
         }
 
-        let all: Vec<Xts<Aes128>> = KERNELS
-            .iter()
-            .filter_map(|&(k, _)| Xts::<Aes128>::with_kernel(&data, &tweak, k))
-            .collect();
-        assert!(!all.is_empty(), "no kernel to test");
-        // The portable one is always to be had.
-        assert!(
-            Xts::<Aes128>::with_kernel(&data, &tweak, Kernel::Portable)
-                .is_some()
-        );
+        // The portable one last, as the reference.
+        let build = || Xts::<Aes128>::try_new(&data, &tweak).expect("distinct");
+        let all = [under.build(build), features::build_portable(build)];
 
         for len in BLOCK..MAX {
             let mut want = [0u8; MAX];

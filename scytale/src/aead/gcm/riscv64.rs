@@ -68,7 +68,7 @@ use crate::align::At16;
 use crate::cipher::BlockCipher;
 use crate::cipher::aes::riscv64::Schedule;
 pub(crate) use crate::cipher::aes::riscv64::{Keys, keys};
-use crate::features::{self, Features};
+use crate::features::Chosen;
 use crate::kernel::Kernel;
 use zeroize::Zeroize;
 
@@ -88,17 +88,6 @@ static STEP: At16<[u32; 4 * GROUP]> = {
     }
     At16(w)
 };
-
-/// What the loops here need: the vector AES instructions, a byte
-/// reverse (which either of two extensions brings) and `vgmul`.
-pub(crate) const ZVKNED: Features = crate::cipher::aes::ZVKNED
-    .union(crate::cipher::aes::VREV8)
-    .union(ghash::riscv64::ZVKG);
-
-/// Whether the loops here can run: their row in GCM's list.
-fn supported() -> bool {
-    features::allows(super::KERNELS, Kernel::Zvkned)
-}
 
 /// Everything the hash works out from the subkey and never changes.
 #[derive(Clone)]
@@ -126,10 +115,9 @@ impl Drop for Subkey {
 impl Subkey {
     /// The powers of hash subkey `h`, or `None` where this processor
     /// has not the instructions to use them.
+    /// Only [`Engine::of`] calls this, for GCM's chosen vector row,
+    /// which needs Zvkg.
     fn new(h: &[u8; BLOCK]) -> Option<Self> {
-        if !supported() {
-            return None;
-        }
         let h = ghash::riscv64::zvkg::prepare(&[
             ghash::halve(&h[..8]),
             ghash::halve(&h[8..]),
@@ -140,7 +128,7 @@ impl Subkey {
         let mut powers = [[0u64; 2]; GROUP];
         let mut power = [1u64 << 63, 0];
         for slot in powers.iter_mut().rev() {
-            // SAFETY: `supported` has just confirmed the instruction.
+            // SAFETY: GCM's list chose the row that needs Zvkg.
             unsafe { ghash::riscv64::zvkg::multiply(&mut power, &h) };
             *slot = ghash::riscv64::zvkg::prepare(&power);
         }
@@ -173,8 +161,8 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     ///
     /// There is one kernel here, so anything but [`Kernel::Zvkned`]
     /// is answered with nothing.
-    pub(crate) fn of(h: &[u8; BLOCK], kernel: Kernel) -> Option<Self> {
-        if kernel != Kernel::Zvkned {
+    pub(crate) fn of(h: &[u8; BLOCK], chosen: Chosen<Kernel>) -> Option<Self> {
+        if chosen.kernel() != Kernel::Zvkned {
             return None;
         }
         Some(Engine {

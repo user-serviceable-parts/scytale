@@ -18,48 +18,29 @@ use super::portable::ROUND_CONSTANTS;
 #[cfg(test)]
 use super::variant;
 use crate::align::At32;
-use crate::features;
+use crate::features::Chosen;
 
-// Named for the vector suites, which drive each engine in turn; the
-// dispatching types reach it directly.
-/// SHA3-224 with the SHA3 instructions.
-#[cfg(test)]
-pub type Sha3_224 = Sponge<Armv8, variant::Sha3_224>;
 /// SHA3-256 with the SHA3 instructions.
 #[cfg(test)]
 pub type Sha3_256 = Sponge<Armv8, variant::Sha3_256>;
-/// SHA3-384 with the SHA3 instructions.
-#[cfg(test)]
-pub type Sha3_384 = Sponge<Armv8, variant::Sha3_384>;
-/// SHA3-512 with the SHA3 instructions.
-#[cfg(test)]
-pub type Sha3_512 = Sponge<Armv8, variant::Sha3_512>;
 /// SHAKE128 with the SHA3 instructions.
 #[cfg(test)]
 pub type Shake128 = Sponge<Armv8, variant::Shake128>;
-/// SHAKE256 with the SHA3 instructions.
-#[cfg(test)]
-pub type Shake256 = Sponge<Armv8, variant::Shake256>;
-
-/// Whether the SHA3 instructions are available.
-pub(crate) fn has_sha3() -> bool {
-    features::allows(super::KERNELS, super::Kernel::Armv8)
-}
 
 /// The permutation via the SHA3 instructions. No public constructor:
-/// a value exists only by way of `probe`.
+/// a value exists only by way of `of`.
 #[derive(Clone, Copy)]
 pub struct Armv8(());
 
 impl super::engine::Sealed for Armv8 {}
 
 impl Permutation for Armv8 {
-    fn probe() -> Option<Self> {
-        has_sha3().then_some(Armv8(()))
+    fn of(chosen: Chosen<super::Kernel>) -> Option<Self> {
+        (chosen.kernel() == super::Kernel::Armv8).then_some(Armv8(()))
     }
 
     fn permute(self, state: &mut [u64; LANES]) {
-        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // SAFETY: `self` was minted by `of`, which confirmed the
         // instructions.
         unsafe { keccak_f1600(state.as_mut_ptr()) }
     }
@@ -307,104 +288,20 @@ unsafe fn keccak_f1600_x2(state: *mut u64) {
 pub(crate) type Two = At32<[[u64; 2]; LANES]>;
 
 /// The two-state permutation. No public constructor: a value exists
-/// only by way of `probe`.
+/// only by way of `of`.
 #[derive(Clone, Copy)]
 pub(crate) struct Pair(());
 
 impl Pair {
-    /// The permutation, where the features in force allow it.
-    pub(crate) fn probe() -> Option<Self> {
-        features::allows(
-            super::together::KERNELS,
-            super::together::Kernel::Armv8,
-        )
-        .then_some(Pair(()))
+    /// The permutation, where the two-state list chose it.
+    pub(crate) fn of(chosen: Chosen<super::together::Kernel>) -> Option<Self> {
+        (chosen.kernel() == super::together::Kernel::Armv8).then_some(Pair(()))
     }
 
     /// Applies the permutation to each of the two states.
     pub(crate) fn permute(self, state: &mut Two) {
-        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // SAFETY: `self` was minted by `of`, which confirmed the
         // instructions, and `state` is 25 pairs of lanes.
         unsafe { keccak_f1600_x2(state.0.as_mut_ptr().cast()) }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::hash::sha3::portable::keccak_f1600 as reference;
-    use crate::hash::sha3::tests::check_known_answers;
-
-    #[test]
-    fn known_answers() {
-        if has_sha3() {
-            check_known_answers(
-                (
-                    || Sha3_224::try_new().expect("supported"),
-                    || Sha3_256::try_new().expect("supported"),
-                    || Sha3_384::try_new().expect("supported"),
-                    || Sha3_512::try_new().expect("supported"),
-                ),
-                (
-                    || Shake128::try_new().expect("supported"),
-                    || Shake256::try_new().expect("supported"),
-                ),
-            );
-        }
-    }
-
-    /// The permutation alone, on states that are not all zeros.
-    #[test]
-    fn permutes_as_the_portable_code() {
-        if !has_sha3() {
-            return;
-        }
-        let mut seed = 0x9e3779b97f4a7c15u64;
-        for _ in 0..8 {
-            let mut state = [0u64; LANES];
-            for lane in state.iter_mut() {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                *lane = seed;
-            }
-            let mut expected = state;
-            reference(&mut expected);
-            Armv8::probe().expect("checked above").permute(&mut state);
-            assert_eq!(state, expected);
-        }
-    }
-
-    #[test]
-    fn probes_agree_with_constructors() {
-        assert_eq!(Sha3_256::try_new().is_ok(), has_sha3());
-    }
-
-    /// The two-state permutation is the one-state permutation on
-    /// each of its states, which are made to differ so that a lane
-    /// landing in the wrong state shows.
-    #[test]
-    fn two_states_agree_with_one_at_a_time() {
-        let Some(pair) = Pair::probe() else {
-            std::eprintln!("Pair not available; skipping");
-            return;
-        };
-        let mut two: Two = At32([[0; 2]; LANES]);
-        let mut each = [[0u64; LANES]; 2];
-        for round in 0..4u64 {
-            for (s, state) in each.iter_mut().enumerate() {
-                for (i, lane) in state.iter_mut().enumerate() {
-                    *lane ^= (i as u64 + 1 + 25 * s as u64)
-                        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-                        .wrapping_mul(round);
-                    two.0[i][s] = *lane;
-                }
-                reference(state);
-            }
-            pair.permute(&mut two);
-            for (s, state) in each.iter().enumerate() {
-                for (i, lane) in state.iter().enumerate() {
-                    assert_eq!(two.0[i][s], *lane, "{round} {s} {i}");
-                }
-            }
-        }
     }
 }

@@ -122,13 +122,15 @@ macro_rules! ecdsa_curve {
             ) -> Result<[u8; SIGNATURE_SIZE], Error> {
                 let mut noise = [0u8; KEY_SIZE];
                 rng.fill(&mut noise)?;
-                let e = Engine::new(&$constants);
-                let mut out = [0u8; SIGNATURE_SIZE];
-                let signed =
-                    self.secret.sign::<H>(&e, message, Some(&noise), &mut out);
-                noise.zeroize();
-                signed?;
-                Ok(out)
+                crate::math::ec::with_engine!(fixed_base, &$constants, |e| {
+                    let mut out = [0u8; SIGNATURE_SIZE];
+                    let hedge = Some(&noise[..]);
+                    let signed =
+                        self.secret.sign::<H>(&e, message, hedge, &mut out);
+                    noise.zeroize();
+                    signed?;
+                    Ok(out)
+                })
             }
 
             /// Signs `message` under `H`, with the nonce RFC 6979
@@ -140,10 +142,11 @@ macro_rules! ecdsa_curve {
                 &self,
                 message: &[u8],
             ) -> Result<[u8; SIGNATURE_SIZE], Error> {
-                let e = Engine::new(&$constants);
-                let mut out = [0u8; SIGNATURE_SIZE];
-                self.secret.sign::<H>(&e, message, None, &mut out)?;
-                Ok(out)
+                crate::math::ec::with_engine!(fixed_base, &$constants, |e| {
+                    let mut out = [0u8; SIGNATURE_SIZE];
+                    self.secret.sign::<H>(&e, message, None, &mut out)?;
+                    Ok(out)
+                })
             }
         }
 
@@ -157,8 +160,9 @@ macro_rules! ecdsa_curve {
                 message: &[u8],
                 signature: &[u8; SIGNATURE_SIZE],
             ) -> Result<(), Error> {
-                let e = Engine::new(&$constants);
-                self.point.verify::<H>(&e, message, signature)
+                crate::math::ec::with_engine!(&$constants, |e| {
+                    self.point.verify::<H>(&e, message, signature)
+                })
             }
         }
 

@@ -21,40 +21,24 @@
 
 #![allow(unsafe_code)]
 
-use crate::features::{self, Features, x86_64::Feature as F};
+use super::Kernel;
+use crate::features::Chosen;
 
-/// The multiply, where the processor has it. A value exists only by
-/// way of [`probe`], so holding one is holding the proof that the
-/// instructions are there, and the call on it is safe.
+/// The carry-chain instructions, where the list chose them: here, and
+/// in the Montgomery and curve code, which are the same instruction
+/// set. A value exists only by way of [`Adx::of`], so holding one is
+/// holding the proof that the instructions are there, and the calls
+/// on it are safe.
 #[derive(Clone, Copy)]
-pub(super) struct Adx(());
+pub(crate) struct Adx(());
 
-/// Which product the big-number arithmetic runs: here, and in the
-/// Montgomery and curve code that shares the row.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Kernel {
-    /// The written-out rows on `mulx` and the two carry chains.
-    Adx,
-    /// Plain Rust, on any processor.
-    Portable,
+impl Adx {
+    /// The proof, where the list chose the ADX row: ADX (CPUID leaf
+    /// 7, EBX bit 19) and BMI2 for `mulx` (bit 8).
+    pub(crate) fn of(chosen: Chosen<Kernel>) -> Option<Self> {
+        (chosen.kernel() == Kernel::Adx).then_some(Adx(()))
+    }
 }
-
-/// The kernels, best first, each with what it needs.
-pub(crate) const KERNELS: &[(Kernel, Features)] =
-    &[(Kernel::Adx, ADX), (Kernel::Portable, Features::new())];
-
-/// What the list publishes: the needs, without the names.
-pub(crate) const PROFILES: [Features; KERNELS.len()] =
-    features::profiles_of(KERNELS);
-
-/// The multiply, where the processor reports ADX (CPUID leaf 7, EBX
-/// bit 19) and BMI2 for `mulx` (bit 8). Asked once.
-pub(super) fn probe() -> Option<Adx> {
-    features::allows(KERNELS, Kernel::Adx).then_some(Adx(()))
-}
-
-/// What the ADX row needs.
-const ADX: Features = features::x86(&[F::Adx, F::Bmi2]);
 
 impl Adx {
     /// `t = a * b / R mod n` before its final subtraction: the rows
@@ -84,9 +68,10 @@ impl Adx {
             (&a[..0], a)
         };
         for four in blocks.chunks_exact(4) {
-            // SAFETY: `self` was minted by `probe`, which confirmed
-            // the instructions; `four` is four words, the slices are
-            // `limbs` words each, and `limbs` is at least five.
+            // SAFETY: `self` was minted by `of`, from the list's
+            // choice, which confirmed the instructions; `four` is four
+            // words, the slices are `limbs` words each, and `limbs` is
+            // at least five.
             unsafe {
                 hi = block(four, b, n, inv, t, hi);
             }

@@ -57,7 +57,7 @@
 
 #![allow(unsafe_code)]
 
-use crate::features::{self, Features, x86_64::Feature as F};
+use crate::features::Chosen;
 
 /// The field polynomial `x^128 + x^7 + x^2 + x + 1` without its
 /// leading term, written in the reversed bit order.
@@ -79,12 +79,12 @@ const REVERSE: [u8; 16] =
 #[derive(Clone, Copy)]
 pub(crate) struct Multiply(());
 
-/// The multiply, where the processor has it. Asked once.
-pub(crate) fn probe() -> Option<Multiply> {
-    has_carryless_multiply().then_some(Multiply(()))
-}
-
 impl Multiply {
+    /// The multiply, where the kernel list chose it.
+    pub(crate) fn of(chosen: Chosen<super::Kernel>) -> Option<Self> {
+        (chosen.kernel() == super::Kernel::Pclmul).then_some(Multiply(()))
+    }
+
     /// How many blocks the group multiply takes at once, asked as a
     /// call because one architecture decides it at run time.
     pub(crate) fn group(self) -> usize {
@@ -98,7 +98,7 @@ impl Multiply {
 
     /// Multiplies `value` by the prepared subkey `h`, in place.
     pub(crate) fn multiply(self, value: &mut [u64; 2], h: &[u64; 2]) {
-        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // SAFETY: `self` was minted by `of`, which confirmed the
         // instructions.
         unsafe { multiply(value, h) }
     }
@@ -122,17 +122,6 @@ impl Multiply {
         unsafe { multiply_group(value, powers, blocks) }
     }
 }
-
-/// Whether the processor has the instructions used here: `pclmulqdq`
-/// (CPUID leaf 1, ECX bit 1) and `pshufb`, which comes with SSSE3
-/// (bit 9). Every processor with the first has the second, but the
-/// group multiply below uses both, so both are checked.
-pub(super) fn has_carryless_multiply() -> bool {
-    features::allows(super::KERNELS, super::Kernel::Pclmul)
-}
-
-/// What [`has_carryless_multiply`] asks for.
-pub(crate) const PCLMUL: Features = features::x86(&[F::Pclmulqdq, F::Ssse3]);
 
 /// Multiplies `value` by the prepared subkey `h`, in place.
 ///

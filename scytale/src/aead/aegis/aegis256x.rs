@@ -20,7 +20,7 @@ use super::aegis256::{self, Aegis256};
 use super::sealed::{Chosen, Variant};
 use super::{Decryptor, Encryptor, Lane, State, TAG, lengths, open, seal, xor};
 use crate::aead::Aead;
-use crate::cipher::aes::{BLOCK_SIZE, ISOLATED, Kernel};
+use crate::cipher::aes::{BLOCK_SIZE, Kernel};
 use crate::features::{self, Dispatcher, Features};
 use crate::{Error, Key, KeyType};
 
@@ -33,23 +33,8 @@ const KEY_SIZE: usize = 32;
 /// The nonce length, in bytes.
 const NONCE_SIZE: usize = 32;
 
-/// The kernels, best first, each with what it needs. All but the
-/// first hold one lane at a time and are AEGIS-256's own, run
-/// once for each lane; the first holds two.
-pub(crate) const KERNELS: &[(Kernel, Features)] = &[
-    #[cfg(target_arch = "x86_64")]
-    (Kernel::Vaes, crate::cipher::aes::x86_64::VAES256),
-    #[cfg(target_arch = "x86_64")]
-    (Kernel::AesNi, crate::cipher::aes::x86_64::AESNI),
-    #[cfg(target_arch = "aarch64")]
-    (Kernel::Armv8, crate::cipher::aes::ARMV8),
-    #[cfg(target_arch = "riscv64")]
-    (Kernel::Zvkned, crate::cipher::aes::ZVKNED),
-    #[cfg(target_arch = "riscv64")]
-    (Kernel::Zkn, super::ZKNE),
-    (Kernel::Tables, ISOLATED),
-    (Kernel::Bitsliced, Features::new()),
-];
+/// The kernels, best first; see [`crate::cipher::aes::AEGIS256X`].
+pub(crate) const KERNELS: &[(Kernel, Features)] = crate::cipher::aes::AEGIS256X;
 
 /// What the list publishes: the needs, without the names.
 const PROFILES: [Features; KERNELS.len()] = features::profiles_of(KERNELS);
@@ -86,14 +71,15 @@ impl<const D: usize> Aegis256X<D> {
         &PROFILES
     }
 
-    /// Takes the key for `kernel` alone, or `None` where the set in
-    /// force does not allow it.
+    /// Takes the key for `kernel` alone, trusting the caller: the
+    /// meta tests pass only the kernel the list chose under the
+    /// row's features, which the processor has.
     #[cfg(test)]
     pub(crate) fn with_kernel(
         key: &Key<[u8; KEY_SIZE]>,
         kernel: Kernel,
     ) -> Option<Self> {
-        features::available(KERNELS, kernel).then(|| Aegis256X {
+        Some(Aegis256X {
             key: key.clone(),
             kernel,
         })
@@ -406,7 +392,7 @@ degree!(2, 32);
 degree!(4, 64);
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::vec::Vec;
 
     use super::*;
@@ -427,11 +413,33 @@ mod tests {
 
     /// Each kernel this processor can run under the set in force,
     /// the virtual features granted.
+    /// This variant under one kernel: the draft's vectors and the
+    /// rest below, each against the portable kernel. The kernel the
+    /// list chooses under the row's features is the one they build
+    /// on, through the test constructor that trusts its caller.
+    pub(crate) fn kernel(under: &features::Under) {
+        let chosen = under.build(|| features::select(KERNELS)).expect("listed");
+        UNDER.set(Some(chosen));
+        initial_state_of_two();
+        initial_state_of_four();
+        draft_vectors_of_two();
+        draft_vectors_of_four();
+        kernels_and_pieces_agree_for_two();
+        kernels_and_pieces_agree_for_four();
+        UNDER.set(None);
+    }
+
+    std::thread_local! {
+        /// The kernel the meta test has this thread checking.
+        static UNDER: core::cell::Cell<Option<Kernel>> =
+            const { core::cell::Cell::new(None) };
+    }
+
+    /// The portable kernel, as the reference, then the kernel under
+    /// test where it is another.
     fn kernels() -> impl Iterator<Item = Kernel> {
-        KERNELS
-            .iter()
-            .map(|(kernel, _)| *kernel)
-            .filter(|kernel| features::available(KERNELS, *kernel))
+        let under = UNDER.get().filter(|k| *k != Kernel::Bitsliced);
+        core::iter::once(Kernel::Bitsliced).chain(under)
     }
 
     /// The key and nonce of every vector in the draft's appendix
@@ -451,10 +459,16 @@ mod tests {
 
     #[test]
     fn dispatches() {
-        let two = Aegis256X2::new(&Key::zeroed());
-        features::dispatches(KERNELS, Aegis256X2::profiles(), two.kernel());
-        let four = Aegis256X4::new(&Key::zeroed());
-        features::dispatches(KERNELS, Aegis256X4::profiles(), four.kernel());
+        features::build_alone(|| {
+            let two = Aegis256X2::new(&Key::zeroed());
+            features::dispatches(KERNELS, Aegis256X2::profiles(), two.kernel());
+            let four = Aegis256X4::new(&Key::zeroed());
+            features::dispatches(
+                KERNELS,
+                Aegis256X4::profiles(),
+                four.kernel(),
+            );
+        });
     }
 
     /// The state after `Init`, a lane to a row, against what the
@@ -471,7 +485,6 @@ mod tests {
     }
 
     /// The draft's appendix A.6.1.
-    #[test]
     fn initial_state_of_two() {
         initial_state([
             [
@@ -494,7 +507,6 @@ mod tests {
     }
 
     /// The draft's appendix A.7.1.
-    #[test]
     fn initial_state_of_four() {
         initial_state([
             [
@@ -586,7 +598,6 @@ mod tests {
         0405060704050607";
 
     /// The draft's appendix A.6.2 and A.6.3.
-    #[test]
     fn draft_vectors_of_two() {
         let with = |kernel| Aegis256X2::with_kernel(&key(), kernel).unwrap();
         vector(with, ["", "", "", "62cdbab084c83dacdb945bb446f049c8"]);
@@ -609,7 +620,6 @@ mod tests {
     }
 
     /// The draft's appendix A.7.2 and A.7.3.
-    #[test]
     fn draft_vectors_of_four() {
         let with = |kernel| Aegis256X4::with_kernel(&key(), kernel).unwrap();
         vector(with, ["", "", "", "3b7fee6cee7bf17888ad11ed2397beb4"]);
@@ -690,7 +700,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn kernels_and_pieces_agree_for_two() {
         kernels_and_pieces_agree(
             |kernel| Aegis256X2::with_kernel(&key(), kernel).unwrap(),
@@ -699,7 +708,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn kernels_and_pieces_agree_for_four() {
         kernels_and_pieces_agree(
             |kernel| Aegis256X4::with_kernel(&key(), kernel).unwrap(),

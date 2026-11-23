@@ -26,8 +26,38 @@
 
 use zeroize::Zeroize;
 
+use super::Arith;
+use crate::features::{self, Features};
+
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod x86_64;
+
+/// Which product the big-number arithmetic runs: here, and in the
+/// Montgomery and curve code, which share the row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kernel {
+    /// The written-out rows on `mulx` and the two carry chains.
+    #[cfg(target_arch = "x86_64")]
+    Adx,
+    /// Plain Rust, on any processor.
+    Portable,
+}
+
+features::kernels! {
+    enum Kernel;
+
+    /// The kernels, best first: the carry chains, which need ADX and
+    /// BMI2 for `mulx`, then plain Rust.
+    pub(crate) const KERNELS for bignum tested by tests::kernel = [
+        #[cfg(target_arch = "x86_64")]
+        Adx => (x86_64: Adx, Bmi2),
+        Portable => (),
+    ];
+}
+
+/// What the list publishes: the rows' needs.
+pub(crate) const PROFILES: [Features; KERNELS.len()] =
+    features::profiles_of(KERNELS);
 
 /// Reads a big-endian byte string into `out`, least significant limb
 /// first, with leading zeros; the string must fit.
@@ -280,16 +310,16 @@ fn shl1(a: &mut [u64]) -> u64 {
 /// values into the domain, where `R = 2^(64 * n.len())`.
 ///
 /// The words belong to the caller; [`Modulus::prepare`] fills them
-/// and a `Modulus` is a view over them.
+/// and a `Modulus` is a view over them, with the kind of arithmetic
+/// the operation chose.
 #[derive(Clone, Copy)]
-pub(crate) struct Modulus<'a> {
+pub(crate) struct Modulus<'a, A: Arith> {
     n: &'a [u64],
     inv: u64,
     rr: &'a [u64],
-    /// The product written for the processor, where it has one;
-    /// settled when the view is made, which is one kept answer.
-    #[cfg(target_arch = "x86_64")]
-    fast: Option<x86_64::Adx>,
+    /// Read only where something is written out to choose.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    arith: A,
 }
 
 /// The words [`Modulus::prepare`] writes for a modulus of `limbs`
@@ -306,7 +336,9 @@ pub(crate) const fn modexp_words(limbs: usize) -> usize {
     22 * limbs
 }
 
-impl<'a> Modulus<'a> {
+/// Preparing the words needs no product, so no kind is chosen for it;
+/// it hangs from the portable one only to be called as before.
+impl Modulus<'_, super::Portable> {
     /// Sets up `n`, which must be odd and greater than one, in
     /// `words`, which is [`modulus_words`] long; the low limb's
     /// negated inverse comes back for the caller to keep beside them.
@@ -343,29 +375,26 @@ impl<'a> Modulus<'a> {
         }
         Some(inv)
     }
+}
 
-    /// A view over words that [`prepare`](Self::prepare) filled, with
-    /// the inverse it returned.
-    pub(crate) fn new(words: &'a [u64], inv: u64) -> Self {
+impl<'a, A: Arith> Modulus<'a, A> {
+    /// A view over words that [`prepare`](Modulus::prepare) filled,
+    /// with the inverse it returned, for arithmetic of kind `arith`.
+    pub(crate) fn new(words: &'a [u64], inv: u64, arith: A) -> Self {
         let limbs = words.len() / 2;
         let (n, rr) = words.split_at(limbs);
-        Modulus {
-            n,
-            inv,
-            rr,
-            #[cfg(target_arch = "x86_64")]
-            fast: x86_64::probe(),
-        }
+        Modulus { n, inv, rr, arith }
     }
 
     /// The same view with the portable product, for the tests that
     /// hold the two products against each other.
     #[cfg(test)]
-    fn portable(self) -> Self {
+    fn portable(self) -> Modulus<'a, super::Portable> {
         Modulus {
-            #[cfg(target_arch = "x86_64")]
-            fast: None,
-            ..self
+            n: self.n,
+            inv: self.inv,
+            rr: self.rr,
+            arith: super::Portable,
         }
     }
 
@@ -381,9 +410,13 @@ impl<'a> Modulus<'a> {
     /// integrated operand scanning. `b` must be below `n`; `a` may be
     /// any value of the length; the result is below `n`. `out` may
     /// not alias either input.
+    // Out of line: a run of rows over a run-time length, beside
+    // which a call costs nothing, and the exponentiations would
+    // otherwise copy it into each of their call sites.
+    #[inline(never)]
     pub(crate) fn mul(&self, a: &[u64], b: &[u64], out: &mut [u64]) {
         #[cfg(target_arch = "x86_64")]
-        if let Some(adx) = self.fast {
+        if let Some(adx) = self.arith.adx() {
             let hi = adx.rows(a, b, self.n, self.inv, out);
             let borrow = sub_borrow(out, self.n);
             let keep = hi | (1 - borrow);
@@ -460,7 +493,7 @@ impl<'a> Modulus<'a> {
         let limbs = self.limbs();
         debug_assert!(a.len() == limbs && out.len() == limbs);
         #[cfg(target_arch = "x86_64")]
-        if self.fast.is_some() {
+        if self.arith.adx().is_some() {
             self.mul(a, a, out);
             return;
         }
@@ -736,7 +769,7 @@ impl<'a> Modulus<'a> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -820,6 +853,25 @@ mod tests {
         Modulus::prepare(n, words).expect("odd modulus")
     }
 
+    /// The big-number arithmetic under one kernel: every property
+    /// below with the kind the row's list chooses, and the same row
+    /// through the Montgomery contexts, RSA, and the curves.
+    pub(crate) fn kernel(under: &features::Under) {
+        let chosen = under.build(|| features::choose(KERNELS));
+        crate::math::with_arith!(chosen, kind => {
+            products_match_plain_arithmetic(kind);
+            domain_round_trip(kind);
+            modexp_identities(kind);
+            the_processor_product_is_the_portable_one(kind);
+            the_square_is_the_product(kind);
+            public_exponent_agrees_with_the_windowed_one(kind);
+            reduce_matches_the_slow_remainder(kind);
+        });
+        crate::math::montgomery::tests::kernel(chosen);
+        crate::math::rsa::tests::kernel(under);
+        crate::math::ec::tests::bignum(under);
+    }
+
     #[test]
     fn refuses_even_and_trivial_moduli() {
         let mut words = [0u64; 2];
@@ -830,11 +882,10 @@ mod tests {
     }
 
     /// Every product modulo a small prime, against plain division.
-    #[test]
-    fn products_match_plain_arithmetic() {
+    fn products_match_plain_arithmetic<A: Arith>(kind: A) {
         let mut words = [0u64; 2];
         let inv = modulus(&[101], &mut words);
-        let m = Modulus::new(&words, inv);
+        let m = Modulus::new(&words, inv, kind);
         let mut scratch = [0u64; 4];
         for a in 0..101u64 {
             for b in 0..101u64 {
@@ -847,12 +898,11 @@ mod tests {
 
     /// The domain round trip is the identity, at a length where the
     /// limbs interact.
-    #[test]
-    fn domain_round_trip() {
+    fn domain_round_trip<A: Arith>(kind: A) {
         let n = [0x8765432187654321u64, 0x1234567812345678, 0xabcd];
         let mut words = [0u64; 6];
         let inv = modulus(&n, &mut words);
-        let m = Modulus::new(&words, inv);
+        let m = Modulus::new(&words, inv, kind);
         let x = [0xdeadbeefu64, 0xcafe, 0x1234];
         let mut mont = [0u64; 3];
         let mut back = [0u64; 3];
@@ -861,11 +911,10 @@ mod tests {
         assert_eq!(back, x);
     }
 
-    #[test]
-    fn modexp_identities() {
+    fn modexp_identities<A: Arith>(kind: A) {
         let mut words = [0u64; 2];
         let inv = modulus(&[1000003], &mut words);
-        let m = Modulus::new(&words, inv);
+        let m = Modulus::new(&words, inv, kind);
         let mut scratch = [0u64; modexp_words(1)];
         let x = [123456u64];
         let mut out = [0u64];
@@ -890,8 +939,7 @@ mod tests {
     /// The product written for the processor is the portable one,
     /// at every length from one limb to the widest, on operands
     /// that reach every limb and on the edges the random ones miss.
-    #[test]
-    fn the_processor_product_is_the_portable_one() {
+    fn the_processor_product_is_the_portable_one<A: Arith>(kind: A) {
         let mut state = 0x243f_6a88_85a3_08d3u64;
         let mut next = || {
             state ^= state << 13;
@@ -913,7 +961,7 @@ mod tests {
                 n[0] |= 1;
                 n[limbs - 1] |= 1 << 63;
                 let inv = Modulus::prepare(&n, &mut words).expect("odd");
-                let m = Modulus::new(&words, inv);
+                let m = Modulus::new(&words, inv, kind);
                 // A below n, b anything of the length: `mul` allows
                 // that much of its first operand.
                 for limb in a.iter_mut().chain(b.iter_mut()) {
@@ -949,8 +997,7 @@ mod tests {
 
     /// The square is the product of a value with itself, at every
     /// length, on random values and on the edges.
-    #[test]
-    fn the_square_is_the_product() {
+    fn the_square_is_the_product<A: Arith>(kind: A) {
         let mut state = 0x1319_8a2e_0370_7344u64;
         let mut next = || {
             state ^= state << 13;
@@ -972,7 +1019,7 @@ mod tests {
                 n[0] |= 1;
                 n[limbs - 1] |= 1 << 63;
                 let inv = Modulus::prepare(&n, &mut words).expect("odd");
-                let m = Modulus::new(&words, inv);
+                let m = Modulus::new(&words, inv, kind);
                 for limb in a.iter_mut() {
                     *limb = next();
                 }
@@ -989,7 +1036,7 @@ mod tests {
             sub_borrow(&mut top, &one);
             let zero = std::vec![0u64; limbs];
             let inv = Modulus::prepare(&n, &mut words).expect("odd");
-            let m = Modulus::new(&words, inv);
+            let m = Modulus::new(&words, inv, kind);
             for x in [&zero, &one, &top] {
                 m.mul(x, x, &mut product);
                 m.square(x, &mut square, &mut wide);
@@ -1000,12 +1047,11 @@ mod tests {
 
     /// The public-exponent loop agrees with the fixed-window one,
     /// on the exponents RSA uses and on odd ones.
-    #[test]
-    fn public_exponent_agrees_with_the_windowed_one() {
+    fn public_exponent_agrees_with_the_windowed_one<A: Arith>(kind: A) {
         let n = [0x8765432187654321u64, 0x1234567812345678, 0xabcd];
         let mut words = [0u64; 6];
         let inv = modulus(&n, &mut words);
-        let m = Modulus::new(&words, inv);
+        let m = Modulus::new(&words, inv, kind);
         let x = [0xdeadbeefu64, 0xcafe, 0x1234];
         let mut scratch = [0u64; modexp_words(3)];
         for e in [1u64, 2, 3, 17, 65537, 0x1_0000_0001, u64::MAX] {
@@ -1019,12 +1065,11 @@ mod tests {
 
     /// A value wider than the modulus reduces to what the bit-by-bit
     /// remainder says.
-    #[test]
-    fn reduce_matches_the_slow_remainder() {
+    fn reduce_matches_the_slow_remainder<A: Arith>(kind: A) {
         let n = [0x8765432187654321u64, 0x1234567812345678, 0xabcd];
         let mut words = [0u64; 6];
         let inv = modulus(&n, &mut words);
-        let m = Modulus::new(&words, inv);
+        let m = Modulus::new(&words, inv, kind);
         let value = [0x1111u64, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666, 0x77];
         let mut want = [0u64; 3];
         rem_wide(&value, &n, &mut want);
