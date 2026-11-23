@@ -116,8 +116,10 @@ jobs:
           set -o pipefail
           cargo test --release -p scytale --lib kernels:: -- --nocapture \
               | tee kernels.log
-          missing=$(grep -oE '^  [a-z0-9_]+/[^ ]+ +not run' kernels.log \
-              | awk '{print $1}' | tr '\n' ' ')
+          # grep finds nothing on a runner that has everything,
+          # which is not a failure.
+          missing=$( (grep -oE '^  [a-z0-9_]+/[^ ]+ +not run' kernels.log \
+              || true) | awk '{print $1}' | tr '\n' ' ')
           echo "missing=$missing" >> "$GITHUB_OUTPUT"
 
       # SDE is Intel's, pinned by version and hash and fetched only
@@ -245,8 +247,10 @@ jobs:
           set -o pipefail
           cargo test --release -p scytale-acvp --test vendored \
               -- --nocapture | tee vendored.log
-          missing=$(grep -oE '^  [a-z0-9_]+/[^ ]+ +not run' vendored.log \
-              | awk '{print $1}' | tr '\n' ' ')
+          # grep finds nothing on a runner that has everything,
+          # which is not a failure.
+          missing=$( (grep -oE '^  [a-z0-9_]+/[^ ]+ +not run' vendored.log \
+              || true) | awk '{print $1}' | tr '\n' ' ')
           echo "missing=$missing" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache/restore@v6
@@ -674,7 +678,7 @@ jobs:
                   --lib --target "$TARGET" -- --skip kernels::
           else
               cargo test --release -p scytale --lib --target "$TARGET" \
-                  arch:: features::
+                  -- arch:: features::
           fi
           if [ -n "${{ matrix.expect_all }}" ]; then
               ! grep -E ' not run' kernels.log
