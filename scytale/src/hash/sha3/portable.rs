@@ -113,3 +113,20 @@ impl Permutation for Keccak {
         keccak_f1600(state)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The permutation of the zero state, from the Keccak team's
+    /// published intermediate values: the first lane after one
+    /// application.
+    #[test]
+    fn permutes_zero_as_published() {
+        let mut state = [0u64; LANES];
+        keccak_f1600(&mut state);
+        assert_eq!(state[0], 0xf1258f7940e1dde7);
+        assert_eq!(state[1], 0x84d5ccf933c0478a);
+        assert_eq!(state[24], 0xeaf1ff7b5ceca249);
+    }
+}

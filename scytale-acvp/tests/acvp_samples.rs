@@ -1,9 +1,10 @@
-//! `cargo test -p scytale-acvp --test vendored`: the check against
-//! the vendored vectors, a test per suite, each answering the suite
-//! in full under every kernel its vectors test; see
-//! `scytale_acvp::vendored`. Test `vendored::sha2_512` alone with
-//! `cargo test -p scytale-acvp -- vendored::sha2_512`, and name
-//! kernels as its lines do in `SCYTALE_KERNELS`.
+//! `cargo test -p scytale-acvp --test acvp_samples`: the check
+//! against NIST's ACVP sample vectors, kept in this crate, a test per
+//! suite, each answering the suite in full under every kernel its
+//! vectors test; see `scytale_acvp::vendored`. Test
+//! `acvp_samples::sha2_512` alone with `cargo test -p scytale-acvp --
+//! --exact acvp_samples::sha2_512`, and name kernels as its lines do
+//! in `SCYTALE_KERNELS`.
 
 use std::sync::Mutex;
 
@@ -73,7 +74,7 @@ macro_rules! suites {
     ($($name:ident => $directory:literal,)+) => {
         const _: () = every_suite_once(&[$($directory),+]);
 
-        mod vendored {
+        mod acvp_samples {
             $(
                 #[test]
                 fn $name() {

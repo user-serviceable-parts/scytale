@@ -431,10 +431,11 @@ state is wiped when the generator is dropped.
 | riscv64 | scalar rotates (Zbb, Zbkb) | ChaCha20 |
 | any | none needed; portable Rust | all |
 
-The x86-64 and arm64 rows are exercised on real silicon: the
-continuous integration matrix runs the whole test suite natively on
-runners of both, so the assembly is run by the processor it was
-written for. The RISC-V rows are not. The riscv64 runner is a plain
+The x86-64 and arm64 rows are exercised on real silicon wherever the
+runner has the instructions: the continuous integration matrix runs
+the whole test suite natively on runners of both, so the assembly is
+run by the processor it was written for, and a row the runner lacks
+is run under an emulator instead. The RISC-V rows are not. The riscv64 runner is a plain
 `rv64imafdcsu` machine with none of the extensions in the table, so
 it reports every one of those rows as unavailable, and they are covered
 under qemu instead -- at two vector lengths, which is more than one

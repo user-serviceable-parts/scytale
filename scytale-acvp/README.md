@@ -31,17 +31,18 @@ a sample file. They cover both hashes at both lengths, and are
 answered offline like any other suite.
 
 ```sh
-cargo test --release -p scytale-acvp --test vendored -- --nocapture
+cargo test --release -p scytale-acvp --test acvp_samples -- --nocapture
 ```
 
 answers every suite in full, the large-data groups and every SLH-DSA
 signature included, and has every kernel this processor can run
 answer the vectors that test it, each exactly once. Each suite is a
-test of its own, named after its directory: `vendored::sha2_512`
+test of its own, named after its directory: `acvp_samples::sha2_512`
 for `ACVP-SHA2-512-1.0`, without the `ACVP-` prefix and the revision,
 which is kept only where two directories differ by nothing else. A
 test is filtered as any other is, so
-`cargo test -p scytale-acvp -- vendored::sha2_512` runs that one.
+`cargo test -p scytale-acvp -- --exact acvp_samples::sha2_512` runs that
+one; without `--exact` a name selects every test it is part of.
 
 A kernel is reached through the feature profiles the library's
 types publish. A vector tests the kernels of one type: a hash suite
@@ -55,7 +56,7 @@ answered once, under the features detected, as `<suite>/default`.
 
 Each test prints the cases compared and a line per kernel, as the
 library's kernel tests do: the suite and the kernel's features,
-`vendored::sha2_512`'s as `sha2_512/avx2`, and whether it ran, was
+`acvp_samples::sha2_512`'s as `sha2_512/avx2`, and whether it ran, was
 not run for the features the processor lacks, or was not selected. A
 test fails only if a kernel it ran fails. `SCYTALE_KERNELS` takes
 kernel names, separated by white space, and runs those alone, which

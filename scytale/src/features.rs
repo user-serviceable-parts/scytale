@@ -932,11 +932,18 @@ impl Under {
     /// Builds with this kernel's features in force, and puts the
     /// set back before anyone else may build.
     pub(crate) fn build<T>(&self, build: impl FnOnce() -> T) -> T {
+        // Put back however the build ends: a build that panics must
+        // not leave the tests that follow a narrowed set.
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                reset();
+            }
+        }
         let _turn = BUILD.lock().unwrap_or_else(|e| e.into_inner());
         set(self.0).expect("each_kernel checked the processor has these");
-        let built = build();
-        reset();
-        built
+        let _reset = Reset;
+        build()
     }
 }
 

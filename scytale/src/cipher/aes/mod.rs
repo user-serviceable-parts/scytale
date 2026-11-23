@@ -146,9 +146,11 @@ features::kernels! {
     /// [`Feature::Isolated`] admits; then the constant-time portable
     /// code, which needs nothing.
     ///
-    /// AES-NI's key expansion shuffles with `pshufb` (SSSE3). VAES
-    /// runs two blocks to a 256-bit register (AVX2) and finishes its
-    /// tails with the AES-NI loops, which are VEX-encoded (AVX).
+    /// AES-NI's key expansion shuffles with `pshufb` (SSSE3); its
+    /// loops are the legacy SSE encodings, so it needs no AVX. VAES
+    /// runs two blocks to a 256-bit register (AVX2, with AVX for the
+    /// operating system keeping those registers) and finishes its
+    /// tails with the AES-NI loops.
     pub(crate) const KERNELS for aes tested by tests::kernel = [
         #[cfg(target_arch = "x86_64")]
         Vaes => (x86_64: Aes, Ssse3, Avx, Avx2, Vaes),
@@ -661,6 +663,16 @@ mod tests {
     /// at every tail width the widest loop has, with and without full
     /// groups before it.
     pub(crate) fn kernel(under: &features::Under) {
+        // The round counts, on the kernel the row chooses.
+        assert_eq!(under.build(|| Aes::<16>::new(&[0; 16])).rounds(), 10);
+        assert_eq!(under.build(|| Aes::<24>::new(&[0; 24])).rounds(), 12);
+        assert_eq!(under.build(|| Aes::<32>::new(&[0; 32])).rounds(), 14);
+        let chosen = under.build(|| features::choose(KERNELS)).expect("listed");
+        #[cfg(target_arch = "x86_64")]
+        x86_64::schedule_is_standard(chosen);
+        #[cfg(target_arch = "aarch64")]
+        aarch64::armv8::schedule_is_standard(chosen);
+        let _ = chosen;
         fips197(under);
         agrees::<Aes128, 16>(under);
         agrees::<Aes192, 24>(under);

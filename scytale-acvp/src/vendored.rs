@@ -504,8 +504,17 @@ pub fn check(name: &str, directory: &str) -> Result<(), Error> {
         } else if features::set(profile).is_err() {
             format!("not run: needs {}", short_name(missing))
         } else {
+            // Put back on the way out however it is left, so that a
+            // panic does not leave the next test a narrowed set.
+            struct Reset;
+            impl Drop for Reset {
+                fn drop(&mut self) {
+                    features::reset();
+                }
+            }
+            let reset = Reset;
             let outcomes = answer_all(&kernel, suite, &doc, &all, &list);
-            features::reset();
+            drop(reset);
             let mut errors = Vec::new();
             for (i, outcome) in outcomes {
                 match outcome {

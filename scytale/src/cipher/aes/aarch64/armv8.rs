@@ -530,3 +530,34 @@ body!(
     "aesimc",
     ["v0", "v1", "v2", "v3", "v4", "v5", "v6"]
 );
+
+/// The schedule the instructions build is FIPS 197's, word for word,
+/// encryption and decryption both, where AES's list chose this row;
+/// run by AES's kernel test under that choice.
+#[cfg(test)]
+pub(crate) fn schedule_is_standard(chosen: Chosen<crate::cipher::aes::Kernel>) {
+    use crate::cipher::aes::expand_words;
+    use crate::cipher::aes::portable::bitsliced::sub_word;
+    if chosen.kernel() != crate::cipher::aes::Kernel::Armv8 {
+        return;
+    }
+    fn check<const K: usize>(size: KeySize) {
+        for i in 0..100u32 {
+            let key: [u8; K] = core::array::from_fn(|j| {
+                (i.wrapping_mul(97).wrapping_add(j as u32 * 31)) as u8
+            });
+            let want = expand_words(&key, size, sub_word);
+            // SAFETY: the list chose the row that needs the AES
+            // instructions.
+            let aes = unsafe { expand(&key, size) };
+            assert_eq!(aes.enc, want, "{size:?} key {i}");
+            let rounds = size.rounds();
+            assert_eq!(aes.dec[..4], want[4 * rounds..4 * rounds + 4]);
+            assert_eq!(aes.dec[4 * rounds..4 * rounds + 4], want[..4]);
+            assert_eq!(aes.dec[4 * rounds + 4..], want[4 * rounds + 4..]);
+        }
+    }
+    check::<16>(KeySize::Aes128);
+    check::<24>(KeySize::Aes192);
+    check::<32>(KeySize::Aes256);
+}

@@ -96,7 +96,7 @@ jobs:
         # Every crate's tests, once, but for the kernel tests, which
         # run in the next step where their tables can be read. Of
         # scytale-acvp only its own unit tests: the check against
-        # the vendored vectors has jobs of its own below.
+        # the ACVP sample vectors has jobs of its own below.
         run: |
           cargo test --release --workspace --exclude scytale-acvp \
               -- --skip kernels::
@@ -195,14 +195,14 @@ jobs:
             target
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
-  # The check against the vendored vectors on the native runners:
+  # The check against the ACVP sample vectors on the native runners:
   # one test per suite, every kernel answering the vectors that test
   # it exactly once, natively where the runner can and then under the
   # same emulators as above for the rest; see scytale-acvp/README.md.
-  # Only the `vendored` tests run here: the crate's unit tests run in
+  # Only the `acvp_samples` tests run here: the crate's unit tests run in
   # the job above.
-  vendored:
-    name: test (${{ matrix.arch }}, vendored)
+  acvp-samples:
+    name: test (${{ matrix.arch }}, acvp samples)
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -238,18 +238,18 @@ jobs:
             ~/.cargo/git/db
             target
           key: >-
-            vendored-${{ matrix.arch }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+            acvp-samples-${{ matrix.arch }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Vendored vectors, natively
+      - name: ACVP samples, natively
         id: native
         shell: bash
         run: |
           set -o pipefail
-          cargo test --release -p scytale-acvp --test vendored \
-              -- --nocapture | tee vendored.log
+          cargo test --release -p scytale-acvp --test acvp_samples \
+              -- --nocapture | tee samples.log
           # grep finds nothing on a runner that has everything,
           # which is not a failure.
-          missing=$( (grep -oE '^  [a-z0-9_]+/[^ ]+ +not run' vendored.log \
+          missing=$( (grep -oE '^  [a-z0-9_]+/[^ ]+ +not run' samples.log \
               || true) | awk '{print $1}' | tr '\n' ' ')
           echo "missing=$missing" >> "$GITHUB_OUTPUT"
 
@@ -268,13 +268,19 @@ jobs:
           mkdir -p ~/sde
           tar -xJf sde.tar.xz -C ~/sde --strip-components=1
 
+      - uses: actions/cache/save@v6
+        if: ${{ matrix.arch == 'x86-64' && steps.native.outputs.missing != '' && steps.sde.outputs.cache-hit != 'true' }}
+        with:
+          path: ~/sde
+          key: sde-${{ env.SDE_SHA256 }}
+
       - name: Install QEMU
         if: ${{ matrix.arch == 'arm64' && steps.native.outputs.missing != '' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends qemu-user
 
-      - name: Vendored vectors the runner lacks, emulated
+      - name: ACVP samples the runner lacks, emulated
         if: ${{ steps.native.outputs.missing != '' }}
         shell: bash
         run: |
@@ -285,8 +291,14 @@ jobs:
               arm64) runner="qemu-aarch64 -cpu max" ;;
           esac
           export "CARGO_TARGET_${name}_RUNNER=$runner"
-          cargo test --release -p scytale-acvp --test vendored \
-              -- --nocapture | tee emulated.log
+          # Only the suites that own those kernels: each test reads its
+          # vectors before it looks at what is selected, which under
+          # an emulator is time spent on nothing.
+          suites=$(for k in $SCYTALE_KERNELS; do
+              echo "acvp_samples::${k%%/*}"
+          done | sort -u)
+          cargo test --release -p scytale-acvp --test acvp_samples \
+              -- --nocapture --exact $suites | tee emulated.log
           ! grep -E ' not run' emulated.log
         env:
           SCYTALE_KERNELS: ${{ steps.native.outputs.missing }}
@@ -313,8 +325,8 @@ jobs:
   # an experiment: on the x86-64 pool two or three jobs a run took
   # three times as long as the same jobs in other runs, every suite
   # and the compile alike, which the steps around the test measure.
-  vendored-emulated:
-    name: test (riscv64, max, ${{ matrix.part }})
+  acvp-samples-emulated:
+    name: test (riscv64, max, acvp samples, ${{ matrix.part }})
     runs-on: ubuntu-24.04-arm
     container: debian:trixie
     strategy:
@@ -322,24 +334,24 @@ jobs:
       matrix:
         include:
           - part: lms
-            filter: vendored::lms
+            filter: acvp_samples::lms
           - part: slh-dsa signing
-            filter: vendored::slh_dsa_siggen
+            filter: acvp_samples::slh_dsa_siggen
           - part: slh-dsa
-            filter: vendored::slh_dsa --skip vendored::slh_dsa_siggen
+            filter: acvp_samples::slh_dsa --skip acvp_samples::slh_dsa_siggen
           - part: ml-dsa, ml-kem
-            filter: vendored::ml_dsa vendored::ml_kem
+            filter: acvp_samples::ml_dsa acvp_samples::ml_kem
           - part: rsa, curves
             filter: >-
-              vendored::rsa vendored::ecdsa vendored::detecdsa
-              vendored::eddsa vendored::xecdh
+              acvp_samples::rsa acvp_samples::ecdsa acvp_samples::detecdsa
+              acvp_samples::eddsa acvp_samples::xecdh
           - part: the rest
             filter: >-
-              --skip vendored::lms --skip vendored::slh_dsa
-              --skip vendored::ml_dsa --skip vendored::ml_kem
-              --skip vendored::rsa --skip vendored::ecdsa
-              --skip vendored::detecdsa --skip vendored::eddsa
-              --skip vendored::xecdh
+              --skip acvp_samples::lms --skip acvp_samples::slh_dsa
+              --skip acvp_samples::ml_dsa --skip acvp_samples::ml_kem
+              --skip acvp_samples::rsa --skip acvp_samples::ecdsa
+              --skip acvp_samples::detecdsa --skip acvp_samples::eddsa
+              --skip acvp_samples::xecdh
     steps:
       - uses: actions/checkout@v7
 
@@ -364,7 +376,7 @@ jobs:
             ~/.cargo/git/db
             target
           key: >-
-            vendored-riscv64-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+            acvp-samples-riscv64-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Measure the machine
         # The processor, the cores, the kernel's cpu counters (steal
@@ -384,9 +396,9 @@ jobs:
         run: |
           set -o pipefail
           cargo test --release -p scytale-acvp --no-default-features \
-              --test vendored --target riscv64gc-unknown-linux-gnu \
-              -- --nocapture ${{ matrix.filter }} | tee vendored.log
-          ! grep -E ' not run' vendored.log
+              --test acvp_samples --target riscv64gc-unknown-linux-gnu \
+              -- --nocapture ${{ matrix.filter }} | tee samples.log
+          ! grep -E ' not run' samples.log
         env:
           CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER:
             riscv64-linux-gnu-gcc
@@ -434,18 +446,18 @@ jobs:
       matrix:
         include:
           # One row for the library's tests and the lints and, apart
-          # from it, the check against the vendored vectors in two
+          # from it, the check against the ACVP sample vectors in two
           # parts by test name, which carry nothing else.
           - name: x86, 32-bit
             target: i686-unknown-linux-musl
-          - name: x86, 32-bit, vendored, heavy
+          - name: x86, 32-bit, acvp samples, heavy
             target: i686-unknown-linux-musl
-            filter: vendored::lms vendored::slh_dsa vendored::ml_dsa
-          - name: x86, 32-bit, vendored, the rest
+            filter: acvp_samples::lms acvp_samples::slh_dsa acvp_samples::ml_dsa
+          - name: x86, 32-bit, acvp samples, the rest
             target: i686-unknown-linux-musl
             filter: >-
-              --skip vendored::lms --skip vendored::slh_dsa
-              --skip vendored::ml_dsa
+              --skip acvp_samples::lms --skip acvp_samples::slh_dsa
+              --skip acvp_samples::ml_dsa
     env:
       CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
     steps:
@@ -485,12 +497,12 @@ jobs:
           CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS:
             -D warnings -C linker-flavor=ld.lld
 
-      - name: Test the vendored vectors, ${{ matrix.name }}
+      - name: Test the ACVP sample vectors, ${{ matrix.name }}
         # This row's suites, and nothing else.
         if: ${{ matrix.filter }}
         run: |
           cargo test --release -p scytale-acvp --no-default-features \
-              --test vendored --target ${{ matrix.target }} \
+              --test acvp_samples --target ${{ matrix.target }} \
               -- --nocapture ${{ matrix.filter }}
         env:
           CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS:
@@ -544,10 +556,10 @@ jobs:
   # on that set of features, and that those kernels run on that
   # processor. Whether each kernel is right is settled
   # once, where every kernel can run: the library's tests and the
-  # check against the vendored vectors on the native runners for
+  # check against the ACVP sample vectors on the native runners for
   # x86-64 and aarch64, and for RISC-V, which has no native runner,
   # under QEMU's `max` processor, in the row marked `whole` here and
-  # the vendored-emulated job above.
+  # the acvp-samples-emulated job above.
   #
   # The container is for its QEMU: the runner's own is too old to
   # report the RISC-V cryptography extensions, and it lacks some of
@@ -610,8 +622,8 @@ jobs:
           # runner has and no profile requires: the only place these
           # kernels run at all, so this row is not a dispatch check
           # but RISC-V's one run of the library's tests, and the
-          # processor also gets the check against the vendored
-          # vectors, in the vendored-emulated job above.
+          # processor also gets the check against the ACVP sample
+          # vectors, in the acvp-samples-emulated job above.
           - arch: riscv64
             cpu: max
             expect_all: 1
@@ -870,7 +882,7 @@ jobs:
           openssl version
           scripts/test-openssl-interop
 
-  # The published crate omits the vendored vectors, so check that it
+  # The published crate omits the ACVP sample vectors, so check that it
   # still builds and that nothing else went missing.
   package:
     name: package

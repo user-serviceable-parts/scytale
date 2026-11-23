@@ -426,3 +426,37 @@ pub(crate) fn keys_either_way<C: BlockCipher>() -> Option<KeysEitherWay<C>> {
     keyed!(either_way);
     None
 }
+
+/// The schedule the instructions build is FIPS 197's, word for word,
+/// encryption and decryption both, where AES's list chose one of this
+/// file's rows; run by AES's kernel test under that choice.
+#[cfg(test)]
+pub(crate) fn schedule_is_standard(
+    chosen: crate::features::Chosen<super::Kernel>,
+) {
+    use crate::cipher::aes::expand_words;
+    use crate::cipher::aes::portable::bitsliced::sub_word;
+    if !matches!(chosen.kernel(), super::Kernel::AesNi | super::Kernel::Vaes) {
+        return;
+    }
+    for (len, size) in [
+        (16, KeySize::Aes128),
+        (24, KeySize::Aes192),
+        (32, KeySize::Aes256),
+    ] {
+        for i in 0..100u32 {
+            let key: std::vec::Vec<u8> = (0..len)
+                .map(|j| (i.wrapping_mul(97).wrapping_add(j * 31)) as u8)
+                .collect();
+            let want = expand_words(&key, size, sub_word);
+            // SAFETY: the list chose a row whose features include the
+            // AES instructions and SSSE3, which the schedule uses.
+            let keys = unsafe { RoundKeys::new(&key, size) };
+            assert_eq!(keys.enc, want, "{size:?} key {i}");
+            let rounds = size.rounds();
+            assert_eq!(keys.dec[..4], want[4 * rounds..4 * rounds + 4]);
+            assert_eq!(keys.dec[4 * rounds..4 * rounds + 4], want[..4]);
+            assert_eq!(keys.dec[4 * rounds + 4..], want[4 * rounds + 4..]);
+        }
+    }
+}

@@ -74,17 +74,29 @@ run_target() {
     #       --target "$target" --test vendored -- vendored::sha2_
     cross test --workspace --exclude scytale-acvp --target "$target" \
         -- --skip kernels::
+    # The output is kept for the check below; sh has no pipefail, so
+    # cargo's status is carried out of the pipe in a file.
     log=$(mktemp)
-    cross test -p scytale --lib --target "$target" kernels:: \
-        -- --nocapture | tee "$log"
-    # Under the emulator's `max`, every kernel of the architecture
-    # must run, as CI holds it to.
-    if [ "$QEMU_CPU" = max ] && grep -q ' not run' "$log"; then
-        rm -f "$log"
+    status=$(mktemp)
+    { cross test -p scytale --lib --target "$target" kernels:: \
+        -- --nocapture; echo $? > "$status"; } | tee "$log"
+    failed=$(cat "$status")
+    # Under the emulator's `max`, every RISC-V kernel must run, as CI
+    # holds it to. Only RISC-V is given QEMU_CPU (see Cross.toml); the
+    # other targets run on the image's own default processor.
+    missing=no
+    if [ "$target" = riscv64gc-unknown-linux-gnu ] \
+        && [ "$QEMU_CPU" = max ] && grep -q ' not run' "$log"; then
+        missing=yes
+    fi
+    rm -f "$log" "$status"
+    if [ "$failed" != 0 ]; then
+        exit "$failed"
+    fi
+    if [ "$missing" = yes ]; then
         echo "a kernel did not run under max" >&2
         exit 1
     fi
-    rm -f "$log"
     if [ "$target" = riscv64gc-unknown-linux-gnu ] \
         && [ -z "$QEMU_SWEEP" ]; then
         for cpu in $RISCV_CONFIGS; do

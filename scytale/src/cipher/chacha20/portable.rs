@@ -168,3 +168,23 @@ impl Backend for Portable {
         xor(key, nonce, counter, data)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RFC 8439 section 2.1.1: the quarter round on its own.
+    #[test]
+    fn quarter_round_example() {
+        let mut s = [[0u32; LANES]; 16];
+        s[0] = [0x11111111; LANES];
+        s[1] = [0x01020304; LANES];
+        s[2] = [0x9b8d6f43; LANES];
+        s[3] = [0x01234567; LANES];
+        quarter_round(&mut s, 0, 1, 2, 3);
+        assert_eq!(s[0][0], 0xea2a92f4);
+        assert_eq!(s[1][0], 0xcb1cf8ce);
+        assert_eq!(s[2][0], 0x4581472e);
+        assert_eq!(s[3][0], 0x5881c4bb);
+    }
+}
