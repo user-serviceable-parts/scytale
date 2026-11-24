@@ -446,9 +446,7 @@ mod tests {
     #[test]
     fn deterministic_is_exact() {
         let suite = find("DetECDSA")[0];
-        let Some(doc) = super::super::vendored(suite) else {
-            return;
-        };
+        let doc = super::super::vendored(suite);
         let answered = answer(
             &doc,
             &mut fixed_rng(&Builder::default()).unwrap(),
@@ -526,9 +524,7 @@ mod tests {
             .into_iter()
             .find(|s| s.mode == Some("sigGen"))
             .unwrap();
-        let Some(doc) = super::super::vendored(suite) else {
-            return;
-        };
+        let doc = super::super::vendored(suite);
         let answered = answer(
             &doc,
             &mut fixed_rng(&Builder::default()).unwrap(),
@@ -560,9 +556,7 @@ mod tests {
             .into_iter()
             .find(|s| s.mode == Some("sigGen"))
             .unwrap();
-        let Some(doc) = super::super::vendored(suite) else {
-            return;
-        };
+        let doc = super::super::vendored(suite);
         let mut prompt = doc.clone();
         for group in prompt["testGroups"].as_array_mut().unwrap() {
             group.as_object_mut().unwrap().remove("d");

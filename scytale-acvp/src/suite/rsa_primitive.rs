@@ -498,11 +498,7 @@ mod tests {
     /// give the file's signature.
     #[test]
     fn private_exponent_is_derived_from_the_primes() {
-        let Some(doc) =
-            super::super::vendored(find("RSA-SignaturePrimitive-2.0")[0])
-        else {
-            return;
-        };
+        let doc = super::super::vendored(find("RSA-SignaturePrimitive-2.0")[0]);
         let mut seen = 0;
         for group in list(&doc, "testGroups").unwrap() {
             if group["keyMode"] != "crt" {
@@ -532,11 +528,8 @@ mod tests {
 
     #[test]
     fn crt_cases_sign_without_a_private_exponent() {
-        let Some(mut doc) =
-            super::super::vendored(find("RSA-SignaturePrimitive-2.0")[0])
-        else {
-            return;
-        };
+        let mut doc =
+            super::super::vendored(find("RSA-SignaturePrimitive-2.0")[0]);
         let with = answer(
             &doc,
             &mut fixed_rng(&Builder::default()).unwrap(),

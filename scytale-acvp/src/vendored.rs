@@ -269,7 +269,7 @@ fn shares_a_key(suite: &Suite) -> bool {
 /// the registry, in a fixed order: a unit per case, so that a
 /// group's cases are answered side by side, except that a group
 /// whose cases share a key the driver generates, see
-/// [`shares_a_key`], is a unit whole.
+/// `shares_a_key`, is a unit whole.
 pub fn units(suite: usize, doc: &Value) -> Vec<Unit> {
     let mut out = Vec::new();
     let Some(groups) = doc["testGroups"].as_array() else {
@@ -404,13 +404,6 @@ pub fn short_name(features: Features) -> String {
     }
     let names: Vec<&str> = features.iter().map(Feature::name).collect();
     names.join("+")
-}
-
-/// The kernels `SCYTALE_KERNELS` names, separated by white space, or
-/// `None` when it is unset, which selects every kernel.
-fn selected() -> Option<Vec<String>> {
-    let list = std::env::var("SCYTALE_KERNELS").ok()?;
-    Some(list.split_whitespace().map(Into::into).collect())
 }
 
 /// The kernels the units `all` of `doc` test, each as the profile
@@ -558,26 +551,35 @@ fn answer_all(
 /// each of its kernels, as the test `name`, and prints the cases
 /// compared and a line for every kernel: run, not run with the
 /// features it lacks, not selected, or failed, with what went wrong
-/// on stderr. A suite whose vectors are not in this copy is skipped.
+/// on stderr.
 /// Fails if any kernel's run fails, and on a suite that answers fewer
 /// cases than its minimum when every unit was answered.
+///
+/// `selected` names the kernels to run, as the lines spell them, and
+/// `None` runs every one. `default` is the set a suite with no kernel
+/// of its own builds under, and `None` the set detected: such a suite
+/// tests no kernel, so which ones its objects take is free to choose,
+/// and under an emulator the choice is time. QEMU runs the RISC-V
+/// vector instructions through helpers, and SHA-256 on the vector
+/// kernel measured nearly twice as slow there as on the scalar one.
 ///
 /// The kernels run at once, each unit building through its kernel's
 /// [`Builder`], so suites may be checked from several threads at
 /// once too.
-pub fn check(name: &str, directory: &str) -> Result<(), Error> {
+pub fn check(
+    name: &str,
+    directory: &str,
+    selected: Option<&[String]>,
+    default: Option<Features>,
+) -> Result<(), Error> {
     let s = SUITES
         .iter()
         .position(|s| s.directory == directory)
         .ok_or_else(|| Error::new(format!("{directory}: not registered")))?;
     let suite = &SUITES[s];
-    let Some(doc) = vendored(suite) else {
-        println!("{name}: {directory}: no vectors in this copy, skipped");
-        return Ok(());
-    };
+    let doc = vendored(suite);
     let types = kernels_tested(suite)?;
     let all = units(s, &doc);
-    let selected = selected();
     let hardware = features::detected();
     let kernels = kernels(&types, &doc, &all);
     // Each kernel's name, and its builder if it is to run or else
@@ -597,10 +599,15 @@ pub fn check(name: &str, directory: &str) -> Result<(), Error> {
             format!("{name}/{}", short_name(*profile))
         };
         let missing = profile.without(Feature::Isolated) - hardware;
-        let built = if selected.as_ref().is_some_and(|s| !s.contains(&kernel)) {
+        let built = if selected.is_some_and(|s| !s.contains(&kernel)) {
             Err("not selected".to_string())
         } else if types.is_empty() {
-            Ok(Builder::default())
+            Ok(match default {
+                Some(set) => Builder::try_new(set).map_err(|e| {
+                    Error::new(format!("the default set {set}: {e}"))
+                })?,
+                None => Builder::default(),
+            })
         } else {
             Builder::try_new(*profile)
                 .map_err(|_| format!("not run: needs {}", short_name(missing)))

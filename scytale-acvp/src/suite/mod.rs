@@ -765,10 +765,13 @@ pub fn chosen(names: &[String]) -> Result<Vec<&'static Suite>, Error> {
     Ok(out)
 }
 
-/// The vendored file of `suite`, or `None` if the vectors are not in
-/// this copy.
-pub fn vendored(suite: &Suite) -> Option<Value> {
-    let doc = load(&format!("{}/internalProjection.json", suite.directory))?;
+/// The vendored file of `suite`.
+///
+/// # Panics
+///
+/// If the file cannot be read, or is not the suite's.
+pub fn vendored(suite: &Suite) -> Value {
+    let doc = load(&format!("{}/internalProjection.json", suite.directory));
     assert_eq!(doc["algorithm"], suite.algorithm, "{}", suite.directory);
     if let Some(mode) = suite.mode {
         assert_eq!(doc["mode"], mode, "{}", suite.directory);
@@ -777,7 +780,7 @@ pub fn vendored(suite: &Suite) -> Option<Value> {
     if !doc["revision"].is_null() {
         assert_eq!(doc["revision"], suite.revision, "{}", suite.directory);
     }
-    Some(doc)
+    doc
 }
 
 /// A generator whose output is a function of nothing but the order
@@ -978,7 +981,7 @@ mod tests {
     #[test]
     fn a_verified_suite_is_checked_against_a_server_answer() {
         let suite = find("LMS-sigGen-SP800-208")[0];
-        let Some(file) = vendored(suite) else { return };
+        let file = vendored(suite);
         let answer_only = |keep: &[&str]| {
             let mut doc = file.clone();
             for group in members(&mut doc, "testGroups").unwrap() {

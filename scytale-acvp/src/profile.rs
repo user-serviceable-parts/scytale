@@ -40,6 +40,8 @@ use scytale::mac::poly1305::Poly1305;
 use scytale::random::{CtrDrbg, MIN_SEED};
 use scytale::sig::{self, ecdsa};
 use serde_json::Value;
+use std::cell::Cell;
+use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex, PoisonError};
 
 /// The seed every profile's generator starts from, so the answers
@@ -95,19 +97,37 @@ impl Seed {
 /// suites with no kernel of their own, whose signatures run for
 /// minutes, run side by side, and with them every kernel the
 /// processor's whole set selects.
+///
+/// Turns are taken in the order builds arrive: once a build under
+/// another set is waiting, later ones under the set in force queue
+/// behind it rather than join. Otherwise a set that some build always
+/// holds, as a long signing run holds the set detected, would keep
+/// every other set waiting until it was done.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Builder(Option<Features>);
 
-/// The set the running builds share, and how many there are.
+/// The set the running builds share, how many there are, and the
+/// builds waiting, oldest first, each with its ticket and set.
 struct Turn {
     set: Features,
     builds: usize,
+    queue: VecDeque<(u64, Features)>,
+    next: u64,
 }
 
 static TURN: Mutex<Turn> = Mutex::new(Turn {
     set: Features::new(),
     builds: 0,
+    queue: VecDeque::new(),
+    next: 0,
 });
+
+thread_local! {
+    /// How many builds this thread is inside, so that a build started
+    /// within another joins its turn at once rather than queue behind
+    /// builds that wait for that turn to end.
+    static HELD: Cell<usize> = const { Cell::new(0) };
+}
 
 /// Signalled when a turn ends.
 static ENDED: Condvar = Condvar::new();
@@ -151,24 +171,45 @@ impl Builder {
         Ok(build()?)
     }
 
-    /// Waits until this builder's set is in force or nothing is
-    /// building, and joins the turn. A build that starts another
-    /// under the same builder joins its own turn, so nesting is safe.
+    /// Waits for this builder's turn and joins it: the oldest waiting
+    /// build goes first, and joins a turn already under its own set or
+    /// starts one when nothing is building. A build started inside
+    /// another on this thread joins its turn at once, so nesting is
+    /// safe.
     fn enter(&self) -> Result<Building, Error> {
         let wanted = self.set();
         let mut turn = TURN.lock().unwrap_or_else(PoisonError::into_inner);
-        while turn.builds > 0 && turn.set != wanted {
+        if HELD.get() > 0 {
+            turn.builds += 1;
+            HELD.set(HELD.get() + 1);
+            return Ok(Building);
+        }
+        let ticket = turn.next;
+        turn.next += 1;
+        turn.queue.push_back((ticket, wanted));
+        loop {
+            let first = turn.queue.front().map(|&(t, _)| t) == Some(ticket);
+            if first && (turn.builds == 0 || turn.set == wanted) {
+                break;
+            }
             turn = ENDED.wait(turn).unwrap_or_else(PoisonError::into_inner);
         }
+        turn.queue.pop_front();
         // Between turns the set detected is in force, which is what a
         // builder without a profile wants, so only a profile is set.
         if turn.builds == 0
             && let Some(profile) = self.0
+            && let Err(e) = features::set(profile)
         {
-            features::set(profile)?;
+            // The next in the queue may go now.
+            ENDED.notify_all();
+            return Err(e.into());
         }
         turn.set = wanted;
         turn.builds += 1;
+        HELD.set(HELD.get() + 1);
+        // The next in the queue may want this same turn.
+        ENDED.notify_all();
         Ok(Building)
     }
 }
@@ -181,10 +222,11 @@ impl Drop for Building {
     fn drop(&mut self) {
         let mut turn = TURN.lock().unwrap_or_else(PoisonError::into_inner);
         turn.builds -= 1;
+        HELD.set(HELD.get() - 1);
         if turn.builds == 0 {
             features::reset();
-            ENDED.notify_all();
         }
+        ENDED.notify_all();
     }
 }
 

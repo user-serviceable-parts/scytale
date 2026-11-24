@@ -6,14 +6,46 @@
 //! --exact acvp_samples::sha2_512`, and name kernels as its lines do
 //! in `SCYTALE_KERNELS`.
 
+use std::sync::OnceLock;
+
+use scytale::features::Features;
 use scytale_acvp::suite::SUITES;
+
+/// What the environment asks of the check, read here, in the test,
+/// and nowhere in the crate itself.
+struct Asked {
+    /// `SCYTALE_KERNELS`: the kernels to run, separated by white space,
+    /// as the lines name them; unset runs every one.
+    kernels: Option<Vec<String>>,
+    /// `SCYTALE_DEFAULT_FEATURES`: the set a suite with no kernel of
+    /// its own builds under; unset builds under the set detected.
+    default: Option<Features>,
+}
+
+fn asked() -> &'static Asked {
+    static ASKED: OnceLock<Asked> = OnceLock::new();
+    ASKED.get_or_init(|| Asked {
+        kernels: std::env::var("SCYTALE_KERNELS")
+            .ok()
+            .map(|list| list.split_whitespace().map(Into::into).collect()),
+        default: std::env::var("SCYTALE_DEFAULT_FEATURES").ok().map(|text| {
+            text.parse().unwrap_or_else(|_| {
+                panic!("SCYTALE_DEFAULT_FEATURES: {text:?}")
+            })
+        }),
+    })
+}
 
 /// One suite's check. The harness runs as many at once as it runs
 /// any tests: each builds through its kernels' builders, which take
 /// turns only while something is built or run under another set, so
 /// suites need not take turns themselves.
 fn check(name: &str, directory: &str) {
-    if let Err(e) = scytale_acvp::vendored::check(name, directory) {
+    let asked = asked();
+    let kernels = asked.kernels.as_deref();
+    if let Err(e) =
+        scytale_acvp::vendored::check(name, directory, kernels, asked.default)
+    {
         panic!("{e}");
     }
 }

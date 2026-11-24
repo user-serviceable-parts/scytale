@@ -423,6 +423,12 @@ jobs:
             riscv64-linux-gnu-gcc
           CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER:
             qemu-riscv64 -cpu max -L /usr/riscv64-linux-gnu
+          # The suites with no kernel of their own test none, so they
+          # build on the scalar extensions alone: QEMU runs the vector
+          # ones through helpers, and SHA-256 measured nearly twice as
+          # slow on the vector kernel there as on the scalar one. The
+          # vector kernels still answer their own vectors.
+          SCYTALE_DEFAULT_FEATURES: zbb zbc zbkb zbkc zkne zknd zknh
 
       - name: Measure the machine after
         shell: bash

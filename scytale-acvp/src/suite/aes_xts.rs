@@ -145,9 +145,7 @@ mod tests {
     #[test]
     fn sequence_number_gives_the_tweak() {
         for suite in super::super::find("ACVP-AES-XTS") {
-            let Some(doc) = super::super::vendored(suite) else {
-                continue;
-            };
+            let doc = super::super::vendored(suite);
             let mut seen = 0;
             for group in list(&doc, "testGroups").unwrap() {
                 if group["tweakMode"] != "number" {

@@ -143,9 +143,7 @@ mod tests {
     #[test]
     fn server_side_agrees() {
         let suite = super::super::find("XECDH-SSC-RFC7748")[0];
-        let Some(doc) = super::super::vendored(suite) else {
-            return;
-        };
+        let doc = super::super::vendored(suite);
         fn check<const N: usize>(curve: &Curve<N>, t: &Value) {
             let key = |name| key::<N>(&hex(t, name).unwrap(), name).unwrap();
             let z = (curve.function)(&key("privateServer"), &key("publicIut"));

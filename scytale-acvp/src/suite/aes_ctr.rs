@@ -108,9 +108,7 @@ mod tests {
         let builder = Builder::default();
         let mut rng = fixed_rng(&builder).unwrap();
         for suite in find("ACVP-AES-CTR") {
-            let Some(doc) = super::super::vendored(suite) else {
-                continue;
-            };
+            let doc = super::super::vendored(suite);
             for group in list(&doc, "testGroups").unwrap() {
                 if group["direction"] != "encrypt" {
                     continue;

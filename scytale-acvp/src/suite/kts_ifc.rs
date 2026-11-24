@@ -375,9 +375,7 @@ mod tests {
 
     #[test]
     fn initiator_without_a_key_chooses_one() {
-        let Some(mut doc) = super::super::vendored(find("KTS-IFC")[0]) else {
-            return;
-        };
+        let mut doc = super::super::vendored(find("KTS-IFC")[0]);
         for group in doc["testGroups"].as_array_mut().unwrap() {
             for t in group["tests"].as_array_mut().unwrap() {
                 t.as_object_mut().unwrap().remove("iutK");
@@ -426,9 +424,7 @@ mod tests {
     /// check falls on NIST's own tag and the answer's consistency.
     #[test]
     fn an_initiator_is_checked_without_the_server_key() {
-        let Some(mut doc) = super::super::vendored(find("KTS-IFC")[0]) else {
-            return;
-        };
+        let mut doc = super::super::vendored(find("KTS-IFC")[0]);
         for group in doc["testGroups"].as_array_mut().unwrap() {
             for t in group["tests"].as_array_mut().unwrap() {
                 let t = t.as_object_mut().unwrap();
@@ -476,9 +472,7 @@ mod tests {
     /// group in another mode is skipped.
     #[test]
     fn mode_is_optional_and_checked_when_given() {
-        let Some(mut doc) = super::super::vendored(find("KTS-IFC")[0]) else {
-            return;
-        };
+        let mut doc = super::super::vendored(find("KTS-IFC")[0]);
         let groups = doc["testGroups"].as_array_mut().unwrap();
         groups.truncate(1);
         let group = groups[0].as_object_mut().unwrap();
