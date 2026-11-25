@@ -1390,8 +1390,8 @@ mod tests {
             // Beside the hardware, the hardware still wins.
             let mut f = detected();
             f.insert(Feature::Isolated);
-            let hardware = select(Context::default(), aes::KERNELS).unwrap();
-            assert_eq!(aes(f), hardware);
+            let ctx = Context::try_new(f).unwrap();
+            assert_eq!(aes(f), select(ctx, aes::KERNELS).unwrap());
             // And without it, the tables are never chosen.
             assert_eq!(aes(Features::new()), aes::Kernel::Bitsliced);
         }
