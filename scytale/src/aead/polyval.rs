@@ -9,6 +9,7 @@
 //! by writing the field arithmetic out again.
 
 use super::ghash::{BLOCK, Ghash, MAX_GROUP, multiply_by_x};
+use crate::Context;
 #[cfg(target_arch = "x86_64")]
 use crate::features;
 use zeroize::Zeroize;
@@ -70,19 +71,20 @@ impl Drop for Polyval {
 
 impl Inner {
     fn new(
+        ctx: Context,
         key: &[u8; BLOCK],
         #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
         bytes: usize,
     ) -> Self {
         #[cfg(target_arch = "x86_64")]
         if let Some(hash) = (bytes >= WORTH_IT)
-            .then(|| features::choose(super::gcm::KERNELS))
+            .then(|| features::choose(ctx, super::gcm::KERNELS))
             .flatten()
             .and_then(|chosen| super::gcm::x86_64::Polyval::new(key, chosen))
         {
             return Inner::Native(hash);
         }
-        Inner::Generic(Ghash::new(key))
+        Inner::Generic(Ghash::new(ctx, key))
     }
 
     /// Adds whole blocks, as they lie.
@@ -144,12 +146,12 @@ impl Polyval {
     /// powers of the subkey are worth working out, which for a key
     /// used once, as GCM-SIV uses its own, a short message cannot
     /// earn back. A wrong hint costs speed and nothing else.
-    pub(crate) fn new(h: &[u8], bytes: usize) -> Self {
+    pub(crate) fn new(ctx: Context, h: &[u8], bytes: usize) -> Self {
         debug_assert_eq!(h.len(), BLOCK);
         let mut key = reverse(h);
         multiply_by_x(&mut key);
         Polyval {
-            inner: Inner::new(&key, bytes),
+            inner: Inner::new(ctx, &key, bytes),
             block: [0; BLOCK],
             used: 0,
         }
@@ -177,12 +179,12 @@ impl Polyval {
     /// always taken, so this is the only way to exercise the other
     /// one and keep both validated.
     #[cfg(test)]
-    pub(crate) fn generic(h: &[u8]) -> Self {
+    pub(crate) fn generic(ctx: Context, h: &[u8]) -> Self {
         debug_assert_eq!(h.len(), BLOCK);
         let mut key = reverse(h);
         multiply_by_x(&mut key);
         Polyval {
-            inner: Inner::Generic(Ghash::new(&key)),
+            inner: Inner::Generic(Ghash::new(ctx, &key)),
             block: [0; BLOCK],
             used: 0,
         }
@@ -248,18 +250,19 @@ mod tests {
         }
 
         for len in 0..MAX {
-            let mut want = Polyval::generic(&h);
+            let mut want = Polyval::generic(crate::Context::default(), &h);
             want.update(&data[..len]);
             want.pad();
             let want = want.finish();
 
-            let mut got = Polyval::new(&h, WORTH_IT);
+            let mut got = Polyval::new(crate::Context::default(), &h, WORTH_IT);
             got.update(&data[..len]);
             got.pad();
             assert_eq!(got.finish(), want, "{len} bytes");
 
             for piece in [1, 17, 128, 512, 513] {
-                let mut got = Polyval::new(&h, WORTH_IT);
+                let mut got =
+                    Polyval::new(crate::Context::default(), &h, WORTH_IT);
                 for part in data[..len].chunks(piece) {
                     got.update(part);
                 }
@@ -280,14 +283,18 @@ mod tests {
         use crate::aead::gcm::KERNELS;
         use crate::features;
         use crate::kernel::Kernel;
-        features::build_alone(|| {
-            let p = Polyval::new(&hex::<16>(H), WORTH_IT);
-            let row = features::select(KERNELS);
+        {
+            let p = Polyval::new(
+                crate::Context::default(),
+                &hex::<16>(H),
+                WORTH_IT,
+            );
+            let row = features::select(crate::Context::default(), KERNELS);
             assert_eq!(
                 matches!(p.inner, Inner::Native(_)),
                 matches!(row, Some(Kernel::Aesni | Kernel::Vaes))
             );
-        });
+        };
     }
 
     /// The subkey from RFC 8452's worked example, reused throughout
@@ -310,7 +317,8 @@ mod tests {
     /// what pins the byte order and the subkey conversion.
     #[test]
     fn matches_rfc8452_example() {
-        let mut p = Polyval::new(&hex::<16>(H), WORTH_IT);
+        let mut p =
+            Polyval::new(crate::Context::default(), &hex::<16>(H), WORTH_IT);
         p.update(&hex::<16>("4f4f95668c83dfb6401762bb2d01a262"));
         p.update(&hex::<16>("d1a24ddd2721d006bbe45f20d3c9f362"));
         assert_eq!(p.finish(), hex::<16>("f7a3b47b846119fae5b7866cf5e5b77e"));
@@ -320,7 +328,8 @@ mod tests {
     /// not quietly absorb a block of zeros instead.
     #[test]
     fn empty_input_hashes_to_zero() {
-        let mut p = Polyval::new(&hex::<16>(H), WORTH_IT);
+        let mut p =
+            Polyval::new(crate::Context::default(), &hex::<16>(H), WORTH_IT);
         p.pad();
         assert_eq!(p.finish(), [0; BLOCK]);
     }
@@ -334,13 +343,15 @@ mod tests {
         let data: [u8; 5 * BLOCK] = core::array::from_fn(|i| (i * 7 + 3) as u8);
 
         for len in 0..=data.len() {
-            let mut whole = Polyval::new(&h, WORTH_IT);
+            let mut whole =
+                Polyval::new(crate::Context::default(), &h, WORTH_IT);
             whole.update(&data[..len]);
             whole.pad();
             let want = whole.finish();
 
             for piece in [1, 3, 7, 16, 17, 31] {
-                let mut p = Polyval::new(&h, WORTH_IT);
+                let mut p =
+                    Polyval::new(crate::Context::default(), &h, WORTH_IT);
                 for part in data[..len].chunks(piece) {
                     p.update(part);
                 }
@@ -365,7 +376,7 @@ mod tests {
         const LEN: usize = (2 * BATCH + 3) * BLOCK + 5;
         let data: [u8; LEN] = core::array::from_fn(|i| (i * 11 + 1) as u8);
 
-        let mut whole = Polyval::new(&h, WORTH_IT);
+        let mut whole = Polyval::new(crate::Context::default(), &h, WORTH_IT);
         whole.update(&data);
         whole.pad();
         let want = whole.finish();
@@ -373,7 +384,7 @@ mod tests {
         // Sizes that land inside a batch, on its boundary and just
         // past it, and one that is a whole batch itself.
         for piece in [BLOCK, BATCH * BLOCK - 1, BATCH * BLOCK, 129] {
-            let mut p = Polyval::new(&h, WORTH_IT);
+            let mut p = Polyval::new(crate::Context::default(), &h, WORTH_IT);
             for part in data.chunks(piece) {
                 p.update(part);
             }
@@ -391,11 +402,11 @@ mod tests {
         let mut filled = [0u8; BLOCK];
         filled[..short.len()].copy_from_slice(&short);
 
-        let mut a = Polyval::new(&h, WORTH_IT);
+        let mut a = Polyval::new(crate::Context::default(), &h, WORTH_IT);
         a.update(&short);
         a.pad();
 
-        let mut b = Polyval::new(&h, WORTH_IT);
+        let mut b = Polyval::new(crate::Context::default(), &h, WORTH_IT);
         b.update(&filled);
         b.pad();
 
@@ -409,11 +420,11 @@ mod tests {
         let h = hex::<16>(H);
         let data = [0x5a; BLOCK];
 
-        let mut once = Polyval::new(&h, WORTH_IT);
+        let mut once = Polyval::new(crate::Context::default(), &h, WORTH_IT);
         once.update(&data);
         let want = once.finish();
 
-        let mut twice = Polyval::new(&h, WORTH_IT);
+        let mut twice = Polyval::new(crate::Context::default(), &h, WORTH_IT);
         twice.update(&data);
         twice.pad();
         twice.pad();
@@ -430,14 +441,14 @@ mod tests {
         let aad = [0x11; 20];
         let text = [0x22; 37];
 
-        let mut want = Polyval::new(&h, WORTH_IT);
+        let mut want = Polyval::new(crate::Context::default(), &h, WORTH_IT);
         want.update(&aad);
         want.pad();
         want.update(&text);
         want.pad();
         let want = want.finish();
 
-        let mut p = Polyval::new(&h, WORTH_IT);
+        let mut p = Polyval::new(crate::Context::default(), &h, WORTH_IT);
         for part in aad.chunks(6) {
             p.update(part);
         }

@@ -8,6 +8,7 @@
 use super::{answer_groups, answer_tests, skip};
 use crate::profile::Builder;
 use crate::support::{Error, flag, hex, hex_value, text};
+use scytale::Context;
 use scytale::Random;
 use scytale::sig::slh_dsa::*;
 use serde_json::{Value, json};
@@ -39,15 +40,23 @@ fn array<const N: usize>(bytes: &[u8], name: &str) -> Result<[u8; N], Error> {
 trait Set {
     const NAME: &'static str;
     /// `pk || sk` from `SK.seed || SK.prf || PK.seed`.
-    fn key_gen(seeds: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error>;
+    fn key_gen(ctx: Context, seeds: &[u8])
+    -> Result<(Vec<u8>, Vec<u8>), Error>;
     /// A signature, hedged with `rnd` when given.
     fn sign(
+        ctx: Context,
         sk: &[u8],
         rnd: Option<&[u8]>,
         context: &[u8],
         message: &[u8],
     ) -> Result<Vec<u8>, Error>;
-    fn verify(pk: &[u8], context: &[u8], message: &[u8], sig: &[u8]) -> bool;
+    fn verify(
+        ctx: Context,
+        pk: &[u8],
+        context: &[u8],
+        message: &[u8],
+        sig: &[u8],
+    ) -> bool;
 }
 
 macro_rules! set {
@@ -55,20 +64,24 @@ macro_rules! set {
         struct $name;
         impl Set for $name {
             const NAME: &'static str = $acvp;
-            fn key_gen(seeds: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
+            fn key_gen(
+                ctx: Context,
+                seeds: &[u8],
+            ) -> Result<(Vec<u8>, Vec<u8>), Error> {
                 let mut rng = Fixed(seeds.to_vec());
-                let key = $module::PrivateKey::generate(&mut rng)?;
+                let key = $module::PrivateKey::generate(ctx, &mut rng)?;
                 let pk = key.public_key().bytes().to_vec();
                 Ok((pk, key.key_bytes().to_vec()))
             }
             fn sign(
+                ctx: Context,
                 sk: &[u8],
                 rnd: Option<&[u8]>,
                 context: &[u8],
                 message: &[u8],
             ) -> Result<Vec<u8>, Error> {
                 let sk = array::<{ $module::KEY_SIZE }>(sk, "sk")?;
-                let key = $module::PrivateKey::new(&sk);
+                let key = $module::PrivateKey::new(ctx, &sk);
                 let sig = match rnd {
                     Some(rnd) => {
                         key.sign(&mut Fixed(rnd.to_vec()), context, message)?
@@ -78,6 +91,7 @@ macro_rules! set {
                 Ok(sig.to_vec())
             }
             fn verify(
+                ctx: Context,
                 pk: &[u8],
                 context: &[u8],
                 message: &[u8],
@@ -91,7 +105,7 @@ macro_rules! set {
                 else {
                     return false;
                 };
-                let key = $module::PublicKey::new(&pk);
+                let key = $module::PublicKey::new(ctx, &pk);
                 key.verify(context, message, &sig).is_ok()
             }
         }
@@ -148,37 +162,42 @@ fn answer_group<S: Set>(
     builder: &Builder,
 ) -> Result<Option<Value>, Error> {
     let each = |answer: &dyn Fn(&Value) -> Result<Value, Error>| {
-        answer_tests(group, |t| builder.try_build(|| answer(t)))
+        answer_tests(group, answer)
     };
     if mode != "keyGen" && !pure_external(group) {
         return skip(group, "only the pure external interface is offered");
     }
     match mode {
-        "keyGen" => each(&key_gen::<S>),
+        "keyGen" => each(&|t| key_gen::<S>(builder.ctx(), t)),
         "sigGen" => {
             let deterministic = flag(group, "deterministic")?;
-            each(&|t| sig_gen::<S>(t, deterministic))
+            each(&|t| sig_gen::<S>(builder.ctx(), t, deterministic))
         }
-        "sigVer" => each(&sig_ver::<S>),
+        "sigVer" => each(&|t| sig_ver::<S>(builder.ctx(), t)),
         other => Err(Error::new(format!("mode {other}"))),
     }
 }
 
-fn key_gen<S: Set>(t: &Value) -> Result<Value, Error> {
+fn key_gen<S: Set>(ctx: Context, t: &Value) -> Result<Value, Error> {
     let mut seeds = hex(t, "skSeed")?;
     seeds.extend(hex(t, "skPrf")?);
     seeds.extend(hex(t, "pkSeed")?);
-    let (pk, sk) = S::key_gen(&seeds)?;
+    let (pk, sk) = S::key_gen(ctx, &seeds)?;
     Ok(json!({ "pk": hex_value(&pk), "sk": hex_value(&sk) }))
 }
 
-fn sig_gen<S: Set>(t: &Value, deterministic: bool) -> Result<Value, Error> {
+fn sig_gen<S: Set>(
+    ctx: Context,
+    t: &Value,
+    deterministic: bool,
+) -> Result<Value, Error> {
     let rnd = if deterministic {
         None
     } else {
         Some(hex(t, "additionalRandomness")?)
     };
     let sig = S::sign(
+        ctx,
         &hex(t, "sk")?,
         rnd.as_deref(),
         &hex(t, "context")?,
@@ -187,8 +206,9 @@ fn sig_gen<S: Set>(t: &Value, deterministic: bool) -> Result<Value, Error> {
     Ok(json!({ "signature": hex_value(&sig) }))
 }
 
-fn sig_ver<S: Set>(t: &Value) -> Result<Value, Error> {
+fn sig_ver<S: Set>(ctx: Context, t: &Value) -> Result<Value, Error> {
     let passed = S::verify(
+        ctx,
         &hex(t, "pk")?,
         &hex(t, "context")?,
         &hex(t, "message")?,

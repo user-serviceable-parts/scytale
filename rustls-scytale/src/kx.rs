@@ -143,8 +143,11 @@ macro_rules! ecdh_group {
             fn start(&self) -> Result<StartedKeyExchange, Error> {
                 let mut rng =
                     generator().map_err(|_| Error::FailedToGetRandomBytes)?;
-                let key = ecdh::$curve::PrivateKey::generate(&mut rng)
-                    .map_err(|_| Error::FailedToGetRandomBytes)?;
+                let key = ecdh::$curve::PrivateKey::generate(
+                    scytale::Context::default(),
+                    &mut rng,
+                )
+                .map_err(|_| Error::FailedToGetRandomBytes)?;
                 let public = key.public_key().sec1_bytes();
                 Ok(StartedKeyExchange::Single(Box::new($active {
                     key,
@@ -174,8 +177,11 @@ macro_rules! ecdh_group {
                 }
                 // Checked to lie on the curve; there is no other way
                 // to make a public key.
-                let peer = ecdh::$curve::PublicKey::try_from_sec1(peer)
-                    .map_err(|_| invalid_share())?;
+                let peer = ecdh::$curve::PublicKey::try_from_sec1(
+                    scytale::Context::default(),
+                    peer,
+                )
+                .map_err(|_| invalid_share())?;
                 Ok(shared(self.key.shared_secret(&peer)))
             }
 
@@ -206,8 +212,11 @@ macro_rules! ml_kem_group {
             fn start(&self) -> Result<StartedKeyExchange, Error> {
                 let mut rng =
                     generator().map_err(|_| Error::FailedToGetRandomBytes)?;
-                let key = ml_kem::$set::PrivateKey::generate(&mut rng)
-                    .map_err(|_| Error::FailedToGetRandomBytes)?;
+                let key = ml_kem::$set::PrivateKey::generate(
+                    scytale::Context::default(),
+                    &mut rng,
+                )
+                .map_err(|_| Error::FailedToGetRandomBytes)?;
                 let public = key.public_key().bytes().to_vec();
                 // Boxed: the expanded key is kilobytes, and it waits
                 // for the server's reply.
@@ -224,8 +233,11 @@ macro_rules! ml_kem_group {
                 let share: &[u8; ml_kem::$set::PUBLIC_KEY_SIZE] =
                     client_share.try_into().map_err(|_| invalid_share())?;
                 // FIPS 203's input check: every coefficient reduced.
-                let public = ml_kem::$set::PublicKey::try_new(share)
-                    .map_err(|_| invalid_share())?;
+                let public = ml_kem::$set::PublicKey::try_new(
+                    scytale::Context::default(),
+                    share,
+                )
+                .map_err(|_| invalid_share())?;
                 let mut rng =
                     generator().map_err(|_| Error::FailedToGetRandomBytes)?;
                 let (ciphertext, secret) = public

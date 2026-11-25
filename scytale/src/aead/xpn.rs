@@ -38,9 +38,11 @@
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::aead::Xpn;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let xpn = Xpn::<Aes128>::new(&Key::from([0u8; 16]));
+//! let ctx = Context::default();
+//! let xpn = Xpn::<Aes128>::new(ctx, &Key::from([0u8; 16]));
 //! let salt = [0x5a; 12];
 //!
 //! // Channel 1, packet 7.
@@ -58,6 +60,7 @@
 //! # }
 //! ```
 
+use crate::Context;
 use core::fmt;
 
 use super::Aead;
@@ -93,8 +96,10 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Dispatcher for Xpn<C> {
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Xpn<C> {
     /// Takes the key the cipher runs under.
-    pub fn new(key: &C::Key) -> Self {
-        Xpn { gcm: Gcm::new(key) }
+    pub fn new(ctx: Context, key: &C::Key) -> Self {
+        Xpn {
+            gcm: Gcm::new(ctx, key),
+        }
     }
 
     /// The feature profiles this mode tells apart, best first: GCM's,
@@ -182,7 +187,7 @@ mod tests {
     use crate::cipher::aes::Aes128;
 
     fn xpn() -> Xpn<Aes128> {
-        Xpn::new(&Key::from([0x42u8; 16]))
+        Xpn::new(crate::Context::default(), &Key::from([0x42u8; 16]))
     }
 
     /// It must agree with plain GCM under the combined nonce, which
@@ -203,7 +208,10 @@ mod tests {
             .encrypt(&salt, &frame, b"head", &mut by_xpn, &mut xpn_tag)
             .expect("encrypt");
 
-        let gcm = Gcm::<Aes128>::new(&Key::from([0x42; 16]));
+        let gcm = Gcm::<Aes128>::new(
+            crate::Context::default(),
+            &Key::from([0x42; 16]),
+        );
         let mut by_gcm = plain;
         let mut gcm_tag = [0u8; 16];
         gcm.encrypt(&combined, b"head", &mut by_gcm, &mut gcm_tag)

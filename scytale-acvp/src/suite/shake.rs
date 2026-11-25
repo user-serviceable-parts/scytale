@@ -23,7 +23,7 @@ pub fn answer(
     }
 }
 
-fn answer_as<X: BitXof + Default + Clone>(
+fn answer_as<X: BitXof + Clone>(
     doc: &Value,
     builder: &Builder,
 ) -> Result<Value, Error> {
@@ -32,7 +32,7 @@ fn answer_as<X: BitXof + Default + Clone>(
             "AFT" | "VOT" => answer_tests(group, |t| {
                 let bits = int(t, "outLen")? as usize;
                 let mut out = vec![0u8; bits.div_ceil(8)];
-                let xof = builder.build(X::default)?;
+                let xof = builder.build(X::new);
                 squeeze(xof, &Message::of(t)?, &mut out)?;
                 // A length that is not whole bytes keeps the last byte's
                 // low bits, numbered as FIPS 202 numbers them, and the
@@ -80,7 +80,7 @@ fn squeeze<X: BitXof>(
 /// times, feeding the first 16 bytes of each output (zero-padded)
 /// into the next, with the output length chosen each time by the
 /// last two bytes of the previous output within the group's range.
-fn mct<X: BitXof + Default + Clone>(
+fn mct<X: BitXof + Clone>(
     t: &Value,
     min_bits: usize,
     max_bits: usize,
@@ -88,7 +88,7 @@ fn mct<X: BitXof + Default + Clone>(
 ) -> Result<Value, Error> {
     // Built once and copied for each of the hundred thousand calls: a
     // copy keeps the kernel it was built with.
-    let fresh = builder.build(X::default)?;
+    let fresh = builder.build(X::new);
     let range = (max_bits - min_bits) / 8 + 1;
     let seed = Message::of(t)?;
     if seed.bits % 8 != 0 {

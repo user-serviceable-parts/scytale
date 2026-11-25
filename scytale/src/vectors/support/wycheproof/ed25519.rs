@@ -49,7 +49,13 @@ pub fn run() {
                 invalid += 1;
                 continue;
             };
-            let accepted = ed25519::verify(&public, &message, &sig).is_ok();
+            let accepted = ed25519::verify(
+                crate::Context::default(),
+                &public,
+                &message,
+                &sig,
+            )
+            .is_ok();
             assert_eq!(accepted, expect_valid, "{tag}");
             if expect_valid {
                 valid += 1;

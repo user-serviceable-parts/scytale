@@ -19,9 +19,11 @@
 //! ```
 //! use scytale::Random;
 //! use scytale::random::CtrDrbg;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = CtrDrbg::from_system()?;
+//! let ctx = Context::default();
+//! let mut rng = CtrDrbg::from_system(ctx)?;
 //!
 //! let mut key = [0u8; 32];
 //! rng.fill(&mut key)?;
@@ -209,6 +211,7 @@ mod hmac_drbg;
 #[cfg(any(target_os = "none", test))]
 pub(crate) mod health;
 
+use crate::Context;
 use core::fmt;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -296,6 +299,9 @@ pub struct CtrDrbg<S: Entropy = entropy::System> {
     /// use a source that has nowhere, and so refuses.
     #[zeroize(skip)]
     source: S,
+    /// What the generator builds its ciphers or hashes under.
+    #[zeroize(skip)]
+    ctx: Context,
     /// The key and counter block that are the generator's whole
     /// secret.
     key: Key<[u8; KEY]>,
@@ -330,11 +336,11 @@ impl<S: Entropy> CtrDrbg<S> {
     ///
     /// Whatever the source refuses with. A source with nothing to
     /// give yields no generator rather than one that cannot work.
-    pub fn try_new(mut source: S) -> Result<Self, Error> {
+    pub fn try_new(ctx: Context, mut source: S) -> Result<Self, Error> {
         let mut raw = [0u8; MIN_SEED * OVERSAMPLE];
         let drawn = source.fill(&mut raw);
-        let built =
-            drawn.and_then(|()| Self::instantiate(&raw, &[], source, true));
+        let built = drawn
+            .and_then(|()| Self::instantiate(ctx, &raw, &[], source, true));
         raw.zeroize();
         built
     }
@@ -352,8 +358,12 @@ impl<S: Entropy> CtrDrbg<S> {
     /// # Errors
     ///
     /// [`Error::InvalidSeedLength`] if `seed` is too short.
-    pub fn try_new_seeded(seed: &[u8], source: S) -> Result<Self, Error> {
-        Self::instantiate(seed, &[], source, true)
+    pub fn try_new_seeded(
+        ctx: Context,
+        seed: &[u8],
+        source: S,
+    ) -> Result<Self, Error> {
+        Self::instantiate(ctx, seed, &[], source, true)
     }
 
     /// A generator seeded without the derivation function: the
@@ -373,11 +383,12 @@ impl<S: Entropy> CtrDrbg<S> {
     /// [`Error::InvalidLength`] if `personalization` is longer than
     /// a seed.
     pub fn try_new_full_entropy(
+        ctx: Context,
         entropy: &[u8; MIN_SEED],
         personalization: &[u8],
         source: S,
     ) -> Result<Self, Error> {
-        Self::instantiate(entropy, personalization, source, false)
+        Self::instantiate(ctx, entropy, personalization, source, false)
     }
 
     /// Reseeds from the generator's own source.
@@ -507,7 +518,7 @@ impl<S: Entropy> CtrDrbg<S> {
         // block at a time. The counter it runs on is a local copy,
         // wiped here, and the last partial block is made by hand so
         // that the keystream past the end is wiped too.
-        let ctr = Ctr::<Aes256>::new(&self.key);
+        let ctr = Ctr::<Aes256>::new(self.ctx, &self.key);
         let (whole, tail) =
             out.split_at_mut(out.len() / BLOCK_SIZE * BLOCK_SIZE);
         if !whole.is_empty() {
@@ -535,6 +546,7 @@ impl<S: Entropy> CtrDrbg<S> {
     /// Builds a generator from material that has already been
     /// gathered, with or without the derivation function in the way.
     fn instantiate(
+        ctx: Context,
         entropy: &[u8],
         personalization: &[u8],
         source: S,
@@ -542,6 +554,7 @@ impl<S: Entropy> CtrDrbg<S> {
     ) -> Result<Self, Error> {
         let mut rng = CtrDrbg {
             source,
+            ctx,
             key: Key::zeroed(),
             v: [0u8; BLOCK_SIZE],
             counter: 1,
@@ -570,7 +583,7 @@ impl<S: Entropy> CtrDrbg<S> {
             if entropy.len() < MIN_SEED {
                 return Err(Error::InvalidSeedLength(entropy.len()));
             }
-            return derive(&[entropy, extra], out);
+            return derive(self.ctx, &[entropy, extra], out);
         }
         if entropy.len() != SEED {
             return Err(Error::InvalidSeedLength(entropy.len()));
@@ -593,7 +606,7 @@ impl<S: Entropy> CtrDrbg<S> {
         out: &mut [u8; SEED],
     ) -> Result<(), Error> {
         if self.derivation {
-            return derive(&[additional], out);
+            return derive(self.ctx, &[additional], out);
         }
         if additional.len() > SEED {
             return Err(Error::InvalidLength(additional.len()));
@@ -608,7 +621,7 @@ impl<S: Entropy> CtrDrbg<S> {
     /// replace both the key and the counter block, mixing `provided`
     /// in as it goes.
     fn update(&mut self, provided: &[u8; SEED]) -> Result<(), Error> {
-        let aes = Aes256::new(&self.key);
+        let aes = Aes256::new(self.ctx, &self.key);
         self.update_under(&aes, provided);
         Ok(())
     }
@@ -661,8 +674,8 @@ impl CtrDrbg<entropy::System> {
     /// without, [`Error::NotSupported`] where the processor has no
     /// generator and [`Error::EntropyUnavailable`] where the one it
     /// has does not pass its startup test.
-    pub fn from_system() -> Result<Self, Error> {
-        Self::try_new(entropy::System::try_new()?)
+    pub fn from_system(ctx: Context) -> Result<Self, Error> {
+        Self::try_new(ctx, entropy::System::try_new()?)
     }
 }
 
@@ -681,7 +694,13 @@ impl CtrDrbg<entropy::External> {
     /// A generator seeded through the derivation function from
     /// `seed`, which must be at least [`MIN_SEED`] bytes.
     pub(crate) fn from_seed(seed: &[u8]) -> Result<Self, Error> {
-        Self::instantiate(seed, &[], entropy::External, true)
+        Self::instantiate(
+            crate::Context::default(),
+            seed,
+            &[],
+            entropy::External,
+            true,
+        )
     }
 
     /// A generator seeded without the derivation function: the
@@ -695,7 +714,13 @@ impl CtrDrbg<entropy::External> {
         entropy: &[u8; SEED],
         personalization: &[u8],
     ) -> Result<Self, Error> {
-        Self::instantiate(entropy, personalization, entropy::External, false)
+        Self::instantiate(
+            crate::Context::default(),
+            entropy,
+            personalization,
+            entropy::External,
+            false,
+        )
     }
 }
 
@@ -739,7 +764,11 @@ fn advance(v: &mut [u8; BLOCK_SIZE], n: u64) {
 /// because entropy and additional input come from different places
 /// and there is no allocator to join them with; the chaining absorbs
 /// them as though they were one run.
-fn derive(parts: &[&[u8]], out: &mut [u8; SEED]) -> Result<(), Error> {
+fn derive(
+    ctx: Context,
+    parts: &[&[u8]],
+    out: &mut [u8; SEED],
+) -> Result<(), Error> {
     // The length goes into the input as a thirty-two bit number, so
     // it has to fit in one.
     let total: usize = parts.iter().map(|p| p.len()).sum();
@@ -754,7 +783,7 @@ fn derive(parts: &[&[u8]], out: &mut [u8; SEED]) -> Result<(), Error> {
     for (i, byte) in fixed.as_mut().iter_mut().enumerate() {
         *byte = i as u8;
     }
-    let aes = Aes256::new(&fixed);
+    let aes = Aes256::new(ctx, &fixed);
 
     // Each pass differs only in the counter its chain starts from,
     // which is what makes the three blocks differ.
@@ -778,7 +807,7 @@ fn derive(parts: &[&[u8]], out: &mut [u8; SEED]) -> Result<(), Error> {
     // from the first.
     let (key, counter) = temp.split_at(KEY);
     let key = Key::<[u8; KEY]>::try_from(key)?;
-    let aes = Aes256::new(&key);
+    let aes = Aes256::new(ctx, &key);
     let mut block = [0u8; BLOCK_SIZE];
     block.copy_from_slice(counter);
     temp.zeroize();
@@ -1009,7 +1038,8 @@ mod tests {
         let Ok(system) = entropy::System::try_new() else {
             return;
         };
-        let mut rng = CtrDrbg::try_new(system).expect("rng");
+        let mut rng =
+            CtrDrbg::try_new(crate::Context::default(), system).expect("rng");
         rng.counter = RESEED_INTERVAL + 1;
         let mut buf = [0u8; 16];
         rng.fill(&mut buf).expect("fill");
@@ -1044,8 +1074,10 @@ mod tests {
         spoiled[499] ^= 1;
         let mut first = [0u8; SEED];
         let mut second = [0u8; SEED];
-        derive(&[&long], &mut first).expect("derive");
-        derive(&[&spoiled], &mut second).expect("derive");
+        derive(crate::Context::default(), &[&long], &mut first)
+            .expect("derive");
+        derive(crate::Context::default(), &[&spoiled], &mut second)
+            .expect("derive");
         assert_ne!(first, second);
     }
 
@@ -1056,8 +1088,14 @@ mod tests {
         let whole = [0x44u8; 70];
         let mut joined = [0u8; SEED];
         let mut split = [0u8; SEED];
-        derive(&[&whole], &mut joined).expect("derive");
-        derive(&[&whole[..17], &whole[17..], &[]], &mut split).expect("derive");
+        derive(crate::Context::default(), &[&whole], &mut joined)
+            .expect("derive");
+        derive(
+            crate::Context::default(),
+            &[&whole[..17], &whole[17..], &[]],
+            &mut split,
+        )
+        .expect("derive");
         assert_eq!(joined, split);
     }
 
@@ -1242,7 +1280,7 @@ mod tests {
             for &len in &lengths {
                 let mut rng = CtrDrbg::from_seed(&seed()).expect("seed");
                 rng.v = start;
-                let aes = Aes256::new(&rng.key);
+                let aes = Aes256::new(crate::Context::default(), &rng.key);
                 let mut expected = vec![0u8; len];
                 let mut v = start;
                 for chunk in expected.chunks_mut(BLOCK_SIZE) {
@@ -1326,7 +1364,8 @@ mod tests {
                 Ok(())
             }
         }
-        let mut rng = CtrDrbg::try_new(Board(1)).expect("board");
+        let mut rng = CtrDrbg::try_new(crate::Context::default(), Board(1))
+            .expect("board");
         let mut buf = [0u8; 32];
         rng.fill(&mut buf).expect("fill");
         assert_ne!(buf, [0u8; 32]);

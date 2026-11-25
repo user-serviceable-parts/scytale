@@ -13,7 +13,7 @@ use super::{
 use crate::aead::Aead;
 use crate::cipher::aes::{BLOCK_SIZE, Kernel};
 use crate::features::{self, Dispatcher, Features};
-use crate::{Error, Key, KeyType};
+use crate::{Context, Error, Key, KeyType};
 
 #[cfg(target_arch = "aarch64")]
 use super::aarch64;
@@ -45,10 +45,10 @@ pub struct Aegis256 {
 
 impl Aegis256 {
     /// Takes the key.
-    pub fn new(key: &Key<[u8; KEY_SIZE]>) -> Self {
+    pub fn new(ctx: Context, key: &Key<[u8; KEY_SIZE]>) -> Self {
         Aegis256 {
             key: key.clone(),
-            kernel: features::select(KERNELS).unwrap_or(Kernel::Bitsliced),
+            kernel: features::select(ctx, KERNELS).unwrap_or(Kernel::Bitsliced),
         }
     }
 
@@ -118,9 +118,9 @@ impl Aead for Aegis256 {
     type Nonce = [u8; NONCE_SIZE];
     type Tag = [u8; TAG];
 
-    fn new(key: &Self::Key) -> Self {
+    fn new(ctx: Context, key: &Self::Key) -> Self {
         // The inherent constructor, which takes precedence here.
-        Aegis256::new(key)
+        Aegis256::new(ctx, key)
     }
 
     fn encrypt(
@@ -401,21 +401,19 @@ pub(crate) mod tests {
         hex(s).try_into().unwrap()
     }
 
-    /// Each kernel this processor can run under the set in force,
-    /// the virtual features granted.
     /// This variant under one kernel: the draft's vectors and the
     /// rest below, each against the portable kernel. The kernel the
     /// list chooses under the row's features is the one they build
     /// on, through the test constructor that trusts its caller.
     pub(crate) fn kernel(under: &features::Under) {
-        let chosen = under.build(|| features::select(KERNELS)).expect("listed");
+        let chosen = features::select(under.ctx(), KERNELS).expect("listed");
         UNDER.set(Some(chosen));
         update();
         draft_vectors();
         draft_vectors_that_must_fail();
         kernels_and_pieces_agree();
         crate::vectors::support::wycheproof::aegis::aegis256(&|key| {
-            under.build(|| Aegis256::new(key))
+            Aegis256::new(under.ctx(), key)
         });
         UNDER.set(None);
     }
@@ -439,10 +437,10 @@ pub(crate) mod tests {
 
     #[test]
     fn dispatches() {
-        features::build_alone(|| {
-            let aead = Aegis256::new(&Key::zeroed());
+        {
+            let aead = Aegis256::new(crate::Context::default(), &Key::zeroed());
             features::dispatches(KERNELS, Aegis256::profiles(), aead.kernel());
-        });
+        };
     }
 
     /// The draft's appendix A.3.1.
@@ -625,7 +623,7 @@ pub(crate) mod tests {
 
     #[test]
     fn aad_after_message_is_out_of_order() {
-        let aead = Aegis256::new(&Key::zeroed());
+        let aead = Aegis256::new(crate::Context::default(), &Key::zeroed());
         let mut e = aead.encryptor(&[0u8; 32]);
         e.update(&mut [0u8; 3]).unwrap();
         assert_eq!(e.aad(b"late"), Err(Error::OutOfOrder));
@@ -638,7 +636,8 @@ pub(crate) mod tests {
     fn wipes_and_hides_the_key() {
         fn wipes<T: ZeroizeOnDrop>() {}
         wipes::<Aegis256>();
-        let aead = Aegis256::new(&Key::from([0x5au8; 32]));
+        let aead =
+            Aegis256::new(crate::Context::default(), &Key::from([0x5au8; 32]));
         let text = std::format!("{aead:?}");
         assert!(!text.contains("5a"), "{text}");
         let text = std::format!("{:?}", aead.decryptor(&[0x5au8; 32]));

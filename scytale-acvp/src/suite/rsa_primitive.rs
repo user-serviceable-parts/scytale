@@ -74,9 +74,10 @@ fn signature_case(
 ) -> Result<Value, Error> {
     let n = hex(t, "n")?;
     let e = hex(t, "e")?;
-    let key = builder.try_build(|| match text(group, "keyMode")? {
-        "standard" => Ok(PrivateKey::try_new(&n, &e, &hex(t, "d")?)?),
+    let key = builder.try_build(|ctx| match text(group, "keyMode")? {
+        "standard" => Ok(PrivateKey::try_new(ctx, &n, &e, &hex(t, "d")?)?),
         "crt" => Ok(PrivateKey::try_new_crt(
+            ctx,
             &n,
             &e,
             &match opt_hex(t, "d")? {
@@ -212,8 +213,8 @@ fn key_for<'k>(
     for _ in 0..KEY_TRIES {
         let key = match generated {
             Some(key) => key,
-            None => generated.insert(builder.try_build(|| {
-                PkePrivateKey::generate(&mut Rng(&mut *rng), bits)
+            None => generated.insert(builder.try_build(|ctx| {
+                PkePrivateKey::generate(ctx, &mut Rng(&mut *rng), bits)
             })?),
         };
         match refuse {
@@ -304,7 +305,7 @@ fn given_key_entry(
     // refuses them at different points: an even modulus never becomes
     // a key at all, while a ciphertext at or above the modulus is
     // caught by the primitive.
-    let Ok(key) = builder.build(|| PkePublicKey::try_new(n, e))? else {
+    let Ok(key) = builder.build(|ctx| PkePublicKey::try_new(ctx, n, e)) else {
         out["testPassed"] = json!(false);
         return Ok(out);
     };
@@ -498,6 +499,7 @@ mod tests {
     /// give the file's signature.
     #[test]
     fn private_exponent_is_derived_from_the_primes() {
+        let ctx = scytale::Context::default();
         let doc = super::super::vendored(find("RSA-SignaturePrimitive-2.0")[0]);
         let mut seen = 0;
         for group in list(&doc, "testGroups").unwrap() {
@@ -515,7 +517,7 @@ mod tests {
                     &e,
                 )
                 .unwrap();
-                let key = PrivateKey::try_new(&n, &e, &d).unwrap();
+                let key = PrivateKey::try_new(ctx, &n, &e, &d).unwrap();
                 let mut signature = vec![0u8; key.modulus_len()];
                 key.sign_primitive(&hex(t, "message").unwrap(), &mut signature)
                     .unwrap();
@@ -566,6 +568,7 @@ mod tests {
 
     #[test]
     fn decryption_without_a_key_generates_one() {
+        let ctx = scytale::Context::default();
         let low = format!("{:0>512}", "01");
         let high = "FF".repeat(256);
         let doc = json!({
@@ -591,6 +594,7 @@ mod tests {
         assert_eq!(fail["testPassed"], false);
         assert!(fail.get("plainText").is_none());
         let key = PkePublicKey::try_new(
+            ctx,
             &hex(pass, "n").unwrap(),
             &hex(pass, "e").unwrap(),
         )

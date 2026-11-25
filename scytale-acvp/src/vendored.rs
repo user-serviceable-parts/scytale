@@ -7,8 +7,8 @@
 //! selected by `SCYTALE_KERNELS`.
 //!
 //! A kernel is reached through the feature profiles the library's
-//! types publish: setting a profile puts a feature set in force, and
-//! a type takes the first of its profiles the set meets. A vector
+//! types publish: an object built with a context of a profile's set
+//! takes the first of its type's profiles that set meets. A vector
 //! tests the kernels of one type: a hash suite the hash's, AES-ECB
 //! the cipher's, a mode's suite the mode's, an ECDSA group its
 //! curve's, the RSA suites RSA's. It is answered under each profile
@@ -32,7 +32,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use scytale::Random;
 use scytale::aead::{Ccm, Gcm, GcmSiv, Xpn};
 use scytale::cipher::aes::Aes128;
 use scytale::cipher::mode::{Cbc, Ctr, Xts};
@@ -312,26 +311,6 @@ pub fn units(suite: usize, doc: &Value) -> Vec<Unit> {
     out
 }
 
-/// A generator that notes any draw made while its builder's set is
-/// not in force. A driver that draws outside the builder has very
-/// likely built outside it too, and a build there takes whatever set
-/// another thread has put in force; the answers cannot show it, since
-/// every kernel answers alike, but a draw can.
-struct Watched<R> {
-    rng: R,
-    set: Features,
-    strayed: bool,
-}
-
-impl<R: Random> Random for Watched<R> {
-    fn fill(&mut self, out: &mut [u8]) -> Result<(), scytale::Error> {
-        if features::get() != self.set {
-            self.strayed = true;
-        }
-        self.rng.fill(out)
-    }
-}
-
 /// Answers `unit` of `doc` under `builder` with a fresh fixed
 /// generator and compares the answer with `doc`; returns the cases
 /// compared, or `None` for a group the driver skipped.
@@ -366,19 +345,12 @@ pub fn answer_unit(
         Value::Array(vec![Value::Object(group)]),
     );
     let cut = Value::Object(cut);
-    let mut rng = Watched {
-        rng: fixed_rng(builder)?,
-        set: builder.set(),
-        strayed: false,
-    };
+    let mut rng = fixed_rng(builder)?;
     let answered = (suite.answer)(&cut, &mut rng, builder)?;
-    if rng.strayed {
-        return Err(Error::new("drew randomness outside the builder"));
-    }
     if answered["testGroups"].as_array().is_some_and(Vec::is_empty) {
         return Ok(None);
     }
-    compare(suite, doc, &answered, builder).map(Some)
+    compare(suite, doc, &answered).map(Some)
 }
 
 /// The seconds between two lines of progress.
@@ -800,44 +772,6 @@ mod tests {
         let verified = of("sigVer");
         assert_eq!(verified.len(), 10);
         assert!(verified.iter().all(|u| u.case.is_some() && u.weight == 1));
-    }
-
-    /// A driver that draws outside its builder fails its unit, which
-    /// can be seen only under a profile the processor would not pick
-    /// by itself: under the set detected, outside looks like inside.
-    #[test]
-    fn a_draw_outside_the_builder_fails_the_unit() {
-        if features::detected().is_empty() {
-            return;
-        }
-        let suite = |answer| Suite {
-            directory: "x",
-            algorithm: "x",
-            mode: None,
-            revision: "1.0",
-            answer,
-            verify: None,
-            minimum: 0,
-        };
-        let inside = suite(|doc, rng, builder| {
-            builder.try_build(|| rng.fill(&mut [0u8; 8]))?;
-            Ok(json!({ "testGroups": [], "vsId": doc["vsId"] }))
-        });
-        let outside = suite(|doc, rng, _| {
-            rng.fill(&mut [0u8; 8])?;
-            Ok(json!({ "testGroups": [], "vsId": doc["vsId"] }))
-        });
-        let doc = json!({"testGroups": [{"tgId": 1, "tests": []}]});
-        let unit = Unit {
-            suite: 0,
-            group: 0,
-            case: None,
-            weight: 1,
-        };
-        let portable = Builder::try_new(Features::new()).unwrap();
-        assert_eq!(answer_unit(&inside, &doc, &unit, &portable), Ok(None));
-        let e = answer_unit(&outside, &doc, &unit, &portable).unwrap_err();
-        assert_eq!(e.message, "drew randomness outside the builder");
     }
 
     #[test]

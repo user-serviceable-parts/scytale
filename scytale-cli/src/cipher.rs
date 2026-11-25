@@ -5,6 +5,7 @@
 //! protocol that brings its own MAC, a disk, a key to wrap, or a
 //! format to preserve.
 
+use scytale::Context;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -233,7 +234,7 @@ where
     match mode {
         "ecb" => {
             let padded = padding()?;
-            let cipher = C::new(&key()?);
+            let cipher = C::new(scytale::Context::default(), &key()?);
             blocks(padded, encrypt, name, input, out, |chunk| {
                 let (blocks, _) = <[u8; 16]>::split_mut(chunk);
                 if encrypt {
@@ -246,7 +247,7 @@ where
         }
         "cbc" => {
             let padded = padding()?;
-            let cbc = Cbc::<C>::new(&key()?);
+            let cbc = Cbc::<C>::new(scytale::Context::default(), &key()?);
             let iv = iv()?;
             if encrypt {
                 let mut e = cbc.encryptor(&iv);
@@ -258,7 +259,7 @@ where
         }
         "cfb128" => {
             let padded = padding()?;
-            let cfb = Cfb128::<C>::new(&key()?);
+            let cfb = Cfb128::<C>::new(scytale::Context::default(), &key()?);
             let iv = iv()?;
             if encrypt {
                 let mut e = cfb.encryptor(&iv);
@@ -269,7 +270,7 @@ where
             }
         }
         "cfb8" => {
-            let cfb = Cfb8::<C>::new(&key()?);
+            let cfb = Cfb8::<C>::new(scytale::Context::default(), &key()?);
             let iv = iv()?;
             if encrypt {
                 let mut e = cfb.encryptor(&iv);
@@ -286,7 +287,7 @@ where
             }
         }
         "cfb1" => {
-            let cfb = Cfb1::<C>::new(&key()?);
+            let cfb = Cfb1::<C>::new(scytale::Context::default(), &key()?);
             let iv = iv()?;
             let mut data = read_all(input)?;
             let bits = data.len() * 8;
@@ -298,7 +299,7 @@ where
             io::write(out, &data, false)
         }
         "ofb" => {
-            let ofb = Ofb::<C>::new(&key()?);
+            let ofb = Ofb::<C>::new(scytale::Context::default(), &key()?);
             let mut s = ofb.stream(&iv()?);
             io::stream(input, out, |c| {
                 s.update(c);
@@ -306,7 +307,7 @@ where
             })
         }
         "ctr" => {
-            let ctr = Ctr::<C>::new(&key()?);
+            let ctr = Ctr::<C>::new(scytale::Context::default(), &key()?);
             let mut s = ctr.stream(&iv()?);
             io::stream(input, out, |c| {
                 s.update(c);
@@ -323,13 +324,14 @@ where
                 ));
             };
             let k2 = value::key::<C>(second, "--tweak-key", name)?;
-            let xts = Xts::<C>::try_new(&k1, &k2).map_err(|_| {
-                usage!(
-                    "--key and --tweak-key are the same {}; XTS needs \
+            let xts = Xts::<C>::try_new(scytale::Context::default(), &k1, &k2)
+                .map_err(|_| {
+                    usage!(
+                        "--key and --tweak-key are the same {}; XTS needs \
                      two different keys",
-                    entry.key.describe()
-                )
-            })?;
+                        entry.key.describe()
+                    )
+                })?;
             let tweak = iv()?;
             let mut data = read_all(input)?;
             if data.len() < 16 {
@@ -421,11 +423,12 @@ fn chacha20(entry: &Entry, args: &CipherArgs) -> Result<()> {
     let mut out = io::output(args.out.as_deref(), false)?;
     if name == "xchacha20" {
         let nonce = value::array::<24>(nonce, "--nonce", name)?;
-        let mut stream = XChaCha20::new(&key).stream(&nonce, args.counter);
+        let mut stream = XChaCha20::new(scytale::Context::default(), &key)
+            .stream(&nonce, args.counter);
         return io::stream(&mut *input, &mut *out, |c| Ok(stream.update(c)?));
     }
     let nonce = value::array::<12>(nonce, "--nonce", name)?;
-    let cipher = ChaCha20::new(&key);
+    let cipher = ChaCha20::new(scytale::Context::default(), &key);
     let mut stream = cipher.stream(&nonce, args.counter);
     io::stream(&mut *input, &mut *out, |c| Ok(stream.update(c)?))
 }
@@ -498,7 +501,11 @@ where
         let tweak: &[u8; 7] = (&tweak[..]).try_into().map_err(|_| {
             usage!("--tweak is {} bytes; ff3-1 takes exactly 7", tweak.len())
         })?;
-        let mode = Ff3_1::<C>::try_new(&key, alphabet.radix())?;
+        let mode = Ff3_1::<C>::try_new(
+            scytale::Context::default(),
+            &key,
+            alphabet.radix(),
+        )?;
         while let Some(line) = next(&mut symbols)? {
             let r = if encrypt {
                 mode.encrypt(tweak, &mut symbols)
@@ -512,7 +519,11 @@ where
             emit(&symbols, &mut *out)?;
         }
     } else {
-        let mode = Ff1::<C>::try_new(&key, alphabet.radix())?;
+        let mode = Ff1::<C>::try_new(
+            scytale::Context::default(),
+            &key,
+            alphabet.radix(),
+        )?;
         while let Some(line) = next(&mut symbols)? {
             let r = if encrypt {
                 mode.encrypt(&tweak, &mut symbols)
@@ -569,10 +580,22 @@ fn wrap(args: &WrapArgs, wrap: bool) -> Result<()> {
         }
         let mut buf = vec![0u8; data.len() + 16];
         let n = match (mode, wrap) {
-            ("kw", true) => Kw::<C>::new(&key).wrap(&data, &mut buf),
-            ("kw", false) => Kw::<C>::new(&key).unwrap(&data, &mut buf),
-            (_, true) => Kwp::<C>::new(&key).wrap(&data, &mut buf),
-            (_, false) => Kwp::<C>::new(&key).unwrap(&data, &mut buf),
+            ("kw", true) => Kw::<C>::new(Context::default(), &key).wrap(
+                &data,
+                &mut buf,
+            ),
+            ("kw", false) => Kw::<C>::new(Context::default(), &key).unwrap(
+                &data,
+                &mut buf,
+            ),
+            (_, true) => Kwp::<C>::new(Context::default(), &key).wrap(
+                &data,
+                &mut buf,
+            ),
+            (_, false) => Kwp::<C>::new(Context::default(), &key).unwrap(
+                &data,
+                &mut buf,
+            ),
         }
         .map_err(|e| match e {
             Error::AuthenticationFailed => verify!(

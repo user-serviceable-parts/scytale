@@ -22,6 +22,7 @@ use crate::support::{
     Error, Rng, hex, hex_value, opt_hex, opt_text, text, unknown_test_type,
 };
 use scytale::BlockType;
+use scytale::Context;
 use scytale::Random;
 use scytale::hash::Hash;
 use scytale::hash::sha2::{
@@ -32,18 +33,21 @@ use scytale::sig::ecdsa::{p256, p384, p521};
 use serde_json::{Value, json};
 
 /// The hashes a signature here may be made under.
-pub trait SigHash: Hash + Clone + BlockType + Default {}
-impl<H: Hash + Clone + BlockType + Default> SigHash for H {}
+pub trait SigHash: Hash + Clone + BlockType {}
+impl<H: Hash + Clone + BlockType> SigHash for H {}
 
 /// One curve's key types, so a driver can be written once.
 pub trait Curve {
     const WIDTH: usize;
     type Private;
     type Public;
-    fn private(d: &[u8]) -> Result<Self::Private, Error>;
-    fn generate(rng: &mut dyn Random) -> Result<Self::Private, Error>;
+    fn private(ctx: Context, d: &[u8]) -> Result<Self::Private, Error>;
+    fn generate(
+        ctx: Context,
+        rng: &mut dyn Random,
+    ) -> Result<Self::Private, Error>;
     fn secret_of(key: &Self::Private) -> Vec<u8>;
-    fn public(sec1: &[u8]) -> Result<Self::Public, Error>;
+    fn public(ctx: Context, sec1: &[u8]) -> Result<Self::Public, Error>;
     fn public_of(key: &Self::Private) -> Vec<u8>;
     fn sign<H: SigHash>(
         key: &Self::Private,
@@ -68,20 +72,26 @@ macro_rules! curve {
             const WIDTH: usize = $width;
             type Private = $module::PrivateKey;
             type Public = $module::PublicKey;
-            fn private(d: &[u8]) -> Result<Self::Private, Error> {
+            fn private(ctx: Context, d: &[u8]) -> Result<Self::Private, Error> {
                 let d: [u8; $width] = d
                     .try_into()
                     .map_err(|_| Error::new("d is not the curve's width"))?;
-                Ok($module::PrivateKey::try_new(&d)?)
+                Ok($module::PrivateKey::try_new(ctx, &d)?)
             }
-            fn generate(rng: &mut dyn Random) -> Result<Self::Private, Error> {
-                Ok($module::PrivateKey::generate(&mut Rng(rng))?)
+            fn generate(
+                ctx: Context,
+                rng: &mut dyn Random,
+            ) -> Result<Self::Private, Error> {
+                Ok($module::PrivateKey::generate(ctx, &mut Rng(rng))?)
             }
             fn secret_of(key: &Self::Private) -> Vec<u8> {
                 key.secret_bytes().to_vec()
             }
-            fn public(sec1: &[u8]) -> Result<Self::Public, Error> {
-                Ok($module::PublicKey::try_from_sec1(sec1)?)
+            fn public(
+                ctx: Context,
+                sec1: &[u8],
+            ) -> Result<Self::Public, Error> {
+                Ok($module::PublicKey::try_from_sec1(ctx, sec1)?)
             }
             fn public_of(key: &Self::Private) -> Vec<u8> {
                 key.public_key().sec1_bytes().to_vec()
@@ -291,14 +301,18 @@ fn signature(t: &Value, width: usize) -> Result<Option<Vec<u8>>, Error> {
 }
 
 /// The key the file gives as `d` in `v`, or a fresh one.
-fn key<C: Curve>(v: &Value, rng: &mut dyn Random) -> Result<C::Private, Error> {
+fn key<C: Curve>(
+    ctx: Context,
+    v: &Value,
+    rng: &mut dyn Random,
+) -> Result<C::Private, Error> {
     match opt_hex(v, "d")? {
         Some(d) => {
             let d = padded(&d, C::WIDTH)
                 .ok_or_else(|| Error::new("d is wider than the curve"))?;
-            C::private(&d)
+            C::private(ctx, &d)
         }
-        None => C::generate(rng),
+        None => C::generate(ctx, rng),
     }
 }
 
@@ -315,7 +329,7 @@ fn key_gen<C: Curve>(
     builder: &Builder,
 ) -> Result<Option<Value>, Error> {
     answer_tests(group, |t| {
-        let key = builder.try_build(|| key::<C>(t, rng))?;
+        let key = builder.try_build(|ctx| key::<C>(ctx, t, rng))?;
         let (qx, qy) = public_fields::<C>(&key);
         Ok(json!({ "d": hex_value(&C::secret_of(&key)), "qx": qx, "qy": qy }))
     })
@@ -328,7 +342,7 @@ fn key_ver<C: Curve>(
     answer_tests(group, |t| {
         // A coordinate wider than the field cannot be presented at all.
         let passed = match sec1(t, C::WIDTH)? {
-            Some(q) => builder.build(|| C::public(&q).is_ok())?,
+            Some(q) => builder.build(|ctx| C::public(ctx, &q).is_ok()),
             None => false,
         };
         Ok(json!({ "testPassed": passed }))
@@ -342,13 +356,13 @@ fn sig_ver<C: Curve, H: SigHash>(
     answer_tests(group, |t| {
         let message = hex(t, "message")?;
         let passed = match (sec1(t, C::WIDTH)?, signature(t, C::WIDTH)?) {
-            (Some(q), Some(sig)) => match builder.build(|| C::public(&q))? {
-                // Verifying starts a hash of the message.
-                Ok(key) => {
-                    builder.build(|| C::verify::<H>(&key, &message, &sig))?
+            (Some(q), Some(sig)) => {
+                match builder.build(|ctx| C::public(ctx, &q)) {
+                    // Verifying starts a hash of the message.
+                    Ok(key) => C::verify::<H>(&key, &message, &sig),
+                    Err(_) => false,
                 }
-                Err(_) => false,
-            },
+            }
             _ => false,
         };
         Ok(json!({ "testPassed": passed }))
@@ -363,18 +377,14 @@ fn sig_gen<C: Curve, H: SigHash>(
     exact: bool,
     builder: &Builder,
 ) -> Result<Option<Value>, Error> {
-    let key = builder.try_build(|| key::<C>(group, rng))?;
+    let key = builder.try_build(|ctx| key::<C>(ctx, group, rng))?;
     let answered = answer_tests(group, |t| {
         let message = hex(t, "message")?;
-        // Signing starts a hash of the message, and a deterministic
-        // signature an HMAC generator for its nonce besides.
-        let sig = builder.try_build(|| {
-            if exact {
-                C::sign_deterministic::<H>(&key, &message)
-            } else {
-                C::sign::<H>(&key, rng, &message)
-            }
-        })?;
+        let sig = if exact {
+            C::sign_deterministic::<H>(&key, &message)
+        } else {
+            C::sign::<H>(&key, rng, &message)
+        }?;
         let (r, s) = sig.split_at(C::WIDTH);
         Ok(json!({ "r": hex_value(r), "s": hex_value(s) }))
     })?;
@@ -400,13 +410,16 @@ pub fn verify_sig_gen(
     answered_group: &Value,
     answered_test: &Value,
 ) -> Result<(), Error> {
+    // Checking an answer is not the kernel under test.
+    let ctx = Context::default();
     with_curve!(vendored_group, C => with_hash!(vendored_group,
-        H => verify_as::<C, H>(
+        H => verify_as::<C, H>(ctx,
             vendored_group, vendored_test, answered_group, answered_test);
         why => Err(Error::new(why))); why => Err(Error::new(why)))
 }
 
 fn verify_as<C: Curve, H: SigHash>(
+    ctx: Context,
     vendored_group: &Value,
     vendored_test: &Value,
     answered_group: &Value,
@@ -424,7 +437,7 @@ fn verify_as<C: Curve, H: SigHash>(
         ("answered", &q, answered_test),
         ("file's", &theirs, vendored_test),
     ] {
-        let public = C::public(q)?;
+        let public = C::public(ctx, q)?;
         let ok = signature(t, C::WIDTH)?
             .is_some_and(|sig| C::verify::<H>(&public, &message, &sig));
         if !ok {
@@ -479,6 +492,7 @@ mod tests {
     /// it answers must hang together.
     #[test]
     fn fresh_keys_are_consistent() {
+        let ctx = Context::default();
         let doc = |mode: &str, group: Value| {
             let mut doc =
                 json!({ "algorithm": "ECDSA", "testGroups": [group] });
@@ -497,7 +511,7 @@ mod tests {
         )
         .unwrap();
         let t = &answered["testGroups"][0]["tests"][0];
-        let key = P256::private(&hex(t, "d").unwrap()).unwrap();
+        let key = P256::private(ctx, &hex(t, "d").unwrap()).unwrap();
         assert_eq!(sec1(t, 32).unwrap().unwrap(), P256::public_of(&key));
 
         let sig_gen = doc(
@@ -513,7 +527,7 @@ mod tests {
         )
         .unwrap();
         let g = &answered["testGroups"][0];
-        let public = P256::public(&sec1(g, 32).unwrap().unwrap()).unwrap();
+        let public = P256::public(ctx, &sec1(g, 32).unwrap().unwrap()).unwrap();
         let sig = signature(&g["tests"][0], 32).unwrap().unwrap();
         assert!(P256::verify::<Sha256>(&public, b"abc", &sig));
     }

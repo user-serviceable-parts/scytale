@@ -7,6 +7,7 @@
 use super::{answer_groups, answer_tests};
 use crate::profile::Builder;
 use crate::support::{Error, hex, hex_value, key_of, text, unknown_test_type};
+use scytale::Context;
 use scytale::Random;
 use scytale::aead::{Aead, GcmSiv, SivKey};
 use scytale::cipher::BlockCipher;
@@ -34,9 +35,9 @@ pub fn answer(
                 // Every message derives its own keys and builds its
                 // own cipher and POLYVAL from them: the message is
                 // built too.
-                builder.try_build(|| match key.len() {
-                    16 => aft::<Aes128>(&key, t, encrypt),
-                    32 => aft::<Aes256>(&key, t, encrypt),
+                builder.try_build(|ctx| match key.len() {
+                    16 => aft::<Aes128>(ctx, &key, t, encrypt),
+                    32 => aft::<Aes256>(ctx, &key, t, encrypt),
                     n => Err(Error::new(format!("key of {n} bytes"))),
                 })
             }),
@@ -46,11 +47,12 @@ pub fn answer(
 }
 
 fn aft<C: BlockCipher<Block = [u8; 16], Key: SivKey>>(
+    ctx: Context,
     key: &[u8],
     t: &Value,
     encrypt: bool,
 ) -> Result<Value, Error> {
-    let siv = GcmSiv::<C>::new(&key_of::<C>(key)?);
+    let siv = GcmSiv::<C>::new(ctx, &key_of::<C>(key)?);
     let nonce: [u8; 12] = hex(t, "iv")?
         .try_into()
         .map_err(|_| Error::new("iv is not 12 bytes"))?;

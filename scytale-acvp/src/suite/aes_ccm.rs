@@ -32,7 +32,7 @@ pub fn answer(
                 let key = hex(t, "key")?;
                 aes_width!(key, C => {
                     let k = key_of::<C>(&key)?;
-                    let ccm = builder.build(|| Ccm::<C>::new(&k))?;
+                    let ccm = builder.build(|ctx| Ccm::<C>::new(ctx, &k));
                     aft(&ccm, t, encrypt, tag_len)
                 })
             }),

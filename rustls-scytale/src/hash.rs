@@ -25,14 +25,14 @@ pub(crate) static SHA384: Sha<Sha384> = Sha {
 
 impl<H> Hash for Sha<H>
 where
-    H: scytale::hash::Hash + Clone + Default + Send + Sync + 'static,
+    H: scytale::hash::Hash + Clone + Send + Sync + 'static,
 {
     fn start(&self) -> Box<dyn Context> {
-        Box::new(Running(H::default()))
+        Box::new(Running(H::new(scytale::Context::default())))
     }
 
     fn hash(&self, data: &[u8]) -> Output {
-        Output::new(H::digest(data).as_ref())
+        Output::new(H::digest(scytale::Context::default(), data).as_ref())
     }
 
     fn output_len(&self) -> usize {

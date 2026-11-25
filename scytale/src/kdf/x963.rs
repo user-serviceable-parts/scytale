@@ -9,15 +9,18 @@
 //! ```
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::kdf::x963;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
+//! let ctx = Context::default();
 //! let z = [0x5a; 32];
 //! let mut key = [0u8; 32];
-//! x963::derive::<Sha256>(&z, &[b"shared info"], &mut key)?;
+//! x963::derive::<Sha256>(ctx, &z, &[b"shared info"], &mut key)?;
 //! # Ok(())
 //! # }
 //! ```
 
+use crate::Context;
 use zeroize::Zeroize;
 
 use crate::Error;
@@ -29,7 +32,8 @@ use crate::hash::Hash;
 /// # Errors
 ///
 /// [`Error::InvalidLength`] if `out` needs more than 2^32 - 1 blocks.
-pub fn derive<H: Hash + Default>(
+pub fn derive<H: Hash>(
+    ctx: Context,
     z: &[u8],
     shared_info: &[&[u8]],
     out: &mut [u8],
@@ -38,7 +42,7 @@ pub fn derive<H: Hash + Default>(
     if blocks > u64::from(u32::MAX) {
         return Err(Error::InvalidLength(out.len()));
     }
-    let mut hash = H::default();
+    let mut hash = H::new(ctx);
     for (i, chunk) in out.chunks_mut(size_of::<H::Output>()).enumerate() {
         hash.update(z);
         hash.update(&(i as u32 + 1).to_be_bytes());
@@ -60,9 +64,15 @@ mod tests {
     #[test]
     fn derive_is_the_definition() {
         let mut out = [0u8; 40];
-        derive::<Sha256>(b"z", &[b"sha", b"red"], &mut out).expect("kdf");
+        derive::<Sha256>(
+            crate::Context::default(),
+            b"z",
+            &[b"sha", b"red"],
+            &mut out,
+        )
+        .expect("kdf");
         for (i, block) in out.chunks(32).enumerate() {
-            let mut h = Sha256::default();
+            let mut h = Sha256::new(crate::Context::default());
             h.update(b"z");
             h.update(&(i as u32 + 1).to_be_bytes());
             h.update(b"shared");
@@ -75,9 +85,20 @@ mod tests {
     fn it_is_not_one_step() {
         let mut ours = [0u8; 32];
         let mut theirs = [0u8; 32];
-        derive::<Sha256>(b"z", &[b"info"], &mut ours).expect("kdf");
-        super::super::one_step::hash::<Sha256>(b"z", &[b"info"], &mut theirs)
-            .expect("kdf");
+        derive::<Sha256>(
+            crate::Context::default(),
+            b"z",
+            &[b"info"],
+            &mut ours,
+        )
+        .expect("kdf");
+        super::super::one_step::hash::<Sha256>(
+            crate::Context::default(),
+            b"z",
+            &[b"info"],
+            &mut theirs,
+        )
+        .expect("kdf");
         assert_ne!(ours, theirs);
     }
 }

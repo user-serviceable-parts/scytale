@@ -47,13 +47,13 @@ fn aft(
     let key = hex(t, "key")?;
     aes_width!(key, C => {
         let key = key_of::<C>(&key)?;
-        let kw = builder.build(|| {
+        let kw = builder.build(|ctx| {
             if forward {
-                Kw::<C>::new(&key)
+                Kw::<C>::new(ctx, &key)
             } else {
-                Kw::<C>::new_inverse(&key)
+                Kw::<C>::new_inverse(ctx, &key)
             }
-        })?;
+        });
         if encrypt {
             let plain = hex(t, "pt")?;
             let mut out = vec![0u8; plain.len() + 8];

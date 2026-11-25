@@ -32,15 +32,17 @@
 //! ```
 //! use scytale::{Error, Random};
 //! use scytale::random::{CtrDrbg, Entropy, entropy};
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
+//! let ctx = Context::default();
 //! // The usual case: let the system feed the generator.
-//! let mut rng = CtrDrbg::from_system()?;
+//! let mut rng = CtrDrbg::from_system(ctx)?;
 //! let mut key = [0u8; 32];
 //! rng.fill(&mut key)?;
 //!
 //! // The same, with the source named.
-//! let mut named = CtrDrbg::try_new(entropy::System::try_new()?)?;
+//! let mut named = CtrDrbg::try_new(ctx, entropy::System::try_new()?)?;
 //! named.fill(&mut key)?;
 //!
 //! // Hardware of your own: a noise source on a bus, read however
@@ -56,7 +58,7 @@
 //!         Ok(())
 //!     }
 //! }
-//! let mut own = CtrDrbg::try_new(Board)?;
+//! let mut own = CtrDrbg::try_new(ctx, Board)?;
 //! own.fill(&mut key)?;
 //! # fn read_noise_register() -> u8 { 0x5a }
 //! # Ok(())

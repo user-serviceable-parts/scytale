@@ -40,8 +40,10 @@
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Ctr;
+//! use scytale::Context;
+//! let ctx = Context::default();
 //!
-//! let ctr = Ctr::<Aes128>::new(&Key::from([0u8; 16]));
+//! let ctr = Ctr::<Aes128>::new(ctx, &Key::from([0u8; 16]));
 //! let counter = [0u8; 16];
 //!
 //! let mut data = [0u8; 21];
@@ -66,6 +68,8 @@ use self::x86_64 as native;
 
 use core::fmt;
 use core::marker::PhantomData;
+
+use crate::Context;
 
 use super::{ByteOrder, counter_blocks, xor};
 use crate::ByteArray;
@@ -115,8 +119,8 @@ impl<C: BlockCipher> Clone for Engine<C> {
 
 /// Every kernel, best first, with what each needs.
 ///
-/// A caller never names one: the mode takes the first row the
-/// features in force meet. The tests and the vector suites do name
+/// A caller never names one: the mode takes the first row its
+/// context meets. The tests and the vector suites do name
 /// them, so that every kernel is validated and not only the one this
 /// machine would pick.
 pub(crate) const KERNELS: &[(Kernel, Features)] = crate::kernel::CTR;
@@ -166,21 +170,20 @@ pub(crate) fn profiles<C: BlockCipher>() -> &'static [Features] {
 }
 
 impl<C: BlockCipher> Engine<C> {
-    /// The engine of the first kernel the features in force allow for
-    /// this cipher.
-    fn new() -> Self {
+    /// The engine of the first kernel `ctx` allows for this cipher.
+    fn new(ctx: Context) -> Self {
         // The list ends in the portable row, which needs nothing, so
         // there is always one; the fallback is for the type checker.
-        features::select(kernels::<C>())
+        features::select(ctx, kernels::<C>())
             .and_then(Self::with)
             .unwrap_or(Engine::Generic(PhantomData))
     }
 
     /// This engine where it can read `cipher`'s schedule, and the
-    /// portable one where it cannot. The cipher chose its own kernel
-    /// from its own reading of the set in force; a set changed in
-    /// between can leave it on code whose schedule these loops cannot
-    /// load, and the engine must then not be the one that tries.
+    /// portable one where it cannot. The cipher chose its own kernel;
+    /// one of the caller's own, or one chosen from another context,
+    /// can be on code whose schedule these loops cannot load, and the
+    /// engine must then not be the one that tries.
     #[cfg_attr(
         not(any(
             target_arch = "aarch64",
@@ -301,14 +304,14 @@ where
     C::Block: ByteArray,
 {
     /// Takes the key the cipher runs under.
-    pub fn new(key: &C::Key) -> Self {
+    pub fn new(ctx: Context, key: &C::Key) -> Self {
         // The counter is the last four bytes of the block, so a
         // cipher of the caller's own with a narrower block has no
         // counter to run. Said when the mode is built for it, rather
         // than found out by an index past the front of the block.
         const { assert!(size_of::<C::Block>() >= 4) };
-        let cipher = C::new(key);
-        let engine = Engine::new().over(&cipher);
+        let cipher = C::new(ctx, key);
+        let engine = Engine::new(ctx).over(&cipher);
         Ctr { cipher, engine }
     }
 
@@ -556,7 +559,7 @@ pub(crate) mod tests {
     }
 
     fn ctr<const K: usize>(key: &[u8; K]) -> Ctr<Aes<K>> {
-        Ctr::new(&Key::from(*key))
+        Ctr::new(crate::Context::default(), &Key::from(*key))
     }
 
     /// Every length across the bulk group, the tail widths under it
@@ -571,7 +574,7 @@ pub(crate) mod tests {
         const N: usize = 2 * 16 * 16 + 5 * 16 + 7;
         let key = [0x5au8; 16];
         let start = [0x77u8; 16];
-        let aes = Aes::<16>::new(&key);
+        let aes = Aes::<16>::new(crate::Context::default(), &key);
 
         let mut want = [0u8; N];
         let mut counter = start;
@@ -597,7 +600,7 @@ pub(crate) mod tests {
         const N: usize = 3 * 16 * 16 + 5 * 16 + 7;
         let key = [0x5au8; 16];
         let start = [0x77u8; 16];
-        let aes = features::build_portable(|| Aes::<16>::new(&key));
+        let aes = { Aes::<16>::new(crate::Context::portable(), &key) };
 
         let mut want = [0u8; N];
         let mut counter = start;
@@ -609,7 +612,7 @@ pub(crate) mod tests {
         }
 
         let key = Key::from(key);
-        let ctr = under.build(|| Ctr::<Aes128>::new(&key));
+        let ctr = Ctr::<Aes128>::new(under.ctx(), &key);
         for n in 0..=N {
             let mut got = [0u8; N];
             ctr.encrypt(&start, &mut got[..n]);
@@ -630,7 +633,7 @@ pub(crate) mod tests {
         // Three times round the 256 blocks that byte counts.
         const N: usize = 3 * 256 * 16 + 32;
         let key = [0x11u8; 16];
-        let aes = Aes::<16>::new(&key);
+        let aes = Aes::<16>::new(crate::Context::default(), &key);
 
         for last in [0u8, 1, 15, 16, 127, 239, 240, 241, 254, 255] {
             let mut start = [0x42u8; 16];
@@ -678,7 +681,7 @@ pub(crate) mod tests {
 
         // The keystream as counter mode defines it: a block at a
         // time, counting in the whole block.
-        let aes = Aes::<16>::new(&key);
+        let aes = Aes::<16>::new(crate::Context::default(), &key);
         let mut want = [0u8; N * 16];
         let mut counter = start;
         for chunk in want.chunks_mut(16) {

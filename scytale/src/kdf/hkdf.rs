@@ -9,14 +9,22 @@
 //! ```
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::kdf::hkdf;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
+//! let ctx = Context::default();
 //! let shared_secret = [0x0b; 32];
 //! let salt = [0x42; 16];
 //!
 //! // Both steps at once: the usual case.
 //! let mut key = [0u8; 32];
-//! hkdf::derive::<Sha256>(&salt, &shared_secret, &[b"encryption"], &mut key)?;
+//! hkdf::derive::<Sha256>(
+//!     ctx,
+//!     &salt,
+//!     &shared_secret,
+//!     &[b"encryption"],
+//!     &mut key,
+//! )?;
 //!
 //! // Expand only, from a key that is already uniformly random, such
 //! // as one a generator drew. Extracting again would not hurt, but
@@ -24,8 +32,8 @@
 //! let prk = [0x7e; 32];
 //! let mut client = [0u8; 32];
 //! let mut server = [0u8; 32];
-//! hkdf::expand::<Sha256>(&prk, &[b"client write"], &mut client)?;
-//! hkdf::expand::<Sha256>(&prk, &[b"server write"], &mut server)?;
+//! hkdf::expand::<Sha256>(ctx, &prk, &[b"client write"], &mut client)?;
+//! hkdf::expand::<Sha256>(ctx, &prk, &[b"server write"], &mut server)?;
 //! assert_ne!(client, server);
 //! # Ok(())
 //! # }
@@ -44,6 +52,7 @@
 //! kilobytes for SHA-256; a protocol wanting more than that has
 //! something else wrong.
 
+use crate::Context;
 use crate::hash::Hash;
 use crate::mac::Mac;
 use crate::mac::hmac::Hmac;
@@ -52,11 +61,12 @@ use zeroize::Zeroize;
 
 /// Extracts a pseudorandom key from `ikm` under `salt`, which may be
 /// empty.
-pub fn extract<H: Hash + Clone + BlockType + Default>(
+pub fn extract<H: Hash + Clone + BlockType>(
+    ctx: Context,
     salt: &[u8],
     ikm: &[u8],
 ) -> H::Output {
-    let mut mac = Hmac::<H>::new(salt);
+    let mut mac = Hmac::<H>::new(ctx, salt);
     mac.update(ikm);
     mac.finalize()
 }
@@ -68,7 +78,8 @@ pub fn extract<H: Hash + Clone + BlockType + Default>(
 ///
 /// Returns [`Error::InvalidLength`] if `okm` is longer than 255
 /// digests, the most the construction defines.
-pub fn expand<H: Hash + Clone + BlockType + Default>(
+pub fn expand<H: Hash + Clone + BlockType>(
+    ctx: Context,
     prk: &[u8],
     info: &[&[u8]],
     okm: &mut [u8],
@@ -76,7 +87,7 @@ pub fn expand<H: Hash + Clone + BlockType + Default>(
     if okm.len() > 255 * size_of::<H::Output>() {
         return Err(Error::InvalidLength(okm.len()));
     }
-    let mut mac = Hmac::<H>::new(prk);
+    let mut mac = Hmac::<H>::new(ctx, prk);
     // T(0) is empty; T(i) = HMAC(PRK, T(i-1) || info || i). Each
     // `finalize` leaves the MAC keyed and ready for the next.
     let mut previous: Option<H::Output> = None;
@@ -102,14 +113,15 @@ pub fn expand<H: Hash + Clone + BlockType + Default>(
 
 /// Extracts from `ikm` under `salt`, then expands with `info` to fill
 /// `okm`. `info` is a list of parts, as [`expand`] takes.
-pub fn derive<H: Hash + Clone + BlockType + Default>(
+pub fn derive<H: Hash + Clone + BlockType>(
+    ctx: Context,
     salt: &[u8],
     ikm: &[u8],
     info: &[&[u8]],
     okm: &mut [u8],
 ) -> Result<(), Error> {
-    let prk = extract::<H>(salt, ikm);
-    expand::<H>(prk.as_ref(), info, okm)
+    let prk = extract::<H>(ctx, salt, ikm);
+    expand::<H>(ctx, prk.as_ref(), info, okm)
 }
 
 #[cfg(test)]
@@ -134,10 +146,17 @@ mod tests {
     #[test]
     fn info_parts_join() {
         let mut whole = [0u8; 48];
-        derive::<Sha256>(b"salt", b"ikm", &[b"label context"], &mut whole)
-            .unwrap();
+        derive::<Sha256>(
+            crate::Context::default(),
+            b"salt",
+            b"ikm",
+            &[b"label context"],
+            &mut whole,
+        )
+        .unwrap();
         let mut parts = [0u8; 48];
         derive::<Sha256>(
+            crate::Context::default(),
             b"salt",
             b"ikm",
             &[b"label", b" ", b"context"],
@@ -148,9 +167,23 @@ mod tests {
 
         // No parts at all is the empty info the standard allows.
         let mut none = [0u8; 48];
-        derive::<Sha256>(b"salt", b"ikm", &[], &mut none).unwrap();
+        derive::<Sha256>(
+            crate::Context::default(),
+            b"salt",
+            b"ikm",
+            &[],
+            &mut none,
+        )
+        .unwrap();
         let mut empty = [0u8; 48];
-        derive::<Sha256>(b"salt", b"ikm", &[b""], &mut empty).unwrap();
+        derive::<Sha256>(
+            crate::Context::default(),
+            b"salt",
+            b"ikm",
+            &[b""],
+            &mut empty,
+        )
+        .unwrap();
         assert_eq!(none, empty);
     }
 
@@ -159,7 +192,7 @@ mod tests {
         let ikm = [0x0b; 22];
         let salt = hex::<13>("000102030405060708090a0b0c");
         let info = hex::<10>("f0f1f2f3f4f5f6f7f8f9");
-        let prk = extract::<Sha256>(&salt, &ikm);
+        let prk = extract::<Sha256>(crate::Context::default(), &salt, &ikm);
         assert_eq!(
             prk,
             hex::<32>(
@@ -168,7 +201,8 @@ mod tests {
             )
         );
         let mut okm = [0u8; 42];
-        expand::<Sha256>(&prk, &[&info], &mut okm).unwrap();
+        expand::<Sha256>(crate::Context::default(), &prk, &[&info], &mut okm)
+            .unwrap();
         assert_eq!(
             okm,
             hex::<42>(
@@ -177,7 +211,14 @@ mod tests {
             )
         );
         let mut again = [0u8; 42];
-        derive::<Sha256>(&salt, &ikm, &[&info], &mut again).unwrap();
+        derive::<Sha256>(
+            crate::Context::default(),
+            &salt,
+            &ikm,
+            &[&info],
+            &mut again,
+        )
+        .unwrap();
         assert_eq!(again, okm);
     }
 
@@ -187,7 +228,14 @@ mod tests {
         let salt: [u8; 80] = core::array::from_fn(|i| 0x60 + i as u8);
         let info: [u8; 80] = core::array::from_fn(|i| 0xb0 + i as u8);
         let mut okm = [0u8; 82];
-        derive::<Sha256>(&salt, &ikm, &[&info], &mut okm).unwrap();
+        derive::<Sha256>(
+            crate::Context::default(),
+            &salt,
+            &ikm,
+            &[&info],
+            &mut okm,
+        )
+        .unwrap();
         assert_eq!(
             okm,
             hex::<82>(
@@ -202,7 +250,8 @@ mod tests {
     fn rfc5869_case_3() {
         let ikm = [0x0b; 22];
         let mut okm = [0u8; 42];
-        derive::<Sha256>(&[], &ikm, &[], &mut okm).unwrap();
+        derive::<Sha256>(crate::Context::default(), &[], &ikm, &[], &mut okm)
+            .unwrap();
         assert_eq!(
             okm,
             hex::<42>(
@@ -218,10 +267,11 @@ mod tests {
         let ikm = [0x0b; 11];
         let salt = hex::<13>("000102030405060708090a0b0c");
         let info = hex::<10>("f0f1f2f3f4f5f6f7f8f9");
-        let prk = extract::<Sha1>(&salt, &ikm);
+        let prk = extract::<Sha1>(crate::Context::default(), &salt, &ikm);
         assert_eq!(prk, hex::<20>("9b6c18c432a7bf8f0e71c8eb88f4b30baa2ba243"));
         let mut okm = [0u8; 42];
-        expand::<Sha1>(&prk, &[&info], &mut okm).unwrap();
+        expand::<Sha1>(crate::Context::default(), &prk, &[&info], &mut okm)
+            .unwrap();
         assert_eq!(
             okm,
             hex::<42>(
@@ -238,7 +288,14 @@ mod tests {
         let salt: [u8; 80] = core::array::from_fn(|i| 0x60 + i as u8);
         let info: [u8; 80] = core::array::from_fn(|i| 0xb0 + i as u8);
         let mut okm = [0u8; 82];
-        derive::<Sha1>(&salt, &ikm, &[&info], &mut okm).unwrap();
+        derive::<Sha1>(
+            crate::Context::default(),
+            &salt,
+            &ikm,
+            &[&info],
+            &mut okm,
+        )
+        .unwrap();
         assert_eq!(
             okm,
             hex::<82>(
@@ -254,7 +311,8 @@ mod tests {
         use crate::hash::sha1::Sha1;
         let ikm = [0x0b; 22];
         let mut okm = [0u8; 42];
-        derive::<Sha1>(&[], &ikm, &[], &mut okm).unwrap();
+        derive::<Sha1>(crate::Context::default(), &[], &ikm, &[], &mut okm)
+            .unwrap();
         assert_eq!(
             okm,
             hex::<42>(
@@ -271,7 +329,8 @@ mod tests {
         use crate::hash::sha1::Sha1;
         let ikm = [0x0c; 22];
         let mut okm = [0u8; 42];
-        derive::<Sha1>(&[], &ikm, &[], &mut okm).unwrap();
+        derive::<Sha1>(crate::Context::default(), &[], &ikm, &[], &mut okm)
+            .unwrap();
         assert_eq!(
             okm,
             hex::<42>(
@@ -286,14 +345,30 @@ mod tests {
         let prk = [0u8; 32];
         let mut okm = [0u8; 255 * 32 + 1];
         assert_eq!(
-            expand::<Sha256>(&prk, &[], &mut okm),
+            expand::<Sha256>(crate::Context::default(), &prk, &[], &mut okm),
             Err(Error::InvalidLength(255 * 32 + 1))
         );
-        assert_eq!(expand::<Sha256>(&prk, &[], &mut okm[..255 * 32]), Ok(()));
+        assert_eq!(
+            expand::<Sha256>(
+                crate::Context::default(),
+                &prk,
+                &[],
+                &mut okm[..255 * 32]
+            ),
+            Ok(())
+        );
     }
 
     #[test]
     fn expand_to_nothing_is_fine() {
-        assert_eq!(expand::<Sha256>(&[0u8; 32], &[b"x"], &mut []), Ok(()));
+        assert_eq!(
+            expand::<Sha256>(
+                crate::Context::default(),
+                &[0u8; 32],
+                &[b"x"],
+                &mut []
+            ),
+            Ok(())
+        );
     }
 }

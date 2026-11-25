@@ -21,6 +21,7 @@ use crate::support::{
     Error, Rng, field, hex, hex_value, int, opt_int, opt_text, text,
     unknown_test_type,
 };
+use scytale::Context;
 use scytale::Random;
 use scytale::hash::sha2::Sha256;
 use scytale::sig::rsa::{PrivateKey, PublicKey};
@@ -47,8 +48,8 @@ pub fn answer(
         let bits = int(group, "modulo")? as usize;
         let crt = opt_text(group, "keyFormat") == Some("crt");
         answer_tests(group, |_| {
-            let key = builder.try_build(|| {
-                PrivateKey::generate(&mut Rng(&mut *rng), bits)
+            let key = builder.try_build(|ctx| {
+                PrivateKey::generate(ctx, &mut Rng(&mut *rng), bits)
             })?;
             key_fields(&key, crt)
         })
@@ -119,12 +120,14 @@ pub fn verify(
     _answered_group: &Value,
     answered_test: &Value,
 ) -> Result<(), Error> {
+    // Checking an answer is not the kernel under test.
+    let ctx = Context::default();
     let bits = int(vendored_group, "modulo")? as usize;
     if field(vendored_test, "d").is_ok() {
-        working_key(vendored_test, bits)
+        working_key(ctx, vendored_test, bits)
             .map_err(|e| Error::new(format!("the file's key: {e}")))?;
     }
-    working_key(answered_test, bits)?;
+    working_key(ctx, answered_test, bits)?;
     if text(answered_test, "e")?.trim_start_matches('0') != "10001" {
         return Err(Error::new("exponent is not 65537"));
     }
@@ -133,12 +136,13 @@ pub fn verify(
 
 /// Builds the key from the fields of `test`, which checks the primes
 /// against the modulus, then signs and verifies under it.
-fn working_key(test: &Value, bits: usize) -> Result<(), Error> {
+fn working_key(ctx: Context, test: &Value, bits: usize) -> Result<(), Error> {
     let n = hex(test, "n")?;
     let e = hex(test, "e")?;
     let d = hex(test, "d")?;
     let key = if field(test, "dmp1").is_ok() {
         PrivateKey::try_new_crt(
+            ctx,
             &n,
             &e,
             &d,
@@ -149,7 +153,7 @@ fn working_key(test: &Value, bits: usize) -> Result<(), Error> {
             &hex(test, "iqmp")?,
         )?
     } else {
-        PrivateKey::try_new(&n, &e, &d)?
+        PrivateKey::try_new(ctx, &n, &e, &d)?
     };
     if key.bits() != bits {
         return Err(Error::new(format!(
@@ -159,7 +163,7 @@ fn working_key(test: &Value, bits: usize) -> Result<(), Error> {
     }
     let message = b"RSA keyGen";
     let sig = key.sign_pkcs1::<Sha256>(message)?;
-    PublicKey::try_new(&n, &e)?
+    PublicKey::try_new(ctx, &n, &e)?
         .verify_pkcs1::<Sha256>(message, sig.as_ref())
         .map_err(|e| Error::new(format!("signature does not verify: {e}")))
 }
@@ -214,10 +218,7 @@ mod tests {
         // Verified against itself, as the file's key and the answer.
         let suite = rsa_keygen_suite();
         let file = with_prompt(&doc, &answered).unwrap();
-        assert_eq!(
-            compare(suite, &file, &answered, &Builder::default()).unwrap(),
-            2
-        );
+        assert_eq!(compare(suite, &file, &answered).unwrap(), 2);
     }
 
     /// The server's expected key has no private exponent: the
@@ -241,13 +242,10 @@ mod tests {
         let key = theirs["testGroups"][0]["tests"][0].as_object_mut().unwrap();
         key.remove("d");
         let suite = rsa_keygen_suite();
-        assert_eq!(
-            compare(suite, &theirs, &good, &Builder::default()).unwrap(),
-            1
-        );
+        assert_eq!(compare(suite, &theirs, &good).unwrap(), 1);
         let mut bad = good.clone();
         bad["testGroups"][0]["tests"][0]["e"] = json!("03");
-        assert!(compare(suite, &theirs, &bad, &Builder::default()).is_err());
+        assert!(compare(suite, &theirs, &bad).is_err());
     }
 
     #[test]
@@ -271,13 +269,8 @@ mod tests {
         bad["testGroups"][0]["tests"][0]["d"] = json!(flipped);
         let suite = rsa_keygen_suite();
         let file = with_prompt(&doc, &good).unwrap();
-        assert_eq!(
-            compare(suite, &file, &good, &Builder::default()).unwrap(),
-            1
-        );
-        let e = compare(suite, &file, &bad, &Builder::default())
-            .unwrap_err()
-            .message;
+        assert_eq!(compare(suite, &file, &good).unwrap(), 1);
+        let e = compare(suite, &file, &bad).unwrap_err().message;
         assert!(!e.contains("the file's key"), "{e}");
     }
 }

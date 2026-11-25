@@ -54,20 +54,31 @@ impl Algorithm {
     /// panicking.
     pub(crate) fn key(self, bytes: &[u8]) -> Option<SealingKey> {
         let cipher = match self {
-            Algorithm::Aes128Gcm => {
-                Cipher::Aes128Gcm(Gcm::new(&Key::try_from(bytes).ok()?))
+            Algorithm::Aes128Gcm => Cipher::Aes128Gcm(Gcm::new(
+                scytale::Context::default(),
+                &Key::try_from(bytes).ok()?,
+            )),
+            Algorithm::Aes256Gcm => Cipher::Aes256Gcm(Gcm::new(
+                scytale::Context::default(),
+                &Key::try_from(bytes).ok()?,
+            )),
+            Algorithm::ChaCha20Poly1305 => {
+                Cipher::ChaCha20Poly1305(ChaCha20Poly1305::new(
+                    scytale::Context::default(),
+                    &Key::try_from(bytes).ok()?,
+                ))
             }
-            Algorithm::Aes256Gcm => {
-                Cipher::Aes256Gcm(Gcm::new(&Key::try_from(bytes).ok()?))
-            }
-            Algorithm::ChaCha20Poly1305 => Cipher::ChaCha20Poly1305(
-                ChaCha20Poly1305::new(&Key::try_from(bytes).ok()?),
-            ),
             Algorithm::Aes128Ccm | Algorithm::Aes128Ccm8 => {
-                Cipher::Aes128Ccm(Ccm::new(&Key::try_from(bytes).ok()?))
+                Cipher::Aes128Ccm(Ccm::new(
+                    scytale::Context::default(),
+                    &Key::try_from(bytes).ok()?,
+                ))
             }
             Algorithm::Aes256Ccm | Algorithm::Aes256Ccm8 => {
-                Cipher::Aes256Ccm(Ccm::new(&Key::try_from(bytes).ok()?))
+                Cipher::Aes256Ccm(Ccm::new(
+                    scytale::Context::default(),
+                    &Key::try_from(bytes).ok()?,
+                ))
             }
         };
         Some(SealingKey {
@@ -245,13 +256,21 @@ mod tests {
             let mut direct = plain;
             let mut want = [0u8; 8];
             match key.len() {
-                16 => Ccm::<Aes128>::new(&Key::try_from(key).unwrap()).encrypt(
+                16 => Ccm::<Aes128>::new(
+                    scytale::Context::default(),
+                    &Key::try_from(key).unwrap(),
+                )
+                .encrypt(
                     &nonce,
                     b"aad",
                     &mut direct,
                     &mut want,
                 ),
-                _ => Ccm::<Aes256>::new(&Key::try_from(key).unwrap()).encrypt(
+                _ => Ccm::<Aes256>::new(
+                    scytale::Context::default(),
+                    &Key::try_from(key).unwrap(),
+                )
+                .encrypt(
                     &nonce,
                     b"aad",
                     &mut direct,

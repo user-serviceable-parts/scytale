@@ -8,17 +8,19 @@
 //! never reprocessed.
 //!
 //! ```
-//! use scytale::mac::hmac::HmacSha256;
+//! use scytale::Context;
 //! use scytale::mac::Mac;
+//! use scytale::mac::hmac::HmacSha256;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
+//! let ctx = Context::default();
 //! let key = [0x0b; 32];
 //!
 //! // In one call.
-//! let tag = HmacSha256::mac(&key, b"Hi There");
+//! let tag = HmacSha256::mac(ctx, &key, b"Hi There");
 //!
 //! // In pieces, then checked in constant time.
-//! let mut mac = HmacSha256::new(&key);
+//! let mut mac = HmacSha256::new(ctx, &key);
 //! mac.update(b"Hi ");
 //! mac.update(b"There");
 //! mac.verify(&tag)?;
@@ -41,7 +43,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use super::Mac;
 use crate::hash::Hash;
 use crate::hash::sha2;
-use crate::{BlockType, Key, KeyType};
+use crate::{BlockType, Context, Key, KeyType};
 
 /// HMAC-SHA-224.
 pub type HmacSha224 = Hmac<sha2::Sha224>;
@@ -75,14 +77,17 @@ pub type HmacSha512_256 = Hmac<sha2::Sha512_256>;
 /// Any [`Hash`] whose digest is no longer than its block will do:
 ///
 /// ```
-/// use scytale::BlockType;
 /// use scytale::hash::Hash;
 /// use scytale::mac::hmac::Hmac;
+/// use scytale::{BlockType, Context};
 ///
-/// #[derive(Clone, Default)]
+/// #[derive(Clone)]
 /// struct Mine;
 /// impl Hash for Mine {
 ///     type Output = [u8; 32];
+///     fn new(_: Context) -> Self {
+///         Mine
+///     }
 ///     fn reset(&mut self) {}
 ///     fn update(&mut self, _: &[u8]) {}
 ///     fn finalize(&mut self) -> [u8; 32] {
@@ -95,7 +100,7 @@ pub type HmacSha512_256 = Hmac<sha2::Sha512_256>;
 ///         [0; 64]
 ///     }
 /// }
-/// let _ = Hmac::<Mine>::new(&[7u8; 100]);
+/// let _ = Hmac::<Mine>::new(Context::default(), &[7u8; 100]);
 /// ```
 ///
 /// One whose digest is longer than its block is refused when the
@@ -103,14 +108,17 @@ pub type HmacSha512_256 = Hmac<sha2::Sha512_256>;
 /// key is hashed to a digest, and the digest has to fit the block.
 ///
 /// ```compile_fail
-/// use scytale::BlockType;
 /// use scytale::hash::Hash;
 /// use scytale::mac::hmac::Hmac;
+/// use scytale::{BlockType, Context};
 ///
-/// #[derive(Clone, Default)]
+/// #[derive(Clone)]
 /// struct Mine;
 /// impl Hash for Mine {
 ///     type Output = [u8; 64];
+///     fn new(_: Context) -> Self {
+///         Mine
+///     }
 ///     fn reset(&mut self) {}
 ///     fn update(&mut self, _: &[u8]) {}
 ///     fn finalize(&mut self) -> [u8; 64] {
@@ -123,7 +131,7 @@ pub type HmacSha512_256 = Hmac<sha2::Sha512_256>;
 ///         [0; 32]
 ///     }
 /// }
-/// let _ = Hmac::<Mine>::new(&[7u8; 100]);
+/// let _ = Hmac::<Mine>::new(Context::default(), &[7u8; 100]);
 /// ```
 pub struct Hmac<H: Hash + Clone + BlockType> {
     /// The hash after the inner keyed block.
@@ -139,9 +147,7 @@ impl<H: Hash + Clone + BlockType> Hmac<H> {
     /// must be a hash at the start of a message.
     ///
     /// The construction needs two hash states, and takes them by
-    /// cloning this one, so a hash that is chosen rather than
-    /// constructed -- a named backend, which the vector suites use --
-    /// can key a MAC without being `Default`.
+    /// cloning this one, so each takes the kernel this one has.
     pub(crate) fn with(hash: H, key: &[u8]) -> Self {
         // A key longer than the block is hashed down to a digest and
         // that digest padded to the block, so the digest has to fit
@@ -194,9 +200,8 @@ impl<H: Hash + Clone + BlockType> Hmac<H> {
 
     /// Returns to the start of a message, under the same key.
     ///
-    /// The [`Mac`] methods are these; they are here as well so that a
-    /// MAC over a hash that is not `Default` -- a named backend --
-    /// can still be driven.
+    /// The [`Mac`] methods are these; they are here as well so that
+    /// code with no [`Mac`] in scope can drive one.
     pub(crate) fn restart(&mut self) {
         self.working = self.inner.clone();
     }
@@ -217,24 +222,20 @@ impl<H: Hash + Clone + BlockType> Hmac<H> {
     }
 }
 
-impl<H: Hash + Clone + BlockType + Default> Hmac<H> {
-    /// Starts a MAC under `key`, of any length.
+impl<H: Hash + Clone + BlockType> Hmac<H> {
+    /// Starts a MAC under `key`, of any length, over the hash `ctx`
+    /// builds.
     ///
     /// A key longer than the hash's block is hashed first, as the
     /// standard says; one shorter is padded with zeros. Either way
     /// the result is the block that [`Mac::new`] takes directly.
-    pub fn new(key: &[u8]) -> Self {
-        Self::with(H::default(), key)
-    }
-
-    /// Keys the two hashes from the padded block.
-    fn from_block(key: &H::Block) -> Self {
-        Self::from_block_with(H::default(), key)
+    pub fn new(ctx: Context, key: &[u8]) -> Self {
+        Self::with(H::new(ctx), key)
     }
 
     /// The tag of `data` under `key`, in one call.
-    pub fn mac(key: &[u8], data: &[u8]) -> H::Output {
-        let mut mac = Self::new(key);
+    pub fn mac(ctx: Context, key: &[u8], data: &[u8]) -> H::Output {
+        let mut mac = Self::new(ctx, key);
         mac.update(data);
         mac.finalize()
     }
@@ -248,11 +249,11 @@ impl<H: Hash + Clone + BlockType> KeyType for Hmac<H> {
     }
 }
 
-impl<H: Hash + Clone + BlockType + Default> Mac for Hmac<H> {
+impl<H: Hash + Clone + BlockType> Mac for Hmac<H> {
     type Tag = H::Output;
 
-    fn new(key: &Self::Key) -> Self {
-        Hmac::from_block(key.array())
+    fn new(ctx: Context, key: &Self::Key) -> Self {
+        Hmac::from_block_with(H::new(ctx), key.array())
     }
 
     fn reset(&mut self) {
@@ -305,16 +306,17 @@ mod tests {
             let key = &bytes[..len];
             let mut block = HmacSha256::zero_key();
             if len > 64 {
-                let digest = Sha256::digest(key);
+                let digest = Sha256::digest(crate::Context::default(), key);
                 block.as_mut()[..32].copy_from_slice(&digest);
             } else {
                 block.as_mut()[..len].copy_from_slice(key);
             }
-            let mut mac = <HmacSha256 as Mac>::new(&block);
+            let mut mac =
+                <HmacSha256 as Mac>::new(crate::Context::default(), &block);
             mac.update(b"message");
             assert_eq!(
                 mac.finalize(),
-                HmacSha256::mac(key, b"message"),
+                HmacSha256::mac(crate::Context::default(), key, b"message"),
                 "{len}"
             );
         }
@@ -430,12 +432,9 @@ mod tests {
         },
     ];
 
-    fn check<H: Hash + Clone + BlockType + Default>(
-        case: &Case,
-        expected: &str,
-    ) {
+    fn check<H: Hash + Clone + BlockType>(case: &Case, expected: &str) {
         let (tag, len) = hex(expected);
-        let mut mac = Hmac::<H>::new(case.key);
+        let mut mac = Hmac::<H>::new(crate::Context::default(), case.key);
         mac.update(case.data);
         assert_eq!(mac.clone().finalize().as_ref()[..len], tag[..len]);
         // The truncated case cannot verify against a full tag, which
@@ -458,9 +457,12 @@ mod tests {
 
     #[test]
     fn one_shot_matches_streaming() {
-        let mut mac = HmacSha256::new(b"key");
+        let mut mac = HmacSha256::new(crate::Context::default(), b"key");
         mac.update(b"data");
-        assert_eq!(HmacSha256::mac(b"key", b"data"), mac.finalize());
+        assert_eq!(
+            HmacSha256::mac(crate::Context::default(), b"key", b"data"),
+            mac.finalize()
+        );
     }
 
     #[test]
@@ -471,12 +473,15 @@ mod tests {
             "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292\
              c5ad",
         );
-        assert_eq!(HmacSha256::new(b"").finalize(), tag[..32]);
+        assert_eq!(
+            HmacSha256::new(crate::Context::default(), b"").finalize(),
+            tag[..32]
+        );
     }
 
     #[test]
     fn verify_rejects_wrong_and_short_tags() {
-        let mut mac = HmacSha256::new(b"key");
+        let mut mac = HmacSha256::new(crate::Context::default(), b"key");
         mac.update(b"message");
         let tag = mac.clone().finalize();
         assert_eq!(mac.clone().verify(&tag), Ok(()));
@@ -495,21 +500,21 @@ mod tests {
 
     #[test]
     fn reset_reuses_the_key() {
-        let mut mac = HmacSha512::new(b"key");
+        let mut mac = HmacSha512::new(crate::Context::default(), b"key");
         mac.update(b"not this");
         mac.reset();
         mac.update(b"message");
-        let mut fresh = HmacSha512::new(b"key");
+        let mut fresh = HmacSha512::new(crate::Context::default(), b"key");
         fresh.update(b"message");
         assert_eq!(mac.finalize(), fresh.finalize());
     }
 
     #[test]
     fn splitting_does_not_matter() {
-        let mut one = HmacSha384::new(b"key");
+        let mut one = HmacSha384::new(crate::Context::default(), b"key");
         one.update(b"mess");
         one.update(b"age");
-        let mut whole = HmacSha384::new(b"key");
+        let mut whole = HmacSha384::new(crate::Context::default(), b"key");
         whole.update(b"message");
         assert_eq!(one.finalize(), whole.finalize());
     }
@@ -517,7 +522,9 @@ mod tests {
     #[test]
     fn every_implementation_zeroizes() {
         fn wipes<T: ZeroizeOnDrop>() {}
-        wipes::<Hmac<sha2::portable::Sha256>>();
-        wipes::<Hmac<sha2::portable::Sha512>>();
+        // Over hashes that wipe themselves; the engines SHA-2 runs on
+        // each do, inside its dispatching type.
+        wipes::<Hmac<crate::hash::blake2::Blake2b256>>();
+        wipes::<Hmac<crate::hash::blake2::Blake2b512>>();
     }
 }

@@ -20,10 +20,12 @@
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::pke::hpke::x25519::PrivateKey;
 //! use scytale::random::CtrDrbg;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = CtrDrbg::from_system()?;
-//! let recipient = PrivateKey::generate(&mut rng)?;
+//! let ctx = Context::default();
+//! let mut rng = CtrDrbg::from_system(ctx)?;
+//! let recipient = PrivateKey::generate(ctx, &mut rng)?;
 //!
 //! // The sender needs only the public key and the context string
 //! // both sides agree on.
@@ -78,9 +80,7 @@ mod sealed {
 
 /// A hash HPKE's key schedule may run HKDF over, with its RFC 9180
 /// identifier. Implemented for SHA-256, SHA-384 and SHA-512 only.
-pub trait Kdf:
-    sealed::Sealed + Hash + Clone + BlockType + Default + 'static
-{
+pub trait Kdf: sealed::Sealed + Hash + Clone + BlockType + 'static {
     /// The `kdf_id` of RFC 9180 section 7.2.
     fn kdf_id() -> u16;
 }
@@ -151,12 +151,13 @@ const VERSION: &[u8] = b"HPKE-v1";
 
 /// `LabeledExtract(salt, label, ikm)`.
 fn labeled_extract<H: Kdf>(
+    ctx: crate::Context,
     suite: &[u8],
     salt: &[u8],
     label: &[u8],
     ikm: &[u8],
 ) -> H::Output {
-    let mut mac = Hmac::<H>::new(salt);
+    let mut mac = Hmac::<H>::new(ctx, salt);
     mac.update(VERSION);
     mac.update(suite);
     mac.update(label);
@@ -167,6 +168,7 @@ fn labeled_extract<H: Kdf>(
 /// `LabeledExpand(prk, label, info, L)`, the length `L` being the
 /// output's; `info` comes in parts, joined in order.
 fn labeled_expand<H: Kdf>(
+    ctx: crate::Context,
     suite: &[u8],
     prk: &[u8],
     label: &[u8],
@@ -183,7 +185,7 @@ fn labeled_expand<H: Kdf>(
         .get_mut(4..count)
         .ok_or(Error::InvalidLength(info.len()))?
         .copy_from_slice(info);
-    hkdf::expand::<H>(prk, &parts[..count], out)
+    hkdf::expand::<H>(ctx, prk, &parts[..count], out)
 }
 
 /// The KEM's `suite_id`: "KEM" and its identifier.
@@ -196,6 +198,7 @@ fn kem_suite(kem_id: u16) -> [u8; 5] {
 /// `out`, which is the KEM's `Nsecret`. The DH output is the caller's
 /// to wipe.
 fn extract_and_expand<H: Kdf>(
+    ctx: crate::Context,
     kem_id: u16,
     dh: &[u8],
     enc: &[u8],
@@ -203,8 +206,9 @@ fn extract_and_expand<H: Kdf>(
     out: &mut [u8],
 ) -> Result<(), Error> {
     let suite = kem_suite(kem_id);
-    let mut prk = labeled_extract::<H>(&suite, b"", b"eae_prk", dh);
+    let mut prk = labeled_extract::<H>(ctx, &suite, b"", b"eae_prk", dh);
     let result = labeled_expand::<H>(
+        ctx,
         &suite,
         prk.as_ref(),
         b"shared_secret",
@@ -219,6 +223,8 @@ fn extract_and_expand<H: Kdf>(
 /// keyed, the nonce base, the message counter and the exporter
 /// secret. Wiped on drop.
 pub struct Context<H: Kdf, A: Cipher> {
+    /// What the schedule's hashes are built under, for the exports.
+    ctx: crate::Context,
     aead: A,
     // The vector suites read these two, to check the schedule.
     pub(crate) base_nonce: [u8; NONCE_SIZE],
@@ -239,7 +245,12 @@ impl<H: Kdf, A: Cipher> Context<H, A> {
     /// `KeySchedule` (RFC 9180 section 5.1) in base mode: no PSK and
     /// no sender key, so the schedule is the shared secret and
     /// `info`.
-    fn new(kem_id: u16, shared: &[u8], info: &[u8]) -> Result<Self, Error> {
+    fn new(
+        ctx: crate::Context,
+        kem_id: u16,
+        shared: &[u8],
+        info: &[u8],
+    ) -> Result<Self, Error> {
         let mut suite = [0u8; 10];
         suite[..4].copy_from_slice(b"HPKE");
         suite[4..6].copy_from_slice(&kem_id.to_be_bytes());
@@ -247,17 +258,20 @@ impl<H: Kdf, A: Cipher> Context<H, A> {
         suite[8..].copy_from_slice(&A::aead_id().to_be_bytes());
 
         let psk_id_hash =
-            labeled_extract::<H>(&suite, b"", b"psk_id_hash", b"");
-        let info_hash = labeled_extract::<H>(&suite, b"", b"info_hash", info);
+            labeled_extract::<H>(ctx, &suite, b"", b"psk_id_hash", b"");
+        let info_hash =
+            labeled_extract::<H>(ctx, &suite, b"", b"info_hash", info);
         // The mode, base, then the two hashes.
         let context: [&[u8]; 3] =
             [&[0x00], psk_id_hash.as_ref(), info_hash.as_ref()];
-        let mut secret = labeled_extract::<H>(&suite, shared, b"secret", b"");
+        let mut secret =
+            labeled_extract::<H>(ctx, &suite, shared, b"secret", b"");
 
         let mut key = A::zero_key();
         let mut base_nonce = [0u8; NONCE_SIZE];
         let mut exporter = [0u8; MAX_HASH];
         let derived = labeled_expand::<H>(
+            ctx,
             &suite,
             secret.as_ref(),
             b"key",
@@ -266,6 +280,7 @@ impl<H: Kdf, A: Cipher> Context<H, A> {
         )
         .and_then(|()| {
             labeled_expand::<H>(
+                ctx,
                 &suite,
                 secret.as_ref(),
                 b"base_nonce",
@@ -275,6 +290,7 @@ impl<H: Kdf, A: Cipher> Context<H, A> {
         })
         .and_then(|()| {
             labeled_expand::<H>(
+                ctx,
                 &suite,
                 secret.as_ref(),
                 b"exp",
@@ -289,7 +305,8 @@ impl<H: Kdf, A: Cipher> Context<H, A> {
             return Err(e);
         }
         Ok(Context {
-            aead: A::new(&key),
+            ctx,
+            aead: A::new(ctx, &key),
             base_nonce,
             seq: 0,
             exporter,
@@ -348,6 +365,7 @@ impl<H: Kdf, A: Cipher> Context<H, A> {
     /// 255 digests, the bound HKDF sets.
     pub fn export(&self, context: &[u8], out: &mut [u8]) -> Result<(), Error> {
         labeled_expand::<H>(
+            self.ctx,
             &self.suite,
             &self.exporter[..size_of::<H::Output>()],
             b"sec",
@@ -390,6 +408,8 @@ macro_rules! xdh_kem {
 
             /// A recipient's private key.
             pub struct PrivateKey {
+                /// What the key was made under, for its hashes.
+                ctx: crate::Context,
                 key: dh::PrivateKey,
                 public: PublicKey,
             }
@@ -397,34 +417,49 @@ macro_rules! xdh_kem {
             /// A recipient's public key.
             #[derive(Clone, Copy)]
             pub struct PublicKey {
+                /// What the key was made under, for its hashes.
+                ctx: crate::Context,
                 key: dh::PublicKey,
             }
 
             impl PrivateKey {
-                fn from_dh(key: dh::PrivateKey) -> Self {
+                fn from_dh(ctx: crate::Context, key: dh::PrivateKey) -> Self {
                     let public = PublicKey {
+                        ctx,
                         key: *key.public_key(),
                     };
-                    PrivateKey { key, public }
+                    PrivateKey { ctx, key, public }
                 }
 
                 /// A fresh key.
-                pub fn generate<R: Random>(rng: &mut R) -> Result<Self, Error> {
-                    Ok(Self::from_dh(dh::PrivateKey::generate(rng)?))
+                pub fn generate<R: Random>(
+                    ctx: crate::Context,
+                    rng: &mut R,
+                ) -> Result<Self, Error> {
+                    Ok(Self::from_dh(ctx, dh::PrivateKey::generate(rng)?))
                 }
 
                 /// The key `DeriveKeyPair` makes from `ikm` (RFC 9180 section
                 /// 7.1.3), which must hold at least [`KEY_SIZE`] bytes of
                 /// entropy; shorter is [`Error::InvalidSeedLength`].
-                pub fn from_seed(ikm: &[u8]) -> Result<Self, Error> {
+                pub fn from_seed(
+                    ctx: crate::Context,
+                    ikm: &[u8],
+                ) -> Result<Self, Error> {
                     if ikm.len() < KEY_SIZE {
                         return Err(Error::InvalidSeedLength(ikm.len()));
                     }
                     let suite = super::kem_suite(KEM_ID);
                     let mut prk =
-                        labeled_extract::<$hash>(&suite, b"", b"dkp_prk", ikm);
+                        labeled_extract::<$hash>(
+                            ctx,
+                            &suite,
+                            b"",
+                            b"dkp_prk",
+                            ikm,
+                        );
                     let mut sk = Key::<[u8; KEY_SIZE]>::from([0u8; KEY_SIZE]);
-                    let expanded = labeled_expand::<$hash>(
+                    let expanded = labeled_expand::<$hash>(ctx,
                         &suite,
                         prk.as_ref(),
                         b"sk",
@@ -433,12 +468,15 @@ macro_rules! xdh_kem {
                     );
                     prk.zeroize();
                     expanded?;
-                    Ok(Self::from_dh(dh::PrivateKey::new(&sk)))
+                    Ok(Self::from_dh(ctx, dh::PrivateKey::new(&sk)))
                 }
 
                 /// A key from its serialized form, the bytes of RFC 7748.
-                pub fn new(secret: &Key<[u8; KEY_SIZE]>) -> Self {
-                    Self::from_dh(dh::PrivateKey::new(secret))
+                pub fn new(
+                    ctx: crate::Context,
+                    secret: &Key<[u8; KEY_SIZE]>,
+                ) -> Self {
+                    Self::from_dh(ctx, dh::PrivateKey::new(secret))
                 }
 
                 /// The serialized key. A secret, to be wiped.
@@ -463,14 +501,16 @@ macro_rules! xdh_kem {
                     let peer = dh::PublicKey::new(enc);
                     let mut dh = self.key.shared_secret(&peer)?;
                     let mut shared = [0u8; SECRET_SIZE];
-                    let result = extract_and_expand::<$hash>(
+                    let result = extract_and_expand::<$hash>(self.ctx,
                         KEM_ID,
                         &dh,
                         enc,
                         &self.public.bytes(),
                         &mut shared,
                     )
-                    .and_then(|()| Context::new(KEM_ID, &shared, info));
+                    .and_then(
+                        |()| Context::new(self.ctx, KEM_ID, &shared, info),
+                    );
                     dh.zeroize();
                     shared.zeroize();
                     result
@@ -479,8 +519,12 @@ macro_rules! xdh_kem {
 
             impl PublicKey {
                 /// A key from its bytes, the u-coordinate.
-                pub fn new(bytes: &[u8; PUBLIC_KEY_SIZE]) -> Self {
+                pub fn new(
+                    ctx: crate::Context,
+                    bytes: &[u8; PUBLIC_KEY_SIZE],
+                ) -> Self {
                     PublicKey {
+                        ctx,
                         key: dh::PublicKey::new(bytes),
                     }
                 }
@@ -498,7 +542,10 @@ macro_rules! xdh_kem {
                     rng: &mut R,
                     info: &[u8],
                 ) -> Result<([u8; ENCAPSULATED_SIZE], Context<H, A>), Error> {
-                    self.sender_with(&PrivateKey::generate(rng)?, info)
+                    self.sender_with(
+                        &PrivateKey::generate(self.ctx, rng)?,
+                        info,
+                    )
                 }
 
                 /// As [`sender`](Self::sender), with the ephemeral key given:
@@ -511,14 +558,16 @@ macro_rules! xdh_kem {
                     let enc = ephemeral.public.bytes();
                     let mut dh = ephemeral.key.shared_secret(&self.key)?;
                     let mut shared = [0u8; SECRET_SIZE];
-                    let result = extract_and_expand::<$hash>(
+                    let result = extract_and_expand::<$hash>(self.ctx,
                         KEM_ID,
                         &dh,
                         &enc,
                         &self.bytes(),
                         &mut shared,
                     )
-                    .and_then(|()| Context::new(KEM_ID, &shared, info));
+                    .and_then(
+                        |()| Context::new(self.ctx, KEM_ID, &shared, info),
+                    );
                     dh.zeroize();
                     shared.zeroize();
                     Ok((enc, result?))
@@ -580,6 +629,8 @@ macro_rules! nist_kem {
 
             /// A recipient's private key.
             pub struct PrivateKey {
+                /// What the key was made under, for its hashes.
+                ctx: crate::Context,
                 key: dh::PrivateKey,
                 public: PublicKey,
             }
@@ -587,20 +638,26 @@ macro_rules! nist_kem {
             /// A recipient's public key.
             #[derive(Clone, Copy)]
             pub struct PublicKey {
+                /// What the key was made under, for its hashes.
+                ctx: crate::Context,
                 key: dh::PublicKey,
             }
 
             impl PrivateKey {
-                fn from_dh(key: dh::PrivateKey) -> Self {
+                fn from_dh(ctx: crate::Context, key: dh::PrivateKey) -> Self {
                     let public = PublicKey {
+                        ctx,
                         key: *key.public_key(),
                     };
-                    PrivateKey { key, public }
+                    PrivateKey { ctx, key, public }
                 }
 
                 /// A fresh key.
-                pub fn generate<R: Random>(rng: &mut R) -> Result<Self, Error> {
-                    Ok(Self::from_dh(dh::PrivateKey::generate(rng)?))
+                pub fn generate<R: Random>(
+                    ctx: crate::Context,
+                    rng: &mut R,
+                ) -> Result<Self, Error> {
+                    Ok(Self::from_dh(ctx, dh::PrivateKey::generate(ctx, rng)?))
                 }
 
                 /// The key `DeriveKeyPair` makes from `ikm` (RFC 9180
@@ -610,17 +667,26 @@ macro_rules! nist_kem {
                 /// until one is a valid scalar, which the first nearly
                 /// always is; [`Error::KeyGenerationFailed`] after the
                 /// RFC's 256.
-                pub fn from_seed(ikm: &[u8]) -> Result<Self, Error> {
+                pub fn from_seed(
+                    ctx: crate::Context,
+                    ikm: &[u8],
+                ) -> Result<Self, Error> {
                     if ikm.len() < KEY_SIZE {
                         return Err(Error::InvalidSeedLength(ikm.len()));
                     }
                     let suite = super::kem_suite(KEM_ID);
                     let mut prk =
-                        labeled_extract::<$hash>(&suite, b"", b"dkp_prk", ikm);
+                        labeled_extract::<$hash>(
+                            ctx,
+                            &suite,
+                            b"",
+                            b"dkp_prk",
+                            ikm,
+                        );
                     let mut candidate = [0u8; KEY_SIZE];
                     let mut found = Err(Error::KeyGenerationFailed);
                     for counter in 0..=255u8 {
-                        if let Err(e) = labeled_expand::<$hash>(
+                        if let Err(e) = labeled_expand::<$hash>(ctx,
                             &suite,
                             prk.as_ref(),
                             b"candidate",
@@ -632,8 +698,11 @@ macro_rules! nist_kem {
                         }
                         // The bits past the order's, cleared.
                         candidate[0] &= $mask;
-                        if let Ok(key) = dh::PrivateKey::try_new(&candidate) {
-                            found = Ok(Self::from_dh(key));
+                        if let Ok(key) = dh::PrivateKey::try_new(
+                            ctx,
+                            &candidate,
+                        ) {
+                            found = Ok(Self::from_dh(ctx, key));
                             break;
                         }
                     }
@@ -645,8 +714,16 @@ macro_rules! nist_kem {
                 /// A key from its serialized form, the scalar
                 /// big-endian; zero or at least the order is
                 /// [`Error::InvalidPrivateKey`].
-                pub fn try_new(secret: &[u8; KEY_SIZE]) -> Result<Self, Error> {
-                    Ok(Self::from_dh(dh::PrivateKey::try_new(secret)?))
+                pub fn try_new(
+                    ctx: crate::Context,
+                    secret: &[u8; KEY_SIZE],
+                ) -> Result<Self, Error> {
+                    Ok(
+                        Self::from_dh(
+                            ctx,
+                            dh::PrivateKey::try_new(ctx, secret)?,
+                        ),
+                    )
                 }
 
                 /// The serialized key. A secret, to be wiped.
@@ -668,17 +745,19 @@ macro_rules! nist_kem {
                     enc: &[u8; ENCAPSULATED_SIZE],
                     info: &[u8],
                 ) -> Result<Context<H, A>, Error> {
-                    let ephemeral = PublicKey::try_new(enc)?;
+                    let ephemeral = PublicKey::try_new(self.ctx, enc)?;
                     let mut dh = self.key.shared_secret(&ephemeral.key);
                     let mut shared = [0u8; SECRET_SIZE];
-                    let result = extract_and_expand::<$hash>(
+                    let result = extract_and_expand::<$hash>(self.ctx,
                         KEM_ID,
                         &dh,
                         enc,
                         &self.public.bytes(),
                         &mut shared,
                     )
-                    .and_then(|()| Context::new(KEM_ID, &shared, info));
+                    .and_then(
+                        |()| Context::new(self.ctx, KEM_ID, &shared, info),
+                    );
                     dh.zeroize();
                     shared.zeroize();
                     result
@@ -689,14 +768,15 @@ macro_rules! nist_kem {
                 /// A key from its uncompressed point, checked to lie
                 /// on the curve; anything else is
                 /// [`Error::InvalidPublicKey`].
-                pub fn try_new(
+                pub fn try_new(ctx: crate::Context,
                     bytes: &[u8; PUBLIC_KEY_SIZE],
                 ) -> Result<Self, Error> {
                     if bytes[0] != 0x04 {
                         return Err(Error::InvalidPublicKey);
                     }
                     Ok(PublicKey {
-                        key: dh::PublicKey::try_from_sec1(bytes)?,
+                        ctx,
+                        key: dh::PublicKey::try_from_sec1(ctx, bytes)?,
                     })
                 }
 
@@ -712,7 +792,10 @@ macro_rules! nist_kem {
                     rng: &mut R,
                     info: &[u8],
                 ) -> Result<([u8; ENCAPSULATED_SIZE], Context<H, A>), Error> {
-                    self.sender_with(&PrivateKey::generate(rng)?, info)
+                    self.sender_with(
+                        &PrivateKey::generate(self.ctx, rng)?,
+                        info,
+                    )
                 }
 
                 /// As [`sender`](Self::sender), with the ephemeral
@@ -725,14 +808,16 @@ macro_rules! nist_kem {
                     let enc = ephemeral.public.bytes();
                     let mut dh = ephemeral.key.shared_secret(&self.key);
                     let mut shared = [0u8; SECRET_SIZE];
-                    let result = extract_and_expand::<$hash>(
+                    let result = extract_and_expand::<$hash>(self.ctx,
                         KEM_ID,
                         &dh,
                         &enc,
                         &self.bytes(),
                         &mut shared,
                     )
-                    .and_then(|()| Context::new(KEM_ID, &shared, info));
+                    .and_then(
+                        |()| Context::new(self.ctx, KEM_ID, &shared, info),
+                    );
                     dh.zeroize();
                     shared.zeroize();
                     Ok((enc, result?))
@@ -776,8 +861,13 @@ mod tests {
     fn every_suite_round_trips() {
         macro_rules! suite {
             ($kem:ident, $h:ty, $a:ty) => {{
-                let mut rng = CtrDrbg::from_system().unwrap();
-                let key = $kem::PrivateKey::generate(&mut rng).unwrap();
+                let mut rng =
+                    CtrDrbg::from_system(crate::Context::default()).unwrap();
+                let key = $kem::PrivateKey::generate(
+                    crate::Context::default(),
+                    &mut rng,
+                )
+                .unwrap();
                 let (enc, mut s) = key
                     .public_key()
                     .sender::<$h, $a, _>(&mut rng, b"info")
@@ -814,8 +904,10 @@ mod tests {
     /// fails; a failure does not use up the message's number.
     #[test]
     fn mismatches_fail() {
-        let mut rng = CtrDrbg::from_system().unwrap();
-        let key = p384::PrivateKey::generate(&mut rng).unwrap();
+        let mut rng = CtrDrbg::from_system(crate::Context::default()).unwrap();
+        let key =
+            p384::PrivateKey::generate(crate::Context::default(), &mut rng)
+                .unwrap();
         let (enc, mut s) = key
             .public_key()
             .sender::<Sha384, Gcm<Aes256>, _>(&mut rng, b"info")
@@ -850,50 +942,64 @@ mod tests {
     #[test]
     fn bad_keys_are_refused() {
         // A compressed point is not RFC 9180's serialization.
-        let mut rng = CtrDrbg::from_system().unwrap();
-        let key = p256::PrivateKey::generate(&mut rng).unwrap();
+        let mut rng = CtrDrbg::from_system(crate::Context::default()).unwrap();
+        let key =
+            p256::PrivateKey::generate(crate::Context::default(), &mut rng)
+                .unwrap();
         let mut point = key.public_key().bytes();
         point[0] = 0x02;
         assert_eq!(
-            p256::PublicKey::try_new(&point).err(),
+            p256::PublicKey::try_new(crate::Context::default(), &point).err(),
             Some(Error::InvalidPublicKey)
         );
         assert!(key.recipient::<Sha256, Gcm<Aes128>>(&point, b"").is_err());
         // An X25519 or X448 encapsulation of the low-order point zero,
         // whose shared secret is zero.
-        let key = x25519::PrivateKey::generate(&mut rng).unwrap();
+        let key =
+            x25519::PrivateKey::generate(crate::Context::default(), &mut rng)
+                .unwrap();
         assert_eq!(
             key.recipient::<Sha256, Gcm<Aes128>>(&[0; 32], b"").err(),
             Some(Error::InvalidPublicKey)
         );
-        let key = x448::PrivateKey::generate(&mut rng).unwrap();
+        let key =
+            x448::PrivateKey::generate(crate::Context::default(), &mut rng)
+                .unwrap();
         assert_eq!(
             key.recipient::<Sha512, Gcm<Aes256>>(&[0; 56], b"").err(),
             Some(Error::InvalidPublicKey)
         );
         // Seeds shorter than a key.
         assert_eq!(
-            x25519::PrivateKey::from_seed(&[1; 31]).err(),
+            x25519::PrivateKey::from_seed(crate::Context::default(), &[1; 31])
+                .err(),
             Some(Error::InvalidSeedLength(31))
         );
         assert_eq!(
-            x448::PrivateKey::from_seed(&[1; 55]).err(),
+            x448::PrivateKey::from_seed(crate::Context::default(), &[1; 55])
+                .err(),
             Some(Error::InvalidSeedLength(55))
         );
         assert_eq!(
-            p521::PrivateKey::from_seed(&[1; 65]).err(),
+            p521::PrivateKey::from_seed(crate::Context::default(), &[1; 65])
+                .err(),
             Some(Error::InvalidSeedLength(65))
         );
         // A scalar at zero.
-        assert!(p384::PrivateKey::try_new(&[0; 48]).is_err());
+        assert!(
+            p384::PrivateKey::try_new(crate::Context::default(), &[0; 48])
+                .is_err()
+        );
     }
 
     /// The counter's last value is refused rather than wrapped, and
     /// an export past HKDF's bound is refused.
     #[test]
     fn limits() {
-        let mut rng = CtrDrbg::from_system().unwrap();
-        let key = x25519::PrivateKey::generate(&mut rng).unwrap();
+        let mut rng = CtrDrbg::from_system(crate::Context::default()).unwrap();
+        let key =
+            x25519::PrivateKey::generate(crate::Context::default(), &mut rng)
+                .unwrap();
         let (_, mut s) = key
             .public_key()
             .sender::<Sha256, ChaCha20Poly1305, _>(&mut rng, b"")

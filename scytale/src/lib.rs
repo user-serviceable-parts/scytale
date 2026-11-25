@@ -38,8 +38,10 @@
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::Nonces;
 //! use scytale::aead::{Aead, Gcm};
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
+//! let ctx = Context::default();
 //! // A session key, and a key for each job derived from it,
 //! // straight into keys that wipe themselves when they go out of
 //! // scope.
@@ -47,12 +49,12 @@
 //! let mut cipher_key = Aes128::zero_key();
 //! let mut mac_key = HmacSha256::zero_key();
 //! let cipher = &[b"cipher".as_slice()];
-//! hkdf::derive::<Sha256>(b"salt", &secret, cipher, cipher_key.as_mut())?;
+//! hkdf::derive::<Sha256>(ctx, b"salt", &secret, cipher, cipher_key.as_mut())?;
 //! let mac = &[b"mac".as_slice()];
-//! hkdf::derive::<Sha256>(b"salt", &secret, mac, mac_key.as_mut())?;
+//! hkdf::derive::<Sha256>(ctx, b"salt", &secret, mac, mac_key.as_mut())?;
 //!
 //! // Authenticated encryption, with nonces that cannot repeat.
-//! let gcm = Gcm::<Aes128>::new(&cipher_key);
+//! let gcm = Gcm::<Aes128>::new(ctx, &cipher_key);
 //! let mut nonces =
 //!     Nonces::<[u8; 12]>::try_new(&7u64.to_be_bytes(), 0)?;
 //! let nonce = nonces.take()?;
@@ -63,8 +65,8 @@
 //! assert_eq!(&message, b"attack at dawn");
 //!
 //! // A digest, and a tag over the same bytes.
-//! let digest = Sha256::digest(&message);
-//! let mac = Hmac::<Sha256>::mac(mac_key.as_ref(), &message);
+//! let digest = Sha256::digest(ctx, &message);
+//! let mac = Hmac::<Sha256>::mac(ctx, mac_key.as_ref(), &message);
 //! assert_ne!(digest, mac);
 //! # Ok(())
 //! # }
@@ -156,5 +158,6 @@ mod traits;
 
 pub use der::Pkcs8Form;
 pub use error::Error;
+pub use features::Context;
 pub use key_info::{Algorithm, KeyInfo};
 pub use traits::{BlockType, ByteArray, Key, KeyType, Random};

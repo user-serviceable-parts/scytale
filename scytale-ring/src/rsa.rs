@@ -242,9 +242,11 @@ impl VerificationAlgorithm for RsaParameters {
         msg: untrusted::Input,
         signature: untrusted::Input,
     ) -> Result<(), error::Unspecified> {
-        let key =
-            rsa::PublicKey::try_from_pkcs1(public_key.as_slice_less_safe())
-                .map_err(error::erase)?;
+        let key = rsa::PublicKey::try_from_pkcs1(
+            scytale::Context::default(),
+            public_key.as_slice_less_safe(),
+        )
+        .map_err(error::erase)?;
         verify_with(
             self,
             &key,
@@ -419,8 +421,9 @@ impl KeyPair {
     /// A key pair from its PKCS#8 `PrivateKeyInfo`.
     pub fn from_pkcs8(pkcs8: &[u8]) -> Result<Self, KeyRejected> {
         crate::pkcs8_peek::check(pkcs8, crate::pkcs8_peek::RSA_ENCRYPTION)?;
-        let key = rsa::PrivateKey::try_from_der(pkcs8)
-            .map_err(KeyRejected::from_scytale)?;
+        let key =
+            rsa::PrivateKey::try_from_der(scytale::Context::default(), pkcs8)
+                .map_err(KeyRejected::from_scytale)?;
         Self::checked(key)
     }
 
@@ -433,6 +436,7 @@ impl KeyPair {
         Private: AsRef<[u8]>,
     {
         let key = rsa::PrivateKey::try_new_crt(
+            scytale::Context::default(),
             components.public_key.n.as_ref(),
             components.public_key.e.as_ref(),
             components.d.as_ref(),
@@ -448,8 +452,9 @@ impl KeyPair {
 
     /// A key pair from its PKCS#1 `RSAPrivateKey`.
     pub fn from_der(input: &[u8]) -> Result<Self, KeyRejected> {
-        let key = rsa::PrivateKey::try_from_pkcs1(input)
-            .map_err(KeyRejected::from_scytale)?;
+        let key =
+            rsa::PrivateKey::try_from_pkcs1(scytale::Context::default(), input)
+                .map_err(KeyRejected::from_scytale)?;
         Self::checked(key)
     }
 
@@ -642,7 +647,8 @@ where
         {
             return Err(error::Unspecified);
         }
-        let key = rsa::PublicKey::try_new(n, e).map_err(error::erase)?;
+        let key = rsa::PublicKey::try_new(scytale::Context::default(), n, e)
+            .map_err(error::erase)?;
         verify_with(params, &key, message, signature)
     }
 }

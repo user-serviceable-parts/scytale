@@ -75,7 +75,7 @@ fn aft(
     let mut data = symbols(text(t, input)?, alphabet)?;
     aes_width!(key, C => {
         let k = key_of::<C>(&key)?;
-        let ff1 = builder.try_build(|| Ff1::<C>::try_new(&k, radix))?;
+        let ff1 = builder.try_build(|ctx| Ff1::<C>::try_new(ctx, &k, radix))?;
         if encrypt {
             ff1.encrypt(&tweak, &mut data)?;
         } else {

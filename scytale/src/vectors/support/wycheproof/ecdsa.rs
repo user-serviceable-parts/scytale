@@ -52,11 +52,7 @@ trait Curve {
     type Public;
     fn public(group: &Value) -> Self::Public;
     fn from_der(der: &[u8]) -> Option<Vec<u8>>;
-    fn verify<H: Hash + Default>(
-        key: &Self::Public,
-        msg: &[u8],
-        sig: &[u8],
-    ) -> bool;
+    fn verify<H: Hash>(key: &Self::Public, msg: &[u8], sig: &[u8]) -> bool;
 }
 
 macro_rules! curve {
@@ -71,14 +67,23 @@ macro_rules! curve {
             /// come back out unchanged.
             fn public(group: &Value) -> Self::Public {
                 let sec1 = hex(&group["publicKey"]["uncompressed"]);
-                let key =
-                    $module::PublicKey::try_from_sec1(&sec1).expect("key");
+                let key = $module::PublicKey::try_from_sec1(
+                    crate::Context::default(),
+                    &sec1,
+                )
+                .expect("key");
                 let der = hex(&group["publicKeyDer"]);
                 let pem = group["publicKeyPem"].as_str().expect("pem");
-                let from_der =
-                    $module::PublicKey::try_from_der(&der).expect("der");
-                let from_pem = $module::PublicKey::try_from_pem(pem.as_bytes())
-                    .expect("pem");
+                let from_der = $module::PublicKey::try_from_der(
+                    crate::Context::default(),
+                    &der,
+                )
+                .expect("der");
+                let from_pem = $module::PublicKey::try_from_pem(
+                    crate::Context::default(),
+                    pem.as_bytes(),
+                )
+                .expect("pem");
                 assert_eq!(from_der.sec1_bytes()[..], sec1[..]);
                 assert_eq!(from_pem.sec1_bytes()[..], sec1[..]);
                 let mut out = [0u8; 512];
@@ -93,7 +98,7 @@ macro_rules! curve {
                 $module::signature_from_der(der).ok().map(|s| s.to_vec())
             }
 
-            fn verify<H: Hash + Default>(
+            fn verify<H: Hash>(
                 key: &Self::Public,
                 msg: &[u8],
                 sig: &[u8],
@@ -111,7 +116,7 @@ curve!(P256, p256, 32);
 curve!(P384, p384, 48);
 curve!(P521, p521, 66);
 
-fn der<C: Curve, H: Hash + Default>(file: &str, counts: &mut Counts) {
+fn der<C: Curve, H: Hash>(file: &str, counts: &mut Counts) {
     let Some(doc) = load(file, "ECDSA") else {
         return;
     };
@@ -129,7 +134,7 @@ fn der<C: Curve, H: Hash + Default>(file: &str, counts: &mut Counts) {
     }
 }
 
-fn fixed<C: Curve, H: Hash + Default>(file: &str, counts: &mut Counts) {
+fn fixed<C: Curve, H: Hash>(file: &str, counts: &mut Counts) {
     let Some(doc) = load(file, "ECDSA") else {
         return;
     };

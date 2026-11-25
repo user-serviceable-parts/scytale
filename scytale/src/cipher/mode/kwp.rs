@@ -22,9 +22,11 @@
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Kwp;
 //! use scytale::cipher::BlockCipher;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let kwp = Kwp::<Aes128>::new(&Key::from([0u8; 16]));
+//! let ctx = Context::default();
+//! let kwp = Kwp::<Aes128>::new(ctx, &Key::from([0u8; 16]));
 //!
 //! // Any length, unlike the unpadded form.
 //! let secret = *b"seven..";
@@ -38,6 +40,7 @@
 //! # }
 //! ```
 
+use crate::Context;
 use core::fmt;
 
 use super::kw::{SEMIBLOCK, apply, unwrap_body, wrap_body};
@@ -83,14 +86,14 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Kwp<C> {
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Kwp<C> {
     /// Wraps with the cipher's forward direction, as RFC 5649
     /// describes.
-    pub fn new(key: &C::Key) -> Self {
-        Kwp::with_direction(C::new(key), true)
+    pub fn new(ctx: Context, key: &C::Key) -> Self {
+        Kwp::with_direction(C::new(ctx, key), true)
     }
 
     /// Wraps with the cipher's inverse direction, the other choice
     /// the standard allows.
-    pub fn new_inverse(key: &C::Key) -> Self {
-        Kwp::with_direction(C::new(key), false)
+    pub fn new_inverse(ctx: Context, key: &C::Key) -> Self {
+        Kwp::with_direction(C::new(ctx, key), false)
     }
 
     fn with_direction(cipher: C, forward: bool) -> Self {
@@ -227,7 +230,10 @@ mod tests {
         const KEK: &str = "5840df6e29b02af1ab493b705bf16ea1ae8338f4dcc176a8";
 
         fn check<const P: usize, const C: usize>(plain: &str, cipher: &str) {
-            let kwp = Kwp::<Aes<24>>::new(&Key::from(unhex::<24>(KEK)));
+            let kwp = Kwp::<Aes<24>>::new(
+                crate::Context::default(),
+                &Key::from(unhex::<24>(KEK)),
+            );
             let plain: [u8; P] = unhex(plain);
             let want: [u8; C] = unhex(cipher);
 
@@ -252,7 +258,10 @@ mod tests {
     /// with them.
     #[test]
     fn round_trips_at_many_lengths() {
-        let kwp = Kwp::<Aes128>::new(&Key::from([3u8; 16]));
+        let kwp = Kwp::<Aes128>::new(
+            crate::Context::default(),
+            &Key::from([3u8; 16]),
+        );
         let plain: [u8; 64] = core::array::from_fn(|i| (i * 7 + 1) as u8);
         let mut wrapped = [0u8; 72];
         let mut back = [0u8; 72];
@@ -269,7 +278,10 @@ mod tests {
     /// single-block case as well as the general one.
     #[test]
     fn rejects_and_wipes() {
-        let kwp = Kwp::<Aes128>::new(&Key::from([3u8; 16]));
+        let kwp = Kwp::<Aes128>::new(
+            crate::Context::default(),
+            &Key::from([3u8; 16]),
+        );
         for len in [5usize, 40] {
             let plain = [9u8; 40];
             let mut wrapped = [0u8; 48];
@@ -296,7 +308,8 @@ mod tests {
     #[test]
     fn padding_must_be_zero() {
         let key = [3u8; 16];
-        let kwp = Kwp::<Aes128>::new(&Key::from(key));
+        let kwp =
+            Kwp::<Aes128>::new(crate::Context::default(), &Key::from(key));
         // Wrap five bytes, then rebuild the wrapped form by hand with
         // the padding set to something other than zero.
         let mut a = [0u8; SEMIBLOCK];
@@ -306,7 +319,7 @@ mod tests {
         body[..5].copy_from_slice(b"hello");
         body[5] = 1; // padding that should have been zero
 
-        let cipher = Aes::new(&key);
+        let cipher = Aes::new(crate::Context::default(), &key);
         let mut block = [0u8; BLOCK];
         block[..SEMIBLOCK].copy_from_slice(&a);
         block[SEMIBLOCK..].copy_from_slice(&body);
@@ -323,8 +336,12 @@ mod tests {
     #[test]
     fn the_directions_are_not_interchangeable() {
         let key = [5u8; 16];
-        let forward = Kwp::<Aes128>::new(&Key::from(key));
-        let inverse = Kwp::<Aes128>::new_inverse(&Key::from(key));
+        let forward =
+            Kwp::<Aes128>::new(crate::Context::default(), &Key::from(key));
+        let inverse = Kwp::<Aes128>::new_inverse(
+            crate::Context::default(),
+            &Key::from(key),
+        );
         let plain = [1u8; 20];
 
         let mut one = [0u8; 32];
@@ -344,7 +361,10 @@ mod tests {
     /// An empty message, and output that will not fit, are refused.
     #[test]
     fn rejects_bad_lengths() {
-        let kwp = Kwp::<Aes128>::new(&Key::from([3u8; 16]));
+        let kwp = Kwp::<Aes128>::new(
+            crate::Context::default(),
+            &Key::from([3u8; 16]),
+        );
         let mut out = [0u8; 64];
         assert!(matches!(
             kwp.wrap(&[], &mut out),
@@ -389,7 +409,13 @@ mod tests {
         let mut buffer = Buffer([0; 256], 0);
         core::fmt::write(
             &mut buffer,
-            format_args!("{:?}", Kwp::<Aes128>::new(&Key::from([3u8; 16]))),
+            format_args!(
+                "{:?}",
+                Kwp::<Aes128>::new(
+                    crate::Context::default(),
+                    &Key::from([3u8; 16])
+                )
+            ),
         )
         .unwrap();
         let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();

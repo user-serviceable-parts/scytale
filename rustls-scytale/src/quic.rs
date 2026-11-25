@@ -54,17 +54,22 @@ impl Algorithm for Quic {
         let mask = match self.0 {
             aead::Algorithm::Aes128Gcm
             | aead::Algorithm::Aes128Ccm
-            | aead::Algorithm::Aes128Ccm8 => Key::try_from(key)
-                .ok()
-                .map(|k| Masker::Aes128(Aes128::new(&k))),
+            | aead::Algorithm::Aes128Ccm8 => Key::try_from(key).ok().map(|k| {
+                Masker::Aes128(Aes128::new(scytale::Context::default(), &k))
+            }),
             aead::Algorithm::Aes256Gcm
             | aead::Algorithm::Aes256Ccm
-            | aead::Algorithm::Aes256Ccm8 => Key::try_from(key)
-                .ok()
-                .map(|k| Masker::Aes256(Aes256::new(&k))),
-            aead::Algorithm::ChaCha20Poly1305 => Key::try_from(key)
-                .ok()
-                .map(|k| Masker::ChaCha20(ChaCha20::new(&k))),
+            | aead::Algorithm::Aes256Ccm8 => Key::try_from(key).ok().map(|k| {
+                Masker::Aes256(Aes256::new(scytale::Context::default(), &k))
+            }),
+            aead::Algorithm::ChaCha20Poly1305 => {
+                Key::try_from(key).ok().map(|k| {
+                    Masker::ChaCha20(ChaCha20::new(
+                        scytale::Context::default(),
+                        &k,
+                    ))
+                })
+            }
         };
         Box::new(Headers(mask))
     }

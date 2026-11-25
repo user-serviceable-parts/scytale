@@ -13,9 +13,12 @@
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::{Alphabet, Ff1};
 //! use scytale::cipher::mode::alphabet::DIGITS;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let ff1 = Ff1::<Aes128>::try_new(&Key::from([0u8; 16]), DIGITS.radix())?;
+//! let ctx = Context::default();
+//! let key = Key::from([0u8; 16]);
+//! let ff1 = Ff1::<Aes128>::try_new(ctx, &key, DIGITS.radix())?;
 //! let mut symbols = [0u16; 16];
 //! let n = DIGITS.encode("4000123456789010", &mut symbols)?;
 //! ff1.encrypt(b"", &mut symbols[..n])?;

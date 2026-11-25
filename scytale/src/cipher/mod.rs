@@ -20,9 +20,11 @@
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Ctr;
 //! use scytale::cipher::BlockCipher;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let aes = Aes128::new(&Key::from([0u8; 16]));
+//! let ctx = Context::default();
+//! let aes = Aes128::new(ctx, &Key::from([0u8; 16]));
 //!
 //! // The cipher itself transforms blocks, as many as there are.
 //! let mut blocks = [[0u8; 16]; 2];
@@ -31,7 +33,7 @@
 //! assert_eq!(blocks, [[0u8; 16]; 2]);
 //!
 //! // A mode carries that over a message of any length.
-//! let ctr = Ctr::<Aes128>::new(&Key::from([0u8; 16]));
+//! let ctr = Ctr::<Aes128>::new(ctx, &Key::from([0u8; 16]));
 //! let mut message = *b"a message of any length";
 //! ctr.encrypt(&[1u8; 16], &mut message);
 //! # Ok(())
@@ -63,7 +65,7 @@ pub use nonce::Nonces;
 use core::any::TypeId;
 use core::slice::from_mut;
 
-use crate::{BlockType, KeyType};
+use crate::{BlockType, Context, KeyType};
 
 /// The 128-bit block AES works in, and with it every construction
 /// defined over a 128-bit cipher: XTS, key wrapping, and the
@@ -95,8 +97,8 @@ pub(crate) const BLOCK: usize = 16;
 /// faster over a run of blocks than over one at a time. A caller
 /// with a single block passes `from_mut(&mut block)`.
 pub trait BlockCipher: BlockType + KeyType + 'static {
-    /// Expands `key`.
-    fn new(key: &Self::Key) -> Self
+    /// Expands `key`, for the best kernel `ctx` allows.
+    fn new(ctx: Context, key: &Self::Key) -> Self
     where
         Self: Sized;
 
@@ -158,7 +160,7 @@ mod tests {
             block[0]
         }
         let key = [0x5au8; 32];
-        let best = Aes256::new(&Key::from(key));
+        let best = Aes256::new(crate::Context::default(), &Key::from(key));
         let named = portable::ttable::Aes::<32>::new(&key);
         assert_eq!(once(&best), once(&named));
         assert_ne!(once(&best), [7u8; 16]);
@@ -169,7 +171,7 @@ mod tests {
     #[test]
     fn zero_key_and_block() {
         fn round_trip<C: BlockCipher>() {
-            let cipher = C::new(&C::zero_key());
+            let cipher = C::new(crate::Context::default(), &C::zero_key());
             let mut block = C::zero_block();
             cipher.encrypt_one(&mut block);
             assert_ne!(block.as_ref(), C::zero_block().as_ref());

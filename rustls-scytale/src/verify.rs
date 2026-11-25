@@ -58,18 +58,17 @@ impl SignatureVerificationAlgorithm for Algorithm {
 /// ECDSA over each curve: an uncompressed point, a DER signature.
 macro_rules! ecdsa_check {
     ($fn:ident, $curve:ident) => {
-        fn $fn<H: Hash + Default>(
-            key: &[u8],
-            message: &[u8],
-            sig: &[u8],
-        ) -> bool {
+        fn $fn<H: Hash>(key: &[u8], message: &[u8], sig: &[u8]) -> bool {
             if key.len() != ecdsa::$curve::PUBLIC_KEY_SIZE
                 || key.first() != Some(&0x04)
             {
                 return false;
             }
             let (Ok(key), Ok(sig)) = (
-                ecdsa::$curve::PublicKey::try_from_sec1(key),
+                ecdsa::$curve::PublicKey::try_from_sec1(
+                    scytale::Context::default(),
+                    key,
+                ),
                 ecdsa::$curve::signature_from_der(sig),
             ) else {
                 return false;
@@ -87,7 +86,7 @@ fn ed25519(key: &[u8], message: &[u8], sig: &[u8]) -> bool {
     let (Ok(key), Ok(sig)) = (key.try_into(), sig.try_into()) else {
         return false;
     };
-    ed25519::verify(key, message, sig).is_ok()
+    ed25519::verify(scytale::Context::default(), key, message, sig).is_ok()
 }
 
 /// ML-DSA (FIPS 204), pure, with the empty context TLS uses
@@ -98,7 +97,7 @@ macro_rules! ml_dsa_check {
             let (Ok(key), Ok(sig)) = (key.try_into(), sig.try_into()) else {
                 return false;
             };
-            ml_dsa::$set::PublicKey::new(key)
+            ml_dsa::$set::PublicKey::new(scytale::Context::default(), key)
                 .verify(&[], message, sig)
                 .is_ok()
         }
@@ -114,21 +113,18 @@ ml_dsa_check!(ml_dsa_87, ml_dsa_87);
 const RSA_BITS: core::ops::RangeInclusive<usize> = 2048..=8192;
 
 fn rsa_key(key: &[u8]) -> Option<rsa::PublicKey> {
-    let key = rsa::PublicKey::try_from_pkcs1(key).ok()?;
+    let key = rsa::PublicKey::try_from_pkcs1(scytale::Context::default(), key)
+        .ok()?;
     RSA_BITS.contains(&key.bits()).then_some(key)
 }
 
-fn rsa_pkcs1<H: DigestInfo + Default>(
-    key: &[u8],
-    message: &[u8],
-    sig: &[u8],
-) -> bool {
+fn rsa_pkcs1<H: DigestInfo>(key: &[u8], message: &[u8], sig: &[u8]) -> bool {
     rsa_key(key).is_some_and(|k| k.verify_pkcs1::<H>(message, sig).is_ok())
 }
 
 /// PSS with MGF1 over the same hash and a salt of the digest's
 /// length, which TLS 1.3 requires and these identifiers name.
-fn rsa_pss<H: Hash + Default>(key: &[u8], message: &[u8], sig: &[u8]) -> bool {
+fn rsa_pss<H: Hash>(key: &[u8], message: &[u8], sig: &[u8]) -> bool {
     rsa_key(key).is_some_and(|k| k.verify_pss::<H>(message, sig).is_ok())
 }
 
@@ -433,8 +429,13 @@ mod tests {
     /// uncompressed points.
     #[test]
     fn ecdsa_round_trip_and_compressed_keys() {
-        let mut rng = CtrDrbg::from_system().unwrap();
-        let key = ecdsa::p384::PrivateKey::generate(&mut rng).unwrap();
+        let mut rng =
+            CtrDrbg::from_system(scytale::Context::default()).unwrap();
+        let key = ecdsa::p384::PrivateKey::generate(
+            scytale::Context::default(),
+            &mut rng,
+        )
+        .unwrap();
         let sig = key.sign::<Sha384, _>(&mut rng, b"message").unwrap();
         let mut der = [0u8; 120];
         let n = ecdsa::p384::signature_der(&sig, &mut der).unwrap();
@@ -464,8 +465,14 @@ mod tests {
     /// A 1024-bit key's genuine signature is refused for its size.
     #[test]
     fn small_rsa_keys_are_refused() {
-        let mut rng = CtrDrbg::from_system().unwrap();
-        let key = rsa::PrivateKey::generate(&mut rng, 1024).unwrap();
+        let mut rng =
+            CtrDrbg::from_system(scytale::Context::default()).unwrap();
+        let key = rsa::PrivateKey::generate(
+            scytale::Context::default(),
+            &mut rng,
+            1024,
+        )
+        .unwrap();
         let sig = key.sign_pkcs1::<Sha256>(b"message").unwrap();
         let mut public = [0u8; 300];
         let n = key.public_key().pkcs1_bytes(&mut public).unwrap();

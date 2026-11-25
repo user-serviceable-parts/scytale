@@ -167,7 +167,7 @@ impl VerificationAlgorithm for EdDSAParameters {
             public_key.as_slice_less_safe().try_into()?;
         let signature: &[u8; ed25519::SIGNATURE_SIZE] =
             signature.as_slice_less_safe().try_into()?;
-        ed25519::PublicKey::new(public_key)
+        ed25519::PublicKey::new(scytale::Context::default(), public_key)
             .verify(msg.as_slice_less_safe(), signature)
             .map_err(error::erase)
     }
@@ -220,7 +220,9 @@ impl Ed25519KeyPair {
     ) -> Result<pkcs8::Document, error::Unspecified> {
         let mut seed = Key::from([0u8; ed25519::KEY_SIZE]);
         rng.fill(seed.as_mut())?;
-        let mut der = ed25519::PrivateKey::new(&seed).der_bytes();
+        let mut der =
+            ed25519::PrivateKey::new(scytale::Context::default(), &seed)
+                .der_bytes();
         let document = pkcs8::Document::new(&der);
         der.zeroize();
         Ok(document)
@@ -238,8 +240,11 @@ impl Ed25519KeyPair {
         }
         let mut fixed = [0u8; LEGACY_MAX];
         let pkcs8 = legacy_public_key_tag_fixed(pkcs8, &mut fixed);
-        let (secret, form) = ed25519::secret_from_der_with_form(pkcs8)
-            .map_err(KeyRejected::from_scytale)?;
+        let (secret, form) = ed25519::secret_from_der_with_form(
+            scytale::Context::default(),
+            pkcs8,
+        )
+        .map_err(KeyRejected::from_scytale)?;
         if !form.v1 {
             return Err(KeyRejected::version_not_supported());
         }
@@ -259,8 +264,11 @@ impl Ed25519KeyPair {
         pkcs8_peek::check(pkcs8, pkcs8_peek::ED25519)?;
         let mut fixed = [0u8; LEGACY_MAX];
         let pkcs8 = legacy_public_key_tag_fixed(pkcs8, &mut fixed);
-        let (secret, form) = ed25519::secret_from_der_with_form(pkcs8)
-            .map_err(KeyRejected::from_scytale)?;
+        let (secret, form) = ed25519::secret_from_der_with_form(
+            scytale::Context::default(),
+            pkcs8,
+        )
+        .map_err(KeyRejected::from_scytale)?;
         if form.v1 && !form.public_key {
             return Err(KeyRejected::public_key_is_missing());
         }
@@ -270,14 +278,20 @@ impl Ed25519KeyPair {
     fn from_seed(mut secret: [u8; ed25519::KEY_SIZE]) -> Self {
         let key = Key::from(secret);
         secret.zeroize();
-        Self::from_private(ed25519::PrivateKey::new(&key))
+        Self::from_private(ed25519::PrivateKey::new(
+            scytale::Context::default(),
+            &key,
+        ))
     }
 
     /// A key pair from its 32-byte seed.
     pub fn from_seed_unchecked(seed: &[u8]) -> Result<Self, KeyRejected> {
         let seed = Key::<[u8; ed25519::KEY_SIZE]>::try_from(seed)
             .map_err(|_| KeyRejected::invalid_encoding())?;
-        Ok(Self::from_private(ed25519::PrivateKey::new(&seed)))
+        Ok(Self::from_private(ed25519::PrivateKey::new(
+            scytale::Context::default(),
+            &seed,
+        )))
     }
 
     /// A key pair from its seed, checked against the public key the
@@ -437,8 +451,11 @@ impl VerificationAlgorithm for EcdsaVerificationAlgorithm {
         macro_rules! verify {
             ($curve:ident) => {{
                 let point = uncompressed(public_key, $curve::PUBLIC_KEY_SIZE)?;
-                let key = $curve::PublicKey::try_from_sec1(point)
-                    .map_err(error::erase)?;
+                let key = $curve::PublicKey::try_from_sec1(
+                    scytale::Context::default(),
+                    point,
+                )
+                .map_err(error::erase)?;
                 let sig = if self.asn1 {
                     $curve::signature_from_der(signature)
                         .map_err(error::erase)?
@@ -668,8 +685,9 @@ impl EcdsaKeyPair {
     ) -> Result<pkcs8::Document, error::Unspecified> {
         macro_rules! generate {
             ($curve:ident) => {{
-                let key =
-                    crate::agreement::draw(rng, $curve::PrivateKey::try_new)?;
+                let key = crate::agreement::draw(rng, |k| {
+                    $curve::PrivateKey::try_new(scytale::Context::default(), k)
+                })?;
                 let mut der = [0u8; $curve::DER_SIZE];
                 let n = key.der_bytes(&mut der).map_err(error::erase)?;
                 let document = pkcs8::Document::new(&der[..n]);
@@ -696,10 +714,16 @@ impl EcdsaKeyPair {
         };
         pkcs8_peek::check(pkcs8, expected)?;
         let (private, form) = match alg.curve {
-            Curve::P256 => p256::PrivateKey::try_from_der_with_form(pkcs8)
-                .map(|(k, f)| (EcdsaPrivate::P256(k), f)),
-            Curve::P384 => p384::PrivateKey::try_from_der_with_form(pkcs8)
-                .map(|(k, f)| (EcdsaPrivate::P384(k), f)),
+            Curve::P256 => p256::PrivateKey::try_from_der_with_form(
+                scytale::Context::default(),
+                pkcs8,
+            )
+            .map(|(k, f)| (EcdsaPrivate::P256(k), f)),
+            Curve::P384 => p384::PrivateKey::try_from_der_with_form(
+                scytale::Context::default(),
+                pkcs8,
+            )
+            .map(|(k, f)| (EcdsaPrivate::P384(k), f)),
         }
         .map_err(KeyRejected::from_scytale)?;
         // RFC 5915 makes the public point optional; ring requires it,
@@ -723,7 +747,7 @@ impl EcdsaKeyPair {
                 let scalar: &[u8; $curve::KEY_SIZE] = private_key
                     .try_into()
                     .map_err(|_| KeyRejected::invalid_encoding())?;
-                $curve::PrivateKey::try_new(scalar)
+                $curve::PrivateKey::try_new(scytale::Context::default(), scalar)
                     .map(EcdsaPrivate::$arm)
                     .map_err(|_| KeyRejected::invalid_component())?
             }};

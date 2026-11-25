@@ -28,14 +28,16 @@
 //! ```
 //! use scytale::kem::ml_kem::ml_kem_768::{PrivateKey, PublicKey};
 //! use scytale::random::CtrDrbg;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = CtrDrbg::from_system()?;
-//! let key = PrivateKey::generate(&mut rng)?;
+//! let ctx = Context::default();
+//! let mut rng = CtrDrbg::from_system(ctx)?;
+//! let key = PrivateKey::generate(ctx, &mut rng)?;
 //!
 //! // The sender has only the public key, and makes a ciphertext
 //! // and a secret from it.
-//! let public = PublicKey::try_new(&key.public_key().bytes())?;
+//! let public = PublicKey::try_new(ctx, &key.public_key().bytes())?;
 //! let (ciphertext, secret) = public.encapsulate(&mut rng)?;
 //!
 //! // The key holder recovers the same secret from the ciphertext.
@@ -53,6 +55,7 @@
 //! chooses the result by a mask. Rejection sampling of the public
 //! matrix `A` varies with the public seed alone.
 
+use crate::Context;
 use zeroize::Zeroize;
 
 use crate::constant_time;
@@ -524,8 +527,8 @@ impl Poly {
     /// `SampleNTT`, algorithm 7: the entry of `A` at `row`, `col`,
     /// by rejection sampling from SHAKE-128 over the seed and the
     /// two indices, column first as the standard has it.
-    fn sample_ntt(rho: &[u8; 32], row: u8, col: u8) -> Poly {
-        let mut xof = Shake128::new();
+    fn sample_ntt(ctx: Context, rho: &[u8; 32], row: u8, col: u8) -> Poly {
+        let mut xof = Shake128::new(ctx);
         xof.update(rho);
         xof.update(&[col, row]);
         let mut reader = xof.finalize_xof();
@@ -540,7 +543,7 @@ impl Poly {
 
     /// As many entries of `A` at once as a kernel runs SHAKE-128
     /// streams together, each as [`sample_ntt`] makes it, or `None`
-    /// where the features in force have no such kernel.
+    /// where the context has no such kernel.
     ///
     /// They are squeezed a block of each at a time until every one
     /// has its coefficients; an entry that fills first ignores the
@@ -621,8 +624,8 @@ impl Poly {
 
     /// A polynomial of small coefficients from the PRF of `seed` and
     /// the counter `n`, `PRF_eta` feeding `SamplePolyCBD_eta`.
-    fn sample_noise(eta: usize, seed: &[u8; 32], n: u8) -> Poly {
-        let mut xof = Shake256::new();
+    fn sample_noise(ctx: Context, eta: usize, seed: &[u8; 32], n: u8) -> Poly {
+        let mut xof = Shake256::new(ctx);
         xof.update(seed);
         xof.update(&[n]);
         let mut bytes = [0u8; 64 * 3];
@@ -642,8 +645,8 @@ impl Zeroize for Poly {
 // The scheme, over an expanded key of rank K.
 
 /// `G`, SHA3-512 split in two.
-fn g(parts: &[&[u8]]) -> ([u8; 32], [u8; 32]) {
-    let mut hash = Sha3_512::new();
+fn g(ctx: Context, parts: &[&[u8]]) -> ([u8; 32], [u8; 32]) {
+    let mut hash = Sha3_512::new(ctx);
     for part in parts {
         hash.update(part);
     }
@@ -658,13 +661,13 @@ fn g(parts: &[&[u8]]) -> ([u8; 32], [u8; 32]) {
 }
 
 /// `H`, SHA3-256.
-fn h(data: &[u8]) -> [u8; 32] {
-    Sha3_256::digest(data)
+fn h(ctx: Context, data: &[u8]) -> [u8; 32] {
+    Sha3_256::digest(ctx, data)
 }
 
 /// `J`, 32 bytes of SHAKE-256, for the implicit rejection secret.
-fn j(z: &[u8], c: &[u8]) -> [u8; SECRET] {
-    let mut xof = Shake256::new();
+fn j(ctx: Context, z: &[u8], c: &[u8]) -> [u8; SECRET] {
+    let mut xof = Shake256::new(ctx);
     xof.update(z);
     xof.update(c);
     let mut out = [0u8; SECRET];
@@ -689,7 +692,10 @@ struct Expanded<const K: usize> {
 /// SHAKE-128 stream, which have nothing to do with each other, so
 /// they are taken as many together as a kernel runs for as long as
 /// there are that many, and one at a time after that.
-fn sample_matrix<const K: usize>(rho: &[u8; 32]) -> [[Poly; K]; K] {
+fn sample_matrix<const K: usize>(
+    ctx: Context,
+    rho: &[u8; 32],
+) -> [[Poly; K]; K] {
     let mut a = [[Poly::ZERO; K]; K];
     let entries = a.as_flattened_mut();
     let at = |n: usize| ((n / K) as u8, (n % K) as u8);
@@ -699,7 +705,7 @@ fn sample_matrix<const K: usize>(rho: &[u8; 32]) -> [[Poly; K]; K] {
     let mut done = 0;
     // One choice for the whole matrix, read once as the key is made.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    let chosen = features::choose(together::KERNELS);
+    let chosen = features::choose(ctx, together::KERNELS);
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     while let Some(chosen) = chosen
         && done + together::WIDTH <= entries.len()
@@ -713,22 +719,26 @@ fn sample_matrix<const K: usize>(rho: &[u8; 32]) -> [[Poly; K]; K] {
     }
     for (n, entry) in entries.iter_mut().enumerate().skip(done) {
         let (row, col) = at(n);
-        *entry = Poly::sample_ntt(rho, row, col);
+        *entry = Poly::sample_ntt(ctx, rho, row, col);
     }
     a
 }
 
 /// Takes apart an encapsulation key already checked well formed.
-fn expand<const K: usize>(ek: &[u8]) -> Expanded<K> {
+fn expand<const K: usize>(ctx: Context, ek: &[u8]) -> Expanded<K> {
     debug_assert_eq!(ek.len(), public_len(K));
     let mut rho = [0u8; 32];
     rho.copy_from_slice(&ek[384 * K..]);
-    let a = sample_matrix::<K>(&rho);
+    let a = sample_matrix::<K>(ctx, &rho);
     let mut t = [Poly::ZERO; K];
     for (i, t_i) in t.iter_mut().enumerate() {
         *t_i = Poly::decode(12, &ek[384 * i..384 * (i + 1)]);
     }
-    Expanded { t, a, hash: h(ek) }
+    Expanded {
+        t,
+        a,
+        hash: h(ctx, ek),
+    }
 }
 
 /// `K-PKE.KeyGen` and the wrapping of algorithm 16: the encapsulation
@@ -736,6 +746,7 @@ fn expand<const K: usize>(ek: &[u8]) -> Expanded<K> {
 /// the seed `d || z`. Returns the encapsulation key taken apart,
 /// which the generation has already done most of.
 fn key_gen<const K: usize>(
+    ctx: Context,
     seed: &[u8; SEED],
     ek: &mut [u8],
     dk: &mut [u8],
@@ -743,23 +754,23 @@ fn key_gen<const K: usize>(
     debug_assert_eq!(ek.len(), public_len(K));
     debug_assert_eq!(dk.len(), private_len(K));
     let (d, z) = seed.split_at(32);
-    let (rho, mut sigma) = g(&[d, &[K as u8]]);
+    let (rho, mut sigma) = g(ctx, &[d, &[K as u8]]);
     let eta1 = params::<K>().eta1;
 
     let mut s = [Poly::ZERO; K];
     let mut e = [Poly::ZERO; K];
     for (i, s_i) in s.iter_mut().enumerate() {
-        *s_i = Poly::sample_noise(eta1, &sigma, i as u8);
+        *s_i = Poly::sample_noise(ctx, eta1, &sigma, i as u8);
         s_i.ntt();
     }
     for (i, e_i) in e.iter_mut().enumerate() {
-        *e_i = Poly::sample_noise(eta1, &sigma, (K + i) as u8);
+        *e_i = Poly::sample_noise(ctx, eta1, &sigma, (K + i) as u8);
         e_i.ntt();
     }
     sigma.zeroize();
 
     // t = A s + e.
-    let a = sample_matrix::<K>(&rho);
+    let a = sample_matrix::<K>(ctx, &rho);
     let mut t = e;
     for (i, (row, t_i)) in a.iter().zip(t.iter_mut()).enumerate() {
         for (entry, s_j) in row.iter().zip(&s) {
@@ -772,7 +783,7 @@ fn key_gen<const K: usize>(
     for (i, s_i) in s.iter().enumerate() {
         s_i.encode(12, &mut dk[384 * i..384 * (i + 1)]);
     }
-    let hash = h(ek);
+    let hash = h(ctx, ek);
     let rest = &mut dk[384 * K..];
     rest[..public_len(K)].copy_from_slice(ek);
     rest[public_len(K)..public_len(K) + 32].copy_from_slice(&hash);
@@ -785,6 +796,7 @@ fn key_gen<const K: usize>(
 /// `K-PKE.Encrypt`, algorithm 14: the message `m` under `ek`, taken
 /// apart, with randomness `r`, into `c`.
 fn encrypt<const K: usize>(
+    ctx: Context,
     ek: &Expanded<K>,
     m: &[u8; 32],
     r: &[u8; 32],
@@ -795,7 +807,7 @@ fn encrypt<const K: usize>(
 
     let mut y = [Poly::ZERO; K];
     for (i, y_i) in y.iter_mut().enumerate() {
-        *y_i = Poly::sample_noise(p.eta1, r, i as u8);
+        *y_i = Poly::sample_noise(ctx, p.eta1, r, i as u8);
         y_i.ntt();
     }
     // u = A^T y + e1: the transpose, so A's row index is the inner
@@ -806,7 +818,7 @@ fn encrypt<const K: usize>(
             u.add_assign(&row[i].mul_ntt(y_j));
         }
         u.inverse_ntt();
-        let e1 = Poly::sample_noise(p.eta2, r, (K + i) as u8);
+        let e1 = Poly::sample_noise(ctx, p.eta2, r, (K + i) as u8);
         u.add_assign(&e1);
         u.compress(p.du)
             .encode(p.du, &mut c[32 * p.du * i..32 * p.du * (i + 1)]);
@@ -817,7 +829,7 @@ fn encrypt<const K: usize>(
         v.add_assign(&t_i.mul_ntt(y_i));
     }
     v.inverse_ntt();
-    let e2 = Poly::sample_noise(p.eta2, r, (2 * K) as u8);
+    let e2 = Poly::sample_noise(ctx, p.eta2, r, (2 * K) as u8);
     v.add_assign(&e2);
     v.add_assign(&Poly::decode(1, m).decompress(1));
     v.compress(p.dv).encode(p.dv, &mut c[32 * p.du * K..]);
@@ -852,12 +864,13 @@ fn decrypt<const K: usize>(dk: &[u8], c: &[u8]) -> [u8; 32] {
 /// `ML-KEM.Encaps_internal`, algorithm 17: the ciphertext into `c`
 /// and the shared secret returned, from the message `m`.
 fn encapsulate<const K: usize>(
+    ctx: Context,
     ek: &Expanded<K>,
     m: &[u8; 32],
     c: &mut [u8],
 ) -> [u8; SECRET] {
-    let (key, mut r) = g(&[m, &ek.hash]);
-    encrypt::<K>(ek, m, &r, c);
+    let (key, mut r) = g(ctx, &[m, &ek.hash]);
+    encrypt::<K>(ctx, ek, m, &r, c);
     r.zeroize();
     key
 }
@@ -865,6 +878,7 @@ fn encapsulate<const K: usize>(
 /// `ML-KEM.Decaps_internal`, algorithm 18, with the implicit
 /// rejection chosen by a mask.
 fn decapsulate<const K: usize>(
+    ctx: Context,
     dk: &[u8],
     ek: &Expanded<K>,
     c: &[u8],
@@ -872,11 +886,11 @@ fn decapsulate<const K: usize>(
     let hash = &dk[384 * K + public_len(K)..384 * K + public_len(K) + 32];
     let z = &dk[384 * K + public_len(K) + 32..];
     let mut m = decrypt::<K>(dk, c);
-    let (mut key, mut r) = g(&[&m, hash]);
-    let mut rejected = j(z, c);
+    let (mut key, mut r) = g(ctx, &[&m, hash]);
+    let mut rejected = j(ctx, z, c);
     let mut again = [0u8; 1568];
     let again = &mut again[..c.len()];
-    encrypt::<K>(ek, &m, &r, again);
+    encrypt::<K>(ctx, ek, &m, &r, again);
     // Both secrets are in hand; the comparison picks one without
     // saying which, or when.
     let same = constant_time::equal(c, again);
@@ -915,10 +929,10 @@ fn public_key_is_valid<const K: usize>(ek: &[u8]) -> bool {
 
 /// The decapsulation key check of algorithm 21: the hash inside
 /// matches the encapsulation key inside.
-fn private_key_is_valid<const K: usize>(dk: &[u8]) -> bool {
+fn private_key_is_valid<const K: usize>(ctx: Context, dk: &[u8]) -> bool {
     let ek = &dk[384 * K..384 * K + public_len(K)];
     let hash = &dk[384 * K + public_len(K)..384 * K + public_len(K) + 32];
-    h(ek)[..] == hash[..]
+    h(ctx, ek)[..] == hash[..]
 }
 
 // Formats: RFC 9935, which puts the bare encapsulation key in a
@@ -1005,6 +1019,8 @@ macro_rules! parameter_set {
         /// decapsulation key, with its seed when it was made from
         /// one; wiped on drop.
         pub struct PrivateKey {
+            /// What the key's hashes are built under.
+            ctx: crate::Context,
             seed: Option<[u8; SEED_SIZE]>,
             expanded: [u8; KEY_SIZE],
             public: PublicKey,
@@ -1014,6 +1030,8 @@ macro_rules! parameter_set {
         /// encapsulation key, checked to be well formed.
         #[derive(Clone)]
         pub struct PublicKey {
+            /// What the key's hashes are built under.
+            ctx: crate::Context,
             bytes: [u8; PUBLIC_KEY_SIZE],
             expanded: ml_kem::Expanded<$k>,
         }
@@ -1046,6 +1064,7 @@ macro_rules! parameter_set {
 
         impl PrivateKey {
             fn from_expanded(
+                ctx: crate::Context,
                 seed: Option<[u8; SEED_SIZE]>,
                 expanded: [u8; KEY_SIZE],
                 public: ml_kem::Expanded<$k>,
@@ -1055,9 +1074,11 @@ macro_rules! parameter_set {
                     &expanded[384 * $k..384 * $k + PUBLIC_KEY_SIZE],
                 );
                 PrivateKey {
+                    ctx,
                     seed,
                     expanded,
                     public: PublicKey {
+                        ctx,
                         bytes,
                         expanded: public,
                     },
@@ -1065,10 +1086,13 @@ macro_rules! parameter_set {
             }
 
             /// A fresh key from 64 random bytes of seed.
-            pub fn generate<R: Random>(rng: &mut R) -> Result<Self, Error> {
+            pub fn generate<R: Random>(
+                ctx: crate::Context,
+                rng: &mut R,
+            ) -> Result<Self, Error> {
                 let mut seed = [0u8; SEED_SIZE];
                 rng.fill(&mut seed)?;
-                let key = Self::from_seed(&seed);
+                let key = Self::from_seed(ctx, &seed);
                 seed.zeroize();
                 Ok(key)
             }
@@ -1076,27 +1100,33 @@ macro_rules! parameter_set {
             /// The key a seed `d || z` expands to, by FIPS 203's
             /// `ML-KEM.KeyGen_internal`. Any 64 bytes are a seed,
             /// so there is nothing to reject.
-            pub fn from_seed(seed: &[u8; SEED_SIZE]) -> Self {
+            pub fn from_seed(
+                ctx: crate::Context,
+                seed: &[u8; SEED_SIZE],
+            ) -> Self {
                 let mut expanded = [0u8; KEY_SIZE];
                 let mut ek = [0u8; PUBLIC_KEY_SIZE];
                 let public =
-                    ml_kem::key_gen::<$k>(seed, &mut ek, &mut expanded);
-                Self::from_expanded(Some(*seed), expanded, public)
+                    ml_kem::key_gen::<$k>(ctx, seed, &mut ek, &mut expanded);
+                Self::from_expanded(ctx, Some(*seed), expanded, public)
             }
 
             /// A key from its expanded form, checked as FIPS 203
             /// requires: the hash inside must match the public key
             /// inside, and that key must be well formed. A key that
             /// comes in this way has no seed to give back.
-            pub fn try_new(expanded: &[u8; KEY_SIZE]) -> Result<Self, Error> {
+            pub fn try_new(
+                ctx: crate::Context,
+                expanded: &[u8; KEY_SIZE],
+            ) -> Result<Self, Error> {
                 let ek = &expanded[384 * $k..384 * $k + PUBLIC_KEY_SIZE];
-                if !ml_kem::private_key_is_valid::<$k>(expanded)
+                if !ml_kem::private_key_is_valid::<$k>(ctx, expanded)
                     || !ml_kem::public_key_is_valid::<$k>(ek)
                 {
                     return Err(Error::InvalidPrivateKey);
                 }
-                let public = ml_kem::expand::<$k>(ek);
-                Ok(Self::from_expanded(None, *expanded, public))
+                let public = ml_kem::expand::<$k>(ctx, ek);
+                Ok(Self::from_expanded(ctx, None, *expanded, public))
             }
 
             /// The seed, when the key was made from one, and
@@ -1129,7 +1159,7 @@ macro_rules! parameter_set {
                 &self,
                 ciphertext: &[u8; CIPHERTEXT_SIZE],
             ) -> [u8; SHARED_SECRET_SIZE] {
-                ml_kem::decapsulate::<$k>(
+                ml_kem::decapsulate::<$k>(self.ctx,
                     &self.expanded,
                     &self.public.expanded,
                     ciphertext,
@@ -1143,7 +1173,10 @@ macro_rules! parameter_set {
             /// Another parameter set is [`Error::WrongAlgorithm`], and
             /// anything else wrong with the bytes
             /// [`Error::InvalidEncoding`].
-            pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
+            pub fn try_from_der(
+                ctx: crate::Context,
+                der: &[u8],
+            ) -> Result<Self, Error> {
                 let info = crate::der::read_pkcs8(der)?;
                 let algorithm = &info.algorithm;
                 if algorithm.oid != OID || !algorithm.params.is_empty() {
@@ -1156,7 +1189,7 @@ macro_rules! parameter_set {
                         let seed: &[u8; SEED_SIZE] = seed
                             .try_into()
                             .map_err(|_| Error::InvalidEncoding)?;
-                        let key = Self::from_seed(seed);
+                        let key = Self::from_seed(ctx, seed);
                         if expanded.is_some_and(|e| e[..] != key.expanded[..]) {
                             return Err(Error::InvalidEncoding);
                         }
@@ -1166,7 +1199,7 @@ macro_rules! parameter_set {
                         let expanded: &[u8; KEY_SIZE] = expanded
                             .try_into()
                             .map_err(|_| Error::InvalidEncoding)?;
-                        Self::try_new(expanded)?
+                        Self::try_new(ctx, expanded)?
                     }
                     (None, None) => return Err(Error::InvalidEncoding),
                 };
@@ -1191,13 +1224,16 @@ macro_rules! parameter_set {
             /// the DER above; whitespace and line ends are read
             /// leniently, and anything else that is not exactly one
             /// well-formed block is [`Error::InvalidEncoding`].
-            pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
+            pub fn try_from_pem(
+                ctx: crate::Context,
+                pem: &[u8],
+            ) -> Result<Self, Error> {
                 let mut der = [0u8; ml_kem::SCRATCH];
                 let labels = [ml_kem::PRIVATE_LABEL];
                 let result = crate::codec::pem::decode_one_of(
                     &labels, pem, &mut der,
                 )
-                    .and_then(|(_, n)| Self::try_from_der(&der[..n]));
+                    .and_then(|(_, n)| Self::try_from_der(ctx, &der[..n]));
                 der.zeroize();
                 result
             }
@@ -1222,14 +1258,16 @@ macro_rules! parameter_set {
             /// A public key from its bytes, checked as FIPS 203
             /// requires: every coefficient below the modulus.
             pub fn try_new(
+                ctx: crate::Context,
                 bytes: &[u8; PUBLIC_KEY_SIZE],
             ) -> Result<Self, Error> {
                 if !ml_kem::public_key_is_valid::<$k>(bytes) {
                     return Err(Error::InvalidPublicKey);
                 }
                 Ok(PublicKey {
+                    ctx,
                     bytes: *bytes,
-                    expanded: ml_kem::expand::<$k>(bytes),
+                    expanded: ml_kem::expand::<$k>(ctx, bytes),
                 })
             }
 
@@ -1252,7 +1290,12 @@ macro_rules! parameter_set {
                 rng.fill(&mut m)?;
                 let mut c = [0u8; CIPHERTEXT_SIZE];
                 let secret =
-                    ml_kem::encapsulate::<$k>(&self.expanded, &m, &mut c);
+                    ml_kem::encapsulate::<$k>(
+                        self.ctx,
+                        &self.expanded,
+                        &m,
+                        &mut c,
+                    );
                 m.zeroize();
                 Ok((c, secret))
             }
@@ -1260,14 +1303,17 @@ macro_rules! parameter_set {
             /// A key from its DER `SubjectPublicKeyInfo`, the form
             /// under `PUBLIC KEY` in a PEM file, which must name this
             /// parameter set.
-            pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
+            pub fn try_from_der(
+                ctx: crate::Context,
+                der: &[u8],
+            ) -> Result<Self, Error> {
                 let (algorithm, key) = crate::der::read_spki(der)?;
                 if algorithm.oid != OID || !algorithm.params.is_empty() {
                     return Err(Error::WrongAlgorithm);
                 }
                 let key: &[u8; PUBLIC_KEY_SIZE] =
                     key.try_into().map_err(|_| Error::InvalidEncoding)?;
-                Self::try_new(key)
+                Self::try_new(ctx, key)
             }
 
             /// Writes the key as a `SubjectPublicKeyInfo` into the
@@ -1278,7 +1324,10 @@ macro_rules! parameter_set {
 
             /// A key from a `PUBLIC KEY` PEM block, read as
             /// [`PrivateKey::try_from_pem`] reads its own.
-            pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
+            pub fn try_from_pem(
+                ctx: crate::Context,
+                pem: &[u8],
+            ) -> Result<Self, Error> {
                 let mut der = [0u8; ml_kem::SCRATCH];
                 let (_, n) =
                     crate::codec::pem::decode_one_of(
@@ -1286,7 +1335,7 @@ macro_rules! parameter_set {
                         pem,
                         &mut der,
                     )?;
-                Self::try_from_der(&der[..n])
+                Self::try_from_der(ctx, &der[..n])
             }
 
             /// Writes the key as a `PUBLIC KEY` PEM block into the
@@ -1429,7 +1478,7 @@ pub(crate) mod tests {
     #[test]
     fn matrix_sampling_matches_the_standard() {
         fn standard(rho: &[u8; 32], row: u8, col: u8) -> [u16; N] {
-            let mut xof = Shake128::new();
+            let mut xof = Shake128::new(crate::Context::default());
             xof.update(rho);
             xof.update(&[col, row]);
             let mut reader = xof.finalize_xof();
@@ -1455,7 +1504,8 @@ pub(crate) mod tests {
             let rho = [seed; 32];
             for (row, col) in [(0, 0), (1, 2), (3, 3)] {
                 assert_eq!(
-                    Poly::sample_ntt(&rho, row, col).0,
+                    Poly::sample_ntt(crate::Context::default(), &rho, row, col)
+                        .0,
                     standard(&rho, row, col),
                     "{seed} {row} {col}"
                 );
@@ -1464,7 +1514,7 @@ pub(crate) mod tests {
     }
 
     /// The matrix is its entries, each sampled alone, whichever way
-    /// the features in force have its streams run: at every rank,
+    /// the default context has its streams run: at every rank,
     /// which leave entries over from the groups taken together
     /// or none.
     #[test]
@@ -1472,10 +1522,15 @@ pub(crate) mod tests {
         fn check<const K: usize>() {
             for seed in [0u8, 1, 0x5a, 0xff] {
                 let rho = [seed; 32];
-                let a = sample_matrix::<K>(&rho);
+                let a = sample_matrix::<K>(crate::Context::default(), &rho);
                 for (i, row) in a.iter().enumerate() {
                     for (j, entry) in row.iter().enumerate() {
-                        let alone = Poly::sample_ntt(&rho, i as u8, j as u8);
+                        let alone = Poly::sample_ntt(
+                            crate::Context::default(),
+                            &rho,
+                            i as u8,
+                            j as u8,
+                        );
                         assert_eq!(entry.0, alone.0, "{K} {seed} {i} {j}");
                     }
                 }
@@ -1508,11 +1563,15 @@ pub(crate) mod tests {
                 return;
             };
             for (poly, (row, col)) in polys.iter().zip(at) {
-                assert_eq!(poly.0, Poly::sample_ntt(&rho, row, col).0);
+                assert_eq!(
+                    poly.0,
+                    Poly::sample_ntt(crate::Context::default(), &rho, row, col)
+                        .0
+                );
             }
             // How many blocks each entry needs alone.
             let blocks = at.map(|(row, col)| {
-                let mut xof = Shake128::new();
+                let mut xof = Shake128::new(crate::Context::default());
                 xof.update(&rho);
                 xof.update(&[col, row]);
                 let mut reader = xof.finalize_xof();
@@ -1586,11 +1645,14 @@ pub(crate) mod tests {
             ($module:ident) => {{
                 use $module::*;
                 let seed = [0x3cu8; SEED_SIZE];
-                let mut rng = crate::random::CtrDrbg::from_system().unwrap();
-                let key = under.build(|| PrivateKey::from_seed(&seed));
-                let reference = crate::features::build_portable(|| {
-                    PrivateKey::from_seed(&seed)
-                });
+                let mut rng = crate::random::CtrDrbg::from_system(
+                    crate::Context::default(),
+                )
+                .unwrap();
+                let key = { PrivateKey::from_seed(under.ctx(), &seed) };
+                let reference = {
+                    PrivateKey::from_seed(crate::Context::portable(), &seed)
+                };
                 assert_eq!(key.key_bytes(), reference.key_bytes());
                 let (c, k) =
                     reference.public_key().encapsulate(&mut rng).unwrap();
@@ -1604,9 +1666,9 @@ pub(crate) mod tests {
         check!(ml_kem_1024);
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
-            let chosen = under
-                .build(|| crate::features::choose(together::KERNELS))
-                .expect("listed");
+            let chosen =
+                crate::features::choose(under.ctx(), together::KERNELS)
+                    .expect("listed");
             entries_together_agree_with_entries_alone(chosen);
             together::tests::together_agrees_with_apart(chosen);
         }
@@ -1620,13 +1682,25 @@ pub(crate) mod tests {
         macro_rules! check {
             ($module:ident) => {{
                 use $module::*;
-                let mut rng = crate::random::CtrDrbg::from_system().unwrap();
-                let key = PrivateKey::generate(&mut rng).unwrap();
+                let mut rng = crate::random::CtrDrbg::from_system(
+                    crate::Context::default(),
+                )
+                .unwrap();
+                let key =
+                    PrivateKey::generate(crate::Context::default(), &mut rng)
+                        .unwrap();
                 let (c, k) = key.public_key().encapsulate(&mut rng).unwrap();
                 assert_eq!(key.decapsulate(&c), k);
-                let again = PrivateKey::from_seed(&key.seed_bytes().unwrap());
+                let again = PrivateKey::from_seed(
+                    crate::Context::default(),
+                    &key.seed_bytes().unwrap(),
+                );
                 assert_eq!(again.key_bytes(), key.key_bytes());
-                let expanded = PrivateKey::try_new(&key.key_bytes()).unwrap();
+                let expanded = PrivateKey::try_new(
+                    crate::Context::default(),
+                    &key.key_bytes(),
+                )
+                .unwrap();
                 assert_eq!(expanded.decapsulate(&c), k);
                 assert_eq!(
                     expanded.seed_bytes(),
@@ -1638,7 +1712,7 @@ pub(crate) mod tests {
                 let rejected = key.decapsulate(&bad);
                 assert_ne!(rejected, k);
                 let z = &key.key_bytes()[KEY_SIZE - 32..];
-                assert_eq!(rejected, j(z, &bad));
+                assert_eq!(rejected, j(crate::Context::default(), z, &bad));
 
                 // A public key with a coefficient at the modulus is
                 // refused; a private key with a wrong hash is refused.
@@ -1646,13 +1720,13 @@ pub(crate) mod tests {
                 ek[0] = 0x01;
                 ek[1] = 0x0d;
                 assert_eq!(
-                    PublicKey::try_new(&ek).err(),
+                    PublicKey::try_new(crate::Context::default(), &ek).err(),
                     Some(Error::InvalidPublicKey)
                 );
                 let mut dk = key.key_bytes();
                 dk[KEY_SIZE - 40] ^= 1;
                 assert_eq!(
-                    PrivateKey::try_new(&dk).err(),
+                    PrivateKey::try_new(crate::Context::default(), &dk).err(),
                     Some(Error::InvalidPrivateKey)
                 );
 
@@ -1660,26 +1734,46 @@ pub(crate) mod tests {
                 let mut out = [0u8; 6000];
                 let n = key.der_bytes(&mut out).unwrap();
                 assert_eq!(n, 2 + 3 + 13 + 2 + 2 + 64);
-                let back = PrivateKey::try_from_der(&out[..n]).unwrap();
+                let back = PrivateKey::try_from_der(
+                    crate::Context::default(),
+                    &out[..n],
+                )
+                .unwrap();
                 assert_eq!(back.seed_bytes(), key.seed_bytes());
                 let n = expanded.der_bytes(&mut out).unwrap();
                 assert_eq!(n, DER_SIZE);
-                let back = PrivateKey::try_from_der(&out[..n]).unwrap();
+                let back = PrivateKey::try_from_der(
+                    crate::Context::default(),
+                    &out[..n],
+                )
+                .unwrap();
                 assert_eq!(back.key_bytes(), key.key_bytes());
                 let n = key.pem_bytes(&mut out).unwrap();
                 assert!(n < PEM_SIZE);
                 assert!(out.starts_with(b"-----BEGIN PRIVATE KEY-----\n"));
-                let back = PrivateKey::try_from_pem(&out[..n]).unwrap();
+                let back = PrivateKey::try_from_pem(
+                    crate::Context::default(),
+                    &out[..n],
+                )
+                .unwrap();
                 assert_eq!(back.key_bytes(), key.key_bytes());
                 let n = expanded.pem_bytes(&mut out).unwrap();
                 assert_eq!(n, PEM_SIZE);
                 let n = key.public_key().der_bytes(&mut out).unwrap();
                 assert_eq!(n, PUBLIC_KEY_DER_SIZE);
-                let back = PublicKey::try_from_der(&out[..n]).unwrap();
+                let back = PublicKey::try_from_der(
+                    crate::Context::default(),
+                    &out[..n],
+                )
+                .unwrap();
                 assert_eq!(back.bytes(), key.public_key().bytes());
                 let n = key.public_key().pem_bytes(&mut out).unwrap();
                 assert_eq!(n, PUBLIC_KEY_PEM_SIZE);
-                let back = PublicKey::try_from_pem(&out[..n]).unwrap();
+                let back = PublicKey::try_from_pem(
+                    crate::Context::default(),
+                    &out[..n],
+                )
+                .unwrap();
                 assert_eq!(back.bytes(), key.public_key().bytes());
             }};
         }
@@ -1691,17 +1785,31 @@ pub(crate) mod tests {
     /// A key of one set is not a key of another, in either format.
     #[test]
     fn sets_do_not_mix() {
-        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
-        let key = ml_kem_512::PrivateKey::generate(&mut rng).unwrap();
+        let mut rng =
+            crate::random::CtrDrbg::from_system(crate::Context::default())
+                .unwrap();
+        let key = ml_kem_512::PrivateKey::generate(
+            crate::Context::default(),
+            &mut rng,
+        )
+        .unwrap();
         let mut out = [0u8; 2048];
         let n = key.der_bytes(&mut out).unwrap();
         assert_eq!(
-            ml_kem_768::PrivateKey::try_from_der(&out[..n]).err(),
+            ml_kem_768::PrivateKey::try_from_der(
+                crate::Context::default(),
+                &out[..n]
+            )
+            .err(),
             Some(Error::WrongAlgorithm)
         );
         let n = key.public_key().der_bytes(&mut out).unwrap();
         assert_eq!(
-            ml_kem_768::PublicKey::try_from_der(&out[..n]).err(),
+            ml_kem_768::PublicKey::try_from_der(
+                crate::Context::default(),
+                &out[..n]
+            )
+            .err(),
             Some(Error::WrongAlgorithm)
         );
     }
@@ -1713,7 +1821,7 @@ pub(crate) mod tests {
     fn both_forms() {
         use ml_kem_768::*;
         let seed = [7u8; 64];
-        let key = PrivateKey::from_seed(&seed);
+        let key = PrivateKey::from_seed(crate::Context::default(), &seed);
         let expanded = key.key_bytes();
         let mut out = [0u8; 4096];
         let oid = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x04, 0x02];
@@ -1725,13 +1833,16 @@ pub(crate) mod tests {
         })
         .unwrap();
         assert_eq!(
-            PrivateKey::try_from_der(&out[..n]).unwrap().key_bytes(),
+            PrivateKey::try_from_der(crate::Context::default(), &out[..n])
+                .unwrap()
+                .key_bytes(),
             expanded
         );
         let pos = out[..n].windows(64).position(|w| w == seed).unwrap();
         out[pos] ^= 1;
         assert_eq!(
-            PrivateKey::try_from_der(&out[..n]).err(),
+            PrivateKey::try_from_der(crate::Context::default(), &out[..n])
+                .err(),
             Some(Error::InvalidEncoding)
         );
     }
@@ -1821,9 +1932,17 @@ pub(crate) mod tests {
         Pj8=\n\
         -----END PRIVATE KEY-----\n";
         use ml_kem_512::PrivateKey;
-        let seed = PrivateKey::try_from_pem(RFC9935_SEED).unwrap();
-        let expanded = PrivateKey::try_from_pem(RFC9935_EXPANDED).unwrap();
-        let both = PrivateKey::try_from_pem(RFC9935_BOTH).unwrap();
+        let seed =
+            PrivateKey::try_from_pem(crate::Context::default(), RFC9935_SEED)
+                .unwrap();
+        let expanded = PrivateKey::try_from_pem(
+            crate::Context::default(),
+            RFC9935_EXPANDED,
+        )
+        .unwrap();
+        let both =
+            PrivateKey::try_from_pem(crate::Context::default(), RFC9935_BOTH)
+                .unwrap();
         assert_eq!(seed.key_bytes(), expanded.key_bytes());
         assert_eq!(seed.key_bytes(), both.key_bytes());
         let mut want = [0u8; 64];

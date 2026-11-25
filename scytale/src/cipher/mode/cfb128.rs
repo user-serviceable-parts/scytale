@@ -23,9 +23,11 @@
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Cfb128;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let cfb = Cfb128::<Aes128>::new(&Key::from([0u8; 16]));
+//! let ctx = Context::default();
+//! let cfb = Cfb128::<Aes128>::new(ctx, &Key::from([0u8; 16]));
 //! let iv = [0u8; 16];
 //!
 //! let mut data = [0u8; 32];
@@ -41,7 +43,7 @@ use core::fmt;
 use super::{LANES, xor};
 use crate::KeyType;
 use crate::cipher::{BlockCipher, OneBlock};
-use crate::{ByteArray, Error};
+use crate::{ByteArray, Context, Error};
 
 /// The key is the cipher's own, so generic code can draw one
 /// without naming the cipher.
@@ -64,9 +66,9 @@ where
     C::Block: ByteArray,
 {
     /// Takes the key the cipher runs under.
-    pub fn new(key: &C::Key) -> Self {
+    pub fn new(ctx: Context, key: &C::Key) -> Self {
         Cfb128 {
-            cipher: C::new(key),
+            cipher: C::new(ctx, key),
         }
     }
 
@@ -216,7 +218,7 @@ mod tests {
     }
 
     fn cfb<const K: usize>(key: &[u8; K]) -> Cfb128<Aes<K>> {
-        Cfb128::new(&Key::from(*key))
+        Cfb128::new(crate::Context::default(), &Key::from(*key))
     }
 
     /// NIST SP 800-38A F.3.13 and F.3.14, AES-128.

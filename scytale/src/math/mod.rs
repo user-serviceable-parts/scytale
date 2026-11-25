@@ -143,10 +143,10 @@ pub(crate) enum Choice {
 }
 
 impl Choice {
-    /// What the big-number list [`limbs::KERNELS`] chooses, asked
-    /// here: for a key whose arithmetic reads no table.
-    pub(crate) fn bignum() -> Self {
-        Self::of(crate::features::choose(limbs::KERNELS), None)
+    /// What the big-number list [`limbs::KERNELS`] chooses under
+    /// `ctx`: for a key whose arithmetic reads no table.
+    pub(crate) fn bignum(ctx: crate::Context) -> Self {
+        Self::of(crate::features::choose(ctx, limbs::KERNELS), None)
     }
 
     /// The kind the two lists' answers make together.

@@ -37,10 +37,18 @@ pub fn derive(
 ) {
     let n = iterations.get();
     let derived = match algorithm.0.digest_algorithm().id {
-        Id::SHA1 => pbkdf2::<Sha1>(secret, salt, n, out),
-        Id::SHA256 => pbkdf2::<Sha256>(secret, salt, n, out),
-        Id::SHA384 => pbkdf2::<Sha384>(secret, salt, n, out),
-        Id::SHA512 => pbkdf2::<Sha512>(secret, salt, n, out),
+        Id::SHA1 => {
+            pbkdf2::<Sha1>(scytale::Context::default(), secret, salt, n, out)
+        }
+        Id::SHA256 => {
+            pbkdf2::<Sha256>(scytale::Context::default(), secret, salt, n, out)
+        }
+        Id::SHA384 => {
+            pbkdf2::<Sha384>(scytale::Context::default(), secret, salt, n, out)
+        }
+        Id::SHA512 => {
+            pbkdf2::<Sha512>(scytale::Context::default(), secret, salt, n, out)
+        }
         Id::SHA512_256 => unreachable!("PBKDF2 over SHA-512/256"),
     };
     // The count is nonzero by type, which is the one thing the
@@ -62,10 +70,18 @@ pub fn verify(
     let n = iterations.get();
     let key = previously_derived;
     match algorithm.0.digest_algorithm().id {
-        Id::SHA1 => verify::<Sha1>(secret, salt, n, key),
-        Id::SHA256 => verify::<Sha256>(secret, salt, n, key),
-        Id::SHA384 => verify::<Sha384>(secret, salt, n, key),
-        Id::SHA512 => verify::<Sha512>(secret, salt, n, key),
+        Id::SHA1 => {
+            verify::<Sha1>(scytale::Context::default(), secret, salt, n, key)
+        }
+        Id::SHA256 => {
+            verify::<Sha256>(scytale::Context::default(), secret, salt, n, key)
+        }
+        Id::SHA384 => {
+            verify::<Sha384>(scytale::Context::default(), secret, salt, n, key)
+        }
+        Id::SHA512 => {
+            verify::<Sha512>(scytale::Context::default(), secret, salt, n, key)
+        }
         Id::SHA512_256 => unreachable!("PBKDF2 over SHA-512/256"),
     }
     .map_err(error::erase)

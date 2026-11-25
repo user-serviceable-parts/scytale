@@ -16,8 +16,10 @@
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::BlockCipher;
+//! use scytale::Context;
+//! let ctx = Context::default();
 //!
-//! let aes = Aes128::new(&Key::from([0u8; 16]));
+//! let aes = Aes128::new(ctx, &Key::from([0u8; 16]));
 //! let mut blocks = [[0u8; 16]; 4];
 //! aes.encrypt(&mut blocks);
 //! aes.decrypt(&mut blocks);
@@ -36,7 +38,7 @@ use core::fmt;
 
 use crate::cipher::BlockCipher;
 use crate::features::{self, Dispatcher, Features};
-use crate::{BlockType, Key, KeyType};
+use crate::{BlockType, Context, Key, KeyType};
 
 /// AES block size in bytes.
 pub const BLOCK_SIZE: usize = 16;
@@ -237,7 +239,7 @@ features::kernels! {
 /// What the list publishes: the needs, without the names.
 const PROFILES: [Features; KERNELS.len()] = features::profiles_of(KERNELS);
 
-/// AES over the best implementation the features in force allow, at
+/// AES over the best implementation its context allows, at
 /// a key width of `K` bytes.
 ///
 /// The public types are the three widths: [`Aes128`], [`Aes192`] and
@@ -298,12 +300,11 @@ impl<const K: usize> fmt::Debug for Aes<K> {
 }
 
 impl<const K: usize> Aes<K> {
-    /// Expands `key` with the best implementation the features in
-    /// force allow.
+    /// Expands `key` with the best implementation `ctx` allows.
     ///
     /// A width other than 16, 24 or 32 is refused when the type is
     /// instantiated, at compile time.
-    pub(crate) fn new(key: &[u8; K]) -> Self {
+    pub(crate) fn new(ctx: Context, key: &[u8; K]) -> Self {
         const {
             assert!(
                 K == 16 || K == 24 || K == 32,
@@ -311,7 +312,7 @@ impl<const K: usize> Aes<K> {
             )
         };
         let inner = {
-            let built = match features::choose(KERNELS) {
+            let built = match features::choose(ctx, KERNELS) {
                 #[cfg(target_arch = "x86_64")]
                 Some(c) if c.kernel() == Kernel::Vaes => {
                     x86_64::vaes::Aes::new(key, c).map(Inner::Vaes)
@@ -446,8 +447,8 @@ impl<const K: usize> KeyType for Aes<K> {
 }
 
 impl<const K: usize> BlockCipher for Aes<K> {
-    fn new(key: &Self::Key) -> Self {
-        Aes::new(key.array())
+    fn new(ctx: Context, key: &Self::Key) -> Self {
+        Aes::new(ctx, key.array())
     }
 
     fn encrypt(&self, blocks: &mut [Self::Block]) {
@@ -467,10 +468,10 @@ macro_rules! width {
         pub struct $name(Aes<$k>);
 
         impl $name {
-            /// Expands `key` with the best implementation the
-            /// features in force allow; see [`crate::features`].
-            pub fn new(key: &Key<[u8; $k]>) -> Self {
-                $name(Aes::new(key.array()))
+            /// Expands `key` with the best implementation `ctx`
+            /// allows; see [`crate::features`].
+            pub fn new(ctx: Context, key: &Key<[u8; $k]>) -> Self {
+                $name(Aes::new(ctx, key.array()))
             }
 
             /// The feature profiles this cipher tells apart, best
@@ -561,8 +562,8 @@ macro_rules! width {
         }
 
         impl BlockCipher for $name {
-            fn new(key: &Self::Key) -> Self {
-                $name::new(key)
+            fn new(ctx: Context, key: &Self::Key) -> Self {
+                $name::new(ctx, key)
             }
 
             fn encrypt(&self, blocks: &mut [Self::Block]) {
@@ -646,11 +647,12 @@ mod tests {
 
     #[test]
     fn picks_the_first_kernel_whose_needs_are_met() {
-        let built = features::build_alone(|| {
-            let built = Aes::<16>::new(&[0; 16]).kernel();
+        let built = {
+            let built =
+                Aes::<16>::new(crate::Context::default(), &[0; 16]).kernel();
             features::dispatches(KERNELS, Aes128::profiles(), built);
             built
-        });
+        };
         assert_eq!(Aes256::profiles(), Aes128::profiles());
         assert_eq!(KERNELS.last(), Some(&(Kernel::Bitsliced, Features::new())));
         // Tables are never detected, so never chosen unasked.
@@ -664,10 +666,10 @@ mod tests {
     /// groups before it.
     pub(crate) fn kernel(under: &features::Under) {
         // The round counts, on the kernel the row chooses.
-        assert_eq!(under.build(|| Aes::<16>::new(&[0; 16])).rounds(), 10);
-        assert_eq!(under.build(|| Aes::<24>::new(&[0; 24])).rounds(), 12);
-        assert_eq!(under.build(|| Aes::<32>::new(&[0; 32])).rounds(), 14);
-        let chosen = under.build(|| features::choose(KERNELS)).expect("listed");
+        assert_eq!(Aes::<16>::new(under.ctx(), &[0; 16]).rounds(), 10);
+        assert_eq!(Aes::<24>::new(under.ctx(), &[0; 24]).rounds(), 12);
+        assert_eq!(Aes::<32>::new(under.ctx(), &[0; 32]).rounds(), 14);
+        let chosen = features::choose(under.ctx(), KERNELS).expect("listed");
         #[cfg(target_arch = "x86_64")]
         x86_64::schedule_is_standard(chosen);
         #[cfg(target_arch = "aarch64")]
@@ -724,7 +726,7 @@ mod tests {
             C: BlockCipher<Block = [u8; BLOCK_SIZE], Key = Key<[u8; K]>>,
         {
             let key = Key::from(<[u8; K]>::try_from(key).expect("width"));
-            let aes = under.build(|| C::new(&key));
+            let aes = C::new(under.ctx(), &key);
             aes.encrypt(blocks);
             let mut back = blocks.to_vec();
             aes.decrypt(&mut back);
@@ -740,8 +742,8 @@ mod tests {
         // Past the widest loop's group, so its tails are all here.
         const MAX: usize = 41;
         let key = Key::from(core::array::from_fn(|i| (i * 37 + K) as u8));
-        let aes = under.build(|| C::new(&key));
-        let reference = features::build_portable(|| C::new(&key));
+        let aes = C::new(under.ctx(), &key);
+        let reference = { C::new(crate::Context::portable(), &key) };
         let mut data = [[0u8; BLOCK_SIZE]; MAX];
         for (i, b) in data.as_flattened_mut().iter_mut().enumerate() {
             *b = (i * 13 + K) as u8;
@@ -769,7 +771,7 @@ mod tests {
         where
             W: BlockCipher<Block = [u8; BLOCK_SIZE], Key = Key<[u8; K]>>,
         {
-            let generic = Aes::<K>::new(&key);
+            let generic = Aes::<K>::new(crate::Context::default(), &key);
             // Enough blocks to pass through a group loop and leave a
             // tail, which is where the two could differ.
             let mut mine = [[0u8; BLOCK_SIZE]; 19];
@@ -790,12 +792,33 @@ mod tests {
             assert_eq!(mine, plain, "decrypting did not undo encrypting");
         }
 
-        same(Aes128::new(&Key::from([9u8; 16])), [9u8; 16]);
-        same(Aes192::new(&Key::from([9u8; 24])), [9u8; 24]);
-        same(Aes256::new(&Key::from([9u8; 32])), [9u8; 32]);
+        same(
+            Aes128::new(crate::Context::default(), &Key::from([9u8; 16])),
+            [9u8; 16],
+        );
+        same(
+            Aes192::new(crate::Context::default(), &Key::from([9u8; 24])),
+            [9u8; 24],
+        );
+        same(
+            Aes256::new(crate::Context::default(), &Key::from([9u8; 32])),
+            [9u8; 32],
+        );
 
-        assert_eq!(Aes128::new(&Key::from([0u8; 16])).rounds(), 10);
-        assert_eq!(Aes192::new(&Key::from([0u8; 24])).rounds(), 12);
-        assert_eq!(Aes256::new(&Key::from([0u8; 32])).rounds(), 14);
+        assert_eq!(
+            Aes128::new(crate::Context::default(), &Key::from([0u8; 16]))
+                .rounds(),
+            10
+        );
+        assert_eq!(
+            Aes192::new(crate::Context::default(), &Key::from([0u8; 24]))
+                .rounds(),
+            12
+        );
+        assert_eq!(
+            Aes256::new(crate::Context::default(), &Key::from([0u8; 32]))
+                .rounds(),
+            14
+        );
     }
 }

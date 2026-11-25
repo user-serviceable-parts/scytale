@@ -11,13 +11,14 @@ use super::sha::{Family, Message};
 use super::{answer_groups, answer_tests};
 use crate::profile::Builder;
 use crate::support::{Error, hex, hex_value, int, text, unknown_test_type};
+use scytale::Context;
 use scytale::Random;
 use scytale::hash::sha3::{CShake128, CShake256};
 use scytale::hash::{BitXof, XofReader};
 use serde_json::{Value, json};
 
 /// The constructor of either width.
-type Start<X> = fn(&[u8], &[u8]) -> X;
+type Start<X> = fn(Context, &[u8], &[u8]) -> X;
 
 pub fn answer(
     doc: &Value,
@@ -42,7 +43,7 @@ fn answer_as<X: BitXof>(
             let name = text(t, "functionName")?.as_bytes();
             let custom = customization(group, t)?;
             let message = Message::of(t)?;
-            let xof = builder.build(|| start(name, &custom))?;
+            let xof = builder.build(|ctx| start(ctx, name, &custom));
             let out = squeeze(xof, &message, bits)?;
             Ok(json!({ "md": hex_value(&out), "outLen": bits }))
         }),
@@ -164,7 +165,7 @@ fn mct<X: BitXof>(
             };
             // The customization changes every round, so each round
             // builds its own.
-            let xof = builder.build(|| start(b"", &custom))?;
+            let xof = builder.build(|ctx| start(ctx, b"", &custom));
             output = squeeze(xof, &message, out_bits)?;
             last_bits = out_bits;
             let right = rightmost_16(&output, out_bits);

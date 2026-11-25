@@ -19,10 +19,12 @@
 //! ```
 //! use scytale::kem::ml_kem::ml_kem_768::PrivateKey;
 //! use scytale::random::CtrDrbg;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = CtrDrbg::from_system()?;
-//! let recipient = PrivateKey::generate(&mut rng)?;
+//! let ctx = Context::default();
+//! let mut rng = CtrDrbg::from_system(ctx)?;
+//! let recipient = PrivateKey::generate(ctx, &mut rng)?;
 //!
 //! // The sender needs only the public key.
 //! let (ciphertext, secret) = recipient.public_key().encapsulate(&mut rng)?;

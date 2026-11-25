@@ -38,9 +38,11 @@
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Ff3_1;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let ff3: Ff3_1<Aes128> = Ff3_1::try_new(&Key::from([0u8; 16]), 10)?;
+//! let ctx = Context::default();
+//! let ff3: Ff3_1<Aes128> = Ff3_1::try_new(ctx, &Key::from([0u8; 16]), 10)?;
 //! let tweak = [0u8; 7];
 //!
 //! let mut account = [0u16, 1, 2, 3, 4, 5, 6, 7, 8, 9];
@@ -53,6 +55,7 @@
 //! # }
 //! ```
 
+use crate::Context;
 use core::fmt;
 
 use crate::Error;
@@ -115,7 +118,11 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ff3_1<C> {
     /// 65536.
     ///
     /// The key is held reversed, as the standard specifies.
-    pub fn try_new(key: &C::Key, radix: u32) -> Result<Self, Error> {
+    pub fn try_new(
+        ctx: Context,
+        key: &C::Key,
+        radix: u32,
+    ) -> Result<Self, Error> {
         if !(2..=65536).contains(&radix) {
             return Err(Error::InvalidRadix(radix));
         }
@@ -135,7 +142,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ff3_1<C> {
         // returns; only the cipher built from it outlives it.
         let mut reversed = key.clone();
         reversed.as_mut().reverse();
-        let cipher = C::new(&reversed);
+        let cipher = C::new(ctx, &reversed);
 
         Ok(Ff3_1 {
             cipher,
@@ -326,7 +333,8 @@ mod tests {
 
     fn ff3(radix: u32) -> Ff3_1<Aes128> {
         let key: [u8; 16] = unhex("44d737102ccc9aec882045c31c08252a");
-        Ff3_1::try_new(&Key::from(key), radix).unwrap()
+        Ff3_1::try_new(crate::Context::default(), &Key::from(key), radix)
+            .unwrap()
     }
 
     #[test]
@@ -405,7 +413,12 @@ mod tests {
         let key: [u8; 16] = unhex("44d737102ccc9aec882045c31c08252a");
         for radix in [0u32, 1, 65537] {
             assert_eq!(
-                Ff3_1::<Aes128>::try_new(&Key::from(key), radix).unwrap_err(),
+                Ff3_1::<Aes128>::try_new(
+                    crate::Context::default(),
+                    &Key::from(key),
+                    radix
+                )
+                .unwrap_err(),
                 Error::InvalidRadix(radix)
             );
         }

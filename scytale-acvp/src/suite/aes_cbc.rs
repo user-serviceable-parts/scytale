@@ -47,7 +47,7 @@ fn aft(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
     let mut data = hex(t, input)?;
     aes_width!(key, C => {
         let k = key_of::<C>(&key)?;
-        let cbc = builder.build(|| Cbc::<C>::new(&k))?;
+        let cbc = builder.build(|ctx| Cbc::<C>::new(ctx, &k));
         if encrypt {
             cbc.encrypt(&iv, &mut data)?;
         } else {
@@ -76,7 +76,7 @@ fn mct(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
         });
         let (last, previous) = aes_width!(key, C => {
             let k = key_of::<C>(&key)?;
-        let cbc = builder.build(|| Cbc::<C>::new(&k))?;
+        let cbc = builder.build(|ctx| Cbc::<C>::new(ctx, &k));
             if encrypt {
                 step_encrypt(&cbc, &iv, &input)?
             } else {

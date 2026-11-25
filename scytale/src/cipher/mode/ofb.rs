@@ -25,9 +25,11 @@
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Ofb;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let ofb = Ofb::<Aes128>::new(&Key::from([0u8; 16]));
+//! let ctx = Context::default();
+//! let ofb = Ofb::<Aes128>::new(ctx, &Key::from([0u8; 16]));
 //! let iv = [0u8; 16];
 //!
 //! // Any length, not just whole blocks.
@@ -39,6 +41,7 @@
 //! # }
 //! ```
 
+use crate::Context;
 use core::fmt;
 
 use super::xor;
@@ -63,12 +66,12 @@ pub struct Ofb<C: BlockCipher> {
 
 impl<C: BlockCipher> Ofb<C> {
     /// Takes the key the cipher runs under.
-    pub fn new(key: &C::Key) -> Self {
+    pub fn new(ctx: Context, key: &C::Key) -> Self {
         // A cipher of the caller's own whose block is no bytes at
         // all would leave the loop below with nothing to advance by.
         const { assert!(size_of::<C::Block>() > 0) };
         Ofb {
-            cipher: C::new(key),
+            cipher: C::new(ctx, key),
         }
     }
 
@@ -168,7 +171,7 @@ mod tests {
     }
 
     fn ofb<const K: usize>(key: &[u8; K]) -> Ofb<Aes<K>> {
-        Ofb::new(&Key::from(*key))
+        Ofb::new(crate::Context::default(), &Key::from(*key))
     }
 
     /// NIST SP 800-38A F.4.1 and F.4.2, AES-128.

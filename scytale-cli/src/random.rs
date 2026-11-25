@@ -25,7 +25,7 @@ pub struct RandomArgs {
 }
 
 pub fn run(args: RandomArgs) -> Result<()> {
-    let mut rng = CtrDrbg::from_system()?;
+    let mut rng = CtrDrbg::from_system(scytale::Context::default())?;
     let mut bytes = Zeroizing::new(vec![0u8; args.count]);
     // The generator caps one request; a larger one is several.
     for chunk in bytes.chunks_mut(MAX_REQUEST) {

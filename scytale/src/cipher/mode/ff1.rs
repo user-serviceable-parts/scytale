@@ -43,10 +43,12 @@
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Ff1;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
+//! let ctx = Context::default();
 //! // Decimal digits.
-//! let ff1 = Ff1::<Aes128>::try_new(&Key::from([0u8; 16]), 10)?;
+//! let ff1 = Ff1::<Aes128>::try_new(ctx, &Key::from([0u8; 16]), 10)?;
 //!
 //! let mut account = [0u16, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 //! ff1.encrypt(b"record 42", &mut account)?;
@@ -59,6 +61,7 @@
 //! # }
 //! ```
 
+use crate::Context;
 use core::fmt;
 
 use crate::Error;
@@ -116,12 +119,16 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Ff1<C> {
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Ff1<C> {
     /// Takes the key the cipher runs under, for messages written in
     /// `radix` symbols, which must be between 2 and 65536.
-    pub fn try_new(key: &C::Key, radix: u32) -> Result<Self, Error> {
+    pub fn try_new(
+        ctx: Context,
+        key: &C::Key,
+        radix: u32,
+    ) -> Result<Self, Error> {
         if !(2..=65536).contains(&radix) {
             return Err(Error::InvalidRadix(radix));
         }
         Ok(Ff1 {
-            cipher: C::new(key),
+            cipher: C::new(ctx, key),
             radix,
         })
     }
@@ -421,7 +428,7 @@ mod tests {
 
     fn ff1(radix: u32) -> Ff1<Aes128> {
         let key: [u8; 16] = unhex("2b7e151628aed2a6abf7158809cf4f3c");
-        Ff1::try_new(&Key::from(key), radix).unwrap()
+        Ff1::try_new(crate::Context::default(), &Key::from(key), radix).unwrap()
     }
 
     /// NIST's published sample for FF1 with AES-128, decimal digits
@@ -507,7 +514,12 @@ mod tests {
         let key: [u8; 16] = unhex("2b7e151628aed2a6abf7158809cf4f3c");
         for radix in [0u32, 1, 65537, 100_000] {
             assert_eq!(
-                Ff1::<Aes128>::try_new(&Key::from(key), radix).unwrap_err(),
+                Ff1::<Aes128>::try_new(
+                    crate::Context::default(),
+                    &Key::from(key),
+                    radix
+                )
+                .unwrap_err(),
                 Error::InvalidRadix(radix)
             );
         }

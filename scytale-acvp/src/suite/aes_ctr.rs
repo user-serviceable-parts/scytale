@@ -69,7 +69,7 @@ fn aft(
             let mut iv = vec![0u8; 16];
             // The generator rekeys its cipher as it draws, so a draw is
             // a build.
-            builder.try_build(|| rng.fill(&mut iv[..12]))?;
+            rng.fill(&mut iv[..12])?;
             iv[15] = 1;
             iv
         }
@@ -79,7 +79,7 @@ fn aft(
         .map_err(|_| Error::new("field iv is not one block"))?;
     aes_width!(key, C => {
         let k = key_of::<C>(&key)?;
-        let ctr = builder.build(|| Ctr::<C>::new(&k))?;
+        let ctr = builder.build(|ctx| Ctr::<C>::new(ctx, &k));
         if encrypt {
             ctr.encrypt(&block, &mut data);
         } else {

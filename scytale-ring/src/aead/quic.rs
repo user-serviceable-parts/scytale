@@ -106,11 +106,18 @@ impl HeaderProtectionKey {
         key_bytes: &[u8],
     ) -> Result<Self, error::Unspecified> {
         let inner = match algorithm.id {
-            Id::AES_128 => Inner::Aes128(Aes128::new(&super::key(key_bytes)?)),
-            Id::AES_256 => Inner::Aes256(Aes256::new(&super::key(key_bytes)?)),
-            Id::CHACHA20 => {
-                Inner::ChaCha20(ChaCha20::new(&super::key(key_bytes)?))
-            }
+            Id::AES_128 => Inner::Aes128(Aes128::new(
+                scytale::Context::default(),
+                &super::key(key_bytes)?,
+            )),
+            Id::AES_256 => Inner::Aes256(Aes256::new(
+                scytale::Context::default(),
+                &super::key(key_bytes)?,
+            )),
+            Id::CHACHA20 => Inner::ChaCha20(ChaCha20::new(
+                scytale::Context::default(),
+                &super::key(key_bytes)?,
+            )),
         };
         Ok(Self { inner, algorithm })
     }

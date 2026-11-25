@@ -11,15 +11,17 @@
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::mac::Mac;
 //! use scytale::mac::cmac::Cmac;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
+//! let ctx = Context::default();
 //! let key = Key::from([0x2b; 16]);
 //!
 //! // In one call.
-//! let tag = Cmac::<Aes128>::mac(&key, b"message");
+//! let tag = Cmac::<Aes128>::mac(ctx, &key, b"message");
 //!
 //! // In pieces, then checked in constant time.
-//! let mut mac = Cmac::<Aes128>::new(&key);
+//! let mut mac = Cmac::<Aes128>::new(ctx, &key);
 //! mac.update(b"mess");
 //! mac.update(b"age");
 //! mac.verify(&tag)?;
@@ -40,10 +42,10 @@ use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::Mac;
-use crate::KeyType;
 use crate::cipher::mode::cbc::MacEngine;
 use crate::cipher::mode::xor;
 use crate::cipher::{BlockCipher, OneBlock};
+use crate::{Context, KeyType};
 
 /// The block, and tag, length in bytes.
 const BLOCK: usize = 16;
@@ -76,13 +78,10 @@ pub struct Cmac<C: BlockCipher<Block = [u8; BLOCK]>> {
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Cmac<C> {
-    /// Starts a MAC under `key`.
-    pub fn new(key: &C::Key) -> Self {
-        Self::with_engine(key, MacEngine::new())
-    }
-
-    fn with_engine(key: &C::Key, engine: MacEngine<C>) -> Self {
-        let cipher = C::new(key);
+    /// Starts a MAC under `key`, with the best kernel `ctx` allows.
+    pub fn new(ctx: Context, key: &C::Key) -> Self {
+        let cipher = C::new(ctx, key);
+        let engine = MacEngine::new(ctx);
         let mut l = [0u8; BLOCK];
         cipher.encrypt_one(&mut l);
         let k1 = double(&l);
@@ -100,8 +99,8 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Cmac<C> {
     }
 
     /// The tag of `data` under `key`, in one call.
-    pub fn mac(key: &C::Key, data: &[u8]) -> [u8; BLOCK] {
-        let mut mac = Self::new(key);
+    pub fn mac(ctx: Context, key: &C::Key, data: &[u8]) -> [u8; BLOCK] {
+        let mut mac = Self::new(ctx, key);
         mac.update(data);
         mac.finalize()
     }
@@ -138,9 +137,9 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Mac for Cmac<C> {
     type Tag = [u8; BLOCK];
 
     /// Never fails: every key the cipher takes is a CMAC key.
-    fn new(key: &Self::Key) -> Self {
+    fn new(ctx: Context, key: &Self::Key) -> Self {
         // The inherent constructor, which resolution reaches first.
-        Self::with_engine(key, MacEngine::new())
+        Cmac::new(ctx, key)
     }
 
     fn reset(&mut self) {
@@ -256,8 +255,12 @@ pub(crate) mod tests {
         let m = message();
         for &(len, tag) in cases {
             let expected: [u8; 16] = unhex(tag);
-            assert_eq!(Cmac::<C>::mac(key, &m[..len]), expected, "{len}");
-            let mut mac = <Cmac<C> as Mac>::new(key);
+            assert_eq!(
+                Cmac::<C>::mac(crate::Context::default(), key, &m[..len]),
+                expected,
+                "{len}"
+            );
+            let mut mac = <Cmac<C> as Mac>::new(crate::Context::default(), key);
             mac.update(&m[..len]);
             mac.verify(&expected).expect("verify");
         }
@@ -267,7 +270,7 @@ pub(crate) mod tests {
     #[test]
     fn rfc4493_subkeys() {
         let key = Key::from(unhex("2b7e151628aed2a6abf7158809cf4f3c"));
-        let mac = Cmac::<Aes128>::new(&key);
+        let mac = Cmac::<Aes128>::new(crate::Context::default(), &key);
         assert_eq!(mac.k1, unhex::<16>("fbeed618357133667c85e08f7236a8de"));
         assert_eq!(mac.k2, unhex::<16>("f7ddac306ae266ccf90bc11ee46d513b"));
     }
@@ -324,10 +327,12 @@ pub(crate) mod tests {
         let key = Key::from([0x5au8; 16]);
         let m = message();
         for len in [0, 1, 15, 16, 17, 31, 32, 33, 48, 64] {
-            let whole = Cmac::<Aes128>::mac(&key, &m[..len]);
+            let whole =
+                Cmac::<Aes128>::mac(crate::Context::default(), &key, &m[..len]);
             for split in 0..=len {
                 for second in split..=len {
-                    let mut mac = Cmac::<Aes128>::new(&key);
+                    let mut mac =
+                        Cmac::<Aes128>::new(crate::Context::default(), &key);
                     mac.update(&m[..split]);
                     mac.update(&[]);
                     mac.update(&m[split..second]);
@@ -350,10 +355,10 @@ pub(crate) mod tests {
             key: &C::Key,
             data: &[u8],
         ) {
-            let mut mac = under.build(|| Cmac::<C>::new(key));
+            let mut mac = Cmac::<C>::new(under.ctx(), key);
             for len in [0, 1, 16, 17, 32, 48, 64, 200, 1000] {
                 let mut reference =
-                    crate::features::build_portable(|| Cmac::<C>::new(key));
+                    { Cmac::<C>::new(crate::Context::portable(), key) };
                 reference.update(&data[..len]);
                 let expected = reference.finalize();
                 mac.update(&data[..len]);
@@ -373,8 +378,9 @@ pub(crate) mod tests {
     #[test]
     fn verify_rejects_wrong_and_short_tags() {
         let key = Key::from([1u8; 16]);
-        let tag = Cmac::<Aes128>::mac(&key, b"message");
-        let mut mac = Cmac::<Aes128>::new(&key);
+        let tag =
+            Cmac::<Aes128>::mac(crate::Context::default(), &key, b"message");
+        let mut mac = Cmac::<Aes128>::new(crate::Context::default(), &key);
 
         let mut wrong = tag;
         wrong[15] ^= 1;

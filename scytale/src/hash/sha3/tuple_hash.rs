@@ -9,8 +9,10 @@
 //!
 //! ```
 //! use scytale::hash::sha3::TupleHash128;
+//! use scytale::Context;
+//! let ctx = Context::default();
 //!
-//! let mut hash = TupleHash128::new(b"My Tuple App");
+//! let mut hash = TupleHash128::new(ctx, b"My Tuple App");
 //! hash.push(&[0, 1, 2]);
 //! hash.push(&[0x10, 0x11, 0x12, 0x13, 0x14, 0x15]);
 //! let mut out = [0u8; 32];
@@ -27,6 +29,7 @@ use core::fmt;
 
 use super::cshake::{Core, bits_of, left_encode, right_encode};
 use super::{Auto, AutoReader, variant};
+use crate::Context;
 use crate::hash::XofReader;
 
 /// The function name TupleHash gives cSHAKE.
@@ -55,10 +58,10 @@ macro_rules! tuple_hash {
 
         impl $name {
             /// Starts a hash under `customization`, which may be
-            /// empty.
-            pub fn new(customization: &[u8]) -> Self {
+            /// empty, with the best implementation `ctx` allows.
+            pub fn new(ctx: Context, customization: &[u8]) -> Self {
                 $name {
-                    core: Core::with(Auto::new(), NAME, customization),
+                    core: Core::with(Auto::new(ctx), NAME, customization),
                 }
             }
 
@@ -153,7 +156,7 @@ mod tests {
     }
 
     fn hash128(n: usize, s: &[u8], xof: bool) -> Vec<u8> {
-        let mut h = TupleHash128::new(s);
+        let mut h = TupleHash128::new(crate::Context::default(), s);
         strings(n).iter().for_each(|e| h.push(e));
         let mut out = vec![0u8; 32];
         if xof {
@@ -165,7 +168,7 @@ mod tests {
     }
 
     fn hash256(n: usize, s: &[u8], xof: bool) -> Vec<u8> {
-        let mut h = TupleHash256::new(s);
+        let mut h = TupleHash256::new(crate::Context::default(), s);
         strings(n).iter().for_each(|e| h.push(e));
         let mut out = vec![0u8; 64];
         if xof {
@@ -286,7 +289,7 @@ mod tests {
     #[test]
     fn boundaries_count() {
         let hash = |parts: &[&[u8]]| {
-            let mut h = TupleHash128::new(b"");
+            let mut h = TupleHash128::new(crate::Context::default(), b"");
             parts.iter().for_each(|p| h.push(p));
             let mut out = [0u8; 32];
             h.finalize_to(&mut out);
@@ -301,7 +304,7 @@ mod tests {
     /// resetting starts the next sequence afresh.
     #[test]
     fn length_finalize_and_reset() {
-        let mut h = TupleHash256::new(APP);
+        let mut h = TupleHash256::new(crate::Context::default(), APP);
         let mut short = [0u8; 16];
         let mut long = [0u8; 32];
         h.push(b"x");
@@ -321,7 +324,7 @@ mod tests {
     /// The state stays out of the debug output.
     #[test]
     fn debug_omits_the_state() {
-        let h = TupleHash128::new(b"secret label");
+        let h = TupleHash128::new(crate::Context::default(), b"secret label");
         assert_eq!(format!("{h:?}"), "TupleHash128 { .. }");
     }
 }

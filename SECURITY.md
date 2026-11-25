@@ -61,7 +61,7 @@ excluded.
 | AES, table-driven | `cipher/aes/portable/ttable.rs` | **not constant time**; compiled and tested, never selected by any construction; there is currently no way to ask for it |
 | ChaCha20, all | add-rotate-xor only | no tables, no data-dependent branches, on every backend |
 | HChaCha20, XChaCha20 | `cipher/chacha20/portable.rs`, over ChaCha20 | the same rounds; the subkey is wiped with the message |
-| AEGIS round | the AES round of the same instructions on each architecture, else `cipher/aes/portable/bitsliced.rs` | as AES; the table-driven round only where `Isolated` is in force |
+| AEGIS round | the AES round of the same instructions on each architecture, else `cipher/aes/portable/bitsliced.rs` | as AES; the table-driven round only where the context grants `Isolated` |
 | GHASH, portable | 128 masked shift-and-add steps per block | no tables; slow on purpose |
 | GHASH, accelerated | `pclmulqdq`, `pmull`, Zvbc/Zbc/Zvkg | carry-less multiply instructions are data-independent |
 | POLYVAL (GCM-SIV) | over the GHASH multiply | same |

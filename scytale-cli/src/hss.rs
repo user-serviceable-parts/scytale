@@ -8,6 +8,7 @@
 //! the signature: a signature never leaves without the leaf it spent
 //! being recorded, which is the whole safety of the scheme.
 
+use scytale::Context;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -178,10 +179,14 @@ pub fn generate(name: &str) -> Result<Zeroizing<Vec<u8>>> {
             );
         }
     }
-    let mut rng = CtrDrbg::from_system()?;
+    let mut rng = CtrDrbg::from_system(scytale::Context::default())?;
     with_levels!(sets.len(), L => {
         let sets: [(Lms, Lmots); L] = std::array::from_fn(|i| sets[i]);
-        let key = hss::PrivateKey::<L>::generate(&mut rng, &sets)?;
+        let key = hss::PrivateKey::<L>::generate(
+            Context::default(),
+            &mut rng,
+            &sets,
+        )?;
         let mut pem = Zeroizing::new(vec![0u8; hss::pem_max(L)]);
         let n = key.pem_bytes(&mut pem)?;
         pem.truncate(n);
@@ -197,7 +202,7 @@ fn levels(pem: &[u8]) -> Result<usize> {
 /// The public half of the private key in `pem`, as PEM.
 pub fn public(pem: &[u8]) -> Result<Vec<u8>> {
     with_levels!(levels(pem)?, L => {
-        let key = hss::PrivateKey::<L>::try_from_pem(pem)?;
+        let key = hss::PrivateKey::<L>::try_from_pem(Context::default(), pem)?;
         let mut out = vec![0u8; hss::PUBLIC_KEY_PEM_MAX];
         let n = key.public_key().pem_bytes(&mut out)?;
         out.truncate(n);
@@ -219,7 +224,10 @@ fn describe(sets: &[(Lms, Lmots)]) -> String {
 pub fn detail(pem: &[u8], private: bool) -> Result<String> {
     if private {
         with_levels!(levels(pem)?, L => {
-            let key = hss::PrivateKey::<L>::try_from_pem(pem)?;
+            let key = hss::PrivateKey::<L>::try_from_pem(
+                Context::default(),
+                pem,
+            )?;
             let plural = if L == 1 { "" } else { "s" };
             Ok(format!(
                 ", {L} level{plural}: {}; {} signatures left",
@@ -228,7 +236,8 @@ pub fn detail(pem: &[u8], private: bool) -> Result<String> {
             ))
         })
     } else {
-        let key = hss::PublicKey::try_from_pem(pem)?;
+        let key =
+            hss::PublicKey::try_from_pem(scytale::Context::default(), pem)?;
         let levels = key.levels();
         let plural = if levels == 1 { "" } else { "s" };
         let top = (key.top().lms(), key.top().lmots());
@@ -246,7 +255,7 @@ pub fn detail(pem: &[u8], private: bool) -> Result<String> {
 /// key is on disk.
 pub fn sign(path: &Path, message: &[u8]) -> Result<Vec<u8>> {
     let pem = Zeroizing::new(io::read_all(Some(path))?);
-    let mut rng = CtrDrbg::from_system()?;
+    let mut rng = CtrDrbg::from_system(scytale::Context::default())?;
     let exhausted = |e: scytale::Error| match e {
         scytale::Error::SequenceExhausted => usage!(
             "{}: the key has no signatures left; it has signed as many \
@@ -256,7 +265,10 @@ pub fn sign(path: &Path, message: &[u8]) -> Result<Vec<u8>> {
         other => other.into(),
     };
     with_levels!(levels(&pem)?, L => {
-        let mut key = hss::PrivateKey::<L>::try_from_pem(&pem)?;
+        let mut key = hss::PrivateKey::<L>::try_from_pem(
+            Context::default(),
+            &pem,
+        )?;
         let mut signature = vec![0u8; key.signature_len()];
         let n = key.sign(&mut rng, message, &mut signature).map_err(exhausted)?;
         signature.truncate(n);
@@ -296,7 +308,8 @@ pub fn verify(
     message: &[u8],
     signature: &[u8],
 ) -> std::result::Result<(), scytale::Error> {
-    hss::PublicKey::try_from_pem(pem)?.verify(message, signature)
+    hss::PublicKey::try_from_pem(scytale::Context::default(), pem)?
+        .verify(message, signature)
 }
 
 #[cfg(test)]

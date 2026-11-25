@@ -92,7 +92,7 @@ impl<'a> Ots<'a> {
     /// A hash begun as `K` is, over `I || u32str(q) || D_PBLC`, for
     /// the chain ends to follow.
     fn ends(&self) -> Hasher {
-        let mut ends = Hasher::new(self.ots.family());
+        let mut ends = self.hasher.fresh(self.ots.family());
         ends.update(self.i);
         ends.update(&self.q.to_be_bytes());
         ends.update(&D_PBLC);

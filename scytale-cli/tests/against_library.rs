@@ -18,6 +18,7 @@
 
 mod common;
 
+use scytale::Context;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -167,8 +168,8 @@ macro_rules! aes_type {
     };
 }
 
-fn digest<H: Hash + Default>(message: &[u8]) -> Vec<u8> {
-    let mut h = H::default();
+fn digest<H: Hash>(message: &[u8]) -> Vec<u8> {
+    let mut h = H::new(scytale::Context::default());
     h.update(message);
     h.finalize().as_ref().to_vec()
 }
@@ -206,9 +207,9 @@ fn hashes_match_the_library() {
             "shake128" | "shake256" => {
                 let ours = plain(&["hash", name, "-l", "40"], MESSAGE);
                 let theirs = if name == "shake128" {
-                    squeeze(Shake128::default())
+                    squeeze(Shake128::new(scytale::Context::default()))
                 } else {
-                    squeeze(Shake256::default())
+                    squeeze(Shake256::new(scytale::Context::default()))
                 };
                 (ours, theirs)
             }
@@ -225,9 +226,17 @@ fn hashes_match_the_library() {
                 ];
                 let ours = plain(&args, MESSAGE);
                 let theirs = if name == "cshake128" {
-                    squeeze(CShake128::new(b"F", b"C"))
+                    squeeze(CShake128::new(
+                        scytale::Context::default(),
+                        b"F",
+                        b"C",
+                    ))
                 } else {
-                    squeeze(CShake256::new(b"F", b"C"))
+                    squeeze(CShake256::new(
+                        scytale::Context::default(),
+                        b"F",
+                        b"C",
+                    ))
                 };
                 (ours, theirs)
             }
@@ -247,12 +256,14 @@ fn hashes_match_the_library() {
                 let ours = unhex(ok(&args, b""));
                 let mut theirs = [0u8; 40];
                 if name == "tuplehash128" {
-                    let mut t = TupleHash128::new(b"C");
+                    let mut t =
+                        TupleHash128::new(scytale::Context::default(), b"C");
                     t.push(b"one");
                     t.push(&[2, 3]);
                     t.finalize_to(&mut theirs);
                 } else {
-                    let mut t = TupleHash256::new(b"C");
+                    let mut t =
+                        TupleHash256::new(scytale::Context::default(), b"C");
                     t.push(b"one");
                     t.push(&[2, 3]);
                     t.finalize_to(&mut theirs);
@@ -277,7 +288,7 @@ fn macs_match_the_library() {
                 // A key past every block size, which HMAC hashes first.
                 let key = bytes(150, 1);
                 let tag = hash_type!(hash, H => {
-                    let mut mac = Hmac::<H>::new(&key);
+                    let mut mac = Hmac::<H>::new(Context::default(), &key);
                     mac.update(MESSAGE);
                     mac.finalize().as_ref().to_vec()
                 }, _ => panic!("no hash {hash}"));
@@ -285,7 +296,10 @@ fn macs_match_the_library() {
             } else if let Some(bits) = name.strip_prefix("cmac-aes-") {
                 aes_type!(bits, C => {
                     let key = bytes(bits.parse::<usize>().unwrap() / 8, 2);
-                    let mut mac = Cmac::<C>::new(&key_of::<C>(&key));
+                    let mut mac = Cmac::<C>::new(
+                        Context::default(),
+                        &key_of::<C>(&key),
+                    );
                     mac.update(MESSAGE);
                     (key, vec![], mac.finalize().to_vec())
                 })
@@ -293,11 +307,13 @@ fn macs_match_the_library() {
                 let key = bytes(32, 3);
                 let mut tag = [0u8; 40];
                 if name == "kmac128" {
-                    let mut mac = Kmac128::new(&key, b"C");
+                    let mut mac =
+                        Kmac128::new(scytale::Context::default(), &key, b"C");
                     mac.update(MESSAGE);
                     mac.finalize_to(&mut tag);
                 } else {
-                    let mut mac = Kmac256::new(&key, b"C");
+                    let mut mac =
+                        Kmac256::new(scytale::Context::default(), &key, b"C");
                     mac.update(MESSAGE);
                     mac.finalize_to(&mut tag);
                 }
@@ -308,7 +324,10 @@ fn macs_match_the_library() {
                 )
             } else if name == "poly1305" {
                 let key = bytes(32, 4);
-                let mut mac = Poly1305::new(&key_of::<Poly1305>(&key));
+                let mut mac = Poly1305::new(
+                    scytale::Context::default(),
+                    &key_of::<Poly1305>(&key),
+                );
                 mac.update(MESSAGE);
                 (key, vec![], mac.finalize().to_vec())
             } else {
@@ -332,35 +351,59 @@ fn library_aead(name: &str, key: &[u8], nonce: &[u8], aad: &[u8]) -> Vec<u8> {
     let mut data = MESSAGE.to_vec();
     let mut tag = [0u8; 16];
     if name == "chacha20-poly1305" {
-        let aead = ChaCha20Poly1305::new(&key_of::<ChaCha20Poly1305>(key));
+        let aead = ChaCha20Poly1305::new(
+            scytale::Context::default(),
+            &key_of::<ChaCha20Poly1305>(key),
+        );
         aead.encrypt(nonce.try_into().unwrap(), aad, &mut data, &mut tag)
             .unwrap();
     } else if name == "xchacha20-poly1305" {
-        let aead = XChaCha20Poly1305::new(&key_of::<XChaCha20Poly1305>(key));
+        let aead = XChaCha20Poly1305::new(
+            scytale::Context::default(),
+            &key_of::<XChaCha20Poly1305>(key),
+        );
         aead.encrypt(nonce.try_into().unwrap(), aad, &mut data, &mut tag)
             .unwrap();
     } else if name == "aegis-128l" {
-        let aead = Aegis128L::new(&key_of::<Aegis128L>(key));
+        let aead = Aegis128L::new(
+            scytale::Context::default(),
+            &key_of::<Aegis128L>(key),
+        );
         aead.encrypt(nonce.try_into().unwrap(), aad, &mut data, &mut tag)
             .unwrap();
     } else if name == "aegis-128x2" {
-        let aead = Aegis128X2::new(&key_of::<Aegis128X2>(key));
+        let aead = Aegis128X2::new(
+            scytale::Context::default(),
+            &key_of::<Aegis128X2>(key),
+        );
         aead.encrypt(nonce.try_into().unwrap(), aad, &mut data, &mut tag)
             .unwrap();
     } else if name == "aegis-128x4" {
-        let aead = Aegis128X4::new(&key_of::<Aegis128X4>(key));
+        let aead = Aegis128X4::new(
+            scytale::Context::default(),
+            &key_of::<Aegis128X4>(key),
+        );
         aead.encrypt(nonce.try_into().unwrap(), aad, &mut data, &mut tag)
             .unwrap();
     } else if name == "aegis-256" {
-        let aead = Aegis256::new(&key_of::<Aegis256>(key));
+        let aead = Aegis256::new(
+            scytale::Context::default(),
+            &key_of::<Aegis256>(key),
+        );
         aead.encrypt(nonce.try_into().unwrap(), aad, &mut data, &mut tag)
             .unwrap();
     } else if name == "aegis-256x2" {
-        let aead = Aegis256X2::new(&key_of::<Aegis256X2>(key));
+        let aead = Aegis256X2::new(
+            scytale::Context::default(),
+            &key_of::<Aegis256X2>(key),
+        );
         aead.encrypt(nonce.try_into().unwrap(), aad, &mut data, &mut tag)
             .unwrap();
     } else if name == "aegis-256x4" {
-        let aead = Aegis256X4::new(&key_of::<Aegis256X4>(key));
+        let aead = Aegis256X4::new(
+            scytale::Context::default(),
+            &key_of::<Aegis256X4>(key),
+        );
         aead.encrypt(nonce.try_into().unwrap(), aad, &mut data, &mut tag)
             .unwrap();
     } else {
@@ -368,40 +411,36 @@ fn library_aead(name: &str, key: &[u8], nonce: &[u8], aad: &[u8]) -> Vec<u8> {
         let (bits, mode) = rest.split_once('-').unwrap();
         match (bits, mode) {
             ("128", "gcm-siv") => {
-                GcmSiv::<Aes128>::new(&key_of::<Aes128>(key))
-                    .encrypt(
-                        nonce.try_into().unwrap(),
-                        aad,
-                        &mut data,
-                        &mut tag,
-                    )
-                    .unwrap();
+                GcmSiv::<Aes128>::new(
+                    scytale::Context::default(),
+                    &key_of::<Aes128>(key),
+                )
+                .encrypt(nonce.try_into().unwrap(), aad, &mut data, &mut tag)
+                .unwrap();
             }
             ("256", "gcm-siv") => {
-                GcmSiv::<Aes256>::new(&key_of::<Aes256>(key))
-                    .encrypt(
-                        nonce.try_into().unwrap(),
-                        aad,
-                        &mut data,
-                        &mut tag,
-                    )
-                    .unwrap();
+                GcmSiv::<Aes256>::new(
+                    scytale::Context::default(),
+                    &key_of::<Aes256>(key),
+                )
+                .encrypt(nonce.try_into().unwrap(), aad, &mut data, &mut tag)
+                .unwrap();
             }
             (_, "gcm") => aes_type!(bits, C => {
                 let nonce = nonce.try_into().unwrap();
-                Gcm::<C>::new(&key_of::<C>(key))
+                Gcm::<C>::new(scytale::Context::default(), &key_of::<C>(key))
                     .encrypt(nonce, aad, &mut data, &mut tag)
                     .unwrap();
             }),
             (_, "ccm") => aes_type!(bits, C => {
-                Ccm::<C>::new(&key_of::<C>(key))
+                Ccm::<C>::new(scytale::Context::default(), &key_of::<C>(key))
                     .encrypt(nonce, aad, &mut data, &mut tag)
                     .unwrap();
             }),
             (_, "xpn") => aes_type!(bits, C => {
                 let salt = nonce[..12].try_into().unwrap();
                 let frame = nonce[12..].try_into().unwrap();
-                Xpn::<C>::new(&key_of::<C>(key))
+                Xpn::<C>::new(scytale::Context::default(), &key_of::<C>(key))
                     .encrypt(salt, frame, aad, &mut data, &mut tag)
                     .unwrap();
             }),
@@ -473,20 +512,31 @@ where
         "ecb" => {
             let (blocks, rest) = data.as_chunks_mut::<16>();
             assert!(rest.is_empty());
-            C::new(key).encrypt(blocks);
+            C::new(scytale::Context::default(), key).encrypt(blocks);
         }
-        "cbc" => Cbc::<C>::new(key).encryptor(iv).update(&mut data).unwrap(),
-        "cfb128" => Cfb128::<C>::new(key)
+        "cbc" => Cbc::<C>::new(scytale::Context::default(), key)
             .encryptor(iv)
             .update(&mut data)
             .unwrap(),
-        "cfb8" => Cfb8::<C>::new(key).encryptor(iv).update(&mut data),
+        "cfb128" => Cfb128::<C>::new(scytale::Context::default(), key)
+            .encryptor(iv)
+            .update(&mut data)
+            .unwrap(),
+        "cfb8" => Cfb8::<C>::new(scytale::Context::default(), key)
+            .encryptor(iv)
+            .update(&mut data),
         "cfb1" => {
             let bits = data.len() * 8;
-            Cfb1::<C>::new(key).encrypt(iv, &mut data, bits).unwrap();
+            Cfb1::<C>::new(scytale::Context::default(), key)
+                .encrypt(iv, &mut data, bits)
+                .unwrap();
         }
-        "ofb" => Ofb::<C>::new(key).stream(iv).update(&mut data),
-        "ctr" => Ctr::<C>::new(key).stream(iv).update(&mut data),
+        "ofb" => Ofb::<C>::new(scytale::Context::default(), key)
+            .stream(iv)
+            .update(&mut data),
+        "ctr" => Ctr::<C>::new(scytale::Context::default(), key)
+            .stream(iv)
+            .update(&mut data),
         other => panic!("no library call for AES mode {other}"),
     }
     data
@@ -505,14 +555,14 @@ fn ciphers_match_the_library() {
             let mut theirs = MESSAGE.to_vec();
             let nonce = if name == "xchacha20" {
                 let nonce = bytes(24, 9);
-                XChaCha20::new(&typed)
+                XChaCha20::new(scytale::Context::default(), &typed)
                     .stream(nonce[..].try_into().unwrap(), 7)
                     .update(&mut theirs)
                     .unwrap();
                 nonce
             } else {
                 let nonce = bytes(12, 9);
-                ChaCha20::new(&typed)
+                ChaCha20::new(scytale::Context::default(), &typed)
                     .stream(nonce[..].try_into().unwrap(), 7)
                     .update(&mut theirs)
                     .unwrap();
@@ -556,9 +606,15 @@ fn ciphers_match_the_library() {
                     let plain = bytes(if mode == "kw" { 32 } else { 27 }, 11);
                     let mut out = vec![0u8; plain.len() + 16];
                     let n = if mode == "kw" {
-                        Kw::<C>::new(&typed).wrap(&plain, &mut out)
+                        Kw::<C>::new(Context::default(), &typed).wrap(
+                            &plain,
+                            &mut out,
+                        )
                     } else {
-                        Kwp::<C>::new(&typed).wrap(&plain, &mut out)
+                        Kwp::<C>::new(Context::default(), &typed).wrap(
+                            &plain,
+                            &mut out,
+                        )
                     }
                     .unwrap();
                     let theirs = &out[..n];
@@ -569,7 +625,11 @@ fn ciphers_match_the_library() {
                 "xts" => {
                     let second = bytes(width, 12);
                     let mut theirs = MESSAGE.to_vec();
-                    Xts::<C>::try_new(&typed, &key_of::<C>(&second))
+                    Xts::<C>::try_new(
+                        Context::default(),
+                        &typed,
+                        &key_of::<C>(&second),
+                    )
                         .unwrap()
                         .encrypt(&iv, &mut theirs)
                         .unwrap();
@@ -628,12 +688,12 @@ fn fpe_matches(name: &str) {
         let key = bytes(bits.parse::<usize>().unwrap() / 8, 15);
         let typed = key_of::<C>(&key);
         if ff3 {
-            Ff3_1::<C>::try_new(&typed, DIGITS.radix())
+            Ff3_1::<C>::try_new(Context::default(), &typed, DIGITS.radix())
                 .unwrap()
                 .encrypt(tweak[..].try_into().unwrap(), &mut symbols)
                 .unwrap();
         } else {
-            Ff1::<C>::try_new(&typed, DIGITS.radix())
+            Ff1::<C>::try_new(Context::default(), &typed, DIGITS.radix())
                 .unwrap()
                 .encrypt(&tweak, &mut symbols)
                 .unwrap();
@@ -662,7 +722,13 @@ fn kdfs_match_the_library() {
         let h = name.as_str();
         hash_type!(h, H => {
             let mut out = [0u8; 42];
-            hkdf::derive::<H>(b"salt", &secret, &parts, &mut out).unwrap();
+            hkdf::derive::<H>(
+                Context::default(),
+                b"salt",
+                &secret,
+                &parts,
+                &mut out,
+            ).unwrap();
             let ours = run(&[
                 "kdf", "hkdf", h, "--ikm", &s, "--salt", "str:salt",
                 "--info", &a_arg, "--info", &b_arg, "-l", "42",
@@ -670,7 +736,8 @@ fn kdfs_match_the_library() {
             assert_eq!(ours, out, "hkdf {h}");
 
             let mut out = [0u8; 40];
-            pbkdf2::pbkdf2::<H>(b"pw", b"salt", 3, &mut out).unwrap();
+            let ctx = Context::default();
+            pbkdf2::pbkdf2::<H>(ctx, b"pw", b"salt", 3, &mut out).unwrap();
             let ours = run(&[
                 "kdf", "pbkdf2", h, "--password", "str:pw", "--salt",
                 "str:salt", "-i", "3", "-l", "40",
@@ -678,7 +745,13 @@ fn kdfs_match_the_library() {
             assert_eq!(ours, out, "pbkdf2 {h}");
 
             let mut out = [0u8; 40];
-            tls12::prf::<H>(&secret, b"label", &parts, &mut out);
+            tls12::prf::<H>(
+                Context::default(),
+                &secret,
+                b"label",
+                &parts,
+                &mut out,
+            );
             let ours = run(&[
                 "kdf", "tls12", h, "--secret", &s, "--label", "str:label",
                 "--seed", &a_arg, "--seed", &b_arg, "-l", "40",
@@ -686,7 +759,8 @@ fn kdfs_match_the_library() {
             assert_eq!(ours, out, "tls12 {h}");
 
             let mut out = [0u8; 40];
-            one_step::hash::<H>(&secret, &parts, &mut out).unwrap();
+            let ctx = Context::default();
+            one_step::hash::<H>(ctx, &secret, &parts, &mut out).unwrap();
             let ours = run(&[
                 "kdf", "one-step", h, "--secret", &s, "--info", &a_arg,
                 "--info", &b_arg, "-l", "40",
@@ -694,7 +768,12 @@ fn kdfs_match_the_library() {
             assert_eq!(ours, out, "one-step {h}");
 
             let mut out = [0u8; 16];
-            one_step::hash_no_counter::<H>(&secret, &parts, &mut out)
+            one_step::hash_no_counter::<H>(
+                Context::default(),
+                &secret,
+                &parts,
+                &mut out,
+            )
                 .unwrap();
             let ours = run(&[
                 "kdf", "one-step", h, "--secret", &s, "--info", &a_arg,
@@ -703,7 +782,8 @@ fn kdfs_match_the_library() {
             assert_eq!(ours, out, "one-step {h} without the counter");
 
             let mut out = [0u8; 40];
-            x963::derive::<H>(&secret, &parts, &mut out).unwrap();
+            let ctx = Context::default();
+            x963::derive::<H>(ctx, &secret, &parts, &mut out).unwrap();
             let ours = run(&[
                 "kdf", "x963", h, "--secret", &s, "--info", &a_arg,
                 "--info", &b_arg, "-l", "40",
@@ -791,10 +871,14 @@ fn kdfs_match_the_library() {
         if let Some(hash) = m.strip_prefix("hmac-") {
             hash_type!(hash, H => {
                 let mut out = [0u8; 40];
-                let mut mac = Hmac::<H>::new(b"salt");
+                let mut mac = Hmac::<H>::new(Context::default(), b"salt");
                 one_step::mac(&mut mac, &secret, &parts, &mut out).unwrap();
                 assert_eq!(one_step_args(&[]), out, "one-step {m}");
-                let theirs = three(|| Hmac::<H>::new(&key), &iv_bytes, &parts);
+                let theirs = three(
+                    || Hmac::<H>::new(Context::default(), &key),
+                    &iv_bytes,
+                    &parts,
+                );
                 for ((extra, mode), theirs) in modes.iter().zip(theirs) {
                     assert_eq!(sp(&arg(&key), extra), theirs, "{mode} {m}");
                 }
@@ -803,7 +887,7 @@ fn kdfs_match_the_library() {
             aes_type!(bits, C => {
                 let key = bytes(bits.parse::<usize>().unwrap() / 8, 21);
                 let theirs = three(
-                    || Cmac::<C>::new(&key_of::<C>(&key)),
+                    || Cmac::<C>::new(Context::default(), &key_of::<C>(&key)),
                     &iv_bytes,
                     &parts,
                 );
@@ -815,11 +899,35 @@ fn kdfs_match_the_library() {
             let mut out = [0u8; 40];
             let mut derived = [0u8; 40];
             if m == "kmac128" {
-                one_step::kmac128(b"salt", &secret, &parts, &mut out);
-                sp800_108::kmac128(&key, b"L", b"C", &mut derived);
+                one_step::kmac128(
+                    scytale::Context::default(),
+                    b"salt",
+                    &secret,
+                    &parts,
+                    &mut out,
+                );
+                sp800_108::kmac128(
+                    scytale::Context::default(),
+                    &key,
+                    b"L",
+                    b"C",
+                    &mut derived,
+                );
             } else {
-                one_step::kmac256(b"salt", &secret, &parts, &mut out);
-                sp800_108::kmac256(&key, b"L", b"C", &mut derived);
+                one_step::kmac256(
+                    scytale::Context::default(),
+                    b"salt",
+                    &secret,
+                    &parts,
+                    &mut out,
+                );
+                sp800_108::kmac256(
+                    scytale::Context::default(),
+                    &key,
+                    b"L",
+                    b"C",
+                    &mut derived,
+                );
             }
             assert_eq!(one_step_args(&[]), out, "one-step {m}");
             let k = arg(&key);
@@ -1022,11 +1130,19 @@ fn library_public(name: &str, pem: &[u8]) -> Vec<u8> {
     let mut out = vec![0u8; 16 * 1024];
     let n = match name {
         "ed25519" => {
-            let key = ed25519::PrivateKey::try_from_pem(pem).unwrap();
+            let key = ed25519::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )
+            .unwrap();
             return key.public_key().pem_bytes().to_vec();
         }
         "ed448" => {
-            let key = ed448::PrivateKey::try_from_pem(pem).unwrap();
+            let key = ed448::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )
+            .unwrap();
             return key.public_key().pem_bytes().to_vec();
         }
         "x25519" => {
@@ -1037,38 +1153,43 @@ fn library_public(name: &str, pem: &[u8]) -> Vec<u8> {
             let key = x448::PrivateKey::try_from_pem(pem).unwrap();
             return key.public_key().pem_bytes().to_vec();
         }
-        "ecdsa-p256" | "ecdh-p256" => {
-            ecdsa::p256::PrivateKey::try_from_pem(pem)
+        "ecdsa-p256" | "ecdh-p256" => ecdsa::p256::PrivateKey::try_from_pem(
+            scytale::Context::default(),
+            pem,
+        )
+        .unwrap()
+        .public_key()
+        .pem_bytes(&mut out),
+        "ecdsa-p384" | "ecdh-p384" => ecdsa::p384::PrivateKey::try_from_pem(
+            scytale::Context::default(),
+            pem,
+        )
+        .unwrap()
+        .public_key()
+        .pem_bytes(&mut out),
+        "ecdsa-p521" | "ecdh-p521" => ecdsa::p521::PrivateKey::try_from_pem(
+            scytale::Context::default(),
+            pem,
+        )
+        .unwrap()
+        .public_key()
+        .pem_bytes(&mut out),
+        _ if name.starts_with("rsa-") => {
+            rsa::PrivateKey::try_from_pem(scytale::Context::default(), pem)
                 .unwrap()
                 .public_key()
                 .pem_bytes(&mut out)
         }
-        "ecdsa-p384" | "ecdh-p384" => {
-            ecdsa::p384::PrivateKey::try_from_pem(pem)
-                .unwrap()
-                .public_key()
-                .pem_bytes(&mut out)
-        }
-        "ecdsa-p521" | "ecdh-p521" => {
-            ecdsa::p521::PrivateKey::try_from_pem(pem)
-                .unwrap()
-                .public_key()
-                .pem_bytes(&mut out)
-        }
-        _ if name.starts_with("rsa-") => rsa::PrivateKey::try_from_pem(pem)
-            .unwrap()
-            .public_key()
-            .pem_bytes(&mut out),
         // The listed name is a one-level key.
         _ if name.starts_with("hss-") => {
             use scytale::sig::lms::hss::PrivateKey;
-            PrivateKey::<1>::try_from_pem(pem)
+            PrivateKey::<1>::try_from_pem(scytale::Context::default(), pem)
                 .unwrap()
                 .public_key()
                 .pem_bytes(&mut out)
         }
         _ => pq_module!(name, m => {
-            m::PrivateKey::try_from_pem(pem)
+            m::PrivateKey::try_from_pem(scytale::Context::default(), pem)
                 .unwrap()
                 .public_key()
                 .pem_bytes(&mut out)
@@ -1091,8 +1212,11 @@ fn public_key_commands_match_the_library() {
         assert_eq!(public, library_public(&name, &private), "key {name}");
         // The RSA width is the one the name says.
         if let Some(bits) = name.strip_prefix("rsa-") {
-            let key =
-                scytale::sig::rsa::PrivateKey::try_from_pem(&private).unwrap();
+            let key = scytale::sig::rsa::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &private,
+            )
+            .unwrap();
             assert_eq!(key.modulus_len() * 8, bits.parse().unwrap(), "{name}");
         }
     }
@@ -1108,7 +1232,7 @@ fn public_key_commands_match_the_library() {
 /// bytes.
 fn signatures(keys: &Keys) {
     use scytale::sig::{ecdsa, ed448, ed25519, rsa};
-    let mut rng = CtrDrbg::from_system().unwrap();
+    let mut rng = CtrDrbg::from_system(scytale::Context::default()).unwrap();
     let sign = |scheme: &str, key: &str, extra: &[&str]| {
         let mut args = vec!["sig", "sign", scheme, "-k", key];
         args.extend(extra);
@@ -1125,8 +1249,11 @@ fn signatures(keys: &Keys) {
         let scheme = name.as_str();
         if scheme == "ed25519" {
             let (sk, pk) = (keys.private("ed25519"), keys.public("ed25519"));
-            let key =
-                ed25519::PrivateKey::try_from_pem(&keys.read(&sk)).unwrap();
+            let key = ed25519::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &keys.read(&sk),
+            )
+            .unwrap();
             let public = key.public_key();
             let sig: [u8; 64] = sign(scheme, &sk, &[]).try_into().unwrap();
             public.verify(MESSAGE, &sig).unwrap();
@@ -1139,7 +1266,11 @@ fn signatures(keys: &Keys) {
             // Ed448 always hashes a context: the empty one without
             // --context, which the library's empty context must match.
             let (sk, pk) = (keys.private("ed448"), keys.public("ed448"));
-            let key = ed448::PrivateKey::try_from_pem(&keys.read(&sk)).unwrap();
+            let key = ed448::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &keys.read(&sk),
+            )
+            .unwrap();
             let public = key.public_key();
             let sig: [u8; 114] = sign(scheme, &sk, &[]).try_into().unwrap();
             public.verify(b"", MESSAGE, &sig).unwrap();
@@ -1155,6 +1286,7 @@ fn signatures(keys: &Keys) {
                     ($c:ident, $key:literal) => {{
                         let (sk, pk) = (keys.private($key), keys.public($key));
                         let key = ecdsa::$c::PrivateKey::try_from_pem(
+                            Context::default(),
                             &keys.read(&sk),
                         )
                         .unwrap();
@@ -1178,7 +1310,11 @@ fn signatures(keys: &Keys) {
             }, _ => panic!("no hash {h}"));
         } else if let Some(h) = scheme.strip_prefix("rsa-pss-") {
             let (sk, pk) = (keys.private("rsa-2048"), keys.public("rsa-2048"));
-            let key = rsa::PrivateKey::try_from_pem(&keys.read(&sk)).unwrap();
+            let key = rsa::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &keys.read(&sk),
+            )
+            .unwrap();
             hash_type!(h, H => {
                 let sig = sign(scheme, &sk, &[]);
                 key.public_key().verify_pss::<H>(MESSAGE, &sig).unwrap();
@@ -1187,7 +1323,11 @@ fn signatures(keys: &Keys) {
             }, _ => panic!("no hash {h}"));
         } else if let Some(h) = scheme.strip_prefix("rsa-pkcs1-") {
             let (sk, pk) = (keys.private("rsa-2048"), keys.public("rsa-2048"));
-            let key = rsa::PrivateKey::try_from_pem(&keys.read(&sk)).unwrap();
+            let key = rsa::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &keys.read(&sk),
+            )
+            .unwrap();
             hash_type!(h, H => {
                 let theirs = key.sign_pkcs1::<H>(MESSAGE).unwrap();
                 assert_eq!(sign(scheme, &sk, &[]), theirs.as_ref(), "{scheme}");
@@ -1197,15 +1337,22 @@ fn signatures(keys: &Keys) {
             use scytale::sig::lms::hss::{PrivateKey, PublicKey};
             let name = "hss-sha256-h5-w8";
             let (sk, pk) = (keys.private(name), keys.public(name));
-            let public = PublicKey::try_from_pem(&keys.read(&pk)).unwrap();
+            let public = PublicKey::try_from_pem(
+                scytale::Context::default(),
+                &keys.read(&pk),
+            )
+            .unwrap();
             // The tool's signature verifies under the library, and the
             // file it leaves behind is the key one leaf on, which the
             // library signs with next; that verifies under the tool.
             let sig = sign(scheme, &sk, &[]);
             public.verify(MESSAGE, &sig).unwrap();
             assert_eq!(u32::from_be_bytes(sig[4..8].try_into().unwrap()), 0);
-            let mut key =
-                PrivateKey::<1>::try_from_pem(&keys.read(&sk)).unwrap();
+            let mut key = PrivateKey::<1>::try_from_pem(
+                scytale::Context::default(),
+                &keys.read(&sk),
+            )
+            .unwrap();
             assert_eq!(key.remaining(), 31);
             let mut sig = vec![0u8; key.signature_len()];
             let n = key.sign(&mut rng, MESSAGE, &mut sig).unwrap();
@@ -1214,7 +1361,10 @@ fn signatures(keys: &Keys) {
         } else {
             pq_sig_module!(scheme, m => {
                 let (sk, pk) = (keys.private(scheme), keys.public(scheme));
-                let key = m::PrivateKey::try_from_pem(&keys.read(&sk))
+                let key = m::PrivateKey::try_from_pem(
+                    Context::default(),
+                    &keys.read(&sk),
+                )
                     .unwrap();
                 let sig: [u8; m::SIGNATURE_SIZE] =
                     sign(scheme, &sk, &ctx).try_into().unwrap();
@@ -1255,24 +1405,45 @@ fn agreements(keys: &Keys) {
                 .shared_secret(&x448::PublicKey::try_from_pem(&pk).unwrap())
                 .unwrap()
                 .to_vec(),
-            "ecdh-p256" => ecdh::p256::PrivateKey::try_from_pem(&sk)
-                .unwrap()
-                .shared_secret(
-                    &ecdh::p256::PublicKey::try_from_pem(&pk).unwrap(),
+            "ecdh-p256" => ecdh::p256::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &sk,
+            )
+            .unwrap()
+            .shared_secret(
+                &ecdh::p256::PublicKey::try_from_pem(
+                    scytale::Context::default(),
+                    &pk,
                 )
-                .to_vec(),
-            "ecdh-p384" => ecdh::p384::PrivateKey::try_from_pem(&sk)
-                .unwrap()
-                .shared_secret(
-                    &ecdh::p384::PublicKey::try_from_pem(&pk).unwrap(),
+                .unwrap(),
+            )
+            .to_vec(),
+            "ecdh-p384" => ecdh::p384::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &sk,
+            )
+            .unwrap()
+            .shared_secret(
+                &ecdh::p384::PublicKey::try_from_pem(
+                    scytale::Context::default(),
+                    &pk,
                 )
-                .to_vec(),
-            "ecdh-p521" => ecdh::p521::PrivateKey::try_from_pem(&sk)
-                .unwrap()
-                .shared_secret(
-                    &ecdh::p521::PublicKey::try_from_pem(&pk).unwrap(),
+                .unwrap(),
+            )
+            .to_vec(),
+            "ecdh-p521" => ecdh::p521::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &sk,
+            )
+            .unwrap()
+            .shared_secret(
+                &ecdh::p521::PublicKey::try_from_pem(
+                    scytale::Context::default(),
+                    &pk,
                 )
-                .to_vec(),
+                .unwrap(),
+            )
+            .to_vec(),
             _ => panic!("no library call for kex {name}"),
         };
         assert_eq!(ours, theirs, "{name}");
@@ -1283,7 +1454,7 @@ fn agreements(keys: &Keys) {
 /// the secret the tool wrote aside, and the tool decapsulates what
 /// the library encapsulated.
 fn encapsulations(keys: &Keys) {
-    let mut rng = CtrDrbg::from_system().unwrap();
+    let mut rng = CtrDrbg::from_system(scytale::Context::default()).unwrap();
     for name in names("kem") {
         let name = name.as_str();
         let (sk, pk) = (keys.private(name), keys.public(name));
@@ -1302,7 +1473,10 @@ fn encapsulations(keys: &Keys) {
         );
         let written = fs::read(&secret_out).unwrap();
         kem_module!(name, m => {
-            let key = m::PrivateKey::try_from_pem(&keys.read(&sk)).unwrap();
+            let key = m::PrivateKey::try_from_pem(
+                Context::default(),
+                &keys.read(&sk),
+            ).unwrap();
             let c: [u8; m::CIPHERTEXT_SIZE] = ciphertext.try_into().unwrap();
             assert_eq!(key.decapsulate(&c)[..], written[..], "{name}");
             let (c, secret) = key.public_key().encapsulate(&mut rng).unwrap();
@@ -1356,12 +1530,16 @@ macro_rules! hpke_types {
 fn encryptions(keys: &Keys) {
     use scytale::kex::{ecdh, x448, x25519};
     use scytale::pke::{hpke, rsa};
-    let mut rng = CtrDrbg::from_system().unwrap();
+    let mut rng = CtrDrbg::from_system(scytale::Context::default()).unwrap();
     for name in names("pke") {
         let scheme = name.as_str();
         if let Some(h) = scheme.strip_prefix("rsa-oaep-") {
             let (sk, pk) = (keys.private("rsa-2048"), keys.public("rsa-2048"));
-            let key = rsa::PrivateKey::try_from_pem(&keys.read(&sk)).unwrap();
+            let key = rsa::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &keys.read(&sk),
+            )
+            .unwrap();
             let public = key.public_key();
             let seal =
                 ["pke", "encrypt", scheme, "-p", &pk, "--label", "str:L"];
@@ -1435,22 +1613,37 @@ fn encryptions(keys: &Keys) {
                     let pk = $m::PublicKey::try_from_pem(&pk_pem).unwrap();
                     let secret = Key::from(sk.secret_bytes());
                     check!(
-                        hpke::$m::PrivateKey::new(&secret),
-                        hpke::$m::PublicKey::new(&pk.bytes())
+                        hpke::$m::PrivateKey::new(Context::default(), &secret),
+                        hpke::$m::PublicKey::new(
+                            Context::default(),
+                            &pk.bytes(),
+                        )
                     )
                 }};
             }
             macro_rules! nist {
                 ($m:ident) => {{
                     let sk =
-                        ecdh::$m::PrivateKey::try_from_pem(&sk_pem).unwrap();
+                        ecdh::$m::PrivateKey::try_from_pem(
+                            Context::default(),
+                            &sk_pem,
+                        ).unwrap();
                     let pk =
-                        ecdh::$m::PublicKey::try_from_pem(&pk_pem).unwrap();
+                        ecdh::$m::PublicKey::try_from_pem(
+                            Context::default(),
+                            &pk_pem,
+                        ).unwrap();
                     let secret = sk.secret_bytes();
                     let point = pk.sec1_bytes();
                     check!(
-                        hpke::$m::PrivateKey::try_new(&secret).unwrap(),
-                        hpke::$m::PublicKey::try_new(&point).unwrap()
+                        hpke::$m::PrivateKey::try_new(
+                            Context::default(),
+                            &secret,
+                        ).unwrap(),
+                        hpke::$m::PublicKey::try_new(
+                            Context::default(),
+                            &point,
+                        ).unwrap()
                     )
                 }};
             }
