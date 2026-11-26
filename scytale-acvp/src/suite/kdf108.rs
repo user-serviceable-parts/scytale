@@ -107,10 +107,10 @@ fn hmac<H>(
     builder: &Builder,
 ) -> Result<Value, Error>
 where
-    H: Hash + Clone + BlockType + Default,
+    H: Hash + Clone + BlockType,
 {
-    let mut prf = builder.build(|| Hmac::<H>::new(key))?;
-    case(&mut prf, group, t, rng, builder)
+    let mut prf = builder.build(|ctx| Hmac::<H>::new(ctx, key));
+    case(&mut prf, group, t, rng)
 }
 
 fn cmac<C>(
@@ -124,8 +124,8 @@ where
     C: BlockCipher<Block = [u8; 16]>,
 {
     let key = key_of::<Cmac<C>>(key)?;
-    let mut prf = builder.build(|| Cmac::<C>::new(&key))?;
-    case(&mut prf, group, t, rng, builder)
+    let mut prf = builder.build(|ctx| Cmac::<C>::new(ctx, &key));
+    case(&mut prf, group, t, rng)
 }
 
 /// One derivation: the output, the fixed data, and for a counter in
@@ -136,14 +136,13 @@ fn case<M: Mac>(
     group: &Value,
     t: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
 ) -> Result<Value, Error> {
     let fixed = match opt_hex(t, "fixedData")? {
         Some(fixed) => fixed,
         None => {
             let mut fixed = vec![0u8; FIXED_DATA_LEN];
             // The generator rekeys its cipher as it draws.
-            builder.try_build(|| rng.fill(&mut fixed))?;
+            rng.fill(&mut fixed)?;
             fixed
         }
     };
@@ -228,7 +227,7 @@ fn answer_kmac(doc: &Value, builder: &Builder) -> Result<Value, Error> {
             let (key, label) = (hex(t, "keyDerivationKey")?, hex(t, "label")?);
             let context = hex(t, "context")?;
             // The derivation starts its own KMAC.
-            builder.build(|| kdf(&key, &label, &context, &mut out))?;
+            builder.build(|ctx| kdf(ctx, &key, &label, &context, &mut out));
             Ok(json!({ "derivedKey": hex_value(&out) }))
         })
     })

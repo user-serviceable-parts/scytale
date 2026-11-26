@@ -24,9 +24,11 @@
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Cbc;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let cbc = Cbc::<Aes128>::new(&Key::from([0u8; 16]));
+//! let ctx = Context::default();
+//! let cbc = Cbc::<Aes128>::new(ctx, &Key::from([0u8; 16]));
 //! let iv = [0u8; 16];
 //!
 //! let mut data = [0u8; 32];
@@ -57,12 +59,12 @@ use crate::KeyType;
 use crate::cipher::{BlockCipher, OneBlock};
 use crate::features::{self, Dispatcher, Features};
 use crate::kernel::{self, Kernel};
-use crate::{ByteArray, Error};
+use crate::{ByteArray, Context, Error};
 
 /// Every kernel, best first, with what each needs.
 ///
-/// A caller never names one: the mode takes the first row the
-/// features in force meet. The tests and the vector suites do name
+/// A caller never names one: the mode takes the first row its
+/// context meets. The tests and the vector suites do name
 /// them, so that every kernel is validated and not only the one this
 /// machine would pick.
 pub(crate) const KERNELS: &[(Kernel, Features)] = crate::kernel::CBC;
@@ -122,12 +124,11 @@ impl<C: BlockCipher> Clone for Engine<C> {
 }
 
 impl<C: BlockCipher> Engine<C> {
-    /// The engine of the first kernel the features in force allow for
-    /// this cipher.
-    fn new() -> Self {
+    /// The engine of the first kernel `ctx` allows for this cipher.
+    fn new(ctx: Context) -> Self {
         // The list ends in the portable row, which needs nothing, so
         // there is always one; the fallback is for the type checker.
-        features::select(kernels::<C>())
+        features::select(ctx, kernels::<C>())
             .and_then(Self::with)
             .unwrap_or(Engine::Generic(core::marker::PhantomData))
     }
@@ -150,10 +151,10 @@ impl<C: BlockCipher> Engine<C> {
     }
 
     /// This engine where it can read `cipher`'s schedule, and the
-    /// portable one where it cannot. The cipher chose its own kernel
-    /// from its own reading of the set in force; a set changed in
-    /// between can leave it on code whose schedule these loops cannot
-    /// load, and the engine must then not be the one that tries.
+    /// portable one where it cannot. The cipher chose its own kernel;
+    /// one of the caller's own, or one chosen from another context,
+    /// can be on code whose schedule these loops cannot load, and the
+    /// engine must then not be the one that tries.
     #[cfg_attr(
         not(any(target_arch = "aarch64", target_arch = "x86_64")),
         allow(unused_variables)
@@ -198,9 +199,9 @@ impl<C: BlockCipher> Clone for MacEngine<C> {
 }
 
 impl<C: BlockCipher<Block = [u8; 16]>> MacEngine<C> {
-    /// The best engine for this cipher on this processor.
-    pub(crate) fn new() -> Self {
-        MacEngine(Engine::new())
+    /// The best engine for this cipher that `ctx` allows.
+    pub(crate) fn new(ctx: Context) -> Self {
+        MacEngine(Engine::new(ctx))
     }
 
     /// Folds `data`, which must be whole blocks, into `chain`: each
@@ -255,9 +256,9 @@ where
     C::Block: ByteArray,
 {
     /// Takes the key the cipher runs under.
-    pub fn new(key: &C::Key) -> Self {
-        let cipher = C::new(key);
-        let engine = Engine::new().over(&cipher);
+    pub fn new(ctx: Context, key: &C::Key) -> Self {
+        let cipher = C::new(ctx, key);
+        let engine = Engine::new(ctx).over(&cipher);
         Cbc { cipher, engine }
     }
 
@@ -458,7 +459,7 @@ pub(crate) mod tests {
     }
 
     fn cbc<const K: usize>(key: &[u8; K]) -> Cbc<Aes<K>> {
-        Cbc::new(&Key::from(*key))
+        Cbc::new(crate::Context::default(), &Key::from(*key))
     }
 
     /// Fills `buf` with something that is not all one byte.
@@ -518,10 +519,9 @@ pub(crate) mod tests {
         }
 
         // The portable one last, as the reference.
-        let all = [
-            under.build(|| Cbc::<Aes128>::new(&key)),
-            features::build_portable(|| Cbc::<Aes128>::new(&key)),
-        ];
+        let all = [Cbc::<Aes128>::new(under.ctx(), &key), {
+            Cbc::<Aes128>::new(crate::Context::portable(), &key)
+        }];
 
         for len in (0..MAX).step_by(16) {
             let mut want = [0u8; MAX];

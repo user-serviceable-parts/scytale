@@ -144,7 +144,7 @@ fn gcm<C: BlockCipher<Block = [u8; 16]>>(
     let key = value::key::<C>(&args.key, "--key", entry.name)?;
     let nonce = nonce(entry, args)?;
     let aad = value::text(args.aad.as_deref(), "--aad")?;
-    let gcm = Gcm::<C>::new(&key);
+    let gcm = Gcm::<C>::new(scytale::Context::default(), &key);
     let mut out = io::output(args.out.as_deref(), false)?;
     if encrypt {
         let mut input = io::input(args.file.as_deref())?;
@@ -181,7 +181,7 @@ fn chacha20_poly1305(
     let key = value::key::<ChaCha20Poly1305>(&args.key, "--key", entry.name)?;
     let nonce = value::array::<12>(&args.nonce, "--nonce", entry.name)?;
     let aad = value::text(args.aad.as_deref(), "--aad")?;
-    let aead = ChaCha20Poly1305::new(&key);
+    let aead = ChaCha20Poly1305::new(scytale::Context::default(), &key);
     let mut out = io::output(args.out.as_deref(), false)?;
     if encrypt {
         let mut input = io::input(args.file.as_deref())?;
@@ -212,7 +212,7 @@ fn xchacha20_poly1305(
     let key = value::key::<XChaCha20Poly1305>(&args.key, "--key", entry.name)?;
     let nonce = value::array::<24>(&args.nonce, "--nonce", entry.name)?;
     let aad = value::text(args.aad.as_deref(), "--aad")?;
-    let aead = XChaCha20Poly1305::new(&key);
+    let aead = XChaCha20Poly1305::new(scytale::Context::default(), &key);
     let mut out = io::output(args.out.as_deref(), false)?;
     if encrypt {
         let mut input = io::input(args.file.as_deref())?;
@@ -245,7 +245,7 @@ macro_rules! aegis {
             let nonce =
                 value::array::<$nonce>(&args.nonce, "--nonce", entry.name)?;
             let aad = value::text(args.aad.as_deref(), "--aad")?;
-            let aead = <$aead>::new(&key);
+            let aead = <$aead>::new(scytale::Context::default(), &key);
             let mut out = io::output(args.out.as_deref(), false)?;
             if encrypt {
                 let mut input = io::input(args.file.as_deref())?;
@@ -308,7 +308,7 @@ where
     let key = value::key::<C>(&args.key, "--key", entry.name)?;
     let nonce = value::array::<12>(&args.nonce, "--nonce", entry.name)?;
     let aad = value::text(args.aad.as_deref(), "--aad")?;
-    let aead = GcmSiv::<C>::new(&key);
+    let aead = GcmSiv::<C>::new(scytale::Context::default(), &key);
     one_shot(entry, args, encrypt, |data, tag| {
         let tag: &mut [u8; 16] = tag.try_into().map_err(|_| not_authentic())?;
         if encrypt {
@@ -328,7 +328,7 @@ fn ccm<C: BlockCipher<Block = [u8; 16]>>(
     let key = value::key::<C>(&args.key, "--key", entry.name)?;
     let nonce = nonce(entry, args)?;
     let aad = value::text(args.aad.as_deref(), "--aad")?;
-    let aead = Ccm::<C>::new(&key);
+    let aead = Ccm::<C>::new(scytale::Context::default(), &key);
     one_shot(entry, args, encrypt, |data, tag| {
         if encrypt {
             aead.encrypt(&nonce, &aad, data, tag)?;
@@ -351,7 +351,7 @@ fn xpn<C: BlockCipher<Block = [u8; 16]>>(
     salt.copy_from_slice(&both[..12]);
     frame.copy_from_slice(&both[12..]);
     let aad = value::text(args.aad.as_deref(), "--aad")?;
-    let aead = Xpn::<C>::new(&key);
+    let aead = Xpn::<C>::new(scytale::Context::default(), &key);
     one_shot(entry, args, encrypt, |data, tag| {
         if encrypt {
             let mut full = [0u8; 16];

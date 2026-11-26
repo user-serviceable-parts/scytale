@@ -3,7 +3,7 @@
 //! them.
 
 use crate::envelope;
-use crate::profile::{Builder, Seed, answer_under};
+use crate::profile::{Seed, answer_under};
 use crate::suite::{self, Suite, compare, with_prompt};
 use crate::support::Error;
 use scytale::features::Features;
@@ -59,9 +59,8 @@ pub fn replay(
         if let Ok(text) = fs::read_to_string(&expected) {
             let expected: Value = serde_json::from_str(&text)?;
             let expected = envelope::unwrap(&expected).unwrap_or(expected);
-            let checked = with_prompt(&doc, &expected).and_then(|expected| {
-                compare(suite, &expected, &answered, &Builder::default())
-            });
+            let checked = with_prompt(&doc, &expected)
+                .and_then(|expected| compare(suite, &expected, &answered));
             match checked {
                 Ok(n) => eprintln!("{name}: {n} cases match"),
                 Err(e) => problems.push(format!("{name}: {e}")),

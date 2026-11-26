@@ -50,7 +50,7 @@ fn aft(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
     let mut data = hex(t, input)?;
     aes_width!(key, C => {
         let k = key_of::<C>(&key)?;
-        let cfb = builder.build(|| Cfb8::<C>::new(&k))?;
+        let cfb = builder.build(|ctx| Cfb8::<C>::new(ctx, &k));
         if encrypt {
             cfb.encrypt(&iv, &mut data);
         } else {
@@ -83,7 +83,7 @@ fn mct(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
         let mut segment = [input];
         aes_width!(key, C => {
             let k = key_of::<C>(&key)?;
-        let cfb = builder.build(|| Cfb8::<C>::new(&k))?;
+        let cfb = builder.build(|ctx| Cfb8::<C>::new(ctx, &k));
             if encrypt {
                 let mut state = cfb.encryptor(&register);
                 for j in 0..MCT_SEGMENTS {

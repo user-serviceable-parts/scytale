@@ -45,9 +45,11 @@
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Kw;
 //! use scytale::cipher::BlockCipher;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let kw = Kw::<Aes128>::new(&Key::from([0u8; 16]));
+//! let ctx = Context::default();
+//! let kw = Kw::<Aes128>::new(ctx, &Key::from([0u8; 16]));
 //!
 //! let key = [7u8; 32];
 //! let mut wrapped = [0u8; 40];
@@ -60,6 +62,7 @@
 //! # }
 //! ```
 
+use crate::Context;
 use core::fmt;
 
 use crate::Error;
@@ -105,14 +108,14 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Kw<C> {
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Kw<C> {
     /// Wraps with the cipher's forward direction, as RFC 3394
     /// describes.
-    pub fn new(key: &C::Key) -> Self {
-        Kw::with_direction(C::new(key), true)
+    pub fn new(ctx: Context, key: &C::Key) -> Self {
+        Kw::with_direction(C::new(ctx, key), true)
     }
 
     /// Wraps with the cipher's inverse direction, the other choice
     /// the standard allows.
-    pub fn new_inverse(key: &C::Key) -> Self {
-        Kw::with_direction(C::new(key), false)
+    pub fn new_inverse(ctx: Context, key: &C::Key) -> Self {
+        Kw::with_direction(C::new(ctx, key), false)
     }
 
     pub(super) fn with_direction(cipher: C, forward: bool) -> Self {
@@ -272,7 +275,10 @@ mod tests {
             plain: &str,
             cipher: &str,
         ) {
-            let kw = Kw::<Aes<K>>::new(&Key::from(unhex::<K>(key)));
+            let kw = Kw::<Aes<K>>::new(
+                crate::Context::default(),
+                &Key::from(unhex::<K>(key)),
+            );
             let plain: [u8; P] = unhex(plain);
             let want: [u8; C] = unhex(cipher);
 
@@ -306,7 +312,8 @@ mod tests {
     /// accepts within a reasonable span.
     #[test]
     fn round_trips_at_many_lengths() {
-        let kw = Kw::<Aes128>::new(&Key::from([3u8; 16]));
+        let kw =
+            Kw::<Aes128>::new(crate::Context::default(), &Key::from([3u8; 16]));
         let plain: [u8; 128] = core::array::from_fn(|i| (i * 5) as u8);
         let mut wrapped = [0u8; 136];
         let mut back = [0u8; 128];
@@ -323,7 +330,8 @@ mod tests {
     /// rather than holding something that failed its check.
     #[test]
     fn rejects_and_wipes() {
-        let kw = Kw::<Aes128>::new(&Key::from([3u8; 16]));
+        let kw =
+            Kw::<Aes128>::new(crate::Context::default(), &Key::from([3u8; 16]));
         let plain = [9u8; 32];
         let mut wrapped = [0u8; 40];
         kw.wrap(&plain, &mut wrapped).unwrap();
@@ -346,8 +354,12 @@ mod tests {
     #[test]
     fn the_directions_are_not_interchangeable() {
         let key = [5u8; 16];
-        let forward = Kw::<Aes128>::new(&Key::from(key));
-        let inverse = Kw::<Aes128>::new_inverse(&Key::from(key));
+        let forward =
+            Kw::<Aes128>::new(crate::Context::default(), &Key::from(key));
+        let inverse = Kw::<Aes128>::new_inverse(
+            crate::Context::default(),
+            &Key::from(key),
+        );
         let plain = [1u8; 16];
 
         let mut one = [0u8; 24];
@@ -369,7 +381,8 @@ mod tests {
     /// not fit, are refused rather than truncated.
     #[test]
     fn rejects_bad_lengths() {
-        let kw = Kw::<Aes128>::new(&Key::from([3u8; 16]));
+        let kw =
+            Kw::<Aes128>::new(crate::Context::default(), &Key::from([3u8; 16]));
         let mut out = [0u8; 64];
         // Not a whole number of units, and too short.
         for len in [0usize, 4, 8, 12, 20] {
@@ -420,7 +433,13 @@ mod tests {
         let mut buffer = Buffer([0; 256], 0);
         core::fmt::write(
             &mut buffer,
-            format_args!("{:?}", Kw::<Aes128>::new(&Key::from([3u8; 16]))),
+            format_args!(
+                "{:?}",
+                Kw::<Aes128>::new(
+                    crate::Context::default(),
+                    &Key::from([3u8; 16])
+                )
+            ),
         )
         .unwrap();
         let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();

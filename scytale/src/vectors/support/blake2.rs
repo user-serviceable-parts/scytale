@@ -32,8 +32,11 @@ pub fn run() {
         if key.is_empty() {
             // The public type too, whole and a byte at a time, which
             // crosses the block boundary at every offset in turn.
-            assert_eq!(Blake2b512::digest(&input)[..], out[..]);
-            let mut hash = Blake2b512::new();
+            assert_eq!(
+                Blake2b512::digest(crate::Context::default(), &input)[..],
+                out[..]
+            );
+            let mut hash = Blake2b512::new(crate::Context::default());
             for byte in &input {
                 hash.update(core::slice::from_ref(byte));
             }

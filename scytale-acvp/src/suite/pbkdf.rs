@@ -4,6 +4,7 @@
 use super::{answer_groups, answer_tests};
 use crate::profile::Builder;
 use crate::support::{Error, hex, hex_value, int, text, unknown_test_type};
+use scytale::Context;
 use scytale::Random;
 use scytale::hash::sha1::Sha1;
 use scytale::hash::sha2::{
@@ -41,7 +42,8 @@ pub fn answer(
 }
 
 /// [`pbkdf2`] over one hash: password, salt, iterations, key.
-type Derive = fn(&[u8], &[u8], u32, &mut [u8]) -> Result<(), scytale::Error>;
+type Derive =
+    fn(Context, &[u8], &[u8], u32, &mut [u8]) -> Result<(), scytale::Error>;
 
 fn derived(
     t: &Value,
@@ -58,8 +60,12 @@ fn derived(
     }
     let mut key = vec![0u8; bits / 8];
     // The derivation keys its own HMAC.
-    builder.try_build(|| {
-        derive(password.as_bytes(), &salt, iterations, &mut key)
-    })?;
+    derive(
+        builder.ctx(),
+        password.as_bytes(),
+        &salt,
+        iterations,
+        &mut key,
+    )?;
     Ok(json!({ "derivedKey": hex_value(&key) }))
 }

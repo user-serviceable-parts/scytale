@@ -10,6 +10,7 @@ use crate::profile::Builder;
 use crate::support::{
     Error, decode_hex, flag, hex_value, int, list, text, unknown_test_type,
 };
+use scytale::Context;
 use scytale::Random;
 use scytale::hash::XofReader;
 use scytale::hash::sha3::{TupleHash128, TupleHash256};
@@ -17,7 +18,7 @@ use serde_json::{Value, json};
 
 /// The two widths, as the driver drives them.
 pub trait Tuple {
-    fn start(customization: &[u8]) -> Self;
+    fn start(ctx: Context, customization: &[u8]) -> Self;
     fn push(&mut self, element: &[u8]);
     /// TupleHash, or TupleHashXOF if `xof`, filling `out`.
     fn finish(&mut self, xof: bool, out: &mut [u8]);
@@ -26,8 +27,8 @@ pub trait Tuple {
 macro_rules! tuple {
     ($ty:ty) => {
         impl Tuple for $ty {
-            fn start(customization: &[u8]) -> Self {
-                <$ty>::new(customization)
+            fn start(ctx: Context, customization: &[u8]) -> Self {
+                <$ty>::new(ctx, customization)
             }
 
             fn push(&mut self, element: &[u8]) {
@@ -93,7 +94,7 @@ fn hash<T: Tuple>(
     if !bits.is_multiple_of(8) {
         return Err(Error::new("an output of part of a byte"));
     }
-    let mut h = builder.build(|| T::start(custom))?;
+    let mut h = builder.build(|ctx| T::start(ctx, custom));
     tuple.iter().for_each(|e| h.push(e));
     let mut out = vec![0u8; bits / 8];
     h.finish(xof, &mut out);

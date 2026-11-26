@@ -58,9 +58,11 @@
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::aead::{Aead, Gcm};
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let gcm = Gcm::<Aes128>::new(&Key::from([0u8; 16]));
+//! let ctx = Context::default();
+//! let gcm = Gcm::<Aes128>::new(ctx, &Key::from([0u8; 16]));
 //! let nonce = [0u8; 12];
 //! let header = b"to: alice";
 //!
@@ -103,7 +105,7 @@ use crate::cipher::{BlockCipher, OneBlock};
 use crate::constant_time;
 use crate::features::{self, Chosen, Dispatcher, Features};
 use crate::kernel::{self, Kernel};
-use crate::{Error, KeyType};
+use crate::{Context, Error, KeyType};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The most message bytes GCM may protect under one key and nonce:
@@ -247,12 +249,12 @@ pub(crate) fn profiles<C: BlockCipher<Block = [u8; BLOCK]>>()
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
-    /// The engine of the first kernel the features in force allow for
-    /// this cipher, under hash subkey `h`.
-    fn new(h: &[u8; BLOCK]) -> Self {
+    /// The engine of the first kernel `ctx` allows for this cipher,
+    /// under hash subkey `h`.
+    fn new(ctx: Context, h: &[u8; BLOCK]) -> Self {
         // The list ends in the portable row, which needs nothing, so
         // there is always one; the fallback is for the type checker.
-        features::choose(kernels::<C>())
+        features::choose(ctx, kernels::<C>())
             .and_then(|chosen| Self::with(h, chosen))
             .unwrap_or(Engine::Generic(PhantomData))
     }
@@ -275,8 +277,8 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     }
 
     /// This engine where it can read `cipher`'s schedule, and the
-    /// generic one where it cannot: the cipher chose its own kernel
-    /// from its own reading of the set in force.
+    /// generic one where it cannot: the cipher chose its own kernel,
+    /// which may be one these loops cannot read.
     #[cfg_attr(
         not(any(
             target_arch = "aarch64",
@@ -349,7 +351,7 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Hash<'a, C> {
             ))]
             Engine::Native(engine) => Hash::Native(native::Hasher::new(engine)),
             Engine::Generic(_) => Hash::Generic {
-                hash: Ghash::new(&gcm.h),
+                hash: Ghash::new(gcm.ctx, &gcm.h),
                 engine: core::marker::PhantomData,
             },
         }
@@ -431,6 +433,9 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Hash<'a, C> {
 /// GCM over a block cipher.
 #[derive(Clone)]
 pub struct Gcm<C: BlockCipher<Block = [u8; BLOCK]>> {
+    /// What the mode was built under, for the hash each message
+    /// starts where no loop is written for the cipher.
+    ctx: Context,
     cipher: C,
     /// The hash subkey, the cipher applied to a block of zeros.
     h: [u8; BLOCK],
@@ -463,12 +468,17 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Gcm<C> {
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
     /// Takes the key the cipher runs under.
-    pub fn new(key: &C::Key) -> Self {
-        let cipher = C::new(key);
+    pub fn new(ctx: Context, key: &C::Key) -> Self {
+        let cipher = C::new(ctx, key);
         let mut h = [0u8; BLOCK];
         cipher.encrypt_one(&mut h);
-        let engine = Engine::<C>::new(&h).over(&cipher);
-        Gcm { engine, cipher, h }
+        let engine = Engine::<C>::new(ctx, &h).over(&cipher);
+        Gcm {
+            ctx,
+            engine,
+            cipher,
+            h,
+        }
     }
 
     /// The feature profiles this mode tells apart, best first; see
@@ -529,9 +539,9 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Aead for Gcm<C> {
     type Nonce = [u8; SHORT_NONCE];
     type Tag = [u8; TAG];
 
-    fn new(key: &Self::Key) -> Self {
+    fn new(ctx: Context, key: &Self::Key) -> Self {
         // The inherent constructor, which takes precedence here.
-        Gcm::new(key)
+        Gcm::new(ctx, key)
     }
 
     fn encrypt(
@@ -1049,7 +1059,7 @@ pub(crate) mod tests {
         tag: &[u8; 16],
     ) {
         let key: &[u8; K] = key.try_into().unwrap();
-        let gcm = under.build(|| Gcm::<Aes<K>>::new(&Key::from(*key)));
+        let gcm = { Gcm::<Aes<K>>::new(under.ctx(), &Key::from(*key)) };
         let mut data = [0u8; MAX];
         let data = &mut data[..plain.len()];
         data.copy_from_slice(plain);
@@ -1084,7 +1094,7 @@ pub(crate) mod tests {
     }
 
     fn gcm() -> Gcm<Aes128> {
-        Gcm::new(&Key::from([0x42u8; 16]))
+        Gcm::new(crate::Context::default(), &Key::from([0x42u8; 16]))
     }
 
     /// Anything altered must be rejected, and the buffer wiped rather
@@ -1261,8 +1271,8 @@ pub(crate) mod tests {
         const MAX: usize = 9 * 16 * BLOCK + 3;
         let key = [0x9du8; 16];
         let generic =
-            features::build_portable(|| Gcm::<Aes128>::new(&Key::from(key)));
-        let all = [under.build(|| Gcm::<Aes128>::new(&Key::from(key)))];
+            { Gcm::<Aes128>::new(crate::Context::portable(), &Key::from(key)) };
+        let all = [{ Gcm::<Aes128>::new(under.ctx(), &Key::from(key)) }];
         let nonce = [0x33u8; 12];
         let aad = [0x77u8; 21];
 
@@ -1343,9 +1353,9 @@ pub(crate) mod tests {
     /// engines must reach the same block.
     fn the_engines_agree_on_a_long_nonce(under: &features::Under) {
         let key = [0x11u8; 16];
-        let native = under.build(|| Gcm::<Aes128>::new(&Key::from(key)));
+        let native = { Gcm::<Aes128>::new(under.ctx(), &Key::from(key)) };
         let generic =
-            features::build_portable(|| Gcm::<Aes128>::new(&Key::from(key)));
+            { Gcm::<Aes128>::new(crate::Context::portable(), &Key::from(key)) };
         for len in [1, 8, 15, 16, 17, 128, 129] {
             let nonce = std::vec![0xa5u8; len];
             let mut a = [7u8; 40];
@@ -1363,19 +1373,24 @@ pub(crate) mod tests {
     #[test]
     fn the_native_engine_is_chosen_where_there_is_one() {
         #[cfg(target_arch = "x86_64")]
-        features::build_alone(|| {
-            if features::select(KERNELS) == Some(Kernel::Portable) {
+        {
+            if features::select(crate::Context::default(), KERNELS)
+                == Some(Kernel::Portable)
+            {
                 // Nothing to check on a processor without them.
                 return;
             }
             let key = Key::from([0u8; 16]);
-            let gcm = Gcm::<Aes128>::new(&key);
+            let gcm = Gcm::<Aes128>::new(crate::Context::default(), &key);
             assert!(matches!(gcm.engine, Engine::Native(_)));
             // And the portable cipher, whose schedule those
             // instructions cannot read, does not.
-            let other = Gcm::<portable::bitsliced::Aes<16>>::new(&key);
+            let other = Gcm::<portable::bitsliced::Aes<16>>::new(
+                crate::Context::default(),
+                &key,
+            );
             assert!(matches!(other.engine, Engine::Generic(_)));
-        });
+        };
     }
 
     #[test]

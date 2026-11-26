@@ -64,10 +64,12 @@
 //! use scytale::cipher::Nonces;
 //! use scytale::aead::{Aead, Gcm};
 //! use scytale::cipher::BlockCipher;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let gcm = Gcm::<Aes128>::new(&Key::from([0u8; 16]));
-//! let mut rng = CtrDrbg::from_system()?;
+//! let ctx = Context::default();
+//! let gcm = Gcm::<Aes128>::new(ctx, &Key::from([0u8; 16]));
+//! let mut rng = CtrDrbg::from_system(ctx)?;
 //!
 //! // A ninety-six bit nonce counting in its last four bytes.
 //! let mut nonces = Nonces::<[u8; 12]>::try_random(&mut rng, 4)?;

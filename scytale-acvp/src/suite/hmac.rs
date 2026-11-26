@@ -41,7 +41,7 @@ pub fn answer(
 /// Tags are answered over `macLen` bits, a prefix of the full tag.
 /// The vectors' keys come in every length, so the any-length
 /// constructor keys the MAC.
-fn answer_as<H: Hash + Clone + BlockType + Default>(
+fn answer_as<H: Hash + Clone + BlockType>(
     doc: &Value,
     builder: &Builder,
 ) -> Result<Value, Error> {
@@ -52,7 +52,7 @@ fn answer_as<H: Hash + Clone + BlockType + Default>(
         let mac_bytes = int(group, "macLen")? as usize / 8;
         answer_tests(group, |t| {
             let key = hex(t, "key")?;
-            let mut mac = builder.build(|| Hmac::<H>::new(&key))?;
+            let mut mac = builder.build(|ctx| Hmac::<H>::new(ctx, &key));
             let msg = hex(t, "msg")?;
             mac.update(&msg);
             let tag = mac.finalize();

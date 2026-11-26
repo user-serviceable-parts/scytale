@@ -64,6 +64,7 @@ use super::montgomery::Montgomery;
 use super::uint::Uint;
 use super::{Arith, Choice};
 use crate::BlockType;
+use crate::Context;
 use crate::Error;
 use crate::Pkcs8Form;
 use crate::Random;
@@ -300,17 +301,19 @@ impl<const L: usize> Curve<L> {
     /// the key is made, from the lists that have rows for it: P-256
     /// asks both, P-384 the carry-chain list alone, and P-521 has
     /// nothing to ask.
-    pub(crate) fn choose(&self) -> Choice {
+    // Only x86-64 has a list to ask.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
+    pub(crate) fn choose(&self, ctx: Context) -> Choice {
         #[cfg(target_arch = "x86_64")]
         {
             if self.is_p256() {
                 return Choice::of(
-                    features::choose(super::limbs::KERNELS),
-                    features::choose(KERNELS),
+                    features::choose(ctx, super::limbs::KERNELS),
+                    features::choose(ctx, KERNELS),
                 );
             }
             if L == 6 {
-                return Choice::bignum();
+                return Choice::bignum(ctx);
             }
         }
         Choice::Portable
@@ -1802,8 +1805,9 @@ impl<const L: usize> Secret<L> {
     /// twice the curve's width, with the nonce from RFC 6979; hedged,
     /// as draft-irtf-cfrg-det-sigs-with-noise-05 section 4 has it,
     /// when `noise` holds the curve's width of random bytes.
-    pub(crate) fn sign<H: Hash + Clone + BlockType + Default>(
+    pub(crate) fn sign<H: Hash + Clone + BlockType>(
         &self,
+        ctx: Context,
         e: &Engine<L, impl Arith>,
         message: &[u8],
         noise: Option<&[u8]>,
@@ -1814,7 +1818,7 @@ impl<const L: usize> Secret<L> {
         // kind's alone. Each is kept out of line, so that neither is
         // compiled again for every pairing of a hash with a kind.
         let (z, mut nonce) =
-            Nonce::<H>::for_message(e.curve, &self.d, message, noise)?;
+            Nonce::<H>::for_message(ctx, e.curve, &self.d, message, noise)?;
         loop {
             let mut k = nonce.next(e.curve)?;
             let signed = self.sign_with(e, &z, &k, out);
@@ -1927,14 +1931,15 @@ impl<const L: usize> Public<L> {
     }
 
     /// Checks an ECDSA signature `r || s` over `message`.
-    pub(crate) fn verify<H: Hash + Default>(
+    pub(crate) fn verify<H: Hash>(
         &self,
+        ctx: Context,
         e: &Engine<L, impl Arith>,
         message: &[u8],
         signature: &[u8],
     ) -> Result<(), Error> {
         // As in signing, the hash and the arithmetic apart.
-        self.verify_digest(e, digest::<H>(message).as_ref(), signature)
+        self.verify_digest(e, digest::<H>(ctx, message).as_ref(), signature)
     }
 
     /// [`verify`](Self::verify), given the message's digest.
@@ -1971,15 +1976,12 @@ impl<const L: usize> Public<L> {
 
 /// The digest of `message`, out of line: see [`Secret::sign`].
 #[inline(never)]
-fn digest<H: Hash + Default>(message: &[u8]) -> H::Output {
-    H::digest(message)
+fn digest<H: Hash>(ctx: Context, message: &[u8]) -> H::Output {
+    H::digest(ctx, message)
 }
 
 /// Feeds `n` zero bytes to `mac`, whatever the hash's block size.
-fn zero_pad<H: Hash + Clone + BlockType + Default>(
-    mac: &mut Hmac<H>,
-    mut n: usize,
-) {
+fn zero_pad<H: Hash + Clone + BlockType>(mac: &mut Hmac<H>, mut n: usize) {
     let zeros = [0u8; 64];
     while n > 0 {
         let take = n.min(zeros.len());
@@ -2001,30 +2003,34 @@ fn zero_pad<H: Hash + Clone + BlockType + Default>(
 /// computation no longer can, since `Z` differs between them; and if
 /// the random source is weak, the nonce is still at least as good as
 /// RFC 6979's, because the key and the digest are still in it.
-struct Nonce<H: Hash + Clone + BlockType + Default> {
+struct Nonce<H: Hash + Clone + BlockType> {
+    /// What the HMACs are built under: the key's.
+    ctx: Context,
     k: H::Output,
     v: H::Output,
 }
 
-impl<H: Hash + Clone + BlockType + Default> Nonce<H> {
+impl<H: Hash + Clone + BlockType> Nonce<H> {
     /// The generator for a signature by the private scalar `d` over
     /// `message` on `curve`, with the digest's scalar it was seeded
     /// with: steps a through g. Out of line: see [`Secret::sign`].
     #[inline(never)]
     fn for_message<const L: usize>(
+        ctx: Context,
         curve: &Curve<L>,
         d: &Uint<L>,
         message: &[u8],
         noise: Option<&[u8]>,
     ) -> Result<(Uint<L>, Self), Error> {
         let width = curve.width();
-        let z = curve.hash_to_scalar(H::digest(message).as_ref());
+        let z = curve.hash_to_scalar(H::digest(ctx, message).as_ref());
         // `int2octets(x)` and `bits2octets(h1)`, each of the width.
         let mut d_bytes = [[0u8; 8]; L];
         d.to_be_bytes(&mut d_bytes.as_flattened_mut()[..width]);
         let mut z_bytes = [[0u8; 8]; L];
         z.to_be_bytes(&mut z_bytes.as_flattened_mut()[..width]);
         let nonce = Self::try_new(
+            ctx,
             &d_bytes.as_flattened()[..width],
             &z_bytes.as_flattened()[..width],
             noise,
@@ -2036,6 +2042,7 @@ impl<H: Hash + Clone + BlockType + Default> Nonce<H> {
     /// Steps b through g, given `int2octets(x)`, `bits2octets(h1)`
     /// and, hedged, `Z`.
     fn try_new(
+        ctx: Context,
         x: &[u8],
         h: &[u8],
         noise: Option<&[u8]>,
@@ -2043,11 +2050,11 @@ impl<H: Hash + Clone + BlockType + Default> Nonce<H> {
         // V starts as 0x01 repeated and K as 0x00 repeated. A digest
         // is the only `H::Output` generic code can make; its value
         // is gone before either is used.
-        let mut v = H::digest(&[]);
+        let mut v = H::digest(ctx, &[]);
         v.as_mut().fill(0x01);
         let mut k = v;
         k.as_mut().fill(0x00);
-        let mut nonce = Nonce { k, v };
+        let mut nonce = Nonce { ctx, k, v };
         nonce.seed(0x00, x, h, noise)?;
         nonce.seed(0x01, x, h, noise)?;
         Ok(nonce)
@@ -2063,7 +2070,7 @@ impl<H: Hash + Clone + BlockType + Default> Nonce<H> {
         h: &[u8],
         noise: Option<&[u8]>,
     ) -> Result<(), Error> {
-        let mut mac = Hmac::<H>::new(self.k.as_ref());
+        let mut mac = Hmac::<H>::new(self.ctx, self.k.as_ref());
         mac.update(self.v.as_ref());
         mac.update(&[tag]);
         if let Some(z) = noise {
@@ -2080,7 +2087,7 @@ impl<H: Hash + Clone + BlockType + Default> Nonce<H> {
         }
         mac.update(h);
         self.k = mac.finalize();
-        self.v = Hmac::<H>::mac(self.k.as_ref(), self.v.as_ref());
+        self.v = Hmac::<H>::mac(self.ctx, self.k.as_ref(), self.v.as_ref());
         Ok(())
     }
 
@@ -2099,7 +2106,8 @@ impl<H: Hash + Clone + BlockType + Default> Nonce<H> {
             let mut t = [[0u8; 8]; L];
             let mut filled = 0;
             while filled < width {
-                self.v = Hmac::<H>::mac(self.k.as_ref(), self.v.as_ref());
+                self.v =
+                    Hmac::<H>::mac(self.ctx, self.k.as_ref(), self.v.as_ref());
                 let out = &mut t.as_flattened_mut()[filled..width];
                 let take = out.len().min(size_of::<H::Output>());
                 out[..take].copy_from_slice(&self.v.as_ref()[..take]);
@@ -2123,7 +2131,7 @@ impl<H: Hash + Clone + BlockType + Default> Nonce<H> {
     }
 }
 
-impl<H: Hash + Clone + BlockType + Default> Drop for Nonce<H> {
+impl<H: Hash + Clone + BlockType> Drop for Nonce<H> {
     fn drop(&mut self) {
         self.k.as_mut().zeroize();
         self.v.as_mut().zeroize();
@@ -2456,10 +2464,16 @@ macro_rules! key_types {
             // The arithmetic chosen when the key was made, which a
             // private key's operations take from its public half.
             choice: crate::math::Choice,
+            // What the key was made under, for the hashes its
+            // operations start. ECDH's keys start none, so on them
+            // it goes unread.
+            #[allow(dead_code)]
+            ctx: crate::Context,
         }
 
         impl PrivateKey {
             fn from_secret(
+                ctx: crate::Context,
                 secret: Secret<$limbs>,
                 public: Public<$limbs>,
                 choice: crate::math::Choice,
@@ -2469,6 +2483,7 @@ macro_rules! key_types {
                     public: PublicKey {
                         point: public,
                         choice,
+                        ctx,
                     },
                 }
             }
@@ -2476,24 +2491,30 @@ macro_rules! key_types {
             /// A fresh key: a uniform scalar in `[1, n - 1]`, by
             /// rejection sampling, which fails once in 2^32 draws
             /// and is retried; the public point is derived.
-            pub fn generate<R: Random>(rng: &mut R) -> Result<Self, Error> {
-                let choice = $constants.choose();
+            pub fn generate<R: Random>(
+                ctx: crate::Context,
+                rng: &mut R,
+            ) -> Result<Self, Error> {
+                let choice = $constants.choose(ctx);
                 with_engine!(fixed_base, &$constants, choice, |e| {
                     let secret = Secret::generate(&e, rng)?;
                     let public = secret.public(&e);
-                    Ok(Self::from_secret(secret, public, choice))
+                    Ok(Self::from_secret(ctx, secret, public, choice))
                 })
             }
 
             /// A key from its secret scalar, big-endian, which must be
             /// in `[1, n - 1]`: [`Error::InvalidPrivateKey`] for zero
             /// or a value at or above the order.
-            pub fn try_new(secret: &[u8; KEY_SIZE]) -> Result<Self, Error> {
-                let choice = $constants.choose();
+            pub fn try_new(
+                ctx: crate::Context,
+                secret: &[u8; KEY_SIZE],
+            ) -> Result<Self, Error> {
+                let choice = $constants.choose(ctx);
                 with_engine!(fixed_base, &$constants, choice, |e| {
                     let secret = Secret::try_new(&e, secret)?;
                     let public = secret.public(&e);
-                    Ok(Self::from_secret(secret, public, choice))
+                    Ok(Self::from_secret(ctx, secret, public, choice))
                 })
             }
 
@@ -2519,20 +2540,24 @@ macro_rules! key_types {
             /// of another algorithm, is [`Error::WrongAlgorithm`], and
             /// anything else wrong with the bytes
             /// [`Error::InvalidEncoding`].
-            pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
-                Self::try_from_der_with_form(der).map(|(key, _)| key)
+            pub fn try_from_der(
+                ctx: crate::Context,
+                der: &[u8],
+            ) -> Result<Self, Error> {
+                Self::try_from_der_with_form(ctx, der).map(|(key, _)| key)
             }
 
             /// As [`try_from_der`](Self::try_from_der), and also which
             /// form the structure took: whether the `ECPrivateKey`
             /// carried the public point.
             pub fn try_from_der_with_form(
+                ctx: crate::Context,
                 der: &[u8],
             ) -> Result<(Self, crate::Pkcs8Form), Error> {
-                let choice = $constants.choose();
+                let choice = $constants.choose(ctx);
                 with_engine!(fixed_base, &$constants, choice, |e| {
                     let (secret, public, form) = Secret::from_pkcs8(&e, der)?;
-                    Ok((Self::from_secret(secret, public, choice), form))
+                    Ok((Self::from_secret(ctx, secret, public, choice), form))
                 })
             }
 
@@ -2542,11 +2567,14 @@ macro_rules! key_types {
             /// present, must name this curve, and a carried public
             /// point is checked against the secret's own; the
             /// errors are as for [`try_from_der`](Self::try_from_der).
-            pub fn try_from_sec1_der(der: &[u8]) -> Result<Self, Error> {
-                let choice = $constants.choose();
+            pub fn try_from_sec1_der(
+                ctx: crate::Context,
+                der: &[u8],
+            ) -> Result<Self, Error> {
+                let choice = $constants.choose(ctx);
                 with_engine!(fixed_base, &$constants, choice, |e| {
                     let (secret, public) = Secret::from_sec1_der(&e, der)?;
-                    Ok(Self::from_secret(secret, public, choice))
+                    Ok(Self::from_secret(ctx, secret, public, choice))
                 })
             }
 
@@ -2567,11 +2595,14 @@ macro_rules! key_types {
             /// ends are read leniently; anything else that is not
             /// exactly one well-formed block for this curve, an
             /// encrypted key included, is [`Error::InvalidEncoding`].
-            pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
-                let choice = $constants.choose();
+            pub fn try_from_pem(
+                ctx: crate::Context,
+                pem: &[u8],
+            ) -> Result<Self, Error> {
+                let choice = $constants.choose(ctx);
                 with_engine!(fixed_base, &$constants, choice, |e| {
                     let (secret, public) = Secret::from_pem(&e, pem)?;
-                    Ok(Self::from_secret(secret, public, choice))
+                    Ok(Self::from_secret(ctx, secret, public, choice))
                 })
             }
 
@@ -2590,12 +2621,16 @@ macro_rules! key_types {
             /// compressed `02 || x` and `03 || x` with the tag giving
             /// the parity of `y`. The point must lie on the curve;
             /// anything else is [`Error::InvalidPublicKey`].
-            pub fn try_from_sec1(sec1: &[u8]) -> Result<Self, Error> {
-                let choice = $constants.choose();
+            pub fn try_from_sec1(
+                ctx: crate::Context,
+                sec1: &[u8],
+            ) -> Result<Self, Error> {
+                let choice = $constants.choose(ctx);
                 with_engine!(&$constants, choice, |e| {
                     Ok(PublicKey {
                         point: Public::try_from_sec1(&e, sec1)?,
                         choice,
+                        ctx,
                     })
                 })
             }
@@ -2612,12 +2647,16 @@ macro_rules! key_types {
             /// A key from its DER `SubjectPublicKeyInfo` (RFC 5480),
             /// the form under `PUBLIC KEY` in a PEM file, which must
             /// name this curve; the point inside may be compressed.
-            pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
-                let choice = $constants.choose();
+            pub fn try_from_der(
+                ctx: crate::Context,
+                der: &[u8],
+            ) -> Result<Self, Error> {
+                let choice = $constants.choose(ctx);
                 with_engine!(&$constants, choice, |e| {
                     Ok(PublicKey {
                         point: Public::from_spki(&e, der)?,
                         choice,
+                        ctx,
                     })
                 })
             }
@@ -2633,12 +2672,16 @@ macro_rules! key_types {
 
             /// A key from a `PUBLIC KEY` PEM block, read as
             /// [`PrivateKey::try_from_pem`] reads its own.
-            pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
-                let choice = $constants.choose();
+            pub fn try_from_pem(
+                ctx: crate::Context,
+                pem: &[u8],
+            ) -> Result<Self, Error> {
+                let choice = $constants.choose(ctx);
                 with_engine!(&$constants, choice, |e| {
                     Ok(PublicKey {
                         point: Public::from_pem(&e, pem)?,
                         choice,
+                        ctx,
                     })
                 })
             }
@@ -2695,7 +2738,7 @@ pub(crate) mod tests {
     /// The curves under one kernel of the table-read list: the read
     /// itself, and keys through the public types.
     pub(crate) fn kernel(under: &features::Under) {
-        let choice = under.build(|| P256.choose());
+        let choice = P256.choose(under.ctx());
         with_engine!(fixed_base, &P256, choice, |e| {
             table_reads_keep_the_entry_the_digit_names(&e);
         });
@@ -2706,7 +2749,7 @@ pub(crate) mod tests {
     /// written-out point operations against the formulas, and keys
     /// through the public types.
     pub(crate) fn bignum(under: &features::Under) {
-        let choice = under.build(|| P256.choose());
+        let choice = P256.choose(under.ctx());
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         with_engine!(fixed_base, &P256, choice, |e| {
             written_out_doubling_matches_the_formula(&e);
@@ -2729,8 +2772,8 @@ pub(crate) mod tests {
         use crate::kex::ecdh;
         use crate::sig::ecdsa;
 
-        let p256 = || {
-            let ours = ecdsa::p256::PrivateKey::try_new(&[0x42; 32])
+        let p256 = |ctx: crate::Context| {
+            let ours = ecdsa::p256::PrivateKey::try_new(ctx, &[0x42; 32])
                 .expect("in range");
             let public = ours.public_key().sec1_bytes();
             let signature = ours
@@ -2744,22 +2787,22 @@ pub(crate) mod tests {
             compressed.copy_from_slice(&public[..33]);
             compressed[0] = 0x02 | (public[64] & 1);
             let decompressed =
-                ecdsa::p256::PublicKey::try_from_sec1(&compressed)
+                ecdsa::p256::PublicKey::try_from_sec1(ctx, &compressed)
                     .expect("on the curve")
                     .sec1_bytes();
-            let a =
-                ecdh::p256::PrivateKey::try_new(&[0x42; 32]).expect("in range");
-            let b =
-                ecdh::p256::PrivateKey::try_new(&[0x24; 32]).expect("in range");
+            let a = ecdh::p256::PrivateKey::try_new(ctx, &[0x42; 32])
+                .expect("in range");
+            let b = ecdh::p256::PrivateKey::try_new(ctx, &[0x24; 32])
+                .expect("in range");
             let shared = a.shared_secret(b.public_key());
             (public, signature, verified, decompressed, shared)
         };
-        let got = under.build(p256);
+        let got = p256(under.ctx());
         assert!(got.2, "P-256 verifies");
-        assert_eq!(got, features::build_portable(p256), "P-256");
+        assert_eq!(got, p256(crate::Context::portable()), "P-256");
 
-        let p384 = || {
-            let ours = ecdsa::p384::PrivateKey::try_new(&[0x42; 48])
+        let p384 = |ctx: crate::Context| {
+            let ours = ecdsa::p384::PrivateKey::try_new(ctx, &[0x42; 48])
                 .expect("in range");
             let public = ours.public_key().sec1_bytes();
             let signature = ours
@@ -2769,16 +2812,16 @@ pub(crate) mod tests {
                 .public_key()
                 .verify::<Sha384>(b"message", &signature)
                 .is_ok();
-            let a =
-                ecdh::p384::PrivateKey::try_new(&[0x42; 48]).expect("in range");
-            let b =
-                ecdh::p384::PrivateKey::try_new(&[0x24; 48]).expect("in range");
+            let a = ecdh::p384::PrivateKey::try_new(ctx, &[0x42; 48])
+                .expect("in range");
+            let b = ecdh::p384::PrivateKey::try_new(ctx, &[0x24; 48])
+                .expect("in range");
             let shared = a.shared_secret(b.public_key());
             (public, signature, verified, shared)
         };
-        let got = under.build(p384);
+        let got = p384(under.ctx());
         assert!(got.2, "P-384 verifies");
-        assert_eq!(got, features::build_portable(p384), "P-384");
+        assert_eq!(got, p384(crate::Context::portable()), "P-384");
     }
 
     /// Both field primes are the ones the Montgomery reduction has
@@ -2799,24 +2842,35 @@ pub(crate) mod tests {
     #[test]
     fn group_law_basics() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            with_engine!(fixed_base, curve, curve.choose(), |e| {
-                let g = generator(&e);
-                Public::try_from_affine(&e, curve.gx, curve.gy).unwrap();
-                let two_g = e.point_add(&g, &g);
-                let by_mul = e.point_mul(&g, &Uint::from_limbs(&[2]));
-                assert_eq!(affine(&e, &two_g), affine(&e, &by_mul));
-                let (x, y) = e.to_affine(&two_g).unwrap();
-                Public::try_from_affine(&e, x, y).unwrap();
-                // Identity plus G is G; n G is the identity; (n-1) G = -G.
-                let id = e.identity();
-                assert_eq!(affine(&e, &e.point_add(&id, &g)), affine(&e, &g));
-                assert!(e.to_affine(&e.point_mul(&g, &curve.n)).is_none());
-                let (minus_one, _) = curve.n.sub_borrow(&Uint::one());
-                let (x, y) = e.to_affine(&e.point_mul(&g, &minus_one)).unwrap();
-                assert_eq!(x.0, curve.gx.0);
-                assert_eq!(y.0, Uint::ZERO.sub_mod(&curve.gy, &curve.p).0);
-                assert!(e.to_affine(&e.point_mul(&g, &Uint::ZERO)).is_none());
-            })
+            with_engine!(
+                fixed_base,
+                curve,
+                curve.choose(crate::Context::default()),
+                |e| {
+                    let g = generator(&e);
+                    Public::try_from_affine(&e, curve.gx, curve.gy).unwrap();
+                    let two_g = e.point_add(&g, &g);
+                    let by_mul = e.point_mul(&g, &Uint::from_limbs(&[2]));
+                    assert_eq!(affine(&e, &two_g), affine(&e, &by_mul));
+                    let (x, y) = e.to_affine(&two_g).unwrap();
+                    Public::try_from_affine(&e, x, y).unwrap();
+                    // Identity plus G is G; n G is the identity; (n-1) G = -G.
+                    let id = e.identity();
+                    assert_eq!(
+                        affine(&e, &e.point_add(&id, &g)),
+                        affine(&e, &g)
+                    );
+                    assert!(e.to_affine(&e.point_mul(&g, &curve.n)).is_none());
+                    let (minus_one, _) = curve.n.sub_borrow(&Uint::one());
+                    let (x, y) =
+                        e.to_affine(&e.point_mul(&g, &minus_one)).unwrap();
+                    assert_eq!(x.0, curve.gx.0);
+                    assert_eq!(y.0, Uint::ZERO.sub_mod(&curve.gy, &curve.p).0);
+                    assert!(
+                        e.to_affine(&e.point_mul(&g, &Uint::ZERO)).is_none()
+                    );
+                }
+            )
         }
         check(&P256);
         check(&P384);
@@ -2828,17 +2882,22 @@ pub(crate) mod tests {
     #[test]
     fn doubling_matches_the_general_addition() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            with_engine!(fixed_base, curve, curve.choose(), |e| {
-                let g = generator(&e);
-                let mut p = e.identity();
-                for _ in 0..8 {
-                    assert_eq!(
-                        affine(&e, &e.point_double(&p)),
-                        affine(&e, &e.point_add(&p, &p)),
-                    );
-                    p = e.point_add(&p, &g);
+            with_engine!(
+                fixed_base,
+                curve,
+                curve.choose(crate::Context::default()),
+                |e| {
+                    let g = generator(&e);
+                    let mut p = e.identity();
+                    for _ in 0..8 {
+                        assert_eq!(
+                            affine(&e, &e.point_double(&p)),
+                            affine(&e, &e.point_add(&p, &p)),
+                        );
+                        p = e.point_add(&p, &g);
+                    }
                 }
-            })
+            )
         }
         check(&P256);
         check(&P384);
@@ -3098,28 +3157,34 @@ pub(crate) mod tests {
     /// stands for, as the comb check below says of the combs.
     #[test]
     fn base_windows_are_multiples_of_g() {
-        with_engine!(fixed_base, &P256, P256.choose(), |e| {
-            let wanted = window_entries(&e);
-            assert_eq!(P256.windows.len(), wanted.len() * BASE_ENTRIES);
-            let tables = P256.windows.chunks_exact(BASE_ENTRIES);
-            for (w, (table, multiples)) in tables.zip(&wanted).enumerate() {
-                for (j, (entry, point)) in
-                    table.iter().zip(multiples).enumerate()
-                {
-                    let (x, y) = e.to_affine(point).expect("a multiple of G");
-                    assert_eq!(
-                        e.field.to_mont(e.arith, &x).0,
-                        entry[0],
-                        "{w} {j} x"
-                    );
-                    assert_eq!(
-                        e.field.to_mont(e.arith, &y).0,
-                        entry[1],
-                        "{w} {j} y"
-                    );
+        with_engine!(
+            fixed_base,
+            &P256,
+            P256.choose(crate::Context::default()),
+            |e| {
+                let wanted = window_entries(&e);
+                assert_eq!(P256.windows.len(), wanted.len() * BASE_ENTRIES);
+                let tables = P256.windows.chunks_exact(BASE_ENTRIES);
+                for (w, (table, multiples)) in tables.zip(&wanted).enumerate() {
+                    for (j, (entry, point)) in
+                        table.iter().zip(multiples).enumerate()
+                    {
+                        let (x, y) =
+                            e.to_affine(point).expect("a multiple of G");
+                        assert_eq!(
+                            e.field.to_mont(e.arith, &x).0,
+                            entry[0],
+                            "{w} {j} x"
+                        );
+                        assert_eq!(
+                            e.field.to_mont(e.arith, &y).0,
+                            entry[1],
+                            "{w} {j} y"
+                        );
+                    }
                 }
             }
-        })
+        )
     }
 
     /// Every entry of every comb table is the multiple of `G` it
@@ -3129,26 +3194,34 @@ pub(crate) mod tests {
     #[test]
     fn base_tables_are_multiples_of_g() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            with_engine!(fixed_base, curve, curve.choose(), |e| {
-                let bases = comb_bases(&e);
-                assert_eq!(curve.base.len(), TABLES * ENTRIES);
-                for (i, table) in curve.base.chunks_exact(ENTRIES).enumerate() {
-                    for (j, entry) in table.iter().enumerate() {
-                        let sum = comb_entry(&e, &bases[i], j + 1);
-                        let (x, y) = e.to_affine(&sum).expect("a sum of bases");
-                        assert_eq!(
-                            e.field.to_mont(e.arith, &x).0,
-                            entry[0],
-                            "{i} {j} x"
-                        );
-                        assert_eq!(
-                            e.field.to_mont(e.arith, &y).0,
-                            entry[1],
-                            "{i} {j} y"
-                        );
+            with_engine!(
+                fixed_base,
+                curve,
+                curve.choose(crate::Context::default()),
+                |e| {
+                    let bases = comb_bases(&e);
+                    assert_eq!(curve.base.len(), TABLES * ENTRIES);
+                    for (i, table) in
+                        curve.base.chunks_exact(ENTRIES).enumerate()
+                    {
+                        for (j, entry) in table.iter().enumerate() {
+                            let sum = comb_entry(&e, &bases[i], j + 1);
+                            let (x, y) =
+                                e.to_affine(&sum).expect("a sum of bases");
+                            assert_eq!(
+                                e.field.to_mont(e.arith, &x).0,
+                                entry[0],
+                                "{i} {j} x"
+                            );
+                            assert_eq!(
+                                e.field.to_mont(e.arith, &y).0,
+                                entry[1],
+                                "{i} {j} y"
+                            );
+                        }
                     }
                 }
-            })
+            )
         }
         check(&P256);
         check(&P384);
@@ -3164,44 +3237,49 @@ pub(crate) mod tests {
     #[test]
     fn windowed_matches_the_complete_multiplication() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            with_engine!(fixed_base, curve, curve.choose(), |e| {
-                let g = generator(&e);
-                let (order_less_one, _) = curve.n.sub_borrow(&Uint::one());
-                let mut scalars = std::vec![
-                    Uint::<L>::ZERO,
-                    Uint::one(),
-                    Uint::from_limbs(&[2]),
-                    Uint::from_limbs(&[16]),
-                    Uint::from_limbs(&[31]),
-                    Uint::from_limbs(&[32]),
-                    Uint::from_limbs(&[0x21084210]),
-                    order_less_one,
-                    curve.n,
-                ];
-                // Every limb the same, so every window is the same digit.
-                scalars.push(Uint([0x1084210842108421; L]));
-                let mut x = Uint::<L>::from_limbs(&[0x9e3779b97f4a7c15]);
-                for _ in 0..8 {
-                    x = e.order.mulmod(
-                        e.arith,
-                        &x,
-                        &Uint::from_limbs(&[0x100000001]),
+            with_engine!(
+                fixed_base,
+                curve,
+                curve.choose(crate::Context::default()),
+                |e| {
+                    let g = generator(&e);
+                    let (order_less_one, _) = curve.n.sub_borrow(&Uint::one());
+                    let mut scalars = std::vec![
+                        Uint::<L>::ZERO,
+                        Uint::one(),
+                        Uint::from_limbs(&[2]),
+                        Uint::from_limbs(&[16]),
+                        Uint::from_limbs(&[31]),
+                        Uint::from_limbs(&[32]),
+                        Uint::from_limbs(&[0x21084210]),
+                        order_less_one,
+                        curve.n,
+                    ];
+                    // Every limb the same, so every window is the same digit.
+                    scalars.push(Uint([0x1084210842108421; L]));
+                    let mut x = Uint::<L>::from_limbs(&[0x9e3779b97f4a7c15]);
+                    for _ in 0..8 {
+                        x = e.order.mulmod(
+                            e.arith,
+                            &x,
+                            &Uint::from_limbs(&[0x100000001]),
+                        );
+                        scalars.push(x);
+                    }
+                    for k in scalars {
+                        let want = affine(&e, &e.point_mul_complete(&g, &k));
+                        let got = affine(&e, &e.point_mul(&g, &k));
+                        assert_eq!(want, got, "{:?}", k.0);
+                    }
+                    // And the identity as the point, which has no inverse to
+                    // take: every multiple of it is itself.
+                    let identity = e.identity();
+                    assert!(
+                        e.to_affine(&e.point_mul(&identity, &Uint::one()))
+                            .is_none()
                     );
-                    scalars.push(x);
                 }
-                for k in scalars {
-                    let want = affine(&e, &e.point_mul_complete(&g, &k));
-                    let got = affine(&e, &e.point_mul(&g, &k));
-                    assert_eq!(want, got, "{:?}", k.0);
-                }
-                // And the identity as the point, which has no inverse to
-                // take: every multiple of it is itself.
-                let identity = e.identity();
-                assert!(
-                    e.to_affine(&e.point_mul(&identity, &Uint::one()))
-                        .is_none()
-                );
-            })
+            )
         }
         check(&P256);
         check(&P384);
@@ -3213,38 +3291,46 @@ pub(crate) mod tests {
     #[test]
     fn vartime_matches_the_constant_time_multiplications() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            with_engine!(fixed_base, curve, curve.choose(), |e| {
-                let g = generator(&e);
-                let q = e.point_mul(&g, &Uint::from_limbs(&[7]));
-                let (order_less_one, _) = curve.n.sub_borrow(&Uint::one());
-                let mut scalars = std::vec![
-                    Uint::<L>::ZERO,
-                    Uint::one(),
-                    Uint::from_limbs(&[2]),
-                    Uint::from_limbs(&[15]),
-                    Uint::from_limbs(&[16]),
-                    order_less_one,
-                ];
-                let mut x = Uint::<L>::from_limbs(&[0x9e3779b97f4a7c15]);
-                for _ in 0..6 {
-                    x = e.order.mulmod(
-                        e.arith,
-                        &x,
-                        &Uint::from_limbs(&[0x100000001]),
-                    );
-                    scalars.push(x);
-                }
-                for a in &scalars {
-                    for b in &scalars {
-                        let want = affine(
-                            &e,
-                            &e.point_add(&e.point_mul(&q, a), &e.mul_base(b)),
+            with_engine!(
+                fixed_base,
+                curve,
+                curve.choose(crate::Context::default()),
+                |e| {
+                    let g = generator(&e);
+                    let q = e.point_mul(&g, &Uint::from_limbs(&[7]));
+                    let (order_less_one, _) = curve.n.sub_borrow(&Uint::one());
+                    let mut scalars = std::vec![
+                        Uint::<L>::ZERO,
+                        Uint::one(),
+                        Uint::from_limbs(&[2]),
+                        Uint::from_limbs(&[15]),
+                        Uint::from_limbs(&[16]),
+                        order_less_one,
+                    ];
+                    let mut x = Uint::<L>::from_limbs(&[0x9e3779b97f4a7c15]);
+                    for _ in 0..6 {
+                        x = e.order.mulmod(
+                            e.arith,
+                            &x,
+                            &Uint::from_limbs(&[0x100000001]),
                         );
-                        let got = affine(&e, &e.mul_add_vartime(&q, a, b));
-                        assert_eq!(want, got, "{:?} {:?}", a.0, b.0);
+                        scalars.push(x);
+                    }
+                    for a in &scalars {
+                        for b in &scalars {
+                            let want = affine(
+                                &e,
+                                &e.point_add(
+                                    &e.point_mul(&q, a),
+                                    &e.mul_base(b),
+                                ),
+                            );
+                            let got = affine(&e, &e.mul_add_vartime(&q, a, b));
+                            assert_eq!(want, got, "{:?} {:?}", a.0, b.0);
+                        }
                     }
                 }
-            })
+            )
         }
         check(&P256);
         check(&P384);
@@ -3258,22 +3344,27 @@ pub(crate) mod tests {
     #[test]
     fn fixed_base_matches_the_general_multiplication() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            with_engine!(fixed_base, curve, curve.choose(), |e| {
-                let g = generator(&e);
-                let (top, _) = curve.n.sub_borrow(&Uint::one());
-                let mut high = Uint::<L>::ZERO;
-                high.0[L - 1] = 1 << 63;
-                let mut spread = Uint::<L>::ZERO;
-                for (i, limb) in spread.0.iter_mut().enumerate() {
-                    *limb = 0x0f1e2d3c4b5a6978u64.rotate_left(i as u32 * 7);
+            with_engine!(
+                fixed_base,
+                curve,
+                curve.choose(crate::Context::default()),
+                |e| {
+                    let g = generator(&e);
+                    let (top, _) = curve.n.sub_borrow(&Uint::one());
+                    let mut high = Uint::<L>::ZERO;
+                    high.0[L - 1] = 1 << 63;
+                    let mut spread = Uint::<L>::ZERO;
+                    for (i, limb) in spread.0.iter_mut().enumerate() {
+                        *limb = 0x0f1e2d3c4b5a6978u64.rotate_left(i as u32 * 7);
+                    }
+                    for k in [Uint::ZERO, Uint::one(), top, high, spread] {
+                        assert_eq!(
+                            affine(&e, &e.mul_base(&k)),
+                            affine(&e, &e.point_mul(&g, &k)),
+                        );
+                    }
                 }
-                for k in [Uint::ZERO, Uint::one(), top, high, spread] {
-                    assert_eq!(
-                        affine(&e, &e.mul_base(&k)),
-                        affine(&e, &e.point_mul(&g, &k)),
-                    );
-                }
-            })
+            )
         }
         check(&P256);
         check(&P384);
@@ -3285,57 +3376,69 @@ pub(crate) mod tests {
     #[test]
     fn public_keys_match_nist() {
         let mut buf = [0u8; 48];
-        with_engine!(fixed_base, &P256, P256.choose(), |e| {
-            let d = Secret::try_new(
-                &e,
-                unhex(
-                    "bf049d775057f1199612f4bd6ab0af69\
+        with_engine!(
+            fixed_base,
+            &P256,
+            P256.choose(crate::Context::default()),
+            |e| {
+                let d = Secret::try_new(
+                    &e,
+                    unhex(
+                        "bf049d775057f1199612f4bd6ab0af69\
                      5a78fb488453e261ca3c277ad57e55db",
-                    &mut buf,
-                ),
-            )
-            .unwrap();
-            let public = d.public(&e);
-            let mut sec1 = [0u8; 65];
-            public.sec1(&e, &mut sec1);
-            let mut expected = [0u8; 65];
-            unhex(
-                "04c6e20135457dc6f738e60cf6999d2416f31d7c12afea248434a547a9aa\
+                        &mut buf,
+                    ),
+                )
+                .unwrap();
+                let public = d.public(&e);
+                let mut sec1 = [0u8; 65];
+                public.sec1(&e, &mut sec1);
+                let mut expected = [0u8; 65];
+                unhex(
+                    "04c6e20135457dc6f738e60cf6999d2416f31d7c12afea248434a547a\
+                    9aa\
                  8a34b06e5610c1cfc091ad58aa43f2b8a96d9561ee80594c5bc5dc4cb08b\
                  e679aa45ff",
-                &mut expected,
-            );
-            assert_eq!(sec1, expected);
-            assert_eq!(
-                Public::try_from_sec1(&e, &expected).unwrap().x.0,
-                public.x.0
-            );
-        });
+                    &mut expected,
+                );
+                assert_eq!(sec1, expected);
+                assert_eq!(
+                    Public::try_from_sec1(&e, &expected).unwrap().x.0,
+                    public.x.0
+                );
+            }
+        );
 
-        with_engine!(fixed_base, &P384, P384.choose(), |e| {
-            let d = Secret::try_new(
-                &e,
-                unhex(
-                    "958baeccb7bb953aa92fce3a136a7b8a\
+        with_engine!(
+            fixed_base,
+            &P384,
+            P384.choose(crate::Context::default()),
+            |e| {
+                let d = Secret::try_new(
+                    &e,
+                    unhex(
+                        "958baeccb7bb953aa92fce3a136a7b8a\
                      68001c4ed00cf7da6fcf83c0f552636d\
                      0063e7c8a511cc45534f1a7f0f7dd959",
-                    &mut buf,
-                ),
-            )
-            .unwrap();
-            let public = d.public(&e);
-            let mut sec1 = [0u8; 97];
-            public.sec1(&e, &mut sec1);
-            let mut expected = [0u8; 97];
-            unhex(
-                "0419f324cf1cbc7d17c1284f1d887eecafb1e11f4c9709566b3094fe3152\
+                        &mut buf,
+                    ),
+                )
+                .unwrap();
+                let public = d.public(&e);
+                let mut sec1 = [0u8; 97];
+                public.sec1(&e, &mut sec1);
+                let mut expected = [0u8; 97];
+                unhex(
+                    "0419f324cf1cbc7d17c1284f1d887eecafb1e11f4c9709566b3094fe3\
+                    152\
                  f63fdbc937018f93918b80a84d4a9ffb8e132c75a66d983f39cca1dddebb\
                  881969adeabe03b8c84b16e9e8b1de4b79ba3c41701145762eb90cc59c5f\
                  61f568d0601c08",
-                &mut expected,
-            );
-            assert_eq!(sec1, expected);
-        })
+                    &mut expected,
+                );
+                assert_eq!(sec1, expected);
+            }
+        )
     }
 
     /// Compressed points decompress to the same key, with either
@@ -3343,55 +3446,71 @@ pub(crate) mod tests {
     #[test]
     fn compressed_points() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            with_engine!(fixed_base, curve, curve.choose(), |e| {
-                let mut rng = crate::random::CtrDrbg::from_system().unwrap();
-                let mut sec1 = [0u8; 133];
-                let w = curve.width();
-                for _ in 0..4 {
-                    let public =
-                        Secret::generate(&e, &mut rng).unwrap().public(&e);
-                    public.sec1(&e, &mut sec1[..1 + 2 * w]);
-                    let mut compressed = [0u8; 67];
-                    compressed[..1 + w].copy_from_slice(&sec1[..1 + w]);
-                    compressed[0] = 0x02 | (sec1[2 * w] & 1);
-                    let back = Public::try_from_sec1(&e, &compressed[..1 + w])
-                        .unwrap();
-                    assert_eq!(back.y.0, public.y.0);
-                    // The other parity is the negated point, also valid.
-                    compressed[0] ^= 1;
-                    let other = Public::try_from_sec1(&e, &compressed[..1 + w])
-                        .unwrap();
-                    assert_eq!(
-                        other.y.0,
-                        Uint::ZERO.sub_mod(&public.y, &curve.p).0
-                    );
-                    // A point off the curve, and the wrong lengths.
-                    sec1[1 + 2 * w - 1] ^= 1;
-                    assert!(
-                        Public::try_from_sec1(&e, &sec1[..1 + 2 * w]).is_err()
-                    );
-                    assert!(Public::try_from_sec1(&e, &sec1[..2 * w]).is_err());
-                    assert!(Public::try_from_sec1(&e, &[0]).is_err());
-                }
-                // Among small x, some have no y: those are refused, and
-                // the rest decompress to points that re-encode.
-                let mut refused = 0;
-                for x in 1..20u8 {
-                    let mut compressed = [0u8; 67];
-                    compressed[0] = 0x02;
-                    compressed[w] = x;
-                    match Public::try_from_sec1(&e, &compressed[..1 + w]) {
-                        Ok(p) => {
-                            p.sec1(&e, &mut sec1[..1 + 2 * w]);
-                            assert_eq!(sec1[1..1 + w], compressed[1..1 + w]);
-                            assert_eq!(sec1[2 * w] & 1, 0);
-                        }
-                        Err(Error::InvalidPublicKey) => refused += 1,
-                        Err(e) => panic!("{e}"),
+            with_engine!(
+                fixed_base,
+                curve,
+                curve.choose(crate::Context::default()),
+                |e| {
+                    let mut rng = crate::random::CtrDrbg::from_system(
+                        crate::Context::default(),
+                    )
+                    .unwrap();
+                    let mut sec1 = [0u8; 133];
+                    let w = curve.width();
+                    for _ in 0..4 {
+                        let public =
+                            Secret::generate(&e, &mut rng).unwrap().public(&e);
+                        public.sec1(&e, &mut sec1[..1 + 2 * w]);
+                        let mut compressed = [0u8; 67];
+                        compressed[..1 + w].copy_from_slice(&sec1[..1 + w]);
+                        compressed[0] = 0x02 | (sec1[2 * w] & 1);
+                        let back =
+                            Public::try_from_sec1(&e, &compressed[..1 + w])
+                                .unwrap();
+                        assert_eq!(back.y.0, public.y.0);
+                        // The other parity is the negated point, also valid.
+                        compressed[0] ^= 1;
+                        let other =
+                            Public::try_from_sec1(&e, &compressed[..1 + w])
+                                .unwrap();
+                        assert_eq!(
+                            other.y.0,
+                            Uint::ZERO.sub_mod(&public.y, &curve.p).0
+                        );
+                        // A point off the curve, and the wrong lengths.
+                        sec1[1 + 2 * w - 1] ^= 1;
+                        assert!(
+                            Public::try_from_sec1(&e, &sec1[..1 + 2 * w])
+                                .is_err()
+                        );
+                        assert!(
+                            Public::try_from_sec1(&e, &sec1[..2 * w]).is_err()
+                        );
+                        assert!(Public::try_from_sec1(&e, &[0]).is_err());
                     }
+                    // Among small x, some have no y: those are refused, and
+                    // the rest decompress to points that re-encode.
+                    let mut refused = 0;
+                    for x in 1..20u8 {
+                        let mut compressed = [0u8; 67];
+                        compressed[0] = 0x02;
+                        compressed[w] = x;
+                        match Public::try_from_sec1(&e, &compressed[..1 + w]) {
+                            Ok(p) => {
+                                p.sec1(&e, &mut sec1[..1 + 2 * w]);
+                                assert_eq!(
+                                    sec1[1..1 + w],
+                                    compressed[1..1 + w]
+                                );
+                                assert_eq!(sec1[2 * w] & 1, 0);
+                            }
+                            Err(Error::InvalidPublicKey) => refused += 1,
+                            Err(e) => panic!("{e}"),
+                        }
+                    }
+                    assert!(refused > 0, "no non-residue among small x");
                 }
-                assert!(refused > 0, "no non-residue among small x");
-            })
+            )
         }
         check(&P256);
         check(&P384);
@@ -3405,16 +3524,25 @@ pub(crate) mod tests {
     #[test]
     fn near_order_scalars_multiply_correctly() {
         fn check<const L: usize>(curve: &Curve<L>) {
-            with_engine!(fixed_base, curve, curve.choose(), |e| {
-                let g = generator(&e);
-                for j in 1..=64u64 {
-                    let (k, _) =
-                        curve.n.sub_borrow(&Uint::from_limbs(&[2 * j]));
-                    let want = affine(&e, &e.point_mul_complete(&g, &k));
-                    assert_eq!(affine(&e, &e.point_mul(&g, &k)), want, "{j}");
-                    assert_eq!(affine(&e, &e.mul_base(&k)), want, "{j}");
+            with_engine!(
+                fixed_base,
+                curve,
+                curve.choose(crate::Context::default()),
+                |e| {
+                    let g = generator(&e);
+                    for j in 1..=64u64 {
+                        let (k, _) =
+                            curve.n.sub_borrow(&Uint::from_limbs(&[2 * j]));
+                        let want = affine(&e, &e.point_mul_complete(&g, &k));
+                        assert_eq!(
+                            affine(&e, &e.point_mul(&g, &k)),
+                            want,
+                            "{j}"
+                        );
+                        assert_eq!(affine(&e, &e.mul_base(&k)), want, "{j}");
+                    }
                 }
-            })
+            )
         }
         check(&P256);
         check(&P384);
@@ -3429,7 +3557,7 @@ pub(crate) mod tests {
     /// has no vectors yet, so this is what pins the layout.
     #[test]
     fn hedged_nonce_layout() {
-        fn by_hand<H: Hash + Clone + BlockType + Default>(
+        fn by_hand<H: Hash + Clone + BlockType>(
             x: &[u8],
             h: &[u8],
             z: &[u8],
@@ -3451,21 +3579,39 @@ pub(crate) mod tests {
                 }
                 data.extend_from_slice(&key);
                 data.extend_from_slice(h);
-                k = Hmac::<H>::mac(&k, &data).as_ref().to_vec();
-                v = Hmac::<H>::mac(&k, &v).as_ref().to_vec();
+                k = Hmac::<H>::mac(crate::Context::default(), &k, &data)
+                    .as_ref()
+                    .to_vec();
+                v = Hmac::<H>::mac(crate::Context::default(), &k, &v)
+                    .as_ref()
+                    .to_vec();
             }
             (k, v)
         }
         let (x, h, z) = ([7u8; 32], [9u8; 32], [3u8; 32]);
-        let nonce = Nonce::<Sha256>::try_new(&x, &h, Some(&z)).unwrap();
+        let nonce = Nonce::<Sha256>::try_new(
+            crate::Context::default(),
+            &x,
+            &h,
+            Some(&z),
+        )
+        .unwrap();
         let (k, v) = by_hand::<Sha256>(&x, &h, &z);
         assert_eq!((nonce.k.as_ref(), nonce.v.as_ref()), (&k[..], &v[..]));
         let (x, h, z) = ([7u8; 66], [9u8; 66], [3u8; 66]);
-        let nonce = Nonce::<Sha512>::try_new(&x, &h, Some(&z)).unwrap();
+        let nonce = Nonce::<Sha512>::try_new(
+            crate::Context::default(),
+            &x,
+            &h,
+            Some(&z),
+        )
+        .unwrap();
         let (k, v) = by_hand::<Sha512>(&x, &h, &z);
         assert_eq!((nonce.k.as_ref(), nonce.v.as_ref()), (&k[..], &v[..]));
         // Without noise it is RFC 6979's seeding, which differs.
-        let plain = Nonce::<Sha512>::try_new(&x, &h, None).unwrap();
+        let plain =
+            Nonce::<Sha512>::try_new(crate::Context::default(), &x, &h, None)
+                .unwrap();
         assert_ne!(plain.k.as_ref(), &k[..]);
     }
 
@@ -3474,27 +3620,66 @@ pub(crate) mod tests {
     #[test]
     fn hedged_signatures_verify() {
         let mut buf = [0u8; 48];
-        with_engine!(fixed_base, &P256, P256.choose(), |e| {
-            let d =
-                Secret::try_new(&e, unhex(&"42".repeat(32), &mut buf)).unwrap();
-            let mut plain = [0u8; 64];
-            d.sign::<Sha256>(&e, b"m", None, &mut plain).unwrap();
-            let mut a = [0u8; 64];
-            d.sign::<Sha256>(&e, b"m", Some(&[1; 32]), &mut a).unwrap();
-            let mut b = [0u8; 64];
-            d.sign::<Sha256>(&e, b"m", Some(&[2; 32]), &mut b).unwrap();
-            for sig in [&plain, &a, &b] {
-                d.public(&e).verify::<Sha256>(&e, b"m", sig).unwrap();
-            }
-            assert_ne!(a, plain);
-            assert_ne!(a, b);
-            // The same noise gives the same signature: the randomness is
-            // the only thing that varies.
-            let mut again = [0u8; 64];
-            d.sign::<Sha256>(&e, b"m", Some(&[1; 32]), &mut again)
+        with_engine!(
+            fixed_base,
+            &P256,
+            P256.choose(crate::Context::default()),
+            |e| {
+                let d = Secret::try_new(&e, unhex(&"42".repeat(32), &mut buf))
+                    .unwrap();
+                let mut plain = [0u8; 64];
+                d.sign::<Sha256>(
+                    crate::Context::default(),
+                    &e,
+                    b"m",
+                    None,
+                    &mut plain,
+                )
                 .unwrap();
-            assert_eq!(a, again);
-        })
+                let mut a = [0u8; 64];
+                d.sign::<Sha256>(
+                    crate::Context::default(),
+                    &e,
+                    b"m",
+                    Some(&[1; 32]),
+                    &mut a,
+                )
+                .unwrap();
+                let mut b = [0u8; 64];
+                d.sign::<Sha256>(
+                    crate::Context::default(),
+                    &e,
+                    b"m",
+                    Some(&[2; 32]),
+                    &mut b,
+                )
+                .unwrap();
+                for sig in [&plain, &a, &b] {
+                    d.public(&e)
+                        .verify::<Sha256>(
+                            crate::Context::default(),
+                            &e,
+                            b"m",
+                            sig,
+                        )
+                        .unwrap();
+                }
+                assert_ne!(a, plain);
+                assert_ne!(a, b);
+                // The same noise gives the same signature: the randomness is
+                // the only thing that varies.
+                let mut again = [0u8; 64];
+                d.sign::<Sha256>(
+                    crate::Context::default(),
+                    &e,
+                    b"m",
+                    Some(&[1; 32]),
+                    &mut again,
+                )
+                .unwrap();
+                assert_eq!(a, again);
+            }
+        )
     }
 
     /// RFC 6979 appendix A.2.5 and A.2.6: deterministic signatures
@@ -3502,140 +3687,237 @@ pub(crate) mod tests {
     #[test]
     fn rfc6979_vectors() {
         let mut buf = [0u8; 48];
-        with_engine!(fixed_base, &P256, P256.choose(), |e| {
-            let d = Secret::try_new(
-                &e,
-                unhex(
-                    "c9afa9d845ba75166b5c215767b1d693\
+        with_engine!(
+            fixed_base,
+            &P256,
+            P256.choose(crate::Context::default()),
+            |e| {
+                let d = Secret::try_new(
+                    &e,
+                    unhex(
+                        "c9afa9d845ba75166b5c215767b1d693\
                      4e50c3db36e89b127b8a622b120f6721",
-                    &mut buf,
-                ),
-            )
-            .unwrap();
-            let mut sig = [0u8; 64];
-            d.sign::<Sha256>(&e, b"sample", None, &mut sig).unwrap();
-            let mut expected = [0u8; 64];
-            unhex(
-                "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf\
+                        &mut buf,
+                    ),
+                )
+                .unwrap();
+                let mut sig = [0u8; 64];
+                d.sign::<Sha256>(
+                    crate::Context::default(),
+                    &e,
+                    b"sample",
+                    None,
+                    &mut sig,
+                )
+                .unwrap();
+                let mut expected = [0u8; 64];
+                unhex(
+                    "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84\
+                    eaf\
                  3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f\
                  843acda8",
-                &mut expected,
-            );
-            assert_eq!(sig, expected);
-            d.public(&e).verify::<Sha256>(&e, b"sample", &sig).unwrap();
-            d.sign::<Sha256>(&e, b"test", None, &mut sig).unwrap();
-            unhex(
-                "f1abb023518351cd71d881567b1ea663ed3efcf6c5132b354f28d3b0b7d3\
+                    &mut expected,
+                );
+                assert_eq!(sig, expected);
+                d.public(&e)
+                    .verify::<Sha256>(
+                        crate::Context::default(),
+                        &e,
+                        b"sample",
+                        &sig,
+                    )
+                    .unwrap();
+                d.sign::<Sha256>(
+                    crate::Context::default(),
+                    &e,
+                    b"test",
+                    None,
+                    &mut sig,
+                )
+                .unwrap();
+                unhex(
+                    "f1abb023518351cd71d881567b1ea663ed3efcf6c5132b354f28d3b0b\
+                    7d3\
                  8367019f4113742a2b14bd25926b49c649155f267e60d3814b4c0cc84250\
                  e46f0083",
-                &mut expected,
-            );
-            assert_eq!(sig, expected);
-        });
+                    &mut expected,
+                );
+                assert_eq!(sig, expected);
+            }
+        );
 
-        with_engine!(fixed_base, &P384, P384.choose(), |e| {
-            let d = Secret::try_new(
-                &e,
-                unhex(
-                    "6b9d3dad2e1b8c1c05b19875b6659f4d\
+        with_engine!(
+            fixed_base,
+            &P384,
+            P384.choose(crate::Context::default()),
+            |e| {
+                let d = Secret::try_new(
+                    &e,
+                    unhex(
+                        "6b9d3dad2e1b8c1c05b19875b6659f4d\
                      e23c3b667bf297ba9aa47740787137d8\
                      96d5724e4c70a825f872c9ea60d2edf5",
-                    &mut buf,
-                ),
-            )
-            .unwrap();
-            let mut sig = [0u8; 96];
-            d.sign::<Sha384>(&e, b"sample", None, &mut sig).unwrap();
-            let mut expected = [0u8; 96];
-            unhex(
-                "94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad\
+                        &mut buf,
+                    ),
+                )
+                .unwrap();
+                let mut sig = [0u8; 96];
+                d.sign::<Sha384>(
+                    crate::Context::default(),
+                    &e,
+                    b"sample",
+                    None,
+                    &mut sig,
+                )
+                .unwrap();
+                let mut expected = [0u8; 96];
+                unhex(
+                    "94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea9\
+                    5ad\
                  133c81a648152e44acf96e36dd1e80fabe4699ef4aeb15f178cea1fe40db\
                  2603138f130e740a19624526203b6351d0a3a94fa329c145786e679e7b82\
                  c71a38628ac8",
-                &mut expected,
-            );
-            assert_eq!(sig, expected);
-            d.public(&e).verify::<Sha384>(&e, b"sample", &sig).unwrap();
-        })
+                    &mut expected,
+                );
+                assert_eq!(sig, expected);
+                d.public(&e)
+                    .verify::<Sha384>(
+                        crate::Context::default(),
+                        &e,
+                        b"sample",
+                        &sig,
+                    )
+                    .unwrap();
+            }
+        )
     }
 
     /// Verification refuses what it should: a changed message, a
     /// changed signature, zero or out-of-range parts, another key.
     #[test]
     fn verify_refusals() {
-        with_engine!(fixed_base, &P256, P256.choose(), |e| {
-            let mut rng = crate::random::CtrDrbg::from_system().unwrap();
-            let d = Secret::generate(&e, &mut rng).unwrap();
-            let public = d.public(&e);
-            let mut sig = [0u8; 64];
-            d.sign::<Sha256>(&e, b"message", None, &mut sig).unwrap();
-            public.verify::<Sha256>(&e, b"message", &sig).unwrap();
-            let bad = |s: &[u8], m: &[u8]| {
-                assert_eq!(
-                    public.verify::<Sha256>(&e, m, s),
-                    Err(Error::InvalidSignature)
+        with_engine!(
+            fixed_base,
+            &P256,
+            P256.choose(crate::Context::default()),
+            |e| {
+                let mut rng = crate::random::CtrDrbg::from_system(
+                    crate::Context::default(),
+                )
+                .unwrap();
+                let d = Secret::generate(&e, &mut rng).unwrap();
+                let public = d.public(&e);
+                let mut sig = [0u8; 64];
+                d.sign::<Sha256>(
+                    crate::Context::default(),
+                    &e,
+                    b"message",
+                    None,
+                    &mut sig,
+                )
+                .unwrap();
+                public
+                    .verify::<Sha256>(
+                        crate::Context::default(),
+                        &e,
+                        b"message",
+                        &sig,
+                    )
+                    .unwrap();
+                let bad = |s: &[u8], m: &[u8]| {
+                    assert_eq!(
+                        public.verify::<Sha256>(
+                            crate::Context::default(),
+                            &e,
+                            m,
+                            s
+                        ),
+                        Err(Error::InvalidSignature)
+                    );
+                };
+                bad(&sig, b"messagf");
+                let mut t = sig;
+                t[0] ^= 1;
+                bad(&t, b"message");
+                t = sig;
+                t[63] ^= 1;
+                bad(&t, b"message");
+                t = sig;
+                t[..32].fill(0);
+                bad(&t, b"message");
+                t = sig;
+                t[32..].fill(0xff);
+                bad(&t, b"message");
+                bad(&sig[..63], b"message");
+                let other = Secret::generate(&e, &mut rng).unwrap().public(&e);
+                assert!(
+                    other
+                        .verify::<Sha256>(
+                            crate::Context::default(),
+                            &e,
+                            b"message",
+                            &sig
+                        )
+                        .is_err()
                 );
-            };
-            bad(&sig, b"messagf");
-            let mut t = sig;
-            t[0] ^= 1;
-            bad(&t, b"message");
-            t = sig;
-            t[63] ^= 1;
-            bad(&t, b"message");
-            t = sig;
-            t[..32].fill(0);
-            bad(&t, b"message");
-            t = sig;
-            t[32..].fill(0xff);
-            bad(&t, b"message");
-            bad(&sig[..63], b"message");
-            let other = Secret::generate(&e, &mut rng).unwrap().public(&e);
-            assert!(other.verify::<Sha256>(&e, b"message", &sig).is_err());
-        })
+            }
+        )
     }
 
     /// Both sides of an agreement land on the same secret, and a
     /// key of the other curve or an off-curve point is refused.
     #[test]
     fn agreement() {
-        with_engine!(fixed_base, &P384, P384.choose(), |e| {
-            let mut rng = crate::random::CtrDrbg::from_system().unwrap();
-            let a = Secret::generate(&e, &mut rng).unwrap();
-            let b = Secret::generate(&e, &mut rng).unwrap();
-            let mut ab = [0u8; 48];
-            let mut ba = [0u8; 48];
-            a.shared_secret(&e, &b.public(&e), &mut ab);
-            b.shared_secret(&e, &a.public(&e), &mut ba);
-            assert_eq!(ab, ba);
-            assert_ne!(ab, [0u8; 48]);
-        })
+        with_engine!(
+            fixed_base,
+            &P384,
+            P384.choose(crate::Context::default()),
+            |e| {
+                let mut rng = crate::random::CtrDrbg::from_system(
+                    crate::Context::default(),
+                )
+                .unwrap();
+                let a = Secret::generate(&e, &mut rng).unwrap();
+                let b = Secret::generate(&e, &mut rng).unwrap();
+                let mut ab = [0u8; 48];
+                let mut ba = [0u8; 48];
+                a.shared_secret(&e, &b.public(&e), &mut ab);
+                b.shared_secret(&e, &a.public(&e), &mut ba);
+                assert_eq!(ab, ba);
+                assert_ne!(ab, [0u8; 48]);
+            }
+        )
     }
 
     /// Scalars out of range are not keys.
     #[test]
     fn scalar_range() {
-        with_engine!(fixed_base, &P256, P256.choose(), |e| {
-            let mut buf = [0u8; 32];
-            assert_eq!(
-                Secret::try_new(&e, &buf).err(),
-                Some(Error::InvalidPrivateKey)
-            );
-            P256.n.to_be_bytes(&mut buf);
-            assert_eq!(
-                Secret::try_new(&e, &buf).err(),
-                Some(Error::InvalidPrivateKey)
-            );
-            buf[31] -= 1;
-            assert!(Secret::try_new(&e, &buf).is_ok());
-            assert_eq!(
-                Secret::try_new(&e, &buf[..31]).err(),
-                Some(Error::InvalidKeyLength(31))
-            );
-            assert_eq!(
-                Secret::try_new(&e, &[1u8; 48]).err(),
-                Some(Error::InvalidKeyLength(48))
-            );
-        })
+        with_engine!(
+            fixed_base,
+            &P256,
+            P256.choose(crate::Context::default()),
+            |e| {
+                let mut buf = [0u8; 32];
+                assert_eq!(
+                    Secret::try_new(&e, &buf).err(),
+                    Some(Error::InvalidPrivateKey)
+                );
+                P256.n.to_be_bytes(&mut buf);
+                assert_eq!(
+                    Secret::try_new(&e, &buf).err(),
+                    Some(Error::InvalidPrivateKey)
+                );
+                buf[31] -= 1;
+                assert!(Secret::try_new(&e, &buf).is_ok());
+                assert_eq!(
+                    Secret::try_new(&e, &buf[..31]).err(),
+                    Some(Error::InvalidKeyLength(31))
+                );
+                assert_eq!(
+                    Secret::try_new(&e, &[1u8; 48]).err(),
+                    Some(Error::InvalidKeyLength(48))
+                );
+            }
+        )
     }
 }

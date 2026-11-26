@@ -9,11 +9,13 @@
 //! ```
 //! use scytale::hash::Hash;
 //! use scytale::hash::blake2::{Blake2b256, Blake2b512};
+//! use scytale::Context;
+//! let ctx = Context::default();
 //!
-//! let digest = Blake2b512::digest(b"abc");
+//! let digest = Blake2b512::digest(ctx, b"abc");
 //! assert_eq!(digest[..4], [0xba, 0x80, 0xa5, 0x3f]);
 //!
-//! let mut hash = Blake2b256::new();
+//! let mut hash = Blake2b256::new(ctx);
 //! hash.update(b"a");
 //! hash.update(b"bc");
 //! assert_eq!(hash.finalize().len(), 32);
@@ -28,8 +30,8 @@
 //! There is one implementation, written out over `u64`, so nothing
 //! here dispatches.
 
-use crate::BlockType;
 use crate::hash::Hash;
+use crate::{BlockType, Context};
 use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -224,15 +226,12 @@ macro_rules! digest {
         pub struct $name(Engine);
 
         impl $name {
-            /// Starts a hash.
-            pub fn new() -> Self {
+            /// Starts a hash. BLAKE2 has one kernel, so `ctx` has
+            /// nothing to choose; it is taken so that every hash is
+            /// made alike.
+            pub fn new(ctx: Context) -> Self {
+                let _ = ctx;
                 $name(Engine::new($out, &[]))
-            }
-        }
-
-        impl Default for $name {
-            fn default() -> Self {
-                Self::new()
             }
         }
 
@@ -256,8 +255,12 @@ macro_rules! digest {
         impl Hash for $name {
             type Output = [u8; $out];
 
+            fn new(ctx: Context) -> Self {
+                Self::new(ctx)
+            }
+
             fn reset(&mut self) {
-                *self = Self::new();
+                self.0 = Engine::new($out, &[]);
             }
 
             #[inline]
@@ -312,7 +315,10 @@ mod tests {
             0x45, 0x33, 0xcc, 0x95, 0x18, 0xd3, 0x8a, 0xa8, 0xdb, 0xf1, 0x92,
             0x5a, 0xb9, 0x23, 0x86, 0xed, 0xd4, 0x00, 0x99, 0x23,
         ];
-        assert_eq!(Blake2b512::digest(b"abc"), expected);
+        assert_eq!(
+            Blake2b512::digest(crate::Context::default(), b"abc"),
+            expected
+        );
     }
 
     /// RFC 7693 appendix E's deterministic input.
@@ -337,7 +343,7 @@ mod tests {
             0xc6, 0x1e, 0x29, 0xda, 0x56, 0x03, 0xd7, 0x63, 0xb8, 0xbb, 0xad,
             0x2e, 0x73, 0x7f, 0x5e, 0x76, 0x5a, 0x7b, 0xcc, 0xd4, 0x75,
         ];
-        let mut grand = Blake2b256::new();
+        let mut grand = Blake2b256::new(crate::Context::default());
         let mut input = [0u8; 1024];
         let mut key = [0u8; 64];
         for out_len in [20usize, 32, 48, 64] {
@@ -362,26 +368,35 @@ mod tests {
         for len in [0usize, 1, 127, 128, 129, 256, 300] {
             let data = &input[..len];
             assert_eq!(
-                Blake2b256::digest(data)[..],
+                Blake2b256::digest(crate::Context::default(), data)[..],
                 engine(32, &[], data)[..32]
             );
-            assert_eq!(Blake2b512::digest(data), engine(64, &[], data));
-            let mut hash = Blake2b512::new();
+            assert_eq!(
+                Blake2b512::digest(crate::Context::default(), data),
+                engine(64, &[], data)
+            );
+            let mut hash = Blake2b512::new(crate::Context::default());
             for byte in data {
                 hash.update(core::slice::from_ref(byte));
             }
-            assert_eq!(hash.finalize(), Blake2b512::digest(data));
+            assert_eq!(
+                hash.finalize(),
+                Blake2b512::digest(crate::Context::default(), data)
+            );
         }
     }
 
     /// `finalize` leaves a new hash behind.
     #[test]
     fn finalize_resets() {
-        let mut hash = Blake2b512::new();
+        let mut hash = Blake2b512::new(crate::Context::default());
         hash.update(b"something else");
         let _ = hash.finalize();
         hash.update(b"abc");
-        assert_eq!(hash.finalize(), Blake2b512::digest(b"abc"));
+        assert_eq!(
+            hash.finalize(),
+            Blake2b512::digest(crate::Context::default(), b"abc")
+        );
     }
 
     /// HMAC takes the 128-byte block from `BlockType`: checked against
@@ -392,13 +407,13 @@ mod tests {
         let message = b"Hi There";
         let mut padded = [0u8; BLOCK];
         padded[..key.len()].copy_from_slice(&key);
-        let mut inner = Blake2b512::new();
+        let mut inner = Blake2b512::new(crate::Context::default());
         inner.update(&padded.map(|b| b ^ 0x36));
         inner.update(message);
-        let mut outer = Blake2b512::new();
+        let mut outer = Blake2b512::new(crate::Context::default());
         outer.update(&padded.map(|b| b ^ 0x5c));
         outer.update(&inner.finalize());
-        let mut mac = Hmac::<Blake2b512>::new(&key);
+        let mut mac = Hmac::<Blake2b512>::new(crate::Context::default(), &key);
         mac.update(message);
         assert_eq!(mac.finalize(), outer.finalize());
     }

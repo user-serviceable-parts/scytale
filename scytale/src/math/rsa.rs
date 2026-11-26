@@ -34,6 +34,7 @@
 //! rather than by the primes that arrive, so that the layout is a
 //! function of the bits alone.
 
+use crate::Context;
 use zeroize::Zeroize;
 
 use crate::Error;
@@ -1375,13 +1376,14 @@ impl<'a> Private<'a> {
 /// MGF1: xors `out` with the counter-indexed digests of `seed`, as
 /// RFC 8017 appendix B.2.1 defines the mask. PSS and OAEP both mask
 /// with it.
-pub(crate) fn mgf1_xor<H: Hash + Default>(
+pub(crate) fn mgf1_xor<H: Hash>(
+    ctx: Context,
     seed: &[u8],
     out: &mut [u8],
 ) -> Result<(), Error> {
     for (counter, chunk) in (0u32..).zip(out.chunks_mut(size_of::<H::Output>()))
     {
-        let mut hasher = H::default();
+        let mut hasher = H::new(ctx);
         hasher.update(seed);
         hasher.update(&counter.to_be_bytes());
         let mask = hasher.finalize();
@@ -1418,12 +1420,12 @@ pub(crate) mod tests {
         for (i, b) in em.iter_mut().enumerate().skip(1) {
             *b = (i * 7 + 1) as u8;
         }
-        let run = || {
+        let run = |ctx: crate::Context| {
             let mut rng =
                 crate::random::CtrDrbg::from_seed(&[0x5a; 48]).expect("seeded");
             let mut storage = std::vec![0u64; private_words(BITS)];
             let mut scratch = std::vec![0u64; scratch_words(BITS)];
-            let choice = Choice::bignum();
+            let choice = Choice::bignum(ctx);
             Private::generate(
                 choice,
                 &mut rng,
@@ -1455,10 +1457,10 @@ pub(crate) mod tests {
                 .expect("applies");
             (storage, signed, back, long)
         };
-        let got = under.build(run);
+        let got = run(under.ctx());
         assert_eq!(got.2, em, "the public operation undoes the private");
         assert_eq!(got.3, got.1, "with and without the pieces");
-        assert_eq!(got, features::build_portable(run));
+        assert_eq!(got, run(crate::Context::portable()));
     }
 
     /// The layout's parts are disjoint, in order, and end where the

@@ -35,9 +35,11 @@
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::aead::{Aead, GcmSiv};
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let siv = GcmSiv::<Aes128>::new(&Key::from([0u8; 16]));
+//! let ctx = Context::default();
+//! let siv = GcmSiv::<Aes128>::new(ctx, &Key::from([0u8; 16]));
 //! let nonce = [0u8; 12];
 //!
 //! let mut message = *b"hello";
@@ -61,7 +63,7 @@ use crate::cipher::{BlockCipher, OneBlock};
 use crate::constant_time;
 use crate::features::{self, Dispatcher, Features};
 use crate::kernel::Kernel;
-use crate::{Error, Key, KeyType};
+use crate::{Context, Error, Key, KeyType};
 use zeroize::Zeroize;
 
 /// The nonce length, fixed by the standard.
@@ -85,8 +87,10 @@ const MAX_FIELD: u64 = 1 << 36;
 /// use scytale::Key;
 /// use scytale::cipher::aes::{Aes128, Aes256};
 /// use scytale::aead::{Aead, GcmSiv};
-/// let _ = GcmSiv::<Aes128>::new(&Key::from([0u8; 16]));
-/// let _ = GcmSiv::<Aes256>::new(&Key::from([0u8; 32]));
+/// use scytale::Context;
+/// let ctx = Context::default();
+/// let _ = GcmSiv::<Aes128>::new(ctx, &Key::from([0u8; 16]));
+/// let _ = GcmSiv::<Aes256>::new(ctx, &Key::from([0u8; 32]));
 /// ```
 ///
 /// ```compile_fail
@@ -122,6 +126,9 @@ mod sealed {
 /// so the cipher this holds encrypts nothing but those derivations.
 #[derive(Clone)]
 pub struct GcmSiv<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> {
+    /// What the mode was built under, for the cipher and the hash
+    /// each message derives.
+    ctx: Context,
     cipher: C,
     key_len: usize,
     /// How to reach the round keys of a cipher derived from this key,
@@ -216,9 +223,9 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> Aead for GcmSiv<C> {
     type Nonce = [u8; NONCE];
     type Tag = [u8; TAG];
 
-    fn new(key: &Self::Key) -> Self {
+    fn new(ctx: Context, key: &Self::Key) -> Self {
         // The inherent constructor, which takes precedence here.
-        GcmSiv::new(key)
+        GcmSiv::new(ctx, key)
     }
 
     fn encrypt(
@@ -234,7 +241,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> Aead for GcmSiv<C> {
         // The tag covers the plaintext, so it is computed first. The
         // key is wiped before the result is looked at, so that a
         // refusal does not leave it behind.
-        let full = authenticate(&hash_key, &cipher, nonce, aad, data);
+        let full = authenticate(self.ctx, &hash_key, &cipher, nonce, aad, data);
         hash_key.zeroize();
         let full = full?;
         let mut counter = full;
@@ -284,12 +291,12 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> Aead for GcmSiv<C> {
 
 impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
     /// Takes the key that all others are derived from.
-    pub fn new(key: &C::Key) -> Self {
+    pub fn new(ctx: Context, key: &C::Key) -> Self {
         // The list ends in the portable row, which needs nothing, so
         // there is always one; the fallback is for the type checker.
-        features::select(kernels::<C>())
-            .and_then(|kernel| Self::with(key, kernel))
-            .unwrap_or_else(|| Self::generic(key))
+        features::select(ctx, kernels::<C>())
+            .and_then(|kernel| Self::with(ctx, key, kernel))
+            .unwrap_or_else(|| Self::generic(ctx, key))
     }
 
     /// The feature profiles this mode tells apart, best first; see
@@ -308,10 +315,10 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
     /// The mode over the kernel named, or `None` where it is not
     /// written for this cipher. That the processor has its
     /// instructions is the caller's to have settled from the kernel's
-    /// row, by the set in force or by what was detected.
-    fn with(key: &C::Key, kernel: Kernel) -> Option<Self> {
+    /// row, by the context or by what was detected.
+    fn with(ctx: Context, key: &C::Key, kernel: Kernel) -> Option<Self> {
         match kernel {
-            Kernel::Portable => Some(Self::generic(key)),
+            Kernel::Portable => Some(Self::generic(ctx, key)),
             #[cfg(any(
                 target_arch = "aarch64",
                 target_arch = "riscv64",
@@ -322,7 +329,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
                 Some(GcmSiv {
                     native: Some(keys),
                     kernel: hardware,
-                    ..Self::generic(key)
+                    ..Self::generic(ctx, key)
                 })
             }
         }
@@ -330,9 +337,10 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
 
     /// The mode over the cipher's own calls, which every processor
     /// has.
-    fn generic(key: &C::Key) -> Self {
+    fn generic(ctx: Context, key: &C::Key) -> Self {
         GcmSiv {
-            cipher: C::new(key),
+            ctx,
+            cipher: C::new(ctx, key),
             key_len: key.as_ref().len(),
             native: None,
             kernel: Kernel::Portable,
@@ -381,7 +389,8 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
         if let Some(schedule) = self.native.and_then(|keys| keys(cipher)) {
             {
                 let len = data.len();
-                let mut hash = Polyval::new(hash_key, aad.len() + len);
+                let mut hash =
+                    Polyval::new(self.ctx, hash_key, aad.len() + len);
                 // The additional data comes first, as it does in the
                 // tag's definition, and is a field of its own.
                 hash.update(aad);
@@ -416,7 +425,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
             }
         }
         apply(cipher, counter, data);
-        authenticate(hash_key, cipher, nonce, aad, data)
+        authenticate(self.ctx, hash_key, cipher, nonce, aad, data)
     }
 
     /// Derives the hashing key and the encrypting cipher for one
@@ -439,7 +448,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
         let mut key = C::zero_key();
         key.as_mut()
             .copy_from_slice(&material[BLOCK..BLOCK + self.key_len]);
-        let cipher = C::new(&key);
+        let cipher = C::new(self.ctx, &key);
         key.as_mut().zeroize();
         material.zeroize();
         (hash_key, cipher)
@@ -457,13 +466,14 @@ fn check(aad: &[u8], message: usize) -> Result<(), Error> {
 /// The tag for a plaintext: POLYVAL over the additional data, the
 /// message and their lengths, combined with the nonce and encrypted.
 fn authenticate<C: BlockCipher<Block = [u8; BLOCK]>>(
+    ctx: Context,
     hash_key: &[u8; BLOCK],
     cipher: &C,
     nonce: &[u8; NONCE],
     aad: &[u8],
     plaintext: &[u8],
 ) -> Result<[u8; BLOCK], Error> {
-    let mut hash = Polyval::new(hash_key, aad.len() + plaintext.len());
+    let mut hash = Polyval::new(ctx, hash_key, aad.len() + plaintext.len());
     hash.update(aad);
     hash.pad();
     hash.update(plaintext);
@@ -663,7 +673,8 @@ pub(crate) mod tests {
         Key<[u8; K]>: SivKey,
     {
         let key: &[u8; K] = key.try_into().unwrap();
-        let siv = GcmSiv::<Aes<K>>::new(&Key::from(*key));
+        let siv =
+            GcmSiv::<Aes<K>>::new(crate::Context::default(), &Key::from(*key));
         let mut data = [0u8; MAX];
         let data = &mut data[..plain.len()];
         data.copy_from_slice(plain);
@@ -678,7 +689,7 @@ pub(crate) mod tests {
     }
 
     fn siv() -> GcmSiv<Aes128> {
-        GcmSiv::<Aes128>::new(&Key::from([0x42; 16]))
+        GcmSiv::<Aes128>::new(crate::Context::default(), &Key::from([0x42; 16]))
     }
 
     /// The point of the mode: a repeated nonce must not be a
@@ -757,8 +768,8 @@ pub(crate) mod tests {
         }
 
         let generic =
-            crate::features::build_portable(|| GcmSiv::<Aes128>::new(&key));
-        let siv = under.build(|| GcmSiv::<Aes128>::new(&key));
+            { GcmSiv::<Aes128>::new(crate::Context::portable(), &key) };
+        let siv = GcmSiv::<Aes128>::new(under.ctx(), &key);
         for len in 0..MAX {
             let mut want = [0u8; MAX];
             want[..len].copy_from_slice(&message[..len]);
@@ -783,7 +794,10 @@ pub(crate) mod tests {
 
     #[test]
     fn round_trips_at_many_lengths() {
-        let siv = GcmSiv::<Aes256>::new(&Key::from([0x5a; 32]));
+        let siv = GcmSiv::<Aes256>::new(
+            crate::Context::default(),
+            &Key::from([0x5a; 32]),
+        );
         let nonce = [0x77u8; 12];
         let mut plain = [0u8; 70];
         for (i, b) in plain.iter_mut().enumerate() {
@@ -816,7 +830,13 @@ pub(crate) mod tests {
         let mut buffer = Buffer([0; 256], 0);
         core::fmt::write(
             &mut buffer,
-            format_args!("{:?}", GcmSiv::<Aes256>::new(&Key::from([0x5a; 32]))),
+            format_args!(
+                "{:?}",
+                GcmSiv::<Aes256>::new(
+                    crate::Context::default(),
+                    &Key::from([0x5a; 32])
+                )
+            ),
         )
         .unwrap();
         let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();

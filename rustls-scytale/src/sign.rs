@@ -42,7 +42,7 @@ fn refused(what: &str, why: impl fmt::Display) -> Error {
 
 /// A bare `RSAPrivateKey`, the PKCS#1 form.
 fn rsa(der: &[u8]) -> Result<Key, Error> {
-    let key = rsa::PrivateKey::try_from_pkcs1(der)
+    let key = rsa::PrivateKey::try_from_pkcs1(scytale::Context::default(), der)
         .map_err(|e| refused("RSA private key", e))?;
     Key::rsa(key)
 }
@@ -50,13 +50,22 @@ fn rsa(der: &[u8]) -> Result<Key, Error> {
 /// A bare `ECPrivateKey`, the SEC 1 form. Its curve may be named
 /// inside or left to the caller to know, so each curve is tried.
 fn sec1(der: &[u8]) -> Result<Key, Error> {
-    if let Ok(key) = ecdsa::p256::PrivateKey::try_from_sec1_der(der) {
+    if let Ok(key) = ecdsa::p256::PrivateKey::try_from_sec1_der(
+        scytale::Context::default(),
+        der,
+    ) {
         return Key::p256(key);
     }
-    if let Ok(key) = ecdsa::p384::PrivateKey::try_from_sec1_der(der) {
+    if let Ok(key) = ecdsa::p384::PrivateKey::try_from_sec1_der(
+        scytale::Context::default(),
+        der,
+    ) {
         return Key::p384(key);
     }
-    match ecdsa::p521::PrivateKey::try_from_sec1_der(der) {
+    match ecdsa::p521::PrivateKey::try_from_sec1_der(
+        scytale::Context::default(),
+        der,
+    ) {
         Ok(key) => Key::p521(key),
         Err(e) => Err(refused("SEC 1 private key", e)),
     }
@@ -70,36 +79,58 @@ fn pkcs8(der: &[u8]) -> Result<Key, Error> {
     let what = info.algorithm.name();
     let load = |e| refused(what, e);
     match info.algorithm {
-        Algorithm::Rsa => rsa::PrivateKey::try_from_der(der)
-            .map_err(load)
-            .and_then(Key::rsa),
+        Algorithm::Rsa => {
+            rsa::PrivateKey::try_from_der(scytale::Context::default(), der)
+                .map_err(load)
+                .and_then(Key::rsa)
+        }
         // An `id-RSASSA-PSS` key's certificate carries PSS parameters
         // this provider does not reproduce, and rustls compares the
         // two byte for byte; an `rsaEncryption` key signs PSS anyway.
         Algorithm::RsaPss => {
             Err(refused(what, "only rsaEncryption keys are taken"))
         }
-        Algorithm::P256 => ecdsa::p256::PrivateKey::try_from_der(der)
-            .map_err(load)
-            .and_then(Key::p256),
-        Algorithm::P384 => ecdsa::p384::PrivateKey::try_from_der(der)
-            .map_err(load)
-            .and_then(Key::p384),
-        Algorithm::P521 => ecdsa::p521::PrivateKey::try_from_der(der)
-            .map_err(load)
-            .and_then(Key::p521),
-        Algorithm::Ed25519 => ed25519::PrivateKey::try_from_der(der)
-            .map_err(load)
-            .map(Key::ed25519),
-        Algorithm::MlDsa44 => ml_dsa::ml_dsa_44::PrivateKey::try_from_der(der)
-            .map_err(load)
-            .and_then(Key::ml_dsa_44),
-        Algorithm::MlDsa65 => ml_dsa::ml_dsa_65::PrivateKey::try_from_der(der)
-            .map_err(load)
-            .and_then(Key::ml_dsa_65),
-        Algorithm::MlDsa87 => ml_dsa::ml_dsa_87::PrivateKey::try_from_der(der)
-            .map_err(load)
-            .and_then(Key::ml_dsa_87),
+        Algorithm::P256 => ecdsa::p256::PrivateKey::try_from_der(
+            scytale::Context::default(),
+            der,
+        )
+        .map_err(load)
+        .and_then(Key::p256),
+        Algorithm::P384 => ecdsa::p384::PrivateKey::try_from_der(
+            scytale::Context::default(),
+            der,
+        )
+        .map_err(load)
+        .and_then(Key::p384),
+        Algorithm::P521 => ecdsa::p521::PrivateKey::try_from_der(
+            scytale::Context::default(),
+            der,
+        )
+        .map_err(load)
+        .and_then(Key::p521),
+        Algorithm::Ed25519 => {
+            ed25519::PrivateKey::try_from_der(scytale::Context::default(), der)
+                .map_err(load)
+                .map(Key::ed25519)
+        }
+        Algorithm::MlDsa44 => ml_dsa::ml_dsa_44::PrivateKey::try_from_der(
+            scytale::Context::default(),
+            der,
+        )
+        .map_err(load)
+        .and_then(Key::ml_dsa_44),
+        Algorithm::MlDsa65 => ml_dsa::ml_dsa_65::PrivateKey::try_from_der(
+            scytale::Context::default(),
+            der,
+        )
+        .map_err(load)
+        .and_then(Key::ml_dsa_65),
+        Algorithm::MlDsa87 => ml_dsa::ml_dsa_87::PrivateKey::try_from_der(
+            scytale::Context::default(),
+            der,
+        )
+        .map_err(load)
+        .and_then(Key::ml_dsa_87),
         _ => Err(refused(what, "not a signature algorithm TLS uses here")),
     }
 }
@@ -535,7 +566,12 @@ mod tests {
     fn refusals() {
         // An RSA key below 2048 bits.
         let mut rng = generator().unwrap();
-        let small = rsa::PrivateKey::generate(&mut rng, 1024).unwrap();
+        let small = rsa::PrivateKey::generate(
+            scytale::Context::default(),
+            &mut rng,
+            1024,
+        )
+        .unwrap();
         let mut der = vec![0u8; 2048];
         let n = small.der_bytes(&mut der).unwrap();
         assert!(Keys.load_private_key(pkcs8(&der[..n])).is_err());

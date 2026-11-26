@@ -2,6 +2,7 @@
 //! key-derivation key as SP 800-108 does it, from a shared secret as
 //! SP 800-56C and X9.63 do it, or as TLS 1.2 derives them.
 
+use scytale::Context;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
@@ -285,7 +286,13 @@ pub fn run(op: KdfOp) -> Result<()> {
             let info: Vec<&[u8]> = info.iter().map(|i| &i[..]).collect();
             let mut okm = Zeroizing::new(vec![0u8; args.length]);
             with_hash!(hash, H => {
-                hkdf::derive::<H>(&salt, &ikm, &info, &mut okm).map_err(|_| {
+                hkdf::derive::<H>(
+                    Context::default(),
+                    &salt,
+                    &ikm,
+                    &info,
+                    &mut okm,
+                ).map_err(|_| {
                     usage!(
                         "--length {}: HKDF over {hash} gives at most {} \
                          bytes",
@@ -309,7 +316,7 @@ pub fn run(op: KdfOp) -> Result<()> {
             let salt = value::parse(&args.salt, "--salt", true)?;
             let mut key = Zeroizing::new(vec![0u8; args.length]);
             with_hash!(hash, H => {
-                Ok(pbkdf2::pbkdf2::<H>(
+                Ok(pbkdf2::pbkdf2::<H>(scytale::Context::default(),
                     &password,
                     &salt,
                     args.iterations,
@@ -339,7 +346,13 @@ pub fn run(op: KdfOp) -> Result<()> {
             let seed: Vec<&[u8]> = seed.iter().map(|s| &s[..]).collect();
             let mut out_bytes = Zeroizing::new(vec![0u8; args.length]);
             with_hash!(hash, H => {
-                tls12::prf::<H>(&secret, &label, &seed, &mut out_bytes);
+                tls12::prf::<H>(
+                    Context::default(),
+                    &secret,
+                    &label,
+                    &seed,
+                    &mut out_bytes,
+                );
                 Ok(())
             })?;
             let mut out = io::output(args.out.as_deref(), true)?;
@@ -361,8 +374,9 @@ pub fn run(op: KdfOp) -> Result<()> {
             let info = parts(&args.info, "--info")?;
             let info: Vec<&[u8]> = info.iter().map(|i| &i[..]).collect();
             let mut key = Zeroizing::new(vec![0u8; args.length]);
+            let ctx = Context::default();
             with_hash!(hash, H => {
-                x963::derive::<H>(&z, &info, &mut key).map_err(|_| {
+                x963::derive::<H>(ctx, &z, &info, &mut key).map_err(|_| {
                     usage!(
                         "--length {}: more blocks than a 32-bit counter \
                          numbers",
@@ -409,9 +423,21 @@ fn sp800_108_derive(args: &Sp800_108Args) -> Result<Zeroizing<Vec<u8>>> {
         let label = value::text(args.label.as_deref(), "--label")?;
         let context = value::text(args.context.as_deref(), "--context")?;
         if name == "kmac128" {
-            sp800_108::kmac128(&key, &label, &context, &mut out);
+            sp800_108::kmac128(
+                scytale::Context::default(),
+                &key,
+                &label,
+                &context,
+                &mut out,
+            );
         } else {
-            sp800_108::kmac256(&key, &label, &context, &mut out);
+            sp800_108::kmac256(
+                scytale::Context::default(),
+                &key,
+                &label,
+                &context,
+                &mut out,
+            );
         }
         return Ok(out);
     }
@@ -502,21 +528,22 @@ fn sp800_108_derive(args: &Sp800_108Args) -> Result<Zeroizing<Vec<u8>>> {
     }
     if let Some(hash) = name.strip_prefix("hmac-") {
         let key = value::checked(&args.key, "--key", entry.key, name)?;
-        with_hash!(hash, H => derive!(Hmac::<H>::new(&key)))?;
+        let ctx = Context::default();
+        with_hash!(hash, H => derive!(Hmac::<H>::new(ctx, &key)))?;
         return Ok(out);
     }
     match name {
         "cmac-aes-128" => {
             let key = value::key::<Aes128>(&args.key, "--key", name)?;
-            derive!(Cmac::<Aes128>::new(&key))?;
+            derive!(Cmac::<Aes128>::new(scytale::Context::default(), &key))?;
         }
         "cmac-aes-192" => {
             let key = value::key::<Aes192>(&args.key, "--key", name)?;
-            derive!(Cmac::<Aes192>::new(&key))?;
+            derive!(Cmac::<Aes192>::new(scytale::Context::default(), &key))?;
         }
         "cmac-aes-256" => {
             let key = value::key::<Aes256>(&args.key, "--key", name)?;
-            derive!(Cmac::<Aes256>::new(&key))?;
+            derive!(Cmac::<Aes256>::new(scytale::Context::default(), &key))?;
         }
         other => return Err(usage!("no MAC named \"{other}\"")),
     }
@@ -638,10 +665,15 @@ fn one_step_derive(args: &OneStepArgs) -> Result<Zeroizing<Vec<u8>>> {
         let digest = names::digest_len(hash).unwrap_or(0);
         return with_hash!(hash, H => {
             if args.no_counter {
-                one_step::hash_no_counter::<H>(&z, &info, &mut out)
+                one_step::hash_no_counter::<H>(
+                    Context::default(),
+                    &z,
+                    &info,
+                    &mut out,
+                )
                     .map_err(|_| one_block(args.length, hash, digest))
             } else {
-                one_step::hash::<H>(&z, &info, &mut out)
+                one_step::hash::<H>(Context::default(), &z, &info, &mut out)
                     .map_err(|_| too_many_blocks(args.length))
             }
         })
@@ -653,7 +685,7 @@ fn one_step_derive(args: &OneStepArgs) -> Result<Zeroizing<Vec<u8>>> {
         let salt = value::text(args.salt.as_deref(), "--salt")?;
         let digest = names::digest_len(hash).unwrap_or(0);
         return with_hash!(hash, H => {
-            let mut mac = Hmac::<H>::new(&salt);
+            let mut mac = Hmac::<H>::new(scytale::Context::default(), &salt);
             if args.no_counter {
                 one_step::mac_no_counter(&mut mac, &z, &info, &mut out)
                     .map_err(|_| one_block(args.length, name, digest))
@@ -674,12 +706,34 @@ fn one_step_derive(args: &OneStepArgs) -> Result<Zeroizing<Vec<u8>>> {
         None => Zeroizing::new(vec![0u8; default_len]),
     };
     match (name, args.no_counter) {
-        ("kmac128", false) => one_step::kmac128(&salt, &z, &info, &mut out),
-        ("kmac128", true) => {
-            one_step::kmac128_no_counter(&salt, &z, &info, &mut out)
-        }
-        (_, false) => one_step::kmac256(&salt, &z, &info, &mut out),
-        (_, true) => one_step::kmac256_no_counter(&salt, &z, &info, &mut out),
+        ("kmac128", false) => one_step::kmac128(
+            scytale::Context::default(),
+            &salt,
+            &z,
+            &info,
+            &mut out,
+        ),
+        ("kmac128", true) => one_step::kmac128_no_counter(
+            scytale::Context::default(),
+            &salt,
+            &z,
+            &info,
+            &mut out,
+        ),
+        (_, false) => one_step::kmac256(
+            scytale::Context::default(),
+            &salt,
+            &z,
+            &info,
+            &mut out,
+        ),
+        (_, true) => one_step::kmac256_no_counter(
+            scytale::Context::default(),
+            &salt,
+            &z,
+            &info,
+            &mut out,
+        ),
     }
     Ok(out)
 }

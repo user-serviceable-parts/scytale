@@ -55,7 +55,7 @@ fn aft(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
     let mut data = hex(t, input)?;
     aes_width!(key, C => {
         let k = key_of::<C>(&key)?;
-        let cipher = builder.build(|| C::new(&k))?;
+        let cipher = builder.build(|ctx| C::new(ctx, &k));
         apply(&cipher, encrypt, &mut data)?;
     });
     Ok(json!({ output: hex_value(&data) }))
@@ -76,7 +76,7 @@ fn mct(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
         let mut previous = data.clone();
         aes_width!(key, C => {
             let k = key_of::<C>(&key)?;
-        let cipher = builder.build(|| C::new(&k))?;
+        let cipher = builder.build(|ctx| C::new(ctx, &k));
             for _ in 0..MCT_ITERATIONS {
                 previous.copy_from_slice(&data);
                 apply(&cipher, encrypt, &mut data)?;

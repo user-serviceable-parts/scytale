@@ -53,11 +53,23 @@ macro_rules! curve {
                 asn: bool,
             ) -> Option<Vec<u8>> {
                 let private: [u8; $width] = private.try_into().ok()?;
-                let key = $module::PrivateKey::try_new(&private).ok()?;
+                let key = $module::PrivateKey::try_new(
+                    crate::Context::default(),
+                    &private,
+                )
+                .ok()?;
                 let peer = if asn {
-                    $module::PublicKey::try_from_der(public).ok()?
+                    $module::PublicKey::try_from_der(
+                        crate::Context::default(),
+                        public,
+                    )
+                    .ok()?
                 } else {
-                    $module::PublicKey::try_from_sec1(public).ok()?
+                    $module::PublicKey::try_from_sec1(
+                        crate::Context::default(),
+                        public,
+                    )
+                    .ok()?
                 };
                 Some(key.shared_secret(&peer).to_vec())
             }

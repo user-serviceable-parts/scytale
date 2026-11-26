@@ -117,10 +117,13 @@ pub fn run(op: PkeOp) -> Result<()> {
         PkeOp::Encrypt(args) => {
             let (name, hash) = hash_of(&args.scheme)?;
             let pem = key::read_public(&args.public, &[Algorithm::Rsa], name)?;
-            let public = rsa::PublicKey::try_from_pem(&pem)?;
+            let public = rsa::PublicKey::try_from_pem(
+                scytale::Context::default(),
+                &pem,
+            )?;
             let label = value::text(args.label.as_deref(), "--label")?;
             let message = Zeroizing::new(io::read_all(args.file.as_deref())?);
-            let mut rng = CtrDrbg::from_system()?;
+            let mut rng = CtrDrbg::from_system(scytale::Context::default())?;
             let digest = names::digest_len(hash).unwrap_or(0);
             let most = public.modulus_len().saturating_sub(2 * digest + 2);
             if message.len() > most {
@@ -141,7 +144,10 @@ pub fn run(op: PkeOp) -> Result<()> {
         PkeOp::Decrypt(args) => {
             let (name, hash) = hash_of(&args.scheme)?;
             let pem = key::read_private(&args.key, &[Algorithm::Rsa], name)?;
-            let private = rsa::PrivateKey::try_from_pem(&pem)?;
+            let private = rsa::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &pem,
+            )?;
             let label = value::text(args.label.as_deref(), "--label")?;
             let ciphertext = io::read_all(args.file.as_deref())?;
             if ciphertext.len() != private.modulus_len() {
@@ -241,31 +247,55 @@ fn sender<H: Kdf, A: Cipher>(
     Ok(match algorithm {
         Algorithm::X25519 => {
             let public = x25519::PublicKey::try_from_pem(pem)?;
-            let public = hpke::x25519::PublicKey::new(&public.bytes());
+            let public = hpke::x25519::PublicKey::new(
+                scytale::Context::default(),
+                &public.bytes(),
+            );
             let (enc, context) = public.sender(rng, info)?;
             (enc.to_vec(), context)
         }
         Algorithm::X448 => {
             let public = x448::PublicKey::try_from_pem(pem)?;
-            let public = hpke::x448::PublicKey::new(&public.bytes());
+            let public = hpke::x448::PublicKey::new(
+                scytale::Context::default(),
+                &public.bytes(),
+            );
             let (enc, context) = public.sender(rng, info)?;
             (enc.to_vec(), context)
         }
         Algorithm::P256 => {
-            let public = ecdh::p256::PublicKey::try_from_pem(pem)?;
-            let public = hpke::p256::PublicKey::try_new(&public.sec1_bytes())?;
+            let public = ecdh::p256::PublicKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )?;
+            let public = hpke::p256::PublicKey::try_new(
+                scytale::Context::default(),
+                &public.sec1_bytes(),
+            )?;
             let (enc, context) = public.sender(rng, info)?;
             (enc.to_vec(), context)
         }
         Algorithm::P384 => {
-            let public = ecdh::p384::PublicKey::try_from_pem(pem)?;
-            let public = hpke::p384::PublicKey::try_new(&public.sec1_bytes())?;
+            let public = ecdh::p384::PublicKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )?;
+            let public = hpke::p384::PublicKey::try_new(
+                scytale::Context::default(),
+                &public.sec1_bytes(),
+            )?;
             let (enc, context) = public.sender(rng, info)?;
             (enc.to_vec(), context)
         }
         _ => {
-            let public = ecdh::p521::PublicKey::try_from_pem(pem)?;
-            let public = hpke::p521::PublicKey::try_new(&public.sec1_bytes())?;
+            let public = ecdh::p521::PublicKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )?;
+            let public = hpke::p521::PublicKey::try_new(
+                scytale::Context::default(),
+                &public.sec1_bytes(),
+            )?;
             let (enc, context) = public.sender(rng, info)?;
             (enc.to_vec(), context)
         }
@@ -297,7 +327,10 @@ fn recipient<H: Kdf, A: Cipher>(
         Algorithm::X25519 => {
             let private = x25519::PrivateKey::try_from_pem(pem)?;
             let secret = Key::from(private.secret_bytes());
-            let private = hpke::x25519::PrivateKey::new(&secret);
+            let private = hpke::x25519::PrivateKey::new(
+                scytale::Context::default(),
+                &secret,
+            );
             enc.try_into()
                 .map_err(|_| bad)
                 .and_then(|enc| private.recipient(enc, info))
@@ -305,31 +338,52 @@ fn recipient<H: Kdf, A: Cipher>(
         Algorithm::X448 => {
             let private = x448::PrivateKey::try_from_pem(pem)?;
             let secret = Key::from(private.secret_bytes());
-            let private = hpke::x448::PrivateKey::new(&secret);
+            let private = hpke::x448::PrivateKey::new(
+                scytale::Context::default(),
+                &secret,
+            );
             enc.try_into()
                 .map_err(|_| bad)
                 .and_then(|enc| private.recipient(enc, info))
         }
         Algorithm::P256 => {
-            let private = ecdh::p256::PrivateKey::try_from_pem(pem)?;
+            let private = ecdh::p256::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )?;
             let secret = private.secret_bytes();
-            let private = hpke::p256::PrivateKey::try_new(&secret)?;
+            let private = hpke::p256::PrivateKey::try_new(
+                scytale::Context::default(),
+                &secret,
+            )?;
             enc.try_into()
                 .map_err(|_| bad)
                 .and_then(|enc| private.recipient(enc, info))
         }
         Algorithm::P384 => {
-            let private = ecdh::p384::PrivateKey::try_from_pem(pem)?;
+            let private = ecdh::p384::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )?;
             let secret = private.secret_bytes();
-            let private = hpke::p384::PrivateKey::try_new(&secret)?;
+            let private = hpke::p384::PrivateKey::try_new(
+                scytale::Context::default(),
+                &secret,
+            )?;
             enc.try_into()
                 .map_err(|_| bad)
                 .and_then(|enc| private.recipient(enc, info))
         }
         _ => {
-            let private = ecdh::p521::PrivateKey::try_from_pem(pem)?;
+            let private = ecdh::p521::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )?;
             let secret = private.secret_bytes();
-            let private = hpke::p521::PrivateKey::try_new(&secret)?;
+            let private = hpke::p521::PrivateKey::try_new(
+                scytale::Context::default(),
+                &secret,
+            )?;
             enc.try_into()
                 .map_err(|_| bad)
                 .and_then(|enc| private.recipient(enc, info))
@@ -390,7 +444,7 @@ fn run_hpke(op: PkeOp, name: &str, suite: &str) -> Result<()> {
             let info = value::text(args.info.as_deref(), "--info")?;
             let aad = value::text(args.aad.as_deref(), "--aad")?;
             let message = Zeroizing::new(io::read_all(args.file.as_deref())?);
-            let mut rng = CtrDrbg::from_system()?;
+            let mut rng = CtrDrbg::from_system(scytale::Context::default())?;
             let sealed = with_suite!(kdf, aead, H, A => {
                 let sent = sender::<H, A>(algorithm, &pem, &mut rng, &info)?;
                 seal(sent, &aad, message)

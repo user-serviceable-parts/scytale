@@ -12,8 +12,10 @@
 //! ```
 //! use scytale::hash::sha3::CShake128;
 //! use scytale::hash::{Xof, XofReader};
+//! use scytale::Context;
+//! let ctx = Context::default();
 //!
-//! let mut xof = CShake128::new(b"", b"Email Signature");
+//! let mut xof = CShake128::new(ctx, b"", b"Email Signature");
 //! xof.update(&[0, 1, 2, 3]);
 //! let mut out = [0u8; 32];
 //! xof.finalize_xof().squeeze(&mut out);
@@ -32,7 +34,7 @@ use core::fmt;
 
 use super::{Auto, AutoReader, SuffixXof, variant};
 use crate::hash::{BitXof, Xof, XofReader};
-use crate::{BlockType, Error};
+use crate::{BlockType, Context, Error};
 
 /// cSHAKE's domain bits and the first padding one.
 const CSHAKE_SUFFIX: u8 = 0x04;
@@ -223,14 +225,18 @@ macro_rules! cshake {
 
         impl $name {
             /// Starts a function under `function_name` and
-            /// `customization`, with the best implementation the
-            /// processor supports.
+            /// `customization`, with the best implementation `ctx`
+            /// allows.
             ///
             /// Any strings are allowed. The function name is for
             /// functions NIST defines over cSHAKE; leave it empty
             /// and put a label of your own in `customization`.
-            pub fn new(function_name: &[u8], customization: &[u8]) -> Self {
-                $name(Core::with(Auto::new(), function_name, customization))
+            pub fn new(
+                ctx: Context,
+                function_name: &[u8],
+                customization: &[u8],
+            ) -> Self {
+                $name(Core::with(Auto::new(ctx), function_name, customization))
             }
         }
 
@@ -256,15 +262,13 @@ macro_rules! cshake {
             }
         }
 
-        impl Default for $name {
-            /// Both strings empty, which is SHAKE.
-            fn default() -> Self {
-                Self::new(b"", b"")
-            }
-        }
-
         impl Xof for $name {
             type Reader = $reader;
+
+            /// Both strings empty, which is SHAKE.
+            fn new(ctx: Context) -> Self {
+                Self::new(ctx, b"", b"")
+            }
 
             /// Returns to the state after the strings.
             fn reset(&mut self) {
@@ -315,8 +319,6 @@ cshake!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hash::sha3::engine::Sponge;
-    use crate::hash::sha3::portable::Keccak;
     use crate::hash::sha3::{Shake128, Shake256};
     use std::vec::Vec;
 
@@ -365,21 +367,33 @@ mod tests {
         let long: Vec<u8> = (0..200).collect();
         let s = b"Email Signature";
         assert_eq!(
-            squeeze(&mut CShake128::new(b"", s), &short, 32),
+            squeeze(
+                &mut CShake128::new(crate::Context::default(), b"", s),
+                &short,
+                32
+            ),
             unhex(
                 "C1C36925B6409A04F1B504FCBCA9D82B
                  4017277CB5ED2B2065FC1D3814D5AAF5"
             )
         );
         assert_eq!(
-            squeeze(&mut CShake128::new(b"", s), &long, 32),
+            squeeze(
+                &mut CShake128::new(crate::Context::default(), b"", s),
+                &long,
+                32
+            ),
             unhex(
                 "C5221D50E4F822D96A2E8881A961420F
                  294B7B24FE3D2094BAED2C6524CC166B"
             )
         );
         assert_eq!(
-            squeeze(&mut CShake256::new(b"", s), &short, 64),
+            squeeze(
+                &mut CShake256::new(crate::Context::default(), b"", s),
+                &short,
+                64
+            ),
             unhex(
                 "D008828E2B80AC9D2218FFEE1D070C48
                  B8E4C87BFF32C9699D5B6896EEE0EDD1
@@ -388,7 +402,11 @@ mod tests {
             )
         );
         assert_eq!(
-            squeeze(&mut CShake256::new(b"", s), &long, 64),
+            squeeze(
+                &mut CShake256::new(crate::Context::default(), b"", s),
+                &long,
+                64
+            ),
             unhex(
                 "07DC27B11E51FBAC75BC7B3C1D983E8B
                  4B85FB1DEFAF218912AC864302730917
@@ -403,17 +421,29 @@ mod tests {
     fn empty_strings_are_shake() {
         let message = b"abc";
         assert_eq!(
-            squeeze(&mut CShake128::new(b"", b""), message, 40),
-            squeeze(&mut Shake128::new(), message, 40)
+            squeeze(
+                &mut CShake128::new(crate::Context::default(), b"", b""),
+                message,
+                40
+            ),
+            squeeze(&mut Shake128::new(crate::Context::default()), message, 40)
         );
         assert_eq!(
-            squeeze(&mut CShake256::new(b"", b""), message, 40),
-            squeeze(&mut Shake256::new(), message, 40)
+            squeeze(
+                &mut CShake256::new(crate::Context::default(), b"", b""),
+                message,
+                40
+            ),
+            squeeze(&mut Shake256::new(crate::Context::default()), message, 40)
         );
         // A name alone is customization enough.
         assert_ne!(
-            squeeze(&mut CShake128::new(b"N", b""), message, 40),
-            squeeze(&mut Shake128::new(), message, 40)
+            squeeze(
+                &mut CShake128::new(crate::Context::default(), b"N", b""),
+                message,
+                40
+            ),
+            squeeze(&mut Shake128::new(crate::Context::default()), message, 40)
         );
     }
 
@@ -422,10 +452,12 @@ mod tests {
     #[test]
     fn pieces_reset_and_clone() {
         let data: Vec<u8> = (0..500u32).map(|i| (i * 7) as u8).collect();
-        let mut whole = CShake128::new(b"fn", b"label");
+        let mut whole =
+            CShake128::new(crate::Context::default(), b"fn", b"label");
         let expected = squeeze(&mut whole, &data, 64);
         for split in [0, 1, 167, 168, 169, 336, 499] {
-            let mut xof = CShake128::new(b"fn", b"label");
+            let mut xof =
+                CShake128::new(crate::Context::default(), b"fn", b"label");
             xof.update(b"garbage");
             xof.reset();
             xof.update(&data[..split]);
@@ -451,9 +483,10 @@ mod tests {
         let custom = [0x62u8; 200];
         for len in [0usize, 1, 135, 136, 137, 400] {
             let message: Vec<u8> = (0..len).map(|i| i as u8).collect();
-            let mut auto = CShake256::new(&name, &custom);
-            let sponge = Sponge::<Keccak, variant::CShake256>::with(Keccak);
-            let mut portable = Core::with(sponge, &name, &custom);
+            let mut auto =
+                CShake256::new(crate::Context::default(), &name, &custom);
+            let mut portable =
+                CShake256::new(crate::Context::portable(), &name, &custom);
             portable.update(&message);
             let mut want = [0u8; 50];
             portable.finalize_xof().squeeze(&mut want);
@@ -465,7 +498,7 @@ mod tests {
     /// refused call leaves the message as it was.
     #[test]
     fn bit_counts() {
-        let mut xof = CShake128::new(b"", b"S");
+        let mut xof = CShake128::new(crate::Context::default(), b"", b"S");
         xof.update(b"ab");
         assert_eq!(
             xof.finalize_bits_xof(0, 0).err(),
@@ -480,7 +513,7 @@ mod tests {
             .expect("bits")
             .squeeze(&mut out);
 
-        let mut fresh = CShake128::new(b"", b"S");
+        let mut fresh = CShake128::new(crate::Context::default(), b"", b"S");
         fresh.update(b"ab");
         let mut again = [0u8; 16];
         fresh

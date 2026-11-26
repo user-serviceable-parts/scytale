@@ -73,6 +73,7 @@ use self::riscv64 as arch;
 use self::x86_64 as arch;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::Context;
 use crate::features::{self, Features};
 
 /// Which carry-less multiply a hash runs on, named for the
@@ -194,8 +195,9 @@ impl Drop for Ghash {
 impl ZeroizeOnDrop for Ghash {}
 
 impl Ghash {
-    /// Starts a hash under subkey `h`, which is one block.
-    pub(crate) fn new(h: &[u8]) -> Self {
+    /// Starts a hash under subkey `h`, which is one block, with the
+    /// best multiplication `ctx` allows.
+    pub(crate) fn new(ctx: Context, h: &[u8]) -> Self {
         debug_assert_eq!(h.len(), BLOCK);
         let h = [halve(&h[..8]), halve(&h[8..])];
         Ghash {
@@ -203,7 +205,7 @@ impl Ghash {
             y: [0, 0],
             block: [0; BLOCK],
             used: 0,
-            fast: features::choose(KERNELS)
+            fast: features::choose(ctx, KERNELS)
                 .and_then(arch::Multiply::of)
                 .map(|m| (m, m.prepare(&h))),
             powers: None,
@@ -398,7 +400,7 @@ pub(crate) mod tests {
     /// one on a spread of values and on the edges, and the hash at
     /// every length whole and in pieces.
     pub(crate) fn kernel(under: &features::Under) {
-        let chosen = under.build(|| features::choose(KERNELS));
+        let chosen = features::choose(under.ctx(), KERNELS);
         if let Some(fast) = chosen.and_then(arch::Multiply::of) {
             carryless_multiply_agrees_with_portable(fast);
             carryless_multiply_handles_edges(fast);
@@ -446,7 +448,7 @@ pub(crate) mod tests {
         for len in 0..data.len() {
             let want = portably(&key, &data[..len]);
 
-            let mut hash = under.build(|| Ghash::new(&key));
+            let mut hash = Ghash::new(under.ctx(), &key);
             hash.update(&data[..len]);
             hash.pad();
             assert_eq!(hash.finish(), want, "one call, {len} bytes");
@@ -454,7 +456,7 @@ pub(crate) mod tests {
             // Pieces that do not line up with blocks or groups, so
             // the group path meets every kind of leftover.
             for piece in [1, 7, 16, 17, 63, 129] {
-                let mut hash = under.build(|| Ghash::new(&key));
+                let mut hash = Ghash::new(under.ctx(), &key);
                 for part in data[..len].chunks(piece) {
                     hash.update(part);
                 }

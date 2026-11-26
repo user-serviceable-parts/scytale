@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn curves_and_rsa() {
-        let mut rng = CtrDrbg::from_system().unwrap();
+        let mut rng = CtrDrbg::from_system(crate::Context::default()).unwrap();
         let mut out = [0u8; 4096];
 
         let secret = [7u8; 32];
@@ -416,7 +416,10 @@ mod tests {
         assert_eq!(info_pem(&pem), (Algorithm::X25519, false));
 
         use crate::sig::ed448;
-        let key = ed448::PrivateKey::new(&crate::Key::from([7u8; 57]));
+        let key = ed448::PrivateKey::new(
+            crate::Context::default(),
+            &crate::Key::from([7u8; 57]),
+        );
         assert_eq!(info(&key.der_bytes()), (Algorithm::Ed448, true));
         assert_eq!(info_pem(&key.pem_bytes()), (Algorithm::Ed448, true));
         let public = key.public_key();
@@ -437,8 +440,10 @@ mod tests {
 
         let der = crate::sig::ed25519::secret_der(&secret);
         assert_eq!(info(&der), (Algorithm::Ed25519, true));
-        let key =
-            crate::sig::ed25519::PrivateKey::new(&crate::Key::from(secret));
+        let key = crate::sig::ed25519::PrivateKey::new(
+            crate::Context::default(),
+            &crate::Key::from(secret),
+        );
         let der = key.public_key().der_bytes();
         assert_eq!(info(&der), (Algorithm::Ed25519, false));
         let pem = key.pem_bytes();
@@ -447,7 +452,11 @@ mod tests {
         macro_rules! curve {
             ($module:path, $algorithm:expr) => {{
                 use $module as m;
-                let key = m::PrivateKey::generate(&mut rng).unwrap();
+                let key = m::PrivateKey::generate(
+                    crate::Context::default(),
+                    &mut rng,
+                )
+                .unwrap();
                 let n = key.der_bytes(&mut out).unwrap();
                 assert_eq!(info(&out[..n]), ($algorithm, true));
                 let n = key.pem_bytes(&mut out).unwrap();
@@ -463,8 +472,12 @@ mod tests {
         curve!(crate::kex::ecdh::p521, Algorithm::P521);
         curve!(crate::sig::ecdsa::p256, Algorithm::P256);
 
-        let key =
-            crate::sig::rsa::PrivateKey::generate(&mut rng, 1024).unwrap();
+        let key = crate::sig::rsa::PrivateKey::generate(
+            crate::Context::default(),
+            &mut rng,
+            1024,
+        )
+        .unwrap();
         let n = key.der_bytes(&mut out).unwrap();
         assert_eq!(info(&out[..n]), (Algorithm::Rsa, true));
         let n = key.pkcs1_bytes(&mut out).unwrap();
@@ -488,12 +501,16 @@ mod tests {
 
     #[test]
     fn post_quantum() {
-        let mut rng = CtrDrbg::from_system().unwrap();
+        let mut rng = CtrDrbg::from_system(crate::Context::default()).unwrap();
         let mut out = std::vec![0u8; 8192];
         macro_rules! set {
             ($module:path, $algorithm:expr) => {{
                 use $module as m;
-                let key = m::PrivateKey::generate(&mut rng).unwrap();
+                let key = m::PrivateKey::generate(
+                    crate::Context::default(),
+                    &mut rng,
+                )
+                .unwrap();
                 let n = key.der_bytes(&mut out).unwrap();
                 assert_eq!(info(&out[..n]), ($algorithm, true));
                 let n = key.pem_bytes(&mut out).unwrap();

@@ -12,7 +12,7 @@
 //! that have not passed are answered.
 
 use crate::http::Http;
-use crate::profile::{Builder, Seed, answer_under};
+use crate::profile::{Seed, answer_under};
 use crate::replay::{save, suite_for};
 use crate::suite::{Suite, compare, with_prompt};
 use crate::support::{Error, list, opt_int, text};
@@ -308,9 +308,8 @@ impl Run<'_> {
             if let Some(dir) = &self.save {
                 save(dir, &format!("{stem}.expected.json"), &expected)?;
             }
-            let checked = with_prompt(doc, &expected).and_then(|expected| {
-                compare(suite, &expected, &answered, &Builder::default())
-            });
+            let checked = with_prompt(doc, &expected)
+                .and_then(|expected| compare(suite, &expected, &answered));
             match checked {
                 Ok(n) => {
                     eprintln!("{name}: {n} cases match the expected answers")

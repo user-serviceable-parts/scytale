@@ -6,11 +6,14 @@
 //! requirements are met wins. What meets them is a set of
 //! [`Features`], and this module owns that set.
 //!
-//! [`detected`] is what the processor reports, asked once. It is the
-//! default, and the reference set: the set in force, [`get`], may
-//! hold any of its members and nothing else from this architecture,
-//! so no edit can select a kernel the processor cannot run. [`set`]
-//! replaces the set in force; [`reset`] goes back to the hardware.
+//! [`detected`] is what the processor reports, asked once. Every
+//! object is created with a [`Context`], which carries the set it may
+//! choose from: [`Context::default`] is the processor's, and
+//! [`Context::try_new`] takes a set of the program's own, which may
+//! hold any member of [`detected`] and nothing else from this
+//! architecture, so no context can select a kernel the processor
+//! cannot run. An object that creates others as it runs, a MAC its
+//! hash or a signature scheme its hashes, gives them its own context.
 //!
 //! Removing a feature selects the kernel below the one it unlocked,
 //! which is how a program chooses an implementation: not by naming
@@ -25,39 +28,41 @@
 //! The kernels themselves are not named. What a type tells the
 //! program is its [`profiles`](Dispatcher::profiles): the feature
 //! sets it tells apart, each the least a processor must offer for
-//! one choice. A program that wants every choice exercised sets each
-//! profile in turn; one that wants to know what a machine will run
-//! finds the first profile the set in force meets.
+//! one choice. A program that wants every choice exercised makes a
+//! context of each profile in turn; one that wants to know what a
+//! machine will run finds the first profile its context meets.
 //!
 //! The per-architecture enums exist on every target, so a program
 //! for three architectures names all of their features in one place
 //! without a `cfg`, and the documentation shows every name whatever
-//! machine rendered it. [`set`] is strict about this architecture and
-//! inert about the others: a feature of this one that the processor
-//! lacks is an error, a feature of another is never required by
-//! anything here and is kept without effect.
+//! machine rendered it. [`Context::try_new`] is strict about this
+//! architecture and inert about the others: a feature of this one
+//! that the processor lacks is an error, a feature of another is
+//! never required by anything here and is kept without effect.
 //!
 //! ```
-//! use scytale::features::{self, Feature, Features, aarch64, x86_64};
+//! use scytale::Context;
+//! use scytale::cipher::aes::Aes128;
+//! use scytale::features::{self, Feature, aarch64, x86_64};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut f = features::get();
+//! let mut f = features::detected();
 //! // AES-NI rather than VAES; a no-op on any other architecture.
 //! f.remove(x86_64::Feature::Vaes.into());
 //! // A board with no AES instructions and nothing untrusted on it.
 //! if !f.contains(aarch64::Feature::Aes.into()) {
 //!     f.insert(Feature::Isolated);
 //! }
-//! features::set(f)?;
-//! # features::reset();
+//! let ctx = Context::try_new(f)?;
+//! let aes = Aes128::new(ctx, &[0u8; 16].into());
+//! # let _ = aes;
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! The set in force is global to the process and may be changed at
-//! any time; the latest `set` wins. A value constructed earlier keeps
-//! the kernel it was built with. Code sharing the address space is
-//! trusted, so there is no fuse.
+//! A context is a value: two in one program are independent, and
+//! nothing is shared or locked. An object keeps the kernel it was
+//! built with for its whole life.
 //!
 //! # Asking once
 //!
@@ -67,9 +72,8 @@
 //! the answer in an atomic. Nothing locks: two threads arriving
 //! together both ask and both store the same word, which is worth
 //! more than a lock, since it means the question can be put from code
-//! with no allocator and no threads at all. Reading the set in force
-//! is then one relaxed load, cheap enough for a mode that expands a
-//! key for every message.
+//! with no allocator and no threads at all. A default context is then
+//! one relaxed load.
 
 use core::fmt;
 use core::str::FromStr;
@@ -148,8 +152,8 @@ impl Feature {
     }
 
     /// Whether this is a feature of the architecture the program is
-    /// running on, which is the only kind [`set`] checks against the
-    /// hardware.
+    /// running on, which is the only kind [`Context::try_new`] checks
+    /// against the hardware.
     fn is_native(self) -> bool {
         match self {
             Feature::X86_64(_) => cfg!(target_arch = "x86_64"),
@@ -635,15 +639,10 @@ pub(crate) fn native_all() -> Features {
 /// asked; see the module documentation for why the race is harmless.
 static DETECTED: AtomicU64 = AtomicU64::new(0);
 
-/// The set in force, with [`WRITTEN`] once [`set`] has been called.
-/// Zero means [`detected`] is in force, so a program that never calls
-/// `set` pays one load and a branch.
-static IN_FORCE: AtomicU64 = AtomicU64::new(0);
-
 /// What the processor reports, asked once.
 ///
-/// This is the default set in force and the reference every call to
-/// [`set`] is checked against. On an architecture with no
+/// This is the set of [`Context::default`] and the reference every
+/// [`Context::try_new`] is checked against. On an architecture with no
 /// implementations written for it, the empty set.
 pub fn detected() -> Features {
     let kept = DETECTED.load(Ordering::Relaxed);
@@ -655,61 +654,72 @@ pub fn detected() -> Features {
     found
 }
 
-/// The set in force: what [`set`] last stored, or [`detected`] if
-/// nothing has been stored.
-pub fn get() -> Features {
-    let kept = IN_FORCE.load(Ordering::Relaxed);
-    if kept & WRITTEN != 0 {
-        Features(kept & !WRITTEN)
-    } else {
-        baseline()
+/// The features an object may use, given to it when it is created.
+///
+/// Every object that chooses a kernel takes a context at creation
+/// and chooses from its set, once; an object that creates others as
+/// it runs gives them its own context, so everything it does follows
+/// the set it was created with. Two contexts in one program are
+/// wholly independent: nothing is shared, and nothing need be locked.
+///
+/// A context holds only features the processor has, so a kernel
+/// chosen from one can always run. [`Context::default`] is the set
+/// [`detected`]; [`Context::try_new`] takes a set of the program's
+/// own, such as one with [`Feature::Isolated`] added or a feature
+/// taken away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Context(Features);
+
+impl Context {
+    /// A context allowing `features`.
+    ///
+    /// The set may hold any member of [`detected`] and any virtual
+    /// feature; a feature of this architecture that the processor
+    /// lacks is refused with [`Error::UnsupportedFeature`] naming it.
+    /// Features of other architectures are kept and have no effect,
+    /// so a program for several architectures can build one set for
+    /// all of them.
+    pub fn try_new(features: Features) -> Result<Self, Error> {
+        let hardware = detected();
+        if let Some(missing) =
+            features.native().iter().find(|&f| !hardware.contains(f))
+        {
+            return Err(Error::UnsupportedFeature(missing));
+        }
+        Ok(Self(features))
+    }
+
+    /// The features this context allows.
+    pub fn features(self) -> Features {
+        self.0
+    }
+
+    /// The context that allows nothing, so that every object takes
+    /// its portable kernel: the reference the tests compare against.
+    #[cfg(test)]
+    pub(crate) fn portable() -> Self {
+        Self(Features::new())
+    }
+
+    /// Whether everything in `required` is allowed. Private: a kernel
+    /// is chosen by [`choose`] from its list, so that every hardware
+    /// branch in the crate is a row some list publishes and a kernel
+    /// test runs.
+    fn has(self, required: Features) -> bool {
+        required.is_subset(self.0)
     }
 }
 
-/// What is in force until [`set`] is called, and again after
-/// [`reset`]: the hardware.
-fn baseline() -> Features {
-    detected()
-}
-
-/// Makes `features` the set in force.
-///
-/// The set may hold any member of [`detected`] and any virtual
-/// feature; a feature of this architecture that the processor lacks
-/// is refused with [`Error::UnsupportedFeature`] naming it, and the
-/// set in force is unchanged. Features of other architectures are
-/// kept and have no effect, so a program for several architectures
-/// can build one set for all of them.
-///
-/// Takes effect for every value constructed afterwards; values built
-/// earlier keep their kernels.
-pub fn set(features: Features) -> Result<(), Error> {
-    let hardware = detected();
-    if let Some(missing) =
-        features.native().iter().find(|&f| !hardware.contains(f))
-    {
-        return Err(Error::UnsupportedFeature(missing));
+impl Default for Context {
+    /// The features the processor has.
+    fn default() -> Self {
+        Self(detected())
     }
-    IN_FORCE.store(features.0 | WRITTEN, Ordering::Relaxed);
-    Ok(())
-}
-
-/// Puts [`detected`] back in force.
-pub fn reset() {
-    IN_FORCE.store(0, Ordering::Relaxed);
-}
-
-/// Whether everything in `required` is in force. Private: a kernel
-/// is chosen by [`choose`] from its list, so that every hardware
-/// branch in the crate is a row some list publishes and a kernel
-/// test runs.
-fn has(required: Features) -> bool {
-    required.is_subset(get())
 }
 
 /// A kernel the list chose: proof that its row's features were in
-/// force when it was chosen, and so that the processor has them,
-/// since the set in force never holds a feature the processor lacks.
+/// the context it was chosen from, and so that the processor has
+/// them, since a context never holds a feature the processor lacks.
 /// Only [`choose`] makes one, so a kernel's constructor that takes
 /// one needs to ask nothing of the processor: it checks only that the
 /// choice is its own.
@@ -725,17 +735,23 @@ impl<K: Copy> Chosen<K> {
 
 /// As [`select`], with the answer as the proof a kernel's constructor
 /// takes.
-pub(crate) fn choose<K: Copy>(kernels: &[(K, Features)]) -> Option<Chosen<K>> {
-    select(kernels).map(Chosen)
+pub(crate) fn choose<K: Copy>(
+    ctx: Context,
+    kernels: &[(K, Features)],
+) -> Option<Chosen<K>> {
+    select(ctx, kernels).map(Chosen)
 }
 
-/// The first kernel in `kernels` whose requirements are in force.
+/// The first kernel in `kernels` whose requirements `ctx` allows.
 /// Every family's list ends with a kernel that requires nothing, so
 /// there is always one; `None` only for an empty list.
-pub(crate) fn select<K: Copy>(kernels: &[(K, Features)]) -> Option<K> {
+pub(crate) fn select<K: Copy>(
+    ctx: Context,
+    kernels: &[(K, Features)],
+) -> Option<K> {
     kernels
         .iter()
-        .find(|(_, required)| has(*required))
+        .find(|(_, required)| ctx.has(*required))
         .map(|(kernel, _)| *kernel)
 }
 
@@ -916,51 +932,17 @@ pub(crate) fn needs_of<K: PartialEq>(
         .expect("the kernel is listed")
 }
 
-/// Where a kernel test builds its objects: under exactly one kernel's
-/// features, through the public API.
+/// Where a kernel test builds its objects: with exactly one kernel's
+/// features in their context, through the public API.
 #[cfg(test)]
-pub(crate) struct Under(Features);
-
-/// Held for each build under a kernel's features. The set in force is
-/// global, so two tests building at once must take turns; a build is
-/// short, and the object keeps its kernel once built.
-#[cfg(test)]
-static BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) struct Under(Context);
 
 #[cfg(test)]
 impl Under {
-    /// Builds with this kernel's features in force, and puts the
-    /// set back before anyone else may build.
-    pub(crate) fn build<T>(&self, build: impl FnOnce() -> T) -> T {
-        // Put back however the build ends: a build that panics must
-        // not leave the tests that follow a narrowed set.
-        struct Reset;
-        impl Drop for Reset {
-            fn drop(&mut self) {
-                reset();
-            }
-        }
-        let _turn = BUILD.lock().unwrap_or_else(|e| e.into_inner());
-        set(self.0).expect("each_kernel checked the processor has these");
-        let _reset = Reset;
-        build()
+    /// The context with this kernel's features and no others.
+    pub(crate) fn ctx(&self) -> Context {
+        self.0
     }
-}
-
-/// Builds with nothing in force, so on the portable code of every
-/// type: the reference a kernel's answers are compared with.
-#[cfg(test)]
-pub(crate) fn build_portable<T>(build: impl FnOnce() -> T) -> T {
-    Under(Features::new()).build(build)
-}
-
-/// Builds with the set in force left as it is, taking the same turn
-/// as [`Under::build`], so a test that asks which kernel it got sees
-/// no other test's set.
-#[cfg(test)]
-pub(crate) fn build_alone<T>(build: impl FnOnce() -> T) -> T {
-    let _turn = BUILD.lock().unwrap_or_else(|e| e.into_inner());
-    build()
 }
 
 /// The kernels `SCYTALE_KERNELS` names, separated by white space, or
@@ -1002,7 +984,9 @@ pub(crate) fn each_kernel<K: Copy + PartialEq>(
             std::format!("not run: needs {}", short_name(missing))
         } else {
             ran.push(kernel);
-            let under = Under(needs);
+            // The processor has every feature the row needs, checked
+            // just above, so the context is always allowed.
+            let under = Under(Context(needs));
             match std::panic::catch_unwind(|| suite(&under)) {
                 Ok(()) => "run".into(),
                 Err(_) => {
@@ -1117,8 +1101,8 @@ pub(crate) fn rows_are_reachable<K>(kernels: &[(K, Features)]) -> bool {
 /// What every dispatching type's test asserts of its list: each row
 /// can be chosen and the last needs nothing, so the search always
 /// ends; the published profiles are the rows' needs in order; and the
-/// kernel a new value took, `built`, is the first row the set in force
-/// meets, which is what [`select`] says too.
+/// kernel a value took under the default context, `built`, is the
+/// first row the processor meets, which is what [`select`] says too.
 #[cfg(test)]
 pub(crate) fn dispatches<K: Copy + PartialEq + core::fmt::Debug>(
     kernels: &[(K, Features)],
@@ -1159,22 +1143,23 @@ pub(crate) fn dispatches_combined<K: Copy + PartialEq + core::fmt::Debug>(
     dispatches_to(kernels, built);
 }
 
-/// A new value takes the first row the set in force meets.
+/// A value built under the default context takes the first row the
+/// processor meets.
 #[cfg(test)]
 fn dispatches_to<K: Copy + PartialEq + core::fmt::Debug>(
     kernels: &[(K, Features)],
     built: K,
 ) {
-    let in_force = get();
+    let ctx = Context::default();
     let expected = kernels
         .iter()
-        .find(|(_, needs)| needs.is_subset(in_force))
+        .find(|(_, needs)| needs.is_subset(ctx.features()))
         .map(|(kernel, _)| *kernel);
-    assert_eq!(select(kernels), expected);
-    assert_eq!(Some(built), expected, "with {in_force}");
+    assert_eq!(select(ctx, kernels), expected);
+    assert_eq!(Some(built), expected, "with {}", ctx.features());
 }
 
-/// A type that chooses a kernel by the features in force.
+/// A type that chooses a kernel from its context's features.
 ///
 /// Sealed: only the crate's own dispatching types have kernels to
 /// choose among. The kernels are not named; what a type publishes is
@@ -1182,8 +1167,8 @@ fn dispatches_to<K: Copy + PartialEq + core::fmt::Debug>(
 pub trait Dispatcher: sealed::Sealed {
     /// The feature profiles this type tells apart, best first. Each
     /// is the least a processor must offer for one choice; a new
-    /// value takes the first whose profile the set in force meets,
-    /// and the last needs nothing, so there is always one.
+    /// value takes the first whose profile its context meets, and the
+    /// last needs nothing, so there is always one.
     fn profiles() -> &'static [Features];
 }
 
@@ -1293,9 +1278,9 @@ mod tests {
         let isolated = Features::of(&[Feature::Isolated]);
         let kernels = [("isolated", isolated), ("none", Features::new())];
         assert!(rows_are_reachable(&kernels));
-        assert_eq!(select::<&str>(&[]), None);
+        assert_eq!(select::<&str>(Context::default(), &[]), None);
         // Isolated is never detected, so the walk passes it.
-        assert_eq!(select(&kernels), Some("none"));
+        assert_eq!(select(crate::Context::default(), &kernels), Some("none"));
         let profiles: [Features; 2] = profiles_of(&kernels);
         assert_eq!(profiles, [isolated, Features::new()]);
     }
@@ -1313,9 +1298,7 @@ mod tests {
         assert!(rows_are_reachable(&[("b", b), ("a", a), ("", none)]));
     }
 
-    /// Dispatch itself: these set the process-wide features, so each
-    /// holds the build lock throughout, as a kernel test's build does,
-    /// and no other test that asks which kernel it got runs between.
+    /// Dispatch itself: what each context's set selects.
     mod dispatch {
         use super::*;
         use crate::Key;
@@ -1325,121 +1308,123 @@ mod tests {
         use crate::cipher::mode::{Cbc, Ctr, Xts, cbc, ctr, xts};
         use crate::hash::{sha2, sha3};
 
-        /// Puts the hardware back in force when dropped, so a failed
-        /// assertion does not leave the next test a narrowed set.
-        struct Restore;
-
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                reset();
-            }
-        }
-
         /// Removing what the chosen kernel needs selects the kernel
         /// below, for every row of a family's list the processor can
-        /// reach; and setting exactly a row's needs selects that row.
+        /// reach; and a context of exactly a row's needs selects that
+        /// row.
         fn walk<K: Copy + PartialEq + core::fmt::Debug>(
             kernels: &[(K, Features)],
-            now: &dyn Fn() -> K,
+            built: &dyn Fn(Context) -> K,
         ) {
             let hardware = detected();
             let reachable: Vec<&(K, Features)> = kernels
                 .iter()
                 .filter(|(_, needs)| needs.is_subset(hardware))
                 .collect();
-            let mut in_force = hardware;
+            let mut allowed = hardware;
             for (i, (kernel, needs)) in reachable.iter().enumerate() {
-                set(in_force).unwrap();
-                assert_eq!(now(), *kernel, "with {in_force}");
-                in_force = in_force - *needs;
+                let ctx = Context::try_new(allowed).unwrap();
+                assert_eq!(built(ctx), *kernel, "with {allowed}");
+                allowed = allowed - *needs;
                 for (_, lower) in &reachable[i + 1..] {
-                    in_force = in_force | *lower;
+                    allowed = allowed | *lower;
                 }
             }
             // Virtual features are granted, not detected, so every
             // row is reachable by its own profile.
             for (kernel, needs) in kernels {
                 if needs.native().is_subset(hardware) {
-                    set(*needs).unwrap();
-                    assert_eq!(now(), *kernel, "exactly {needs}");
+                    let ctx = Context::try_new(*needs).unwrap();
+                    assert_eq!(built(ctx), *kernel, "exactly {needs}");
                 }
             }
         }
 
         #[test]
         fn removing_a_feature_selects_the_kernel_below() {
-            build_alone(removing_a_feature);
-        }
-
-        fn removing_a_feature() {
-            let _restore = Restore;
             let key = [0u8; 16];
             let chacha_key = crate::Key::from([0u8; 32]);
-            walk(aes::KERNELS, &|| Aes::<16>::new(&key).kernel());
-            walk(sha2::KERNELS32, &|| {
-                sha2::Auto32::<sha2::variant::Sha256>::new().kernel()
+            walk(aes::KERNELS, &|ctx| Aes::<16>::new(ctx, &key).kernel());
+            walk(sha2::KERNELS32, &|ctx| {
+                sha2::Auto32::<sha2::variant::Sha256>::new(ctx).kernel()
             });
-            walk(sha2::KERNELS64, &|| {
-                sha2::Auto64::<sha2::variant::Sha512>::new().kernel()
+            walk(sha2::KERNELS64, &|ctx| {
+                sha2::Auto64::<sha2::variant::Sha512>::new(ctx).kernel()
             });
-            walk(sha3::KERNELS, &|| {
-                sha3::Auto::<sha3::variant::Sha3_256>::new().kernel()
+            walk(sha3::KERNELS, &|ctx| {
+                sha3::Auto::<sha3::variant::Sha3_256>::new(ctx).kernel()
             });
-            walk(crate::cipher::chacha20::KERNELS, &|| {
-                ChaCha20::new(&chacha_key).kernel()
+            walk(crate::cipher::chacha20::KERNELS, &|ctx| {
+                ChaCha20::new(ctx, &chacha_key).kernel()
             });
             // The modes, over a cipher whose schedule their
             // instructions can read, so every row is in play.
             let aes = Key::from([0u8; 16]);
             let tweak = Key::from([1u8; 16]);
-            walk(cbc::KERNELS, &|| Cbc::<Aes128>::new(&aes).kernel());
-            walk(ctr::KERNELS, &|| Ctr::<Aes128>::new(&aes).kernel());
-            walk(xts::KERNELS, &|| {
-                Xts::<Aes128>::try_new(&aes, &tweak)
+            walk(cbc::KERNELS, &|ctx| Cbc::<Aes128>::new(ctx, &aes).kernel());
+            walk(ctr::KERNELS, &|ctx| Ctr::<Aes128>::new(ctx, &aes).kernel());
+            walk(xts::KERNELS, &|ctx| {
+                Xts::<Aes128>::try_new(ctx, &aes, &tweak)
                     .expect("distinct keys")
                     .kernel()
             });
-            walk(gcm::KERNELS, &|| Gcm::<Aes128>::new(&aes).kernel());
-            walk(gcm_siv::KERNELS, &|| GcmSiv::<Aes128>::new(&aes).kernel());
-            walk(ccm::KERNELS, &|| Ccm::<Aes128>::new(&aes).kernel());
+            walk(gcm::KERNELS, &|ctx| Gcm::<Aes128>::new(ctx, &aes).kernel());
+            walk(gcm_siv::KERNELS, &|ctx| {
+                GcmSiv::<Aes128>::new(ctx, &aes).kernel()
+            });
+            walk(ccm::KERNELS, &|ctx| Ccm::<Aes128>::new(ctx, &aes).kernel());
         }
 
         #[test]
         fn isolated_admits_the_tables_below_the_hardware() {
-            build_alone(isolated);
-        }
-
-        fn isolated() {
-            let _restore = Restore;
             let key = [0u8; 16];
+            let aes = |f: Features| {
+                Aes::<16>::new(Context::try_new(f).unwrap(), &key).kernel()
+            };
             // Alone, it unlocks the table-driven code over the
             // bitsliced.
-            set(Features::of(&[Feature::Isolated])).unwrap();
-            assert_eq!(Aes::<16>::new(&key).kernel(), aes::Kernel::Tables);
+            assert_eq!(
+                aes(Features::of(&[Feature::Isolated])),
+                aes::Kernel::Tables
+            );
             // Beside the hardware, the hardware still wins.
             let mut f = detected();
             f.insert(Feature::Isolated);
-            set(f).unwrap();
-            let hardware = select(aes::KERNELS).unwrap();
-            assert_eq!(Aes::<16>::new(&key).kernel(), hardware);
+            let ctx = Context::try_new(f).unwrap();
+            assert_eq!(aes(f), select(ctx, aes::KERNELS).unwrap());
             // And without it, the tables are never chosen.
-            set(Features::new()).unwrap();
-            assert_eq!(Aes::<16>::new(&key).kernel(), aes::Kernel::Bitsliced);
+            assert_eq!(aes(Features::new()), aes::Kernel::Bitsliced);
         }
 
+        /// Two contexts in one program are independent: a value keeps
+        /// the kernel its own chose, whatever another chooses after.
         #[test]
         fn a_value_keeps_the_kernel_it_was_built_with() {
-            build_alone(keeps);
+            let key = [0u8; 16];
+            let built = Aes::<16>::new(Context::default(), &key);
+            let kernel = built.kernel();
+            let portable = Aes::<16>::new(Context::portable(), &key);
+            assert_eq!(portable.kernel(), aes::Kernel::Bitsliced);
+            assert_eq!(built.kernel(), kernel);
         }
 
-        fn keeps() {
-            let _restore = Restore;
-            let key = [0u8; 16];
-            let built = Aes::<16>::new(&key);
-            let kernel = built.kernel();
-            set(Features::new()).unwrap();
-            assert_eq!(built.kernel(), kernel);
-            assert_eq!(Aes::<16>::new(&key).kernel(), aes::Kernel::Bitsliced);
+        /// A context refuses a feature the processor lacks, and takes
+        /// any virtual one.
+        #[test]
+        fn a_context_holds_only_what_the_processor_has() {
+            let missing = native_all() - detected();
+            if let Some(f) = missing.iter().next() {
+                assert_eq!(
+                    Context::try_new(Features::of(&[f])),
+                    Err(Error::UnsupportedFeature(f))
+                );
+            }
+            let isolated = Features::of(&[Feature::Isolated]);
+            assert_eq!(
+                Context::try_new(isolated).map(Context::features),
+                Ok(isolated)
+            );
+            assert_eq!(Context::default().features(), detected());
         }
     }
 }

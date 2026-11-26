@@ -14,6 +14,7 @@ use crate::profile::Builder;
 use crate::support::{
     Error, flag, hex, hex_value, int, text, unknown_test_type,
 };
+use scytale::Context;
 use scytale::Random;
 use scytale::constant_time;
 use scytale::hash::XofReader;
@@ -23,6 +24,7 @@ use serde_json::{Value, json};
 /// What the driver needs of either width.
 pub trait Width: Sized {
     fn try_new_bits(
+        ctx: Context,
         key: &[u8],
         bits: usize,
         s: &[u8],
@@ -55,11 +57,12 @@ macro_rules! width {
     ($ty:ty) => {
         impl Width for $ty {
             fn try_new_bits(
+                ctx: Context,
                 key: &[u8],
                 bits: usize,
                 s: &[u8],
             ) -> Result<Self, scytale::Error> {
-                <$ty>::try_new_bits(key, bits, s)
+                <$ty>::try_new_bits(ctx, key, bits, s)
             }
             fn update(&mut self, data: &[u8]) {
                 <$ty>::update(self, data)
@@ -127,8 +130,9 @@ fn answer_as<K: Width>(doc: &Value, builder: &Builder) -> Result<Value, Error> {
             let msg = from_top(hex(t, "msg")?, msg_bits)?;
             let (whole, last, extra) = split(&msg, msg_bits);
 
-            let mut kmac = builder
-                .try_build(|| K::try_new_bits(&key, key_bits, &custom))?;
+            let mut kmac = builder.try_build(|ctx| {
+                K::try_new_bits(ctx, &key, key_bits, &custom)
+            })?;
             kmac.update(whole);
             let mut out = vec![0u8; mac_bits.div_ceil(8)];
             if !verify {

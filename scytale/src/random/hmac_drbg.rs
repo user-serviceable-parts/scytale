@@ -1,5 +1,6 @@
 //! HMAC_DRBG (SP 800-90A section 10.1.2).
 
+use crate::Context;
 use core::fmt;
 use core::marker::PhantomData;
 
@@ -27,10 +28,13 @@ use crate::{BlockType, ByteArray, Error, Random};
 #[derive(ZeroizeOnDrop)]
 pub struct HmacDrbg<H, S: Entropy = entropy::System>
 where
-    H: Hash + Clone + BlockType + Default,
+    H: Hash + Clone + BlockType,
 {
     #[zeroize(skip)]
     source: S,
+    /// What the generator builds its ciphers or hashes under.
+    #[zeroize(skip)]
+    ctx: Context,
     /// The key and value that are the generator's whole secret.
     k: H::Output,
     v: H::Output,
@@ -44,7 +48,7 @@ where
 
 impl<H, S> HmacDrbg<H, S>
 where
-    H: Hash + Clone + BlockType + Default,
+    H: Hash + Clone + BlockType,
     S: Entropy,
 {
     /// A generator seeded from `source`, which is kept for every
@@ -61,10 +65,10 @@ where
     /// # Errors
     ///
     /// Whatever the source refuses with.
-    pub fn try_new(mut source: S) -> Result<Self, Error> {
+    pub fn try_new(ctx: Context, mut source: S) -> Result<Self, Error> {
         let mut raw = [0u8; MIN_SEED * OVERSAMPLE];
         let drawn = source.fill(&mut raw);
-        let built = drawn.and_then(|()| Self::instantiate(&raw, source));
+        let built = drawn.and_then(|()| Self::instantiate(ctx, &raw, source));
         raw.zeroize();
         built
     }
@@ -82,8 +86,12 @@ where
     /// # Errors
     ///
     /// [`Error::InvalidSeedLength`] if `seed` is too short.
-    pub fn try_new_seeded(seed: &[u8], source: S) -> Result<Self, Error> {
-        Self::instantiate(seed, source)
+    pub fn try_new_seeded(
+        ctx: Context,
+        seed: &[u8],
+        source: S,
+    ) -> Result<Self, Error> {
+        Self::instantiate(ctx, seed, source)
     }
 
     /// Reseeds from the generator's own source: the call
@@ -158,7 +166,7 @@ where
         if !additional.is_empty() {
             self.update(&[additional]);
         }
-        let mut mac = Hmac::<H>::new(self.k.as_ref());
+        let mut mac = Hmac::<H>::new(self.ctx, self.k.as_ref());
         let (whole, tail) = H::Output::split_mut(out);
         for block in whole {
             mac.update(self.v.as_ref());
@@ -179,12 +187,17 @@ where
 
     /// Builds a generator from material that has already been
     /// gathered: the entropy, nonce and personalization as one run.
-    fn instantiate(material: &[u8], source: S) -> Result<Self, Error> {
+    fn instantiate(
+        ctx: Context,
+        material: &[u8],
+        source: S,
+    ) -> Result<Self, Error> {
         if material.len() < MIN_SEED {
             return Err(Error::InvalidSeedLength(material.len()));
         }
         let mut rng: Self = HmacDrbg {
             source,
+            ctx,
             k: H::Output::zeroed(),
             v: H::Output::zeroed(),
             counter: 1,
@@ -205,14 +218,14 @@ where
             if round == 0x01 && empty {
                 break;
             }
-            let mut mac = Hmac::<H>::new(self.k.as_ref());
+            let mut mac = Hmac::<H>::new(self.ctx, self.k.as_ref());
             mac.update(self.v.as_ref());
             mac.update(&[round]);
             for part in provided {
                 mac.update(part);
             }
             self.k = mac.finalize();
-            let mut mac = Hmac::<H>::new(self.k.as_ref());
+            let mut mac = Hmac::<H>::new(self.ctx, self.k.as_ref());
             mac.update(self.v.as_ref());
             self.v = mac.finalize();
         }
@@ -221,7 +234,7 @@ where
 
 impl<H> HmacDrbg<H, entropy::System>
 where
-    H: Hash + Clone + BlockType + Default,
+    H: Hash + Clone + BlockType,
 {
     /// A generator seeded from this machine's own source, as
     /// [`CtrDrbg::from_system`](super::CtrDrbg::from_system) is.
@@ -235,8 +248,8 @@ where
     /// # Errors
     ///
     /// As `CtrDrbg::from_system`.
-    pub fn from_system() -> Result<Self, Error> {
-        Self::try_new(entropy::System::try_new()?)
+    pub fn from_system(ctx: Context) -> Result<Self, Error> {
+        Self::try_new(ctx, entropy::System::try_new()?)
     }
 }
 
@@ -246,18 +259,18 @@ where
 #[cfg(test)]
 impl<H> HmacDrbg<H, entropy::External>
 where
-    H: Hash + Clone + BlockType + Default,
+    H: Hash + Clone + BlockType,
 {
     /// A generator seeded from `seed`, the entropy, nonce and
     /// personalization as one run, at least [`MIN_SEED`] bytes.
     pub(crate) fn from_seed(seed: &[u8]) -> Result<Self, Error> {
-        Self::instantiate(seed, entropy::External)
+        Self::instantiate(crate::Context::default(), seed, entropy::External)
     }
 }
 
 impl<H, S> Random for HmacDrbg<H, S>
 where
-    H: Hash + Clone + BlockType + Default,
+    H: Hash + Clone + BlockType,
     S: Entropy,
 {
     fn fill(&mut self, out: &mut [u8]) -> Result<(), Error> {
@@ -267,7 +280,7 @@ where
 
 impl<H, S> fmt::Debug for HmacDrbg<H, S>
 where
-    H: Hash + Clone + BlockType + Default,
+    H: Hash + Clone + BlockType,
     S: Entropy,
 {
     /// Deliberately omits the state, which is key material.
@@ -390,7 +403,9 @@ mod tests {
     /// A generator with a source of its own reseeds itself.
     #[test]
     fn a_generator_with_a_source_reseeds_itself() {
-        let Ok(mut rng) = HmacDrbg::<Sha256>::from_system() else {
+        let Ok(mut rng) =
+            HmacDrbg::<Sha256>::from_system(crate::Context::default())
+        else {
             return;
         };
         rng.counter = RESEED_INTERVAL + 1;

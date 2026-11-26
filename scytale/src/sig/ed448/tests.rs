@@ -368,17 +368,45 @@ fn rfc8032_vectors() {
         let public: [u8; PUBLIC_KEY_SIZE] = array(pk);
         let (message, context) = (unhex(msg), unhex(ctx));
         let expected: [u8; SIGNATURE_SIZE] = array(sig);
-        assert_eq!(public_key(&secret), public, "{title}");
+        assert_eq!(
+            public_key(crate::Context::default(), &secret),
+            public,
+            "{title}"
+        );
         let (signature, checked) = if ph {
-            let digest = prehash(&message);
+            let digest = prehash(crate::Context::default(), &message);
             (
-                sign_ph_deterministic(&secret, &context, &digest).unwrap(),
-                verify_ph(&public, &context, &digest, &expected),
+                sign_ph_deterministic(
+                    crate::Context::default(),
+                    &secret,
+                    &context,
+                    &digest,
+                )
+                .unwrap(),
+                verify_ph(
+                    crate::Context::default(),
+                    &public,
+                    &context,
+                    &digest,
+                    &expected,
+                ),
             )
         } else {
             (
-                sign_deterministic(&secret, &context, &message).unwrap(),
-                verify(&public, &context, &message, &expected),
+                sign_deterministic(
+                    crate::Context::default(),
+                    &secret,
+                    &context,
+                    &message,
+                )
+                .unwrap(),
+                verify(
+                    crate::Context::default(),
+                    &public,
+                    &context,
+                    &message,
+                    &expected,
+                ),
             )
         };
         assert_eq!(signature, expected, "{title}");
@@ -388,18 +416,42 @@ fn rfc8032_vectors() {
             let mut bad = expected;
             bad[at] ^= 1;
             let result = if ph {
-                verify_ph(&public, &context, &prehash(&message), &bad)
+                verify_ph(
+                    crate::Context::default(),
+                    &public,
+                    &context,
+                    &prehash(crate::Context::default(), &message),
+                    &bad,
+                )
             } else {
-                verify(&public, &context, &message, &bad)
+                verify(
+                    crate::Context::default(),
+                    &public,
+                    &context,
+                    &message,
+                    &bad,
+                )
             };
             assert!(result.is_err(), "{title} at {at}");
         }
         // And the other variant does not accept it.
-        let digest = prehash(&message);
+        let digest = prehash(crate::Context::default(), &message);
         let other = if ph {
-            verify(&public, &context, &message, &expected)
+            verify(
+                crate::Context::default(),
+                &public,
+                &context,
+                &message,
+                &expected,
+            )
         } else if message.len() == PREHASH_SIZE {
-            verify_ph(&public, &context, &digest, &expected)
+            verify_ph(
+                crate::Context::default(),
+                &public,
+                &context,
+                &digest,
+                &expected,
+            )
         } else {
             Err(Error::InvalidSignature)
         };
@@ -515,9 +567,13 @@ fn wide_reduction() {
 #[test]
 fn refusals() {
     let secret = [7u8; KEY_SIZE];
-    let public = public_key(&secret);
-    let sig = sign_deterministic(&secret, b"", b"m").unwrap();
-    assert_eq!(verify(&public, b"", b"m", &sig), Ok(()));
+    let public = public_key(crate::Context::default(), &secret);
+    let sig = sign_deterministic(crate::Context::default(), &secret, b"", b"m")
+        .unwrap();
+    assert_eq!(
+        verify(crate::Context::default(), &public, b"", b"m", &sig),
+        Ok(())
+    );
 
     // S + L, carried byte by byte.
     let l = Scalar(L).to_bytes();
@@ -529,14 +585,14 @@ fn refusals() {
         carry = sum >> 8;
     }
     assert_eq!(
-        verify(&public, b"", b"m", &malleated),
+        verify(crate::Context::default(), &public, b"", b"m", &malleated),
         Err(Error::InvalidSignature)
     );
     // A top byte set in S.
     let mut high = sig;
     high[113] = 1;
     assert_eq!(
-        verify(&public, b"", b"m", &high),
+        verify(crate::Context::default(), &public, b"", b"m", &high),
         Err(Error::InvalidSignature)
     );
 
@@ -550,7 +606,10 @@ fn refusals() {
     // Low bits set in the last byte.
     let mut low = public;
     low[56] |= 1;
-    assert_eq!(verify(&low, b"", b"m", &sig), Err(Error::InvalidPublicKey));
+    assert_eq!(
+        verify(crate::Context::default(), &low, b"", b"m", &sig),
+        Err(Error::InvalidPublicKey)
+    );
     // y = p + 1 = 2^448 - 2^224, all ones from bit 224 up: a
     // non-canonical spelling of y = 1.
     let mut p1 = [0u8; PUBLIC_KEY_SIZE];
@@ -572,16 +631,17 @@ fn refusals() {
     // A context over 255 bytes.
     let long = [0u8; CONTEXT_MAX + 1];
     assert_eq!(
-        sign_deterministic(&secret, &long, b"m").err(),
+        sign_deterministic(crate::Context::default(), &secret, &long, b"m")
+            .err(),
         Some(Error::InvalidLength(256))
     );
     assert_eq!(
-        verify(&public, &long, b"m", &sig),
+        verify(crate::Context::default(), &public, &long, b"m", &sig),
         Err(Error::InvalidLength(256))
     );
     // A different context is a different signature.
     assert_eq!(
-        verify(&public, b"x", b"m", &sig),
+        verify(crate::Context::default(), &public, b"x", b"m", &sig),
         Err(Error::InvalidSignature)
     );
 }
@@ -591,7 +651,10 @@ fn refusals() {
 #[test]
 fn hedged_signatures() {
     let mut rng = CtrDrbg::from_seed(&[0x77u8; MIN_SEED]).unwrap();
-    let key = PrivateKey::new(&Key::from([0x42u8; KEY_SIZE]));
+    let key = PrivateKey::new(
+        crate::Context::default(),
+        &Key::from([0x42u8; KEY_SIZE]),
+    );
     let public = key.public_key();
     let one = key.sign(&mut rng, b"ctx", b"m").unwrap();
     let two = key.sign(&mut rng, b"ctx", b"m").unwrap();
@@ -601,7 +664,7 @@ fn hedged_signatures() {
     for sig in [one, two, fixed] {
         assert_eq!(public.verify(b"ctx", b"m", &sig), Ok(()));
     }
-    let digest = prehash(b"m");
+    let digest = prehash(crate::Context::default(), b"m");
     let ph = key.sign_ph(&mut rng, b"", &digest).unwrap();
     assert_eq!(public.verify_ph(b"", &digest, &ph), Ok(()));
     assert_eq!(
@@ -614,22 +677,40 @@ fn hedged_signatures() {
     );
     // The free functions agree with the key's methods.
     let secret = key.secret_bytes();
-    assert_eq!(sign_deterministic(&secret, b"ctx", b"m"), Ok(fixed));
-    assert!(sign(&secret, &mut rng, b"ctx", b"m").is_ok());
-    assert!(sign_ph(&secret, &mut rng, b"", &digest).is_ok());
+    assert_eq!(
+        sign_deterministic(crate::Context::default(), &secret, b"ctx", b"m"),
+        Ok(fixed)
+    );
+    assert!(
+        sign(crate::Context::default(), &secret, &mut rng, b"ctx", b"m")
+            .is_ok()
+    );
+    assert!(
+        sign_ph(crate::Context::default(), &secret, &mut rng, b"", &digest)
+            .is_ok()
+    );
 }
 
 /// The key types are the free functions with the secret held in
 /// something that wipes itself; the pair encoding reads back.
 #[test]
 fn key_types_match_the_functions() {
-    let key = PrivateKey::new(&Key::from([0x11u8; KEY_SIZE]));
-    assert_eq!(key.public_key().bytes(), public_key(&[0x11; KEY_SIZE]));
+    let key = PrivateKey::new(
+        crate::Context::default(),
+        &Key::from([0x11u8; KEY_SIZE]),
+    );
+    assert_eq!(
+        key.public_key().bytes(),
+        public_key(crate::Context::default(), &[0x11; KEY_SIZE])
+    );
     let der = key.der_bytes();
-    let read = PrivateKey::try_from_der(&der).unwrap();
+    let read =
+        PrivateKey::try_from_der(crate::Context::default(), &der).unwrap();
     assert_eq!(read.secret_bytes(), key.secret_bytes());
     assert_eq!(
-        secret_from_der_with_form(&der).unwrap().1,
+        secret_from_der_with_form(crate::Context::default(), &der)
+            .unwrap()
+            .1,
         Pkcs8Form {
             v1: true,
             public_key: true
@@ -637,25 +718,38 @@ fn key_types_match_the_functions() {
     );
     let pem = key.pem_bytes();
     assert_eq!(
-        PrivateKey::try_from_pem(&pem).unwrap().public_key(),
+        PrivateKey::try_from_pem(crate::Context::default(), &pem)
+            .unwrap()
+            .public_key(),
         key.public_key()
     );
     let short = secret_der(&key.secret_bytes());
     assert!(short.len() < der.len());
     let public = *key.public_key();
-    assert_eq!(PublicKey::try_from_der(&public.der_bytes()), Ok(public));
-    assert_eq!(PublicKey::try_from_pem(&public.pem_bytes()), Ok(public));
+    assert_eq!(
+        PublicKey::try_from_der(crate::Context::default(), &public.der_bytes()),
+        Ok(public)
+    );
+    assert_eq!(
+        PublicKey::try_from_pem(crate::Context::default(), &public.pem_bytes()),
+        Ok(public)
+    );
     // A pair whose public half is not the secret's is refused.
     let mut bad = der;
     bad[PAIR_DER_SIZE - 1] ^= 1;
-    assert_eq!(secret_from_der(&bad), Err(Error::InconsistentKey));
+    assert_eq!(
+        secret_from_der(crate::Context::default(), &bad),
+        Err(Error::InconsistentKey)
+    );
 }
 
 #[test]
 fn generate_draws_the_secret() {
     let mut rng = CtrDrbg::from_seed(&[0x55u8; MIN_SEED]).unwrap();
-    let one = PrivateKey::generate(&mut rng).unwrap();
-    let two = PrivateKey::generate(&mut rng).unwrap();
+    let one =
+        PrivateKey::generate(crate::Context::default(), &mut rng).unwrap();
+    let two =
+        PrivateKey::generate(crate::Context::default(), &mut rng).unwrap();
     assert_ne!(one.secret_bytes(), two.secret_bytes());
     assert_ne!(one.public_key(), two.public_key());
 }
@@ -703,14 +797,26 @@ fn openssl_encodings() {
         Fz3e2T5m+iQ9IKSXKTPn6AVceX4A\n\
         -----END PUBLIC KEY-----\n";
 
-    assert_eq!(public_key(&secret), public);
-    assert_eq!(sign_deterministic(&secret, b"", b"abc"), Ok(signature));
-    assert_eq!(verify(&public, b"", b"abc", &signature), Ok(()));
-    assert_eq!(secret_from_der(&secret_der_bytes), Ok(secret));
+    assert_eq!(public_key(crate::Context::default(), &secret), public);
+    assert_eq!(
+        sign_deterministic(crate::Context::default(), &secret, b"", b"abc"),
+        Ok(signature)
+    );
+    assert_eq!(
+        verify(crate::Context::default(), &public, b"", b"abc", &signature),
+        Ok(())
+    );
+    assert_eq!(
+        secret_from_der(crate::Context::default(), &secret_der_bytes),
+        Ok(secret)
+    );
     assert_eq!(public_key_from_der(&public_der_bytes), Ok(public));
     assert_eq!(secret_der(&secret), secret_der_bytes);
     assert_eq!(public_key_der(&public), public_der_bytes);
-    assert_eq!(secret_from_pem(secret_pem_text), Ok(secret));
+    assert_eq!(
+        secret_from_pem(crate::Context::default(), secret_pem_text),
+        Ok(secret)
+    );
     assert_eq!(public_key_from_pem(public_pem_text), Ok(public));
     assert_eq!(secret_pem(&secret)[..], secret_pem_text[..]);
     assert_eq!(public_key_pem(&public)[..], public_pem_text[..]);
@@ -718,5 +824,8 @@ fn openssl_encodings() {
     // An Ed25519 identifier is not Ed448's.
     let mut e = secret_der_bytes;
     e[11] = 0x70;
-    assert_eq!(secret_from_der(&e), Err(Error::WrongAlgorithm));
+    assert_eq!(
+        secret_from_der(crate::Context::default(), &e),
+        Err(Error::WrongAlgorithm)
+    );
 }

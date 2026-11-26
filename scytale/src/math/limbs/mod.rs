@@ -857,7 +857,7 @@ pub(crate) mod tests {
     /// below with the kind the row's list chooses, and the same row
     /// through the Montgomery contexts, RSA, and the curves.
     pub(crate) fn kernel(under: &features::Under) {
-        let choice = under.build(crate::math::Choice::bignum);
+        let choice = crate::math::Choice::bignum(under.ctx());
         crate::math::with_arith!(choice, kind => {
             products_match_plain_arithmetic(kind);
             domain_round_trip(kind);

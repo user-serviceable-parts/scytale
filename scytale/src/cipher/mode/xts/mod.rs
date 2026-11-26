@@ -46,12 +46,14 @@
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Xts;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
+//! let ctx = Context::default();
 //! // Two 128-bit keys: one for the data, one for the tweak.
 //! let data = Key::from([0u8; 16]);
 //! let tweak_key = Key::from([1u8; 16]);
-//! let xts: Xts<Aes128> = Xts::try_new(&data, &tweak_key)?;
+//! let xts: Xts<Aes128> = Xts::try_new(ctx, &data, &tweak_key)?;
 //!
 //! // Sector 7, as a little-endian integer.
 //! let mut tweak = [0u8; 16];
@@ -65,6 +67,7 @@
 //! # }
 //! ```
 
+use crate::Context;
 use core::fmt;
 
 use crate::cipher::BLOCK;
@@ -107,8 +110,8 @@ pub struct Xts<C: BlockCipher<Block = [u8; BLOCK]>> {
 
 /// Every kernel, best first, with what each needs.
 ///
-/// A caller never names one: the mode takes the first row the
-/// features in force meet. The tests and the vector suites do name
+/// A caller never names one: the mode takes the first row its
+/// context meets. The tests and the vector suites do name
 /// them, so that every kernel is validated and not only the one this
 /// machine would pick.
 pub(crate) const KERNELS: &[(Kernel, Features)] = crate::kernel::XTS;
@@ -169,12 +172,11 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Clone for Engine<C> {
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
-    /// The engine of the first kernel the features in force allow for
-    /// this cipher.
-    fn new() -> Self {
+    /// The engine of the first kernel `ctx` allows for this cipher.
+    fn new(ctx: Context) -> Self {
         // The list ends in the portable row, which needs nothing, so
         // there is always one; the fallback is for the type checker.
-        features::select(kernels::<C>())
+        features::select(ctx, kernels::<C>())
             .and_then(Self::with)
             .unwrap_or(Engine::Generic(core::marker::PhantomData))
     }
@@ -197,10 +199,10 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     }
 
     /// This engine where it can read `cipher`'s schedule, and the
-    /// portable one where it cannot. The cipher chose its own kernel
-    /// from its own reading of the set in force; a set changed in
-    /// between can leave it on code whose schedule these loops cannot
-    /// load, and the engine must then not be the one that tries.
+    /// portable one where it cannot. The cipher chose its own kernel;
+    /// one of the caller's own, or one chosen from another context,
+    /// can be on code whose schedule these loops cannot load, and the
+    /// engine must then not be the one that tries.
     #[cfg_attr(
         not(any(target_arch = "aarch64", target_arch = "x86_64")),
         allow(unused_variables)
@@ -252,12 +254,16 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
     /// They must differ: XTS with one key repeated is a weaker
     /// construction, and the standard forbids it. That is reported
     /// as [`Error::InvalidKeyLength`] with the length of the pair.
-    pub fn try_new(data: &C::Key, tweak: &C::Key) -> Result<Self, Error> {
+    pub fn try_new(
+        ctx: Context,
+        data: &C::Key,
+        tweak: &C::Key,
+    ) -> Result<Self, Error> {
         if constant_time::equal(data.as_ref(), tweak.as_ref()) {
             return Err(Error::InvalidKeyLength(2 * data.as_ref().len()));
         }
-        let (data, tweak) = (C::new(data), C::new(tweak));
-        let engine = Engine::new().over(&data).over(&tweak);
+        let (data, tweak) = (C::new(ctx, data), C::new(ctx, tweak));
+        let engine = Engine::new(ctx).over(&data).over(&tweak);
         Ok(Xts {
             data,
             tweak,
@@ -537,6 +543,7 @@ pub(crate) mod tests {
         ));
         let (data, tweak) = key.split_at(16);
         Xts::try_new(
+            crate::Context::default(),
             &Key::try_from(data).unwrap(),
             &Key::try_from(tweak).unwrap(),
         )
@@ -606,8 +613,10 @@ pub(crate) mod tests {
         }
 
         // The portable one last, as the reference.
-        let build = || Xts::<Aes128>::try_new(&data, &tweak).expect("distinct");
-        let all = [under.build(build), features::build_portable(build)];
+        let build = |ctx: crate::Context| {
+            Xts::<Aes128>::try_new(ctx, &data, &tweak).expect("distinct")
+        };
+        let all = [build(under.ctx()), build(crate::Context::portable())];
 
         for len in BLOCK..MAX {
             let mut want = [0u8; MAX];
@@ -665,6 +674,7 @@ pub(crate) mod tests {
         // The two keys must differ.
         assert_eq!(
             Xts::<Aes128>::try_new(
+                crate::Context::default(),
                 &Key::from([0x11; 16]),
                 &Key::from([0x11; 16])
             )

@@ -41,7 +41,7 @@ pub fn answer(
     })
 }
 
-fn case<H: Hash + Clone + BlockType + Default>(
+fn case<H: Hash + Clone + BlockType>(
     t: &Value,
     key_block_len: usize,
     builder: &Builder,
@@ -50,26 +50,28 @@ fn case<H: Hash + Clone + BlockType + Default>(
     let session_hash = hex(t, "sessionHash")?;
     let mut master = vec![0u8; MASTER_SECRET_LEN];
     // The PRF keys its own HMAC at each call.
-    builder.build(|| {
+    builder.build(|ctx| {
         tls12::prf::<H>(
+            ctx,
             &premaster,
             b"extended master secret",
             &[&session_hash],
             &mut master,
         )
-    })?;
+    });
 
     let server_random = hex(t, "serverRandom")?;
     let client_random = hex(t, "clientRandom")?;
     let mut key_block = vec![0u8; key_block_len];
-    builder.build(|| {
+    builder.build(|ctx| {
         tls12::prf::<H>(
+            ctx,
             &master,
             b"key expansion",
             &[&server_random, &client_random],
             &mut key_block,
         )
-    })?;
+    });
     Ok(json!({
         "masterSecret": hex_value(&master),
         "keyBlock": hex_value(&key_block),

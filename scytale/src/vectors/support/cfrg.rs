@@ -73,8 +73,12 @@ macro_rules! case {
             "kem {} kdf {} aead {}",
             v["kem_id"], v["kdf_id"], v["aead_id"]
         );
-        let recipient = PrivateKey::from_seed(&hex(&v["ikmR"])).expect("ikmR");
-        let ephemeral = PrivateKey::from_seed(&hex(&v["ikmE"])).expect("ikmE");
+        let recipient =
+            PrivateKey::from_seed(crate::Context::default(), &hex(&v["ikmR"]))
+                .expect("ikmR");
+        let ephemeral =
+            PrivateKey::from_seed(crate::Context::default(), &hex(&v["ikmE"]))
+                .expect("ikmE");
         assert_eq!(recipient.secret_bytes()[..], hex(&v["skRm"])[..], "{tag}");
         assert_eq!(
             recipient.public_key().bytes()[..],

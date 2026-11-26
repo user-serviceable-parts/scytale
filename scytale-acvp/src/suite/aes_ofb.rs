@@ -55,7 +55,7 @@ fn aft(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
     let mut data = hex(t, input)?;
     aes_width!(key, C => {
         let k = key_of::<C>(&key)?;
-        let ofb = builder.build(|| Ofb::<C>::new(&k))?;
+        let ofb = builder.build(|ctx| Ofb::<C>::new(ctx, &k));
         if encrypt {
             ofb.encrypt(&iv, &mut data);
         } else {
@@ -87,7 +87,7 @@ fn mct(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
         let mut segment = input.clone();
         aes_width!(key, C => {
             let k = key_of::<C>(&key)?;
-        let ofb = builder.build(|| Ofb::<C>::new(&k))?;
+        let ofb = builder.build(|ctx| Ofb::<C>::new(ctx, &k));
             // One state serves both directions: the keystream does
             // not depend on the message.
             let mut state = ofb.stream(&register);

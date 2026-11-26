@@ -116,8 +116,12 @@ impl EphemeralPrivateKey {
                 rng.fill(key.as_mut())?;
                 Private::X25519(x25519::PrivateKey::new(&key))
             }
-            Curve::P256 => Private::P256(draw(rng, p256::PrivateKey::try_new)?),
-            Curve::P384 => Private::P384(draw(rng, p384::PrivateKey::try_new)?),
+            Curve::P256 => Private::P256(draw(rng, |k| {
+                p256::PrivateKey::try_new(scytale::Context::default(), k)
+            })?),
+            Curve::P384 => Private::P384(draw(rng, |k| {
+                p384::PrivateKey::try_new(scytale::Context::default(), k)
+            })?),
         };
         Ok(Self {
             private_key,
@@ -269,14 +273,20 @@ pub fn agree_ephemeral<B: AsRef<[u8]>, R>(
         }
         Private::P256(k) => {
             let peer = uncompressed(peer, p256::PUBLIC_KEY_SIZE)?;
-            let peer =
-                p256::PublicKey::try_from_sec1(peer).map_err(error::erase)?;
+            let peer = p256::PublicKey::try_from_sec1(
+                scytale::Context::default(),
+                peer,
+            )
+            .map_err(error::erase)?;
             put_secret(&mut shared, k.shared_secret(&peer))
         }
         Private::P384(k) => {
             let peer = uncompressed(peer, p384::PUBLIC_KEY_SIZE)?;
-            let peer =
-                p384::PublicKey::try_from_sec1(peer).map_err(error::erase)?;
+            let peer = p384::PublicKey::try_from_sec1(
+                scytale::Context::default(),
+                peer,
+            )
+            .map_err(error::erase)?;
             put_secret(&mut shared, k.shared_secret(&peer))
         }
     };

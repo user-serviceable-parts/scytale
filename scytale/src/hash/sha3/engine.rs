@@ -24,7 +24,7 @@ use core::marker::PhantomData;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::hash::{BitHash, BitXof, Hash, Xof, XofReader};
+use crate::hash::XofReader;
 use crate::{BlockType, ByteArray, Error};
 
 /// Keeps the traits here to this crate's own implementations.
@@ -260,12 +260,12 @@ impl<P: Permutation, V: Variant> Sponge<P, V> {
         }
     }
 
-    fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.state.lanes.zeroize();
         self.state.used = 0;
     }
 
-    fn update(&mut self, data: &[u8]) {
+    pub(crate) fn update(&mut self, data: &[u8]) {
         const { assert!(core::mem::size_of::<V::Block>() <= MAX_RATE) };
         self.state.absorb(rate::<V>(), data);
     }
@@ -296,29 +296,19 @@ impl<P: Permutation, V: Variant> BlockType for Sponge<P, V> {
     }
 }
 
-impl<P: Permutation, V: DigestVariant> Hash for Sponge<P, V> {
-    type Output = V::Output;
-
-    fn reset(&mut self) {
-        Sponge::reset(self)
-    }
-
-    fn update(&mut self, data: &[u8]) {
-        Sponge::update(self, data)
-    }
-
-    fn finalize(&mut self) -> Self::Output {
+// Inherent rather than `Hash` and `Xof`: a sponge is one kernel,
+// built from its proof, where those are built from a context.
+impl<P: Permutation, V: DigestVariant> Sponge<P, V> {
+    pub(crate) fn finalize(&mut self) -> V::Output {
         let mut state = self.finish(u16::from(V::SUFFIX));
         Self::output(&mut state)
     }
-}
 
-impl<P: Permutation, V: DigestVariant> BitHash for Sponge<P, V> {
-    fn finalize_bits(
+    pub(crate) fn finalize_bits(
         &mut self,
         last: u8,
         bits: u32,
-    ) -> Result<Self::Output, Error> {
+    ) -> Result<V::Output, Error> {
         let trailer = trailer(V::SUFFIX, last, bits)?;
         let mut state = self.finish(trailer);
         Ok(Self::output(&mut state))
@@ -355,31 +345,19 @@ impl<P: Permutation, V: XofVariant> fmt::Debug for Reader<P, V> {
     }
 }
 
-impl<P: Permutation, V: XofVariant> Xof for Sponge<P, V> {
-    type Reader = Reader<P, V>;
-
-    fn reset(&mut self) {
-        Sponge::reset(self)
-    }
-
-    fn update(&mut self, data: &[u8]) {
-        Sponge::update(self, data)
-    }
-
-    fn finalize_xof(&mut self) -> Self::Reader {
+impl<P: Permutation, V: XofVariant> Sponge<P, V> {
+    pub(crate) fn finalize_xof(&mut self) -> Reader<P, V> {
         Reader {
             state: self.finish(u16::from(V::SUFFIX)),
             _marker: PhantomData,
         }
     }
-}
 
-impl<P: Permutation, V: XofVariant> BitXof for Sponge<P, V> {
-    fn finalize_bits_xof(
+    pub(crate) fn finalize_bits_xof(
         &mut self,
         last: u8,
         bits: u32,
-    ) -> Result<Self::Reader, Error> {
+    ) -> Result<Reader<P, V>, Error> {
         let trailer = trailer(V::SUFFIX, last, bits)?;
         Ok(Reader {
             state: self.finish(trailer),

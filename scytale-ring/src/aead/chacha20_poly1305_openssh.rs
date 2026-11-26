@@ -36,7 +36,7 @@ impl Keys {
         let key = |bytes: &[u8]| {
             let mut key = Key::from([0u8; 32]);
             key.as_mut().copy_from_slice(bytes);
-            ChaCha20::new(&key)
+            ChaCha20::new(scytale::Context::default(), &key)
         };
         Keys {
             k_1: key(k_1),
@@ -78,7 +78,7 @@ fn nonce(sequence_number: u32) -> [u8; 12] {
 }
 
 fn tag(poly_key: &Key<[u8; 32]>, packet: &[u8]) -> [u8; TAG_LEN] {
-    let mut mac = Poly1305::new(poly_key);
+    let mut mac = Poly1305::new(scytale::Context::default(), poly_key);
     mac.update(packet);
     mac.finalize()
 }

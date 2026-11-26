@@ -18,6 +18,7 @@ use crate::support::{
     Error, NoEntropy, flag, hex, hex_value, int, list, opt_text, text,
     unknown_test_type,
 };
+use scytale::Context;
 use scytale::hash::Hash;
 use scytale::hash::sha1::Sha1;
 use scytale::hash::sha2::{
@@ -30,7 +31,10 @@ use serde_json::{Value, json};
 
 /// What the driver needs of either generator.
 trait Drbg: Random + Sized {
-    fn try_new_seeded(seed: &[u8]) -> Result<Self, scytale::Error>;
+    fn try_new_seeded(
+        ctx: Context,
+        seed: &[u8],
+    ) -> Result<Self, scytale::Error>;
     fn reseed_with(
         &mut self,
         entropy: &[u8],
@@ -46,8 +50,11 @@ trait Drbg: Random + Sized {
 macro_rules! drbg {
     ($ty:ident, $($bound:tt)+) => {
         impl<H: $($bound)+> Drbg for $ty<H, NoEntropy> {
-            fn try_new_seeded(seed: &[u8]) -> Result<Self, scytale::Error> {
-                $ty::try_new_seeded(seed, NoEntropy)
+            fn try_new_seeded(
+                ctx: Context,
+                seed: &[u8],
+            ) -> Result<Self, scytale::Error> {
+                $ty::try_new_seeded(ctx, seed, NoEntropy)
             }
             fn reseed_with(
                 &mut self,
@@ -67,8 +74,8 @@ macro_rules! drbg {
     };
 }
 
-drbg!(HashDrbg, Hash + Default);
-drbg!(HmacDrbg, Hash + Clone + BlockType + Default);
+drbg!(HashDrbg, Hash);
+drbg!(HmacDrbg, Hash + Clone + BlockType);
 
 /// Answers one group through the generator `$ty` over the group's
 /// hash.
@@ -128,13 +135,13 @@ fn aft<D: Drbg>(
 ) -> Result<Option<Value>, Error> {
     let bits = int(group, "returnedBitsLen")? as usize;
     answer_tests(group, |t| {
-        builder.try_build(|| {
+        builder.try_build(|ctx| {
             // Instantiation takes the entropy, the nonce and the
             // personalization string as one run of material.
             let mut material = hex(t, "entropyInput")?;
             material.extend(hex(t, "nonce")?);
             material.extend(hex(t, "persoString")?);
-            let mut rng = D::try_new_seeded(&material)?;
+            let mut rng = D::try_new_seeded(ctx, &material)?;
 
             let mut out = vec![0u8; bits / 8];
             for other in list(t, "otherInput")? {

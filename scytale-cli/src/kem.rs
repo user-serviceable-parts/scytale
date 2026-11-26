@@ -3,6 +3,7 @@
 //! Encapsulation makes two things, the ciphertext for the peer and
 //! the secret to keep, so it writes the secret to a file of its own.
 
+use scytale::Context;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
@@ -76,9 +77,12 @@ pub fn run(op: KemOp) -> Result<()> {
             let algorithm = key::pq_by_name(name)
                 .ok_or_else(|| usage!("no KEM named \"{name}\""))?;
             let pem = key::read_public(&args.public, &[algorithm], name)?;
-            let mut rng = CtrDrbg::from_system()?;
+            let mut rng = CtrDrbg::from_system(scytale::Context::default())?;
             let (ciphertext, secret) = with_kem!(algorithm, m => {
-                let public = m::PublicKey::try_from_pem(&pem)?;
+                let public = m::PublicKey::try_from_pem(
+                    Context::default(),
+                    &pem,
+                )?;
                 let (c, s) = public.encapsulate(&mut rng)?;
                 (c.to_vec(), Zeroizing::new(s.to_vec()))
             }, _ => return Err(usage!("no KEM named \"{name}\"")));
@@ -95,7 +99,10 @@ pub fn run(op: KemOp) -> Result<()> {
             let pem = key::read_private(&args.key, &[algorithm], name)?;
             let ciphertext = io::read_all(args.file.as_deref())?;
             let secret = with_kem!(algorithm, m => {
-                let private = m::PrivateKey::try_from_pem(&pem)?;
+                let private = m::PrivateKey::try_from_pem(
+                    Context::default(),
+                    &pem,
+                )?;
                 if ciphertext.len() != m::CIPHERTEXT_SIZE {
                     return Err(usage!(
                         "the ciphertext is {} bytes; {name} makes {}",

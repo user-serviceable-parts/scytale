@@ -39,12 +39,12 @@ const X448: Curve<{ x448::KEY_SIZE }> = Curve {
 pub fn answer(
     doc: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
+    _: &Builder,
 ) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
     answer_groups(doc, |group| match text(group, "curve")? {
-        "Curve25519" => answer_group(&X25519, mode, group, rng, builder),
-        "Curve448" => answer_group(&X448, mode, group, rng, builder),
+        "Curve25519" => answer_group(&X25519, mode, group, rng),
+        "Curve448" => answer_group(&X448, mode, group, rng),
         curve => Err(Error::new(format!("no curve named {curve}"))),
     })
 }
@@ -54,16 +54,11 @@ fn answer_group<const N: usize>(
     mode: &str,
     group: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
 ) -> Result<Option<Value>, Error> {
-    // A key is drawn, which rekeys the generator; the curve functions
-    // build nothing, but are kept beside the draw, under `builder`.
     match (mode, text(group, "testType")?) {
         ("keyGen", "AFT") => answer_tests(group, |t| {
-            let (private, public) = builder.try_build(|| {
-                let private: [u8; N] = private_key(t, "privateKey", rng)?;
-                Ok::<_, Error>((private, (curve.public_key)(&private)))
-            })?;
+            let private: [u8; N] = private_key(t, "privateKey", rng)?;
+            let public = (curve.public_key)(&private);
             Ok(json!({
                 "privateKey": hex_value(&private),
                 "publicKey": hex_value(&public),
@@ -71,11 +66,9 @@ fn answer_group<const N: usize>(
         }),
         ("SSC", "AFT") => answer_tests(group, |t| {
             let server = key(&hex(t, "publicServer")?, "publicServer")?;
-            let (public, z) = builder.try_build(|| {
-                let private: [u8; N] = private_key(t, "privateIut", rng)?;
-                let public = (curve.public_key)(&private);
-                Ok::<_, Error>((public, (curve.function)(&private, &server)))
-            })?;
+            let private: [u8; N] = private_key(t, "privateIut", rng)?;
+            let public = (curve.public_key)(&private);
+            let z = (curve.function)(&private, &server);
             Ok(json!({ "publicIut": hex_value(&public), "z": hex_value(&z) }))
         }),
         _ => Err(unknown_test_type(group)),

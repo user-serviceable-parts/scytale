@@ -8,19 +8,21 @@
 //! state the message goes into at a time, the rate, and in the bits
 //! that end the message. The digests give a fixed output; the SHAKE
 //! functions give as much as is asked for, through [`Xof`]. The types
-//! here pick the best kernel the features in force allow (see
+//! here pick the best kernel their context allows (see
 //! [`crate::features`]); the kernels are not names a caller can
 //! reach, only the feature profiles that tell them apart.
 //!
 //! ```
 //! use scytale::hash::sha3::{Sha3_256, Shake128};
 //! use scytale::hash::{Hash, Xof, XofReader};
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let digest = Sha3_256::digest(b"abc");
+//! let ctx = Context::default();
+//! let digest = Sha3_256::digest(ctx, b"abc");
 //! assert_eq!(digest[..4], [0x3a, 0x98, 0x5d, 0xa7]);
 //!
-//! let mut shake = Shake128::new();
+//! let mut shake = Shake128::new(ctx);
 //! shake.update(b"abc");
 //! let mut reader = shake.finalize_xof();
 //! let mut out = [0u8; 64];
@@ -94,7 +96,7 @@ use engine::{DigestVariant, Reader, Sponge, XofVariant};
 
 use crate::features::{self, Chosen, Dispatcher, Features};
 use crate::hash::{BitHash, BitXof, Hash, Xof, XofReader};
-use crate::{BlockType, Error};
+use crate::{BlockType, Context, Error};
 
 /// The six functions, as markers the sponge is generic over.
 pub(crate) mod variant {
@@ -274,13 +276,11 @@ enum Inner<V: engine::Variant> {
 }
 
 impl<V: engine::Variant> Auto<V> {
-    /// Starts a function with the best implementation the features
-    /// in force allow.
-    pub fn new() -> Self {
-        // The list chose the kernel, so its probe answers unless the
-        // features changed between the two reads; portable is right
-        // if they did.
-        let inner = features::choose(KERNELS)
+    /// Starts a function with the best implementation `ctx` allows.
+    pub fn new(ctx: Context) -> Self {
+        // The list chose the kernel, so its probe answers; portable
+        // is only the type's answer to a probe that could refuse.
+        let inner = features::choose(ctx, KERNELS)
             .and_then(Self::with)
             .unwrap_or(Inner::Portable(Sponge::with(portable::Keccak)));
         Auto(inner)
@@ -323,12 +323,6 @@ impl<V: engine::Variant> Auto<V> {
     }
 }
 
-impl<V: engine::Variant> Default for Auto<V> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl<V: engine::Variant> fmt::Debug for Auto<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         dispatch!(&self.0, Inner, s => s.fmt(f))
@@ -346,13 +340,17 @@ impl<V: engine::Variant> BlockType for Auto<V> {
 impl<V: DigestVariant> Hash for Auto<V> {
     type Output = V::Output;
 
+    fn new(ctx: Context) -> Self {
+        Self::new(ctx)
+    }
+
     fn reset(&mut self) {
-        dispatch!(&mut self.0, Inner, s => Hash::reset(s))
+        dispatch!(&mut self.0, Inner, s => s.reset())
     }
 
     #[inline]
     fn update(&mut self, data: &[u8]) {
-        dispatch!(&mut self.0, Inner, s => Hash::update(s, data))
+        dispatch!(&mut self.0, Inner, s => s.update(data))
     }
 
     fn finalize(&mut self) -> Self::Output {
@@ -410,13 +408,17 @@ impl<V: XofVariant> XofReader for AutoReader<V> {
 impl<V: XofVariant> Xof for Auto<V> {
     type Reader = AutoReader<V>;
 
+    fn new(ctx: Context) -> Self {
+        Self::new(ctx)
+    }
+
     fn reset(&mut self) {
-        dispatch!(&mut self.0, Inner, s => Xof::reset(s))
+        dispatch!(&mut self.0, Inner, s => s.reset())
     }
 
     #[inline]
     fn update(&mut self, data: &[u8]) {
-        dispatch!(&mut self.0, Inner, s => Xof::update(s, data))
+        dispatch!(&mut self.0, Inner, s => s.update(data))
     }
 
     fn finalize_xof(&mut self) -> Self::Reader {
@@ -426,8 +428,7 @@ impl<V: XofVariant> Xof for Auto<V> {
 
 /// A sponge whose domain bits are chosen when it is finalized, which
 /// is what cSHAKE and KMAC are built over. Implemented for the
-/// dispatching type and for each implementation, so the vector suites
-/// can drive every one.
+/// dispatching type, whose kernel its context chose.
 pub(crate) trait SuffixXof: BitXof + BlockType + Clone {
     /// Ends the message with `suffix` and the padding.
     fn finalize_suffix_xof(&mut self, suffix: u8) -> Self::Reader;
@@ -456,21 +457,6 @@ impl<V: XofVariant> SuffixXof for Auto<V> {
         Ok(AutoReader(finalize!(&mut self.0, s => {
             s.finalize_bits_suffix_xof(suffix, last, bits)?
         })))
-    }
-}
-
-impl<P: engine::Permutation, V: XofVariant> SuffixXof for Sponge<P, V> {
-    fn finalize_suffix_xof(&mut self, suffix: u8) -> Self::Reader {
-        Sponge::finalize_suffix_xof(self, suffix)
-    }
-
-    fn finalize_bits_suffix_xof(
-        &mut self,
-        suffix: u8,
-        last: u8,
-        bits: u32,
-    ) -> Result<Self::Reader, Error> {
-        Sponge::finalize_bits_suffix_xof(self, suffix, last, bits)
     }
 }
 
@@ -609,48 +595,48 @@ pub(crate) mod tests {
     /// at every length up to a few blocks, whole and in pieces.
     pub(crate) fn kernel(under: &features::Under) {
         for e in &EXAMPLES {
-            let mut a = under.build(Sha3_224::new);
+            let mut a = Sha3_224::new(under.ctx());
             a.update(e.message);
             assert_eq!(a.finalize(), hex(e.sha3_224)[..28]);
-            let mut b = under.build(Sha3_256::new);
+            let mut b = Sha3_256::new(under.ctx());
             b.update(e.message);
             assert_eq!(b.finalize(), hex(e.sha3_256)[..32]);
-            let mut c = under.build(Sha3_384::new);
+            let mut c = Sha3_384::new(under.ctx());
             c.update(e.message);
             assert_eq!(c.finalize(), hex(e.sha3_384)[..48]);
-            let mut d = under.build(Sha3_512::new);
+            let mut d = Sha3_512::new(under.ctx());
             d.update(e.message);
             assert_eq!(d.finalize(), hex(e.sha3_512)[..64]);
             let shake128 =
-                squeeze(e.message, 32, || under.build(Shake128::new));
+                squeeze(e.message, 32, || Shake128::new(under.ctx()));
             assert_eq!(shake128[..32], hex(e.shake128)[..32]);
             let shake256 =
-                squeeze(e.message, 64, || under.build(Shake256::new));
+                squeeze(e.message, 64, || Shake256::new(under.ctx()));
             assert_eq!(shake256, hex(e.shake256));
         }
         check_matches_portable(
-            || under.build(Sha3_224::new),
-            || features::build_portable(Sha3_224::new),
-            || under.build(Shake128::new),
-            || features::build_portable(Shake128::new),
+            || Sha3_224::new(under.ctx()),
+            || Sha3_224::new(crate::Context::portable()),
+            || Shake128::new(under.ctx()),
+            || Shake128::new(crate::Context::portable()),
         );
         check_matches_portable(
-            || under.build(Sha3_256::new),
-            || features::build_portable(Sha3_256::new),
-            || under.build(Shake256::new),
-            || features::build_portable(Shake256::new),
+            || Sha3_256::new(under.ctx()),
+            || Sha3_256::new(crate::Context::portable()),
+            || Shake256::new(under.ctx()),
+            || Shake256::new(crate::Context::portable()),
         );
         check_matches_portable(
-            || under.build(Sha3_384::new),
-            || features::build_portable(Sha3_384::new),
-            || under.build(Shake128::new),
-            || features::build_portable(Shake128::new),
+            || Sha3_384::new(under.ctx()),
+            || Sha3_384::new(crate::Context::portable()),
+            || Shake128::new(under.ctx()),
+            || Shake128::new(crate::Context::portable()),
         );
         check_matches_portable(
-            || under.build(Sha3_512::new),
-            || features::build_portable(Sha3_512::new),
-            || under.build(Shake256::new),
-            || features::build_portable(Shake256::new),
+            || Sha3_512::new(under.ctx()),
+            || Sha3_512::new(crate::Context::portable()),
+            || Shake256::new(under.ctx()),
+            || Shake256::new(crate::Context::portable()),
         );
     }
 
@@ -661,7 +647,7 @@ pub(crate) mod tests {
     /// are shifted down before being passed.
     #[test]
     fn bit_strings() {
-        let mut hash = Sha3_256::new();
+        let mut hash = Sha3_256::new(crate::Context::default());
         hash.update(&[0xf1, 0x3d]);
         assert_eq!(
             hash.finalize_bits(0x64 >> 2, 6).unwrap(),
@@ -670,7 +656,7 @@ pub(crate) mod tests {
                  55f6"
             )[..32]
         );
-        let mut hash = Sha3_256::new();
+        let mut hash = Sha3_256::new(crate::Context::default());
         hash.update(&[0x26]);
         assert_eq!(
             hash.finalize_bits(0x58 >> 3, 5).unwrap(),
@@ -680,8 +666,12 @@ pub(crate) mod tests {
             )[..32]
         );
         // Bits beyond the count are ignored.
-        let a = Sha3_256::new().finalize_bits(0x1f, 5).unwrap();
-        let b = Sha3_256::new().finalize_bits(0xff, 5).unwrap();
+        let a = Sha3_256::new(crate::Context::default())
+            .finalize_bits(0x1f, 5)
+            .unwrap();
+        let b = Sha3_256::new(crate::Context::default())
+            .finalize_bits(0xff, 5)
+            .unwrap();
         assert_eq!(a, b);
     }
 
@@ -689,17 +679,22 @@ pub(crate) mod tests {
     fn bit_count_is_checked() {
         for bits in [0, 8, 9] {
             assert_eq!(
-                Sha3_256::new().finalize_bits(0, bits),
+                Sha3_256::new(crate::Context::default()).finalize_bits(0, bits),
                 Err(Error::InvalidBitCount(bits))
             );
-            assert!(Shake128::new().finalize_bits_xof(0, bits).is_err());
+            assert!(
+                Shake128::new(crate::Context::default())
+                    .finalize_bits_xof(0, bits)
+                    .is_err()
+            );
         }
     }
 
     #[test]
     fn squeezing_in_pieces_is_the_same_stream() {
-        let whole = squeeze(b"abc", 64, Shake128::new);
-        let mut x = Shake128::new();
+        let whole =
+            squeeze(b"abc", 64, || Shake128::new(crate::Context::default()));
+        let mut x = Shake128::new(crate::Context::default());
         x.update(b"abc");
         let mut reader = x.finalize_xof();
         let mut out = [0u8; 64];
@@ -711,10 +706,10 @@ pub(crate) mod tests {
         // Well past one rate of output, against a fresh reader.
         let mut long = [0u8; 500];
         let mut again = [0u8; 500];
-        let mut x = Shake128::new();
+        let mut x = Shake128::new(crate::Context::default());
         x.update(b"abc");
         x.finalize_xof().squeeze(&mut long);
-        let mut x = Shake128::new();
+        let mut x = Shake128::new(crate::Context::default());
         x.update(b"abc");
         let mut reader = x.finalize_xof();
         reader.squeeze(&mut again[..167]);
@@ -740,20 +735,28 @@ pub(crate) mod tests {
             }
             out
         }
-        let bytes128 = stream(Shake128::new(), 1);
-        let bytes256 = stream(Shake256::new(), 1);
+        let bytes128 = stream(Shake128::new(crate::Context::default()), 1);
+        let bytes256 = stream(Shake256::new(crate::Context::default()), 1);
         for piece in [2, 3, 5, 7, 8, 9, 13, 16, 17, 136, 167, 168, 169, 700] {
-            assert_eq!(stream(Shake128::new(), piece), bytes128, "{piece}");
-            assert_eq!(stream(Shake256::new(), piece), bytes256, "{piece}");
+            assert_eq!(
+                stream(Shake128::new(crate::Context::default()), piece),
+                bytes128,
+                "{piece}"
+            );
+            assert_eq!(
+                stream(Shake256::new(crate::Context::default()), piece),
+                bytes256,
+                "{piece}"
+            );
         }
     }
 
     #[test]
     fn splitting_does_not_matter() {
         let data: [u8; 617] = core::array::from_fn(|i| (i * 31) as u8);
-        let expected = Sha3_512::digest(&data);
+        let expected = Sha3_512::digest(crate::Context::default(), &data);
         for chunk in [1, 3, 7, 71, 72, 73, 144, 200] {
-            let mut hash = Sha3_512::new();
+            let mut hash = Sha3_512::new(crate::Context::default());
             for piece in data.chunks(chunk) {
                 hash.update(piece);
             }
@@ -763,14 +766,20 @@ pub(crate) mod tests {
 
     #[test]
     fn reset_and_clone() {
-        let mut hash = Sha3_224::new();
+        let mut hash = Sha3_224::new(crate::Context::default());
         hash.update(b"not this");
         hash.reset();
         hash.update(b"ab");
         let mut fork = hash.clone();
         hash.update(b"c");
-        assert_eq!(hash.finalize(), Sha3_224::digest(b"abc"));
-        assert_eq!(fork.finalize(), Sha3_224::digest(b"ab"));
+        assert_eq!(
+            hash.finalize(),
+            Sha3_224::digest(crate::Context::default(), b"abc")
+        );
+        assert_eq!(
+            fork.finalize(),
+            Sha3_224::digest(crate::Context::default(), b"ab")
+        );
     }
 
     #[test]
@@ -778,7 +787,7 @@ pub(crate) mod tests {
         fn wipes<T: ZeroizeOnDrop>() {}
         wipes::<portable::Sha3_256>();
         wipes::<portable::Shake128>();
-        wipes::<<portable::Shake128 as Xof>::Reader>();
+        wipes::<engine::Reader<portable::Keccak, variant::Shake128>>();
         #[cfg(target_arch = "aarch64")]
         {
             wipes::<aarch64::Sha3_256>();
@@ -788,12 +797,13 @@ pub(crate) mod tests {
 
     #[test]
     fn picks_the_first_kernel_whose_needs_are_met() {
-        features::build_alone(|| {
-            let hash = Auto::<variant::Sha3_256>::new();
+        {
+            let hash =
+                Auto::<variant::Sha3_256>::new(crate::Context::default());
             features::dispatches(KERNELS, Sha3_256::profiles(), hash.kernel());
-            let xof = Auto::<variant::Shake128>::new();
+            let xof = Auto::<variant::Shake128>::new(crate::Context::default());
             features::dispatches(KERNELS, Shake128::profiles(), xof.kernel());
-        });
+        };
     }
 
     #[test]
@@ -807,7 +817,7 @@ pub(crate) mod tests {
                 Ok(())
             }
         }
-        let mut hash = Sha3_256::new();
+        let mut hash = Sha3_256::new(crate::Context::default());
         hash.update(b"secret");
         let mut buffer = Buffer([0; 128], 0);
         core::fmt::write(&mut buffer, format_args!("{hash:?}")).unwrap();
@@ -822,14 +832,14 @@ macro_rules! digest {
     ($(#[$doc:meta])* $name:ident, $variant:ident, $rate:literal,
      $out:literal) => {
         $(#[$doc])*
-        #[derive(Clone, Default)]
+        #[derive(Clone)]
         pub struct $name(Auto<variant::$variant>);
 
         impl $name {
-            /// Starts a hash with the best implementation the
-            /// features in force allow; see [`crate::features`].
-            pub fn new() -> Self {
-                $name(Auto::new())
+            /// Starts a hash with the best implementation `ctx`
+            /// allows; see [`crate::features`].
+            pub fn new(ctx: Context) -> Self {
+                $name(Auto::new(ctx))
             }
 
             /// The feature profiles this hash tells apart, best
@@ -865,6 +875,10 @@ macro_rules! digest {
         impl Hash for $name {
             type Output = [u8; $out];
 
+            fn new(ctx: Context) -> Self {
+                Self::new(ctx)
+            }
+
             fn reset(&mut self) {
                 Hash::reset(&mut self.0)
             }
@@ -896,7 +910,7 @@ macro_rules! shake {
     ($(#[$doc:meta])* $name:ident, $reader:ident, $variant:ident,
      $rate:literal) => {
         $(#[$doc])*
-        #[derive(Clone, Default)]
+        #[derive(Clone)]
         pub struct $name(Auto<variant::$variant>);
 
         #[doc = concat!("The output stream of [`", stringify!($name), "`].")]
@@ -904,10 +918,10 @@ macro_rules! shake {
         pub struct $reader(AutoReader<variant::$variant>);
 
         impl $name {
-            /// Starts a function with the best implementation the
-            /// features in force allow; see [`crate::features`].
-            pub fn new() -> Self {
-                $name(Auto::new())
+            /// Starts a function with the best implementation `ctx`
+            /// allows; see [`crate::features`].
+            pub fn new(ctx: Context) -> Self {
+                $name(Auto::new(ctx))
             }
 
             /// The feature profiles this function tells apart, best
@@ -948,6 +962,10 @@ macro_rules! shake {
 
         impl Xof for $name {
             type Reader = $reader;
+
+            fn new(ctx: Context) -> Self {
+                Self::new(ctx)
+            }
 
             fn reset(&mut self) {
                 Xof::reset(&mut self.0)

@@ -60,10 +60,18 @@ enum State {
 impl State {
     fn new(algorithm: Algorithm, key: &[u8]) -> Self {
         match algorithm.0.id {
-            Id::SHA1 => State::Sha1(Hmac::new(key)),
-            Id::SHA256 => State::Sha256(Hmac::new(key)),
-            Id::SHA384 => State::Sha384(Hmac::new(key)),
-            Id::SHA512 => State::Sha512(Hmac::new(key)),
+            Id::SHA1 => {
+                State::Sha1(Hmac::new(scytale::Context::default(), key))
+            }
+            Id::SHA256 => {
+                State::Sha256(Hmac::new(scytale::Context::default(), key))
+            }
+            Id::SHA384 => {
+                State::Sha384(Hmac::new(scytale::Context::default(), key))
+            }
+            Id::SHA512 => {
+                State::Sha512(Hmac::new(scytale::Context::default(), key))
+            }
             // No static names HMAC over this hash, so no key can.
             Id::SHA512_256 => unreachable!("HMAC-SHA-512/256 has no static"),
         }

@@ -25,6 +25,7 @@
 use zeroize::Zeroize;
 
 use super::{H_MAX, Hasher, I_SIZE, Lmots, Lms, N_MAX, Node, ots};
+use crate::Context;
 
 /// Ends the hash of a leaf.
 const D_LEAF: [u8; 2] = [0x82, 0x82];
@@ -69,6 +70,7 @@ pub(super) struct Tree<'a> {
 
 impl<'a> Tree<'a> {
     pub(super) fn new(
+        ctx: Context,
         lms: Lms,
         ots: Lmots,
         i: &'a [u8; I_SIZE],
@@ -79,7 +81,7 @@ impl<'a> Tree<'a> {
             ots,
             i,
             seed,
-            hasher: Hasher::new(lms.family()),
+            hasher: Hasher::new(ctx, lms.family()),
         }
     }
 

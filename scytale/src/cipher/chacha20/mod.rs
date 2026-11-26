@@ -11,9 +11,11 @@
 //! ```
 //! use scytale::Key;
 //! use scytale::cipher::chacha20::ChaCha20;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let cipher = ChaCha20::new(&Key::from([0x42u8; 32]));
+//! let ctx = Context::default();
+//! let cipher = ChaCha20::new(ctx, &Key::from([0x42u8; 32]));
 //! let nonce = [0u8; 12];
 //! let mut message = *b"attack at dawn";
 //! cipher.encrypt(&nonce, 1, &mut message)?;
@@ -67,7 +69,7 @@ use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::features::{self, Chosen, Dispatcher, Features};
-use crate::{Error, Key, KeyType};
+use crate::{Context, Error, Key, KeyType};
 
 /// The key length, in bytes.
 pub const KEY_SIZE: usize = 32;
@@ -512,13 +514,13 @@ macro_rules! dispatch {
     };
 }
 
-/// ChaCha20 using the best implementation the features in force
-/// allow; see [`crate::features`].
+/// ChaCha20 using the best implementation its context allows; see
+/// [`crate::features`].
 ///
 /// The choice is made when the key is taken, and each call then
 /// dispatches with a single predictable branch.
 #[derive(Clone)]
-pub struct ChaCha20(Inner);
+pub struct ChaCha20(Inner, Context);
 
 #[derive(Clone)]
 enum Inner {
@@ -565,12 +567,11 @@ enum InnerOwned {
 }
 
 impl ChaCha20 {
-    /// Takes the key, with the best implementation the features in
-    /// force allow. The last kernel in the list needs nothing, so
-    /// this cannot fail.
-    pub fn new(key: &Key<[u8; KEY_SIZE]>) -> Self {
+    /// Takes the key, with the best implementation `ctx` allows. The
+    /// last kernel in the list needs nothing, so this cannot fail.
+    pub fn new(ctx: Context, key: &Key<[u8; KEY_SIZE]>) -> Self {
         let built =
-            match features::choose(KERNELS) {
+            match features::choose(ctx, KERNELS) {
                 #[cfg(target_arch = "x86_64")]
                 Some(c) if c.kernel() == Kernel::Avx2 => x86_64::Avx2::of(c)
                     .map(|b| Inner::Avx2(Cipher::with(b, key))),
@@ -588,7 +589,13 @@ impl ChaCha20 {
         let inner = built.unwrap_or_else(|| {
             Inner::Portable(Cipher::with(portable::Portable, key))
         });
-        ChaCha20(inner)
+        ChaCha20(inner, ctx)
+    }
+
+    /// What this cipher was built under, for the objects built for
+    /// it: the Poly1305 each AEAD message keys from it.
+    pub(crate) fn context(&self) -> Context {
+        self.1
     }
 
     /// Which kernel this cipher is running on.
@@ -780,8 +787,7 @@ pub(crate) mod tests {
     /// lengths, counters and chunkings, and Wycheproof's keystream
     /// cases.
     pub(crate) fn kernel(under: &features::Under) {
-        let build =
-            |key: [u8; 32]| under.build(|| ChaCha20::new(&Key::from(key)));
+        let build = |key: [u8; 32]| ChaCha20::new(under.ctx(), &Key::from(key));
         // Section 2.4.2: the sunscreen message.
         let cipher = build(KEY);
         let mut data = *PLAIN;
@@ -814,14 +820,14 @@ pub(crate) mod tests {
         );
         agrees(under);
         crate::vectors::support::wycheproof::chacha20_poly1305::run_cipher(
-            &|key| under.build(|| ChaCha20::new(key)),
+            &|key| ChaCha20::new(under.ctx(), key),
         );
     }
 
     /// One kernel against the portable code.
     fn agrees(under: &features::Under) {
         let key = Key::from(KEY);
-        let cipher = under.build(|| ChaCha20::new(&key));
+        let cipher = ChaCha20::new(under.ctx(), &key);
         let reference = Cipher::with(portable::Portable, &key);
         let data: [u8; 1100] = core::array::from_fn(|i| (i * 13 + 7) as u8);
         for len in [
@@ -855,7 +861,7 @@ pub(crate) mod tests {
 
     #[test]
     fn pieces_match_whole() {
-        let cipher = ChaCha20::new(&Key::from(KEY));
+        let cipher = ChaCha20::new(crate::Context::default(), &Key::from(KEY));
         let data: [u8; 517] = core::array::from_fn(|i| (i * 31) as u8);
         let mut whole = data;
         cipher.encrypt(&NONCE, 5, &mut whole).unwrap();
@@ -899,7 +905,7 @@ pub(crate) mod tests {
         let key = Key::from(KEY);
         let nonce = hex::<16>("000000090000004a0000000031415927");
         let subkey = hchacha20(&key, &nonce);
-        let cipher = ChaCha20::new(&key);
+        let cipher = ChaCha20::new(crate::Context::default(), &key);
         let block = cipher.keystream_block(&[0u8; 12], 0);
         assert_ne!(&subkey.array()[..], &block[..32]);
         assert_ne!(&subkey.array()[..], &block[32..]);
@@ -918,7 +924,7 @@ pub(crate) mod tests {
 
     #[test]
     fn refuses_to_wrap_the_counter() {
-        let cipher = ChaCha20::new(&Key::from(KEY));
+        let cipher = ChaCha20::new(crate::Context::default(), &Key::from(KEY));
         let mut data = [0u8; 129];
         // Two blocks and a byte from the last block: the third block
         // does not exist.
@@ -957,14 +963,15 @@ pub(crate) mod tests {
 
     #[test]
     fn picks_the_first_kernel_whose_needs_are_met() {
-        features::build_alone(|| {
-            let cipher = ChaCha20::new(&Key::from([0u8; 32]));
+        {
+            let cipher =
+                ChaCha20::new(crate::Context::default(), &Key::from([0u8; 32]));
             features::dispatches(
                 KERNELS,
                 ChaCha20::profiles(),
                 cipher.kernel(),
             );
-        });
+        };
     }
 
     #[test]
@@ -978,7 +985,8 @@ pub(crate) mod tests {
                 Ok(())
             }
         }
-        let cipher = ChaCha20::new(&Key::from([0x5au8; 32]));
+        let cipher =
+            ChaCha20::new(crate::Context::default(), &Key::from([0x5au8; 32]));
         let mut buffer = Buffer([0; 128], 0);
         core::fmt::write(&mut buffer, format_args!("{cipher:?}")).unwrap();
         let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();

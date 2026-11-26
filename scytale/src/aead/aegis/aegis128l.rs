@@ -13,7 +13,7 @@ use super::{
 use crate::aead::Aead;
 use crate::cipher::aes::{BLOCK_SIZE, Kernel};
 use crate::features::{self, Dispatcher, Features};
-use crate::{Error, Key, KeyType};
+use crate::{Context, Error, Key, KeyType};
 
 #[cfg(target_arch = "aarch64")]
 use super::aarch64;
@@ -45,10 +45,10 @@ pub struct Aegis128L {
 
 impl Aegis128L {
     /// Takes the key.
-    pub fn new(key: &Key<[u8; KEY_SIZE]>) -> Self {
+    pub fn new(ctx: Context, key: &Key<[u8; KEY_SIZE]>) -> Self {
         Aegis128L {
             key: key.clone(),
-            kernel: features::select(KERNELS).unwrap_or(Kernel::Bitsliced),
+            kernel: features::select(ctx, KERNELS).unwrap_or(Kernel::Bitsliced),
         }
     }
 
@@ -118,9 +118,9 @@ impl Aead for Aegis128L {
     type Nonce = [u8; NONCE_SIZE];
     type Tag = [u8; TAG];
 
-    fn new(key: &Self::Key) -> Self {
+    fn new(ctx: Context, key: &Self::Key) -> Self {
         // The inherent constructor, which takes precedence here.
-        Aegis128L::new(key)
+        Aegis128L::new(ctx, key)
     }
 
     fn encrypt(
@@ -392,21 +392,19 @@ pub(crate) mod tests {
         hex(s).try_into().unwrap()
     }
 
-    /// Each kernel this processor can run under the set in force,
-    /// the virtual features granted.
     /// This variant under one kernel: the draft's vectors and the
     /// rest below, each against the portable kernel. The kernel the
     /// list chooses under the row's features is the one they build
     /// on, through the test constructor that trusts its caller.
     pub(crate) fn kernel(under: &features::Under) {
-        let chosen = under.build(|| features::select(KERNELS)).expect("listed");
+        let chosen = features::select(under.ctx(), KERNELS).expect("listed");
         UNDER.set(Some(chosen));
         update();
         draft_vectors();
         draft_vectors_that_must_fail();
         kernels_and_pieces_agree();
         crate::vectors::support::wycheproof::aegis::aegis128l(&|key| {
-            under.build(|| Aegis128L::new(key))
+            Aegis128L::new(under.ctx(), key)
         });
         UNDER.set(None);
     }
@@ -430,10 +428,11 @@ pub(crate) mod tests {
 
     #[test]
     fn dispatches() {
-        features::build_alone(|| {
-            let aead = Aegis128L::new(&Key::zeroed());
+        {
+            let aead =
+                Aegis128L::new(crate::Context::default(), &Key::zeroed());
             features::dispatches(KERNELS, Aegis128L::profiles(), aead.kernel());
-        });
+        };
     }
 
     /// The draft's appendix A.2.1.
@@ -614,7 +613,7 @@ pub(crate) mod tests {
 
     #[test]
     fn aad_after_message_is_out_of_order() {
-        let aead = Aegis128L::new(&Key::zeroed());
+        let aead = Aegis128L::new(crate::Context::default(), &Key::zeroed());
         let mut e = aead.encryptor(&[0u8; 16]);
         e.update(&mut [0u8; 3]).unwrap();
         assert_eq!(e.aad(b"late"), Err(Error::OutOfOrder));
@@ -628,7 +627,8 @@ pub(crate) mod tests {
         fn wipes<T: ZeroizeOnDrop>() {}
         wipes::<Aegis128L>();
         wipes::<Key<[u8; KEY_SIZE]>>();
-        let aead = Aegis128L::new(&Key::from([0x5au8; 16]));
+        let aead =
+            Aegis128L::new(crate::Context::default(), &Key::from([0x5au8; 16]));
         let text = std::format!("{aead:?}");
         assert!(!text.contains("5a"), "{text}");
         let text = std::format!("{:?}", aead.encryptor(&[0x5au8; 16]));

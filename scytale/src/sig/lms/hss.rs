@@ -65,6 +65,8 @@ const LAYOUT_VERSION: u8 = 1;
 /// An HSS public key: the level count and the top tree's key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublicKey {
+    /// What the key was made under, for its hashes.
+    ctx: crate::Context,
     levels: usize,
     top: super::PublicKey,
 }
@@ -74,7 +76,7 @@ impl PublicKey {
     /// A level count outside 1 to 8, or a set that names no
     /// parameters, is [`Error::WrongAlgorithm`]; the wrong length is
     /// [`Error::InvalidEncoding`].
-    pub fn new(bytes: &[u8]) -> Result<Self, Error> {
+    pub fn new(ctx: crate::Context, bytes: &[u8]) -> Result<Self, Error> {
         if bytes.len() < 4 {
             return Err(Error::InvalidEncoding);
         }
@@ -82,13 +84,17 @@ impl PublicKey {
         if levels == 0 || levels > LEVELS_MAX {
             return Err(Error::WrongAlgorithm);
         }
-        let top = super::PublicKey::new(&bytes[4..])?;
-        Ok(PublicKey { levels, top })
+        let top = super::PublicKey::new(ctx, &bytes[4..])?;
+        Ok(PublicKey { ctx, levels, top })
     }
 
     /// A one-level key: the tree alone.
     pub(super) fn single(top: super::PublicKey) -> Self {
-        PublicKey { levels: 1, top }
+        PublicKey {
+            ctx: top.ctx,
+            levels: 1,
+            top,
+        }
     }
 
     /// The key's bytes, `u32str(L) || lms_public_key`, in the first
@@ -154,7 +160,7 @@ impl PublicKey {
                 return Err(Error::InvalidSignature);
             }
             let (lower_bytes, after) = after.split_at(lower_len);
-            let lower = super::PublicKey::new(lower_bytes)
+            let lower = super::PublicKey::new(self.ctx, lower_bytes)
                 .map_err(|_| Error::InvalidSignature)?;
             if lower.lms.family() != family {
                 return Err(Error::InvalidSignature);
@@ -170,12 +176,15 @@ impl PublicKey {
     /// `PUBLIC KEY` in a PEM file: the RFC 8554 bytes as the key
     /// under id-alg-hss-lms-hashsig (RFC 9708). Another algorithm is
     /// [`Error::WrongAlgorithm`].
-    pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
+    pub fn try_from_der(
+        ctx: crate::Context,
+        der: &[u8],
+    ) -> Result<Self, Error> {
         let (algorithm, key) = crate::der::read_spki(der)?;
         if algorithm.oid != OID || !algorithm.params.is_empty() {
             return Err(Error::WrongAlgorithm);
         }
-        Self::new(key)
+        Self::new(ctx, key)
     }
 
     /// Writes the key as a `SubjectPublicKeyInfo` into the front of
@@ -190,11 +199,14 @@ impl PublicKey {
     /// above; whitespace and line ends are read leniently, and
     /// anything else that is not exactly one well-formed block is
     /// [`Error::InvalidEncoding`].
-    pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
+    pub fn try_from_pem(
+        ctx: crate::Context,
+        pem: &[u8],
+    ) -> Result<Self, Error> {
         let mut der = [0u8; PUBLIC_KEY_DER_MAX];
         let labels = [PUBLIC_LABEL];
         let (_, n) = crate::codec::pem::decode_one_of(&labels, pem, &mut der)?;
-        Self::try_from_der(&der[..n])
+        Self::try_from_der(ctx, &der[..n])
     }
 
     /// Writes the key as a `PUBLIC KEY` PEM block, ASCII with LF line
@@ -224,6 +236,8 @@ const UNSIGNED: Signed = Signed {
 /// its parent a leaf and the caller a tree's key generation; see
 /// [State](super#state) for what the caller must do with it.
 pub struct PrivateKey<const L: usize> {
+    /// What the key was made under, for its hashes.
+    ctx: crate::Context,
     trees: [super::PrivateKey; L],
     /// `signed[j]` is tree `j`'s signature over tree `j + 1`'s public
     /// key; the last is unused.
@@ -238,6 +252,7 @@ impl<const L: usize> PrivateKey<L> {
     /// each level. Sets on different hashes, within a level or
     /// between levels, are [`Error::WrongAlgorithm`].
     pub fn generate<R: Random>(
+        ctx: crate::Context,
         rng: &mut R,
         sets: &[(Lms, Lmots); L],
     ) -> Result<Self, Error> {
@@ -258,9 +273,10 @@ impl<const L: usize> PrivateKey<L> {
                 .and_then(|()| rng.fill(&mut seed[..family.n()]));
         }
         let key = filled.map(|()| PrivateKey {
+            ctx,
             trees: core::array::from_fn(|j| {
                 super::PrivateKey::grow(
-                    sets[j].0, sets[j].1, &ids[j], &seeds[j],
+                    ctx, sets[j].0, sets[j].1, &ids[j], &seeds[j],
                 )
             }),
             signed: [UNSIGNED; L],
@@ -289,6 +305,7 @@ impl<const L: usize> PrivateKey<L> {
     /// The public key.
     pub fn public_key(&self) -> PublicKey {
         PublicKey {
+            ctx: self.ctx,
             levels: L,
             top: self.trees[0].public_key().clone(),
         }
@@ -353,7 +370,8 @@ impl<const L: usize> PrivateKey<L> {
         }
         for j in d + 1..L {
             let (lms, ots) = (self.trees[j].lms(), self.trees[j].lmots());
-            self.trees[j] = super::PrivateKey::generate(rng, lms, ots)?;
+            self.trees[j] =
+                super::PrivateKey::generate(self.ctx, rng, lms, ots)?;
             self.sign_lower(rng, j - 1)?;
         }
         let out = &mut out[..len];
@@ -380,7 +398,10 @@ impl<const L: usize> PrivateKey<L> {
     /// or another number of levels than `L`, is
     /// [`Error::WrongAlgorithm`]; anything else wrong with the bytes
     /// [`Error::InvalidEncoding`].
-    pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
+    pub fn try_from_der(
+        ctx: crate::Context,
+        der: &[u8],
+    ) -> Result<Self, Error> {
         let () = Self::LEVELS_OK;
         let info = crate::der::read_pkcs8(der)?;
         let algorithm = &info.algorithm;
@@ -398,12 +419,13 @@ impl<const L: usize> PrivateKey<L> {
         }
         let mut rest = &bytes[2..];
         let mut key = PrivateKey {
-            trees: core::array::from_fn(|_| super::PrivateKey::blank()),
+            ctx,
+            trees: core::array::from_fn(|_| super::PrivateKey::blank(ctx)),
             signed: [UNSIGNED; L],
         };
         let mut family = None;
         for j in 0..L {
-            let (tree, used) = super::PrivateKey::read(rest)?;
+            let (tree, used) = super::PrivateKey::read(ctx, rest)?;
             rest = &rest[used..];
             let this = tree.lms().family();
             if *family.get_or_insert(this) != this {
@@ -453,11 +475,14 @@ impl<const L: usize> PrivateKey<L> {
 
     /// A key from a `PRIVATE KEY` PEM block (RFC 7468) around the DER
     /// above, read as [`PublicKey::try_from_pem`] reads its own.
-    pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
+    pub fn try_from_pem(
+        ctx: crate::Context,
+        pem: &[u8],
+    ) -> Result<Self, Error> {
         let mut der = [0u8; der_max(LEVELS_MAX)];
         let labels = [PRIVATE_LABEL];
         let result = crate::codec::pem::decode_one_of(&labels, pem, &mut der)
-            .and_then(|(_, n)| Self::try_from_der(&der[..n]));
+            .and_then(|(_, n)| Self::try_from_der(ctx, &der[..n]));
         der.zeroize();
         result
     }

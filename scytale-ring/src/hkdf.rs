@@ -170,10 +170,30 @@ impl Prk {
     ) -> Result<(), scytale::Error> {
         let prk = &self.bytes[..self.len];
         match self.algorithm.0.digest_algorithm().id {
-            Id::SHA1 => hkdf::expand::<Sha1>(prk, info, out),
-            Id::SHA256 => hkdf::expand::<Sha256>(prk, info, out),
-            Id::SHA384 => hkdf::expand::<Sha384>(prk, info, out),
-            Id::SHA512 => hkdf::expand::<Sha512>(prk, info, out),
+            Id::SHA1 => hkdf::expand::<Sha1>(
+                scytale::Context::default(),
+                prk,
+                info,
+                out,
+            ),
+            Id::SHA256 => hkdf::expand::<Sha256>(
+                scytale::Context::default(),
+                prk,
+                info,
+                out,
+            ),
+            Id::SHA384 => hkdf::expand::<Sha384>(
+                scytale::Context::default(),
+                prk,
+                info,
+                out,
+            ),
+            Id::SHA512 => hkdf::expand::<Sha512>(
+                scytale::Context::default(),
+                prk,
+                info,
+                out,
+            ),
             // No static names HKDF over this hash, so no key can.
             Id::SHA512_256 => unreachable!("HKDF-SHA-512/256 has no static"),
         }

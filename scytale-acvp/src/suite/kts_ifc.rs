@@ -28,6 +28,7 @@ use crate::support::{
     Error, Rng, field, hex, hex_value, int, opt_hex, opt_text, text,
     unknown_test_type,
 };
+use scytale::Context;
 use scytale::Random;
 use scytale::hash::Hash;
 use scytale::hash::sha1::Sha1;
@@ -65,11 +66,11 @@ pub fn answer(
         // encryption under OAEP, whose hashes and mask start with each
         // call, and a MAC keyed by the transported key.
         answer_tests(group, |t| {
-            builder.try_build(|| {
+            builder.try_build(|ctx| {
                 if responder {
-                    respond(group, t)
+                    respond(ctx, group, t)
                 } else {
-                    initiate(group, t, rng)
+                    initiate(ctx, group, t, rng)
                 }
             })
         })
@@ -151,7 +152,12 @@ fn sha1(group: &Value) -> Result<bool, Error> {
 
 /// V's key-confirmation tag over the ciphertext `c`, under the
 /// leading bits of the transported key `k`.
-fn tag(group: &Value, k: &[u8], c: &[u8]) -> Result<Vec<u8>, Error> {
+fn tag(
+    ctx: Context,
+    group: &Value,
+    k: &[u8],
+    c: &[u8],
+) -> Result<Vec<u8>, Error> {
     let mac = field(group, "macConfiguration")?;
     let key_len = int(mac, "keyLen")? as usize / 8;
     let key = k
@@ -162,16 +168,21 @@ fn tag(group: &Value, k: &[u8], c: &[u8]) -> Result<Vec<u8>, Error> {
     data.extend_from_slice(&v);
     data.extend_from_slice(&u);
     data.extend_from_slice(c);
-    mac_over(group, key, &data)
+    mac_over(ctx, group, key, &data)
 }
 
 /// The group's MAC of `data` under `key`, at the group's length.
-fn mac_over(group: &Value, key: &[u8], data: &[u8]) -> Result<Vec<u8>, Error> {
+fn mac_over(
+    ctx: Context,
+    group: &Value,
+    key: &[u8],
+    data: &[u8],
+) -> Result<Vec<u8>, Error> {
     let mac = field(group, "macConfiguration")?;
     let mac_len = int(mac, "macLen")? as usize / 8;
     match text(mac, "macType")? {
         "HMAC-SHA-1" => {
-            let full = Hmac::<Sha1>::mac(key, data);
+            let full = Hmac::<Sha1>::mac(ctx, key, data);
             full.as_ref()
                 .get(..mac_len)
                 .map(<[u8]>::to_vec)
@@ -180,7 +191,7 @@ fn mac_over(group: &Value, key: &[u8], data: &[u8]) -> Result<Vec<u8>, Error> {
         "KMAC-128" => {
             // SP 800-56C names "KC" as KMAC's customization for key
             // confirmation.
-            let mut kmac = Kmac128::new(key, b"KC");
+            let mut kmac = Kmac128::new(ctx, key, b"KC");
             kmac.update(data);
             let mut out = vec![0u8; mac_len];
             kmac.finalize_to(&mut out);
@@ -190,7 +201,7 @@ fn mac_over(group: &Value, key: &[u8], data: &[u8]) -> Result<Vec<u8>, Error> {
     }
 }
 
-fn decrypt<H: Hash + Default>(
+fn decrypt<H: Hash>(
     key: &PrivateKey,
     label: &[u8],
     ciphertext: &[u8],
@@ -224,8 +235,9 @@ fn recover(
 
 /// The IUT as responder: it holds the private key the case gives in
 /// full and decrypts the server's ciphertext.
-fn respond(group: &Value, t: &Value) -> Result<Value, Error> {
+fn respond(ctx: Context, group: &Value, t: &Value) -> Result<Value, Error> {
     let key = PrivateKey::try_new(
+        ctx,
         &hex(t, "iutN")?,
         &hex(t, "iutE")?,
         &hex(t, "iutD")?,
@@ -239,18 +251,20 @@ fn respond(group: &Value, t: &Value) -> Result<Value, Error> {
     // material.
     Ok(json!({
         "dkm": hex_value(&k),
-        "tag": hex_value(&tag(group, &k, &c)?),
+        "tag": hex_value(&tag(ctx, group, &k, &c)?),
     }))
 }
 
 /// The IUT as initiator: it chooses the key and encrypts it to the
 /// server's public key.
 fn initiate(
+    ctx: Context,
     group: &Value,
     t: &Value,
     rng: &mut dyn Random,
 ) -> Result<Value, Error> {
-    let key = PublicKey::try_new(&hex(t, "serverN")?, &hex(t, "serverE")?)?;
+    let key =
+        PublicKey::try_new(ctx, &hex(t, "serverN")?, &hex(t, "serverE")?)?;
     let k = match opt_hex(t, "iutK")? {
         Some(k) => k,
         None => {
@@ -270,7 +284,7 @@ fn initiate(
     Ok(json!({
         "iutC": hex_value(c),
         "dkm": hex_value(&k),
-        "tag": hex_value(&tag(group, &k, c)?),
+        "tag": hex_value(&tag(ctx, group, &k, c)?),
     }))
 }
 
@@ -293,6 +307,8 @@ pub fn verify(
     _answered_group: &Value,
     answered_test: &Value,
 ) -> Result<(), Error> {
+    // Checking an answer is not the kernel under test.
+    let ctx = Context::default();
     let same = |name: &str| -> Result<(), Error> {
         let answered = hex(answered_test, name)?;
         if answered != hex(vendored_test, name)? {
@@ -308,10 +324,16 @@ pub fn verify(
         return same("tag");
     }
     if opt_hex(vendored_test, "serverD")?.is_none() {
-        return verify_unopened(vendored_group, vendored_test, answered_test);
+        return verify_unopened(
+            ctx,
+            vendored_group,
+            vendored_test,
+            answered_test,
+        );
     }
     same("dkm")?;
     let key = PrivateKey::try_new(
+        ctx,
         &hex(vendored_test, "serverN")?,
         &hex(vendored_test, "serverE")?,
         &hex(vendored_test, "serverD")?,
@@ -330,7 +352,8 @@ pub fn verify(
         .ok_or_else(|| Error::new("macData does not end with iutC"))?;
     let mut data = prefix.to_vec();
     data.extend_from_slice(&c);
-    let tag = mac_over(vendored_group, &hex(vendored_test, "macKey")?, &data)?;
+    let tag =
+        mac_over(ctx, vendored_group, &hex(vendored_test, "macKey")?, &data)?;
     if tag != hex(answered_test, "tag")? {
         return Err(Error::new("tag is not the MAC over the answered iutC"));
     }
@@ -340,13 +363,14 @@ pub fn verify(
 /// The initiator's check where the server's private key is not to
 /// hand; see [`verify`].
 fn verify_unopened(
+    ctx: Context,
     group: &Value,
     theirs: &Value,
     answered: &Value,
 ) -> Result<(), Error> {
     let k = hex(theirs, "dkm")?;
     let c = hex(theirs, "iutC")?;
-    if tag(group, &k, &c)? != hex(theirs, "tag")? {
+    if tag(ctx, group, &k, &c)? != hex(theirs, "tag")? {
         return Err(Error::new("the file's tag is not the MAC over its iutC"));
     }
     let bits = int(group, "l")?;
@@ -361,7 +385,7 @@ fn verify_unopened(
     if c.len() != MODULUS_LEN {
         return Err(Error::new(format!("answered iutC of {} bytes", c.len())));
     }
-    if tag(group, &k, &c)? != hex(answered, "tag")? {
+    if tag(ctx, group, &k, &c)? != hex(answered, "tag")? {
         return Err(Error::new("answered tag is not the MAC over its iutC"));
     }
     Ok(())
@@ -375,6 +399,7 @@ mod tests {
 
     #[test]
     fn initiator_without_a_key_chooses_one() {
+        let ctx = Context::default();
         let mut doc = super::super::vendored(find("KTS-IFC")[0]);
         for group in doc["testGroups"].as_array_mut().unwrap() {
             for t in group["tests"].as_array_mut().unwrap() {
@@ -404,6 +429,7 @@ mod tests {
                 let dkm = hex(at, "dkm").unwrap();
                 assert_ne!(dkm, hex(t, "dkm").unwrap());
                 let key = PrivateKey::try_new(
+                    ctx,
                     &hex(t, "serverN").unwrap(),
                     &hex(t, "serverE").unwrap(),
                     &hex(t, "serverD").unwrap(),
@@ -412,7 +438,10 @@ mod tests {
                 let c = hex(at, "iutC").unwrap();
                 let label = label(g, t).unwrap();
                 assert_eq!(recover(g, &key, &label, &c).unwrap(), dkm);
-                assert_eq!(hex(at, "tag").unwrap(), tag(g, &dkm, &c).unwrap());
+                assert_eq!(
+                    hex(at, "tag").unwrap(),
+                    tag(ctx, g, &dkm, &c).unwrap()
+                );
                 initiated += 1;
             }
         }

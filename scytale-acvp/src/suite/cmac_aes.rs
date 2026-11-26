@@ -35,7 +35,7 @@ pub fn answer(
                 let key = hex(t, "key")?;
                 aes_width!(key, C => {
                     let k = key_of::<C>(&key)?;
-                    let mac = builder.build(|| Cmac::<C>::new(&k))?;
+                    let mac = builder.build(|ctx| Cmac::<C>::new(ctx, &k));
                     aft(mac, t, generate, mac_len)
                 })
             }),

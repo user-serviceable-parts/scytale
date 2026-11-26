@@ -34,8 +34,8 @@ pub fn answer(
                     // A message over a cipher with no kernel of GCM's
                     // own starts a GHASH of its own, which chooses its
                     // multiply then: the message is built too.
-                    builder.try_build(|| {
-                        aft(&Xpn::<C>::new(&k), t, encrypt, tag_len)
+                    builder.try_build(|ctx| {
+                        aft(&Xpn::<C>::new(ctx, &k), t, encrypt, tag_len)
                     })
                 })
             }),

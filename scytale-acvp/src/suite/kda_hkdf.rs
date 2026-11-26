@@ -17,6 +17,7 @@ use crate::support::{
     Error, decode_hex, field, hex, hex_value, list, opt_hex, text,
     unknown_test_type,
 };
+use scytale::Context;
 use scytale::hash::Hash;
 use scytale::hash::sha2::{Sha224, Sha256, Sha384, Sha512};
 use scytale::hash::sha2::{Sha512_224, Sha512_256};
@@ -71,8 +72,8 @@ pub fn answer(
                 let alg = text(cfg, "hmacAlg")?;
                 answer_tests(group, |t| {
                     // The derivation keys its own HMACs.
-                    let dkm =
-                        builder.try_build(|| with_hash!(alg, single(t)))?;
+                    let dkm = builder
+                        .try_build(|ctx| with_hash!(alg, single(ctx, t)))?;
                     Ok(if validate {
                         json!({ "testPassed": dkm == hex(t, "dkm")? })
                     } else {
@@ -87,8 +88,8 @@ pub fn answer(
                 }
                 let alg = text(cfg, "hmacAlg")?;
                 answer_tests(group, |t| {
-                    let dkms =
-                        builder.try_build(|| with_hash!(alg, multi(t)))?;
+                    let dkms = builder
+                        .try_build(|ctx| with_hash!(alg, multi(ctx, t)))?;
                     if validate {
                         let mut want = Vec::new();
                         for v in list(t, "dkms")? {
@@ -127,27 +128,29 @@ fn bytes(obj: &Value) -> Result<usize, Error> {
 /// One extract and several expansions, each with its own fixed info
 /// and length. The PRK is computed once, which is the whole point of
 /// the flow.
-fn multi<H: Hash + Clone + BlockType + Default>(
+fn multi<H: Hash + Clone + BlockType>(
+    ctx: Context,
     t: &Value,
 ) -> Result<Vec<Vec<u8>>, Error> {
     let param = field(t, "kdfMultiExpansionParameter")?;
     let salt = hex(param, "salt")?;
     let mut ikm = hex(param, "z")?;
     ikm.extend_from_slice(&hex(param, "t")?);
-    let prk = hkdf::extract::<H>(&salt, &ikm);
+    let prk = hkdf::extract::<H>(ctx, &salt, &ikm);
 
     let mut dkms = Vec::new();
     for iteration in list(param, "iterationParameters")? {
         let info = hex(iteration, "fixedInfo")?;
         let mut dkm = vec![0u8; bytes(iteration)?];
-        hkdf::expand::<H>(prk.as_ref(), &[&info], &mut dkm)?;
+        hkdf::expand::<H>(ctx, prk.as_ref(), &[&info], &mut dkm)?;
         dkms.push(dkm);
     }
     Ok(dkms)
 }
 
 /// One derivation.
-fn single<H: Hash + Clone + BlockType + Default>(
+fn single<H: Hash + Clone + BlockType>(
+    ctx: Context,
     t: &Value,
 ) -> Result<Vec<u8>, Error> {
     let param = field(t, "kdfParameter")?;
@@ -169,6 +172,6 @@ fn single<H: Hash + Clone + BlockType + Default>(
     info.extend_from_slice(&(8 * len as u32).to_be_bytes());
 
     let mut dkm = vec![0u8; len];
-    hkdf::derive::<H>(&salt, &ikm, &[&info], &mut dkm)?;
+    hkdf::derive::<H>(ctx, &salt, &ikm, &[&info], &mut dkm)?;
     Ok(dkm)
 }

@@ -7,6 +7,7 @@
 //! RSA key; the ML-DSA and SLH-DSA sets by their own names; `hss` on
 //! an HSS key, whose file every signature rewrites.
 
+use scytale::Context;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
@@ -189,10 +190,13 @@ fn sign(args: SignArgs) -> Result<()> {
     // the hedging of Ed25519, ECDSA, ML-DSA and SLH-DSA, each the
     // deterministic nonce with fresh randomness mixed in. RSA PKCS#1
     // v1.5 draws nothing.
-    let mut rng = CtrDrbg::from_system()?;
+    let mut rng = CtrDrbg::from_system(scytale::Context::default())?;
     let signature: Vec<u8> = match scheme {
         Scheme::Ed25519 => {
-            let key = ed25519::PrivateKey::try_from_pem(&pem)?;
+            let key = ed25519::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &pem,
+            )?;
             match &args.context {
                 Some(_) => key.sign_ctx(&mut rng, &context, &message)?.to_vec(),
                 None => key.sign(&mut rng, &message)?.to_vec(),
@@ -201,7 +205,10 @@ fn sign(args: SignArgs) -> Result<()> {
         // Ed448 hashes a context into every signature, the empty one
         // without --context.
         Scheme::Ed448 => {
-            let key = ed448::PrivateKey::try_from_pem(&pem)?;
+            let key = ed448::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &pem,
+            )?;
             key.sign(&mut rng, &context, &message)
                 .map_err(|_| {
                     usage!("--context is {} bytes; at most 255", context.len())
@@ -210,7 +217,10 @@ fn sign(args: SignArgs) -> Result<()> {
         }
         Scheme::Ecdsa(hash) => match info.algorithm {
             Algorithm::P256 => {
-                let key = ecdsa::p256::PrivateKey::try_from_pem(&pem)?;
+                let key = ecdsa::p256::PrivateKey::try_from_pem(
+                    scytale::Context::default(),
+                    &pem,
+                )?;
                 let sig = with_hash!(hash, H => {
                     Ok(key.sign::<H, _>(&mut rng, &message)?)
                 })?;
@@ -223,7 +233,10 @@ fn sign(args: SignArgs) -> Result<()> {
                 }
             }
             Algorithm::P384 => {
-                let key = ecdsa::p384::PrivateKey::try_from_pem(&pem)?;
+                let key = ecdsa::p384::PrivateKey::try_from_pem(
+                    scytale::Context::default(),
+                    &pem,
+                )?;
                 let sig = with_hash!(hash, H => {
                     Ok(key.sign::<H, _>(&mut rng, &message)?)
                 })?;
@@ -236,7 +249,10 @@ fn sign(args: SignArgs) -> Result<()> {
                 }
             }
             _ => {
-                let key = ecdsa::p521::PrivateKey::try_from_pem(&pem)?;
+                let key = ecdsa::p521::PrivateKey::try_from_pem(
+                    scytale::Context::default(),
+                    &pem,
+                )?;
                 let sig = with_hash!(hash, H => {
                     Ok(key.sign::<H, _>(&mut rng, &message)?)
                 })?;
@@ -250,20 +266,26 @@ fn sign(args: SignArgs) -> Result<()> {
             }
         },
         Scheme::RsaPss(hash) => {
-            let key = rsa::PrivateKey::try_from_pem(&pem)?;
+            let key = rsa::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &pem,
+            )?;
             let sig = with_hash!(hash, H => {
                 Ok(key.sign_pss::<H, _>(&mut rng, &message)?)
             })?;
             sig.as_ref().to_vec()
         }
         Scheme::RsaPkcs1(hash) => {
-            let key = rsa::PrivateKey::try_from_pem(&pem)?;
+            let key = rsa::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &pem,
+            )?;
             let sig =
                 with_hash!(hash, H => Ok(key.sign_pkcs1::<H>(&message)?))?;
             sig.as_ref().to_vec()
         }
         Scheme::PostQuantum(a) => with_pq_sig!(a, m => {
-            let key = m::PrivateKey::try_from_pem(&pem)?;
+            let key = m::PrivateKey::try_from_pem(Context::default(), &pem)?;
             key.sign(&mut rng, &context, &message)
                 .map_err(|_| usage!(
                     "--context is {} bytes; at most 255",
@@ -297,7 +319,10 @@ fn verify(args: VerifyArgs) -> Result<()> {
     };
     let result = match scheme {
         Scheme::Ed25519 => {
-            let key = ed25519::PublicKey::try_from_pem(&pem)?;
+            let key = ed25519::PublicKey::try_from_pem(
+                scytale::Context::default(),
+                &pem,
+            )?;
             let sig = fixed(ed25519::SIGNATURE_SIZE)?;
             let sig = sig.try_into().map_err(|_| invalid())?;
             match &args.context {
@@ -306,7 +331,10 @@ fn verify(args: VerifyArgs) -> Result<()> {
             }
         }
         Scheme::Ed448 => {
-            let key = ed448::PublicKey::try_from_pem(&pem)?;
+            let key = ed448::PublicKey::try_from_pem(
+                scytale::Context::default(),
+                &pem,
+            )?;
             let sig = fixed(ed448::SIGNATURE_SIZE)?;
             let sig = sig.try_into().map_err(|_| invalid())?;
             key.verify(&context, &message, sig)
@@ -322,7 +350,10 @@ fn verify(args: VerifyArgs) -> Result<()> {
             };
             match info.algorithm {
                 Algorithm::P256 => {
-                    let key = ecdsa::p256::PublicKey::try_from_pem(&pem)?;
+                    let key = ecdsa::p256::PublicKey::try_from_pem(
+                        scytale::Context::default(),
+                        &pem,
+                    )?;
                     let sig = if args.raw_ecdsa {
                         let sig = fixed(ecdsa::p256::SIGNATURE_SIZE)?;
                         sig.try_into().map_err(|_| invalid())?
@@ -333,7 +364,10 @@ fn verify(args: VerifyArgs) -> Result<()> {
                     with_hash!(hash, H => Ok(key.verify::<H>(&message, &sig)))?
                 }
                 Algorithm::P384 => {
-                    let key = ecdsa::p384::PublicKey::try_from_pem(&pem)?;
+                    let key = ecdsa::p384::PublicKey::try_from_pem(
+                        scytale::Context::default(),
+                        &pem,
+                    )?;
                     let sig = if args.raw_ecdsa {
                         let sig = fixed(ecdsa::p384::SIGNATURE_SIZE)?;
                         sig.try_into().map_err(|_| invalid())?
@@ -344,7 +378,10 @@ fn verify(args: VerifyArgs) -> Result<()> {
                     with_hash!(hash, H => Ok(key.verify::<H>(&message, &sig)))?
                 }
                 _ => {
-                    let key = ecdsa::p521::PublicKey::try_from_pem(&pem)?;
+                    let key = ecdsa::p521::PublicKey::try_from_pem(
+                        scytale::Context::default(),
+                        &pem,
+                    )?;
                     let sig = if args.raw_ecdsa {
                         let sig = fixed(ecdsa::p521::SIGNATURE_SIZE)?;
                         sig.try_into().map_err(|_| invalid())?
@@ -357,21 +394,27 @@ fn verify(args: VerifyArgs) -> Result<()> {
             }
         }
         Scheme::RsaPss(hash) => {
-            let key = rsa::PublicKey::try_from_pem(&pem)?;
+            let key = rsa::PublicKey::try_from_pem(
+                scytale::Context::default(),
+                &pem,
+            )?;
             fixed(key.modulus_len())?;
             with_hash!(hash, H => {
                 Ok(key.verify_pss::<H>(&message, &signature))
             })?
         }
         Scheme::RsaPkcs1(hash) => {
-            let key = rsa::PublicKey::try_from_pem(&pem)?;
+            let key = rsa::PublicKey::try_from_pem(
+                scytale::Context::default(),
+                &pem,
+            )?;
             fixed(key.modulus_len())?;
             with_hash!(hash, H => {
                 Ok(key.verify_pkcs1::<H>(&message, &signature))
             })?
         }
         Scheme::PostQuantum(a) => with_pq_sig!(a, m => {
-            let key = m::PublicKey::try_from_pem(&pem)?;
+            let key = m::PublicKey::try_from_pem(Context::default(), &pem)?;
             let sig = fixed(m::SIGNATURE_SIZE)?;
             let sig = sig.try_into().map_err(|_| invalid())?;
             key.verify(&context, &message, sig)

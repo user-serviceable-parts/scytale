@@ -141,22 +141,24 @@ mod tests {
     /// read, so every row is in play.
     #[test]
     fn every_mode_picks_the_first_kernel_whose_needs_are_met() {
-        features::build_alone(|| {
+        {
             let key = Key::from([0u8; 16]);
             let tweak = Key::from([1u8; 16]);
-            let cbc = Cbc::<Aes128>::new(&key);
+            let cbc = Cbc::<Aes128>::new(crate::Context::default(), &key);
             features::dispatches(
                 cbc::KERNELS,
                 Cbc::<Aes128>::profiles(),
                 cbc.kernel(),
             );
-            let ctr = Ctr::<Aes128>::new(&key);
+            let ctr = Ctr::<Aes128>::new(crate::Context::default(), &key);
             features::dispatches(
                 ctr::KERNELS,
                 Ctr::<Aes128>::profiles(),
                 ctr.kernel(),
             );
-            let xts = Xts::<Aes128>::try_new(&key, &tweak).expect("distinct");
+            let xts =
+                Xts::<Aes128>::try_new(crate::Context::default(), &key, &tweak)
+                    .expect("distinct");
             features::dispatches(
                 xts::KERNELS,
                 Xts::<Aes128>::profiles(),
@@ -164,27 +166,27 @@ mod tests {
             );
             // The GCM modes choose their multiply apart, so their
             // profiles are the cipher rows joined with GHASH's.
-            let gcm = Gcm::<Aes128>::new(&key);
+            let gcm = Gcm::<Aes128>::new(crate::Context::default(), &key);
             features::dispatches_combined(
                 gcm::KERNELS,
                 &ghash::PROFILES,
                 Gcm::<Aes128>::profiles(),
                 gcm.kernel(),
             );
-            let siv = GcmSiv::<Aes128>::new(&key);
+            let siv = GcmSiv::<Aes128>::new(crate::Context::default(), &key);
             features::dispatches_combined(
                 gcm_siv::KERNELS,
                 &ghash::PROFILES,
                 GcmSiv::<Aes128>::profiles(),
                 siv.kernel(),
             );
-            let ccm = Ccm::<Aes128>::new(&key);
+            let ccm = Ccm::<Aes128>::new(crate::Context::default(), &key);
             features::dispatches(
                 ccm::KERNELS,
                 Ccm::<Aes128>::profiles(),
                 ccm.kernel(),
             );
-        });
+        };
     }
 
     /// Each list names a kernel once: one that named it twice would

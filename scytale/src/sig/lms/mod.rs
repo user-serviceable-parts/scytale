@@ -22,11 +22,13 @@
 //! use scytale::random::CtrDrbg;
 //! use scytale::sig::lms::hss::PrivateKey;
 //! use scytale::sig::lms::{Lmots, Lms};
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = CtrDrbg::from_system()?;
+//! let ctx = Context::default();
+//! let mut rng = CtrDrbg::from_system(ctx)?;
 //! let sets = [(Lms::Sha256M32H5, Lmots::Sha256N32W8); 2];
-//! let mut key = PrivateKey::<2>::generate(&mut rng, &sets)?;
+//! let mut key = PrivateKey::<2>::generate(ctx, &mut rng, &sets)?;
 //! assert_eq!(key.remaining(), 32 * 32);
 //!
 //! let mut signature = [0u8; scytale::sig::lms::hss::signature_max(2)];
@@ -85,6 +87,7 @@
 //! identifier with a private layout, documented at
 //! [`hss::PrivateKey::der_bytes`], since no standard defines one.
 
+use crate::Context;
 use zeroize::Zeroize;
 
 use crate::constant_time;
@@ -437,6 +440,8 @@ const fn check_pair(lms: Lms, ots: Lmots) -> Result<(), Error> {
 /// The hash of a parameter set, `H`, as one state reused for message
 /// after message.
 pub(crate) struct Hasher {
+    /// What the hash was built under, for the others it starts.
+    ctx: Context,
     engine: Engine,
     n: usize,
 }
@@ -447,19 +452,25 @@ enum Engine {
 }
 
 impl Hasher {
-    fn new(family: Family) -> Self {
+    fn new(ctx: Context, family: Family) -> Self {
         let engine = match family {
             Family::Sha256 | Family::Sha256_192 => {
-                Engine::Sha256(Sha256::new())
+                Engine::Sha256(Sha256::new(ctx))
             }
             Family::Shake256 | Family::Shake256_192 => {
-                Engine::Shake256(Shake256::new())
+                Engine::Shake256(Shake256::new(ctx))
             }
         };
         Hasher {
+            ctx,
             engine,
             n: family.n(),
         }
+    }
+
+    /// A fresh hash of `family`, under this one's context.
+    fn fresh(&self, family: Family) -> Self {
+        Hasher::new(self.ctx, family)
     }
 
     fn update(&mut self, data: &[u8]) {
@@ -497,6 +508,8 @@ impl Hasher {
 /// that name it.
 #[derive(Clone)]
 pub struct PublicKey {
+    /// What the key was made under, for its hashes.
+    ctx: crate::Context,
     lms: Lms,
     ots: Lmots,
     i: [u8; I_SIZE],
@@ -508,7 +521,7 @@ impl PublicKey {
     /// || I || T[1]`. A typecode that names no set, or two sets on
     /// different hashes, is [`Error::WrongAlgorithm`]; the wrong length
     /// for the sets is [`Error::InvalidEncoding`].
-    pub fn new(bytes: &[u8]) -> Result<Self, Error> {
+    pub fn new(ctx: crate::Context, bytes: &[u8]) -> Result<Self, Error> {
         let (lms, ots, rest) = Self::parse_sets(bytes)?;
         if rest.len() != I_SIZE + lms.m() {
             return Err(Error::InvalidEncoding);
@@ -517,7 +530,13 @@ impl PublicKey {
         i.copy_from_slice(&rest[..I_SIZE]);
         let mut root = [0u8; N_MAX];
         root[..lms.m()].copy_from_slice(&rest[I_SIZE..]);
-        Ok(PublicKey { lms, ots, i, root })
+        Ok(PublicKey {
+            ctx,
+            lms,
+            ots,
+            i,
+            root,
+        })
     }
 
     /// The two typecodes at the front of a key or signature, and what
@@ -621,7 +640,7 @@ impl PublicKey {
             return Err(Error::InvalidSignature);
         }
         let path = &rest[4..];
-        let mut hasher = Hasher::new(lms.family());
+        let mut hasher = Hasher::new(self.ctx, lms.family());
         let kc = ots::Ots::new(ots, &mut hasher, &self.i, q)
             .candidate(ots_sig, message);
         let mut node_num = (1u32 << h) + q;
@@ -666,6 +685,8 @@ impl core::fmt::Debug for PublicKey {
 /// on its own is what SP 800-208 calls an LMS instance; keys for use
 /// are [`hss::PrivateKey`], which this is one level of.
 pub struct PrivateKey {
+    /// What the key was made under, for its hashes.
+    ctx: crate::Context,
     public: PublicKey,
     seed: Node,
     q: u32,
@@ -685,6 +706,7 @@ impl PrivateKey {
     /// `2^h` leaves. Two sets on different hashes are
     /// [`Error::WrongAlgorithm`].
     pub fn generate<R: Random>(
+        ctx: crate::Context,
         rng: &mut R,
         lms: Lms,
         ots: Lmots,
@@ -694,7 +716,7 @@ impl PrivateKey {
         rng.fill(&mut i)?;
         let mut seed = [0u8; N_MAX];
         rng.fill(&mut seed[..lms.m()])?;
-        let key = Self::grow(lms, ots, &i, &seed);
+        let key = Self::grow(ctx, lms, ots, &i, &seed);
         seed.zeroize();
         Ok(key)
     }
@@ -706,6 +728,7 @@ impl PrivateKey {
     /// [`Error::InvalidSeedLength`], and two sets on different hashes
     /// [`Error::WrongAlgorithm`].
     pub fn from_seed(
+        ctx: crate::Context,
         lms: Lms,
         ots: Lmots,
         i: &[u8; I_SIZE],
@@ -717,21 +740,29 @@ impl PrivateKey {
         }
         let mut node = [0u8; N_MAX];
         node[..seed.len()].copy_from_slice(seed);
-        let key = Self::grow(lms, ots, i, &node);
+        let key = Self::grow(ctx, lms, ots, i, &node);
         node.zeroize();
         Ok(key)
     }
 
     /// [`from_seed`](Self::from_seed) with the pair checked and the
     /// seed padded.
-    fn grow(lms: Lms, ots: Lmots, i: &[u8; I_SIZE], seed: &Node) -> Self {
+    fn grow(
+        ctx: Context,
+        lms: Lms,
+        ots: Lmots,
+        i: &[u8; I_SIZE],
+        seed: &Node,
+    ) -> Self {
         let mut state = tree::Bds::blank();
         let root = {
-            let mut tree = tree::Tree::new(lms, ots, i, seed);
+            let mut tree = tree::Tree::new(ctx, lms, ots, i, seed);
             state.init(&mut tree)
         };
         PrivateKey {
+            ctx,
             public: PublicKey {
+                ctx,
                 lms,
                 ots,
                 i: *i,
@@ -807,7 +838,7 @@ impl PrivateKey {
         out[..4].copy_from_slice(&q.to_be_bytes());
         let (ots_out, rest) = out[4..].split_at_mut(ots.signature_len());
         {
-            let mut hasher = Hasher::new(lms.family());
+            let mut hasher = Hasher::new(self.ctx, lms.family());
             ots::Ots::new(ots, &mut hasher, &self.public.i, q)
                 .sign(&self.seed, &c, message, ots_out);
         }
@@ -822,7 +853,7 @@ impl PrivateKey {
         self.q = q + 1;
         if self.remaining() > 0 {
             let mut tree =
-                tree::Tree::new(lms, ots, &self.public.i, &self.seed);
+                tree::Tree::new(self.ctx, lms, ots, &self.public.i, &self.seed);
             self.state.advance(&mut tree, q);
         }
         Ok(len)
@@ -845,9 +876,11 @@ const PRIVATE_ENCODED_MAX: usize =
 
 impl PrivateKey {
     /// A key with nothing in it, a slot for a decoder to fill.
-    pub(crate) fn blank() -> Self {
+    pub(crate) fn blank(ctx: crate::Context) -> Self {
         PrivateKey {
+            ctx,
             public: PublicKey {
+                ctx,
                 lms: Lms::Sha256M32H5,
                 ots: Lmots::Sha256N32W8,
                 i: [0u8; I_SIZE],
@@ -881,7 +914,10 @@ impl PrivateKey {
 
     /// A key from the front of `bytes`, as [`write`](Self::write)
     /// wrote it, and how many bytes it took.
-    pub(crate) fn read(bytes: &[u8]) -> Result<(Self, usize), Error> {
+    pub(crate) fn read(
+        ctx: Context,
+        bytes: &[u8],
+    ) -> Result<(Self, usize), Error> {
         let (lms, ots, _) = PublicKey::parse_sets(bytes)?;
         let len = Self::encoded_len(lms);
         if bytes.len() < len {
@@ -894,7 +930,7 @@ impl PrivateKey {
             at += len;
             piece
         };
-        let mut key = Self::blank();
+        let mut key = Self::blank(ctx);
         key.public.lms = lms;
         key.public.ots = ots;
         key.public.i.copy_from_slice(take(I_SIZE));
@@ -916,8 +952,11 @@ impl PublicKey {
     /// one level, as RFC 9708 writes a single tree, read as
     /// [`hss::PublicKey::try_from_der`] reads it. More levels than
     /// one is [`Error::WrongAlgorithm`].
-    pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
-        let key = hss::PublicKey::try_from_der(der)?;
+    pub fn try_from_der(
+        ctx: crate::Context,
+        der: &[u8],
+    ) -> Result<Self, Error> {
+        let key = hss::PublicKey::try_from_der(ctx, der)?;
         if key.levels() != 1 {
             return Err(Error::WrongAlgorithm);
         }
@@ -931,8 +970,11 @@ impl PublicKey {
     }
 
     /// A key from a `PUBLIC KEY` PEM block around the DER above.
-    pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
-        let key = hss::PublicKey::try_from_pem(pem)?;
+    pub fn try_from_pem(
+        ctx: crate::Context,
+        pem: &[u8],
+    ) -> Result<Self, Error> {
+        let key = hss::PublicKey::try_from_pem(ctx, pem)?;
         if key.levels() != 1 {
             return Err(Error::WrongAlgorithm);
         }

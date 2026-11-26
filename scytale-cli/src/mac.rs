@@ -121,7 +121,7 @@ fn tag(args: &Common) -> Result<Vec<u8>> {
     if let Some(hash) = name.strip_prefix("hmac-") {
         let key = value::checked(&args.key, "--key", entry.key, name)?;
         return with_hash!(hash, H => {
-            let mut mac = Hmac::<H>::new(&key);
+            let mut mac = Hmac::<H>::new(scytale::Context::default(), &key);
             io::for_each_chunk(input, |c| {
                 mac.update(c);
                 Ok(())
@@ -141,7 +141,8 @@ fn tag(args: &Common) -> Result<Vec<u8>> {
             let mut tag = vec![0u8; args.length.unwrap_or(default)];
             macro_rules! kmac {
                 ($K:ident) => {{
-                    let mut mac = $K::new(&key, &custom);
+                    let mut mac =
+                        $K::new(scytale::Context::default(), &key, &custom);
                     io::for_each_chunk(input, |c| {
                         mac.update(c);
                         Ok(())
@@ -158,7 +159,7 @@ fn tag(args: &Common) -> Result<Vec<u8>> {
         }
         "poly1305" => {
             let key = value::key::<Poly1305>(&args.key, "--key", name)?;
-            let mut mac = Poly1305::new(&key);
+            let mut mac = Poly1305::new(scytale::Context::default(), &key);
             io::for_each_chunk(input, |c| {
                 mac.update(c);
                 Ok(())
@@ -178,7 +179,7 @@ where
     C: scytale::cipher::BlockCipher<Block = [u8; 16]>,
 {
     let key = value::key::<C>(key, "--key", entry.name)?;
-    let mut mac = Cmac::<C>::new(&key);
+    let mut mac = Cmac::<C>::new(scytale::Context::default(), &key);
     io::for_each_chunk(input, |c| {
         mac.update(c);
         Ok(())

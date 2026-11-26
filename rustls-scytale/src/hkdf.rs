@@ -22,13 +22,7 @@ const MAX_DIGEST: usize = OkmBlock::MAX_LEN;
 
 impl<H> HkdfOver<H>
 where
-    H: scytale::hash::Hash
-        + Clone
-        + BlockType
-        + Default
-        + Send
-        + Sync
-        + 'static,
+    H: scytale::hash::Hash + Clone + BlockType + Send + Sync + 'static,
 {
     fn extract(
         &self,
@@ -38,7 +32,8 @@ where
         // No salt is a digest's worth of zeros (RFC 5869 section 2.2).
         let zeros = [0u8; MAX_DIGEST];
         let salt = salt.unwrap_or(&zeros[..size_of::<H::Output>()]);
-        let mut prk = hkdf::extract::<H>(salt, ikm);
+        let mut prk =
+            hkdf::extract::<H>(scytale::Context::default(), salt, ikm);
         let expander = Expander::<H>::new(prk.as_ref());
         prk.as_mut().zeroize();
         Box::new(expander)
@@ -47,13 +42,7 @@ where
 
 impl<H> Hkdf for HkdfOver<H>
 where
-    H: scytale::hash::Hash
-        + Clone
-        + BlockType
-        + Default
-        + Send
-        + Sync
-        + 'static,
+    H: scytale::hash::Hash + Clone + BlockType + Send + Sync + 'static,
 {
     fn extract_from_zero_ikm(
         &self,
@@ -76,7 +65,10 @@ where
     }
 
     fn hmac_sign(&self, key: &OkmBlock, message: &[u8]) -> Tag {
-        Tag::new(Hmac::<H>::mac(key.as_ref(), message).as_ref())
+        Tag::new(
+            Hmac::<H>::mac(scytale::Context::default(), key.as_ref(), message)
+                .as_ref(),
+        )
     }
 }
 
@@ -108,21 +100,20 @@ impl<H> Drop for Expander<H> {
 
 impl<H> HkdfExpander for Expander<H>
 where
-    H: scytale::hash::Hash
-        + Clone
-        + BlockType
-        + Default
-        + Send
-        + Sync
-        + 'static,
+    H: scytale::hash::Hash + Clone + BlockType + Send + Sync + 'static,
 {
     fn expand_slice(
         &self,
         info: &[&[u8]],
         output: &mut [u8],
     ) -> Result<(), OutputLengthError> {
-        hkdf::expand::<H>(&self.prk[..self.len], info, output)
-            .map_err(|_| OutputLengthError)
+        hkdf::expand::<H>(
+            scytale::Context::default(),
+            &self.prk[..self.len],
+            info,
+            output,
+        )
+        .map_err(|_| OutputLengthError)
     }
 
     fn expand_block(&self, info: &[&[u8]]) -> OkmBlock {
@@ -130,7 +121,12 @@ where
         let block = &mut out[..size_of::<H::Output>()];
         // One digest is always within HKDF's limit of 255, which is
         // the only thing `expand` refuses.
-        let expanded = hkdf::expand::<H>(&self.prk[..self.len], info, block);
+        let expanded = hkdf::expand::<H>(
+            scytale::Context::default(),
+            &self.prk[..self.len],
+            info,
+            block,
+        );
         debug_assert!(expanded.is_ok());
         let okm = OkmBlock::new(block);
         out.zeroize();
@@ -211,11 +207,21 @@ mod tests {
         let tag = HKDF_SHA384.hmac_sign(&block, b"transcript");
         assert_eq!(
             tag.as_ref(),
-            Hmac::<Sha384>::mac(&[7u8; 48], b"transcript")
+            Hmac::<Sha384>::mac(
+                scytale::Context::default(),
+                &[7u8; 48],
+                b"transcript"
+            )
         );
         let a = HKDF_SHA384.expander_for_okm(&block).expand_block(&[b"x"]);
         let mut b = [0u8; 48];
-        hkdf::expand::<Sha384>(&[7u8; 48], &[b"x"], &mut b).unwrap();
+        hkdf::expand::<Sha384>(
+            scytale::Context::default(),
+            &[7u8; 48],
+            &[b"x"],
+            &mut b,
+        )
+        .unwrap();
         assert_eq!(a.as_ref(), b);
     }
 }

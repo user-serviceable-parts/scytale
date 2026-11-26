@@ -11,12 +11,14 @@
 //! ```
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::kdf::one_step;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
+//! let ctx = Context::default();
 //! let z = [0x5a; 32];
 //! let mut key = [0u8; 32];
 //! let fixed_info: [&[u8]; 3] = [b"alice", b"bob", &256u32.to_be_bytes()];
-//! one_step::hash::<Sha256>(&z, &fixed_info, &mut key)?;
+//! one_step::hash::<Sha256>(ctx, &z, &fixed_info, &mut key)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -28,6 +30,7 @@
 //! For HKDF, the standard's two-step alternative, see
 //! [`hkdf`](super::hkdf).
 
+use crate::Context;
 use zeroize::Zeroize;
 
 use crate::Error;
@@ -43,13 +46,14 @@ const KMAC_CUSTOMIZATION: &[u8] = b"KDF";
 /// # Errors
 ///
 /// [`Error::InvalidLength`] if `out` needs more than 2^32 - 1 blocks.
-pub fn hash<H: Hash + Default>(
+pub fn hash<H: Hash>(
+    ctx: Context,
     z: &[u8],
     fixed_info: &[&[u8]],
     out: &mut [u8],
 ) -> Result<(), Error> {
     check::<H::Output>(out)?;
-    let mut hash = H::default();
+    let mut hash = H::new(ctx);
     for (i, chunk) in out.chunks_mut(size_of::<H::Output>()).enumerate() {
         hash.update(&(i as u32 + 1).to_be_bytes());
         hash.update(z);
@@ -65,7 +69,8 @@ pub fn hash<H: Hash + Default>(
 /// # Errors
 ///
 /// [`Error::InvalidLength`] if `out` is longer than a digest.
-pub fn hash_no_counter<H: Hash + Default>(
+pub fn hash_no_counter<H: Hash>(
+    ctx: Context,
     z: &[u8],
     fixed_info: &[&[u8]],
     out: &mut [u8],
@@ -73,7 +78,7 @@ pub fn hash_no_counter<H: Hash + Default>(
     if out.len() > size_of::<H::Output>() {
         return Err(Error::InvalidLength(out.len()));
     }
-    let mut hash = H::default();
+    let mut hash = H::new(ctx);
     hash.update(z);
     fixed_info.iter().for_each(|part| hash.update(part));
     emit(hash.finalize(), out);
@@ -132,8 +137,14 @@ pub fn mac_no_counter<M: Mac>(
 /// Fills `out` with `KMAC128(salt, 1 || Z || FixedInfo, L, "KDF")`.
 ///
 /// KMAC gives any length in one call, so the counter is always one.
-pub fn kmac128(salt: &[u8], z: &[u8], fixed_info: &[&[u8]], out: &mut [u8]) {
-    let mut mac = Kmac128::new(salt, KMAC_CUSTOMIZATION);
+pub fn kmac128(
+    ctx: Context,
+    salt: &[u8],
+    z: &[u8],
+    fixed_info: &[&[u8]],
+    out: &mut [u8],
+) {
+    let mut mac = Kmac128::new(ctx, salt, KMAC_CUSTOMIZATION);
     mac.update(&1u32.to_be_bytes());
     mac.update(z);
     fixed_info.iter().for_each(|part| mac.update(part));
@@ -141,8 +152,14 @@ pub fn kmac128(salt: &[u8], z: &[u8], fixed_info: &[&[u8]], out: &mut [u8]) {
 }
 
 /// Fills `out` with `KMAC256(salt, 1 || Z || FixedInfo, L, "KDF")`.
-pub fn kmac256(salt: &[u8], z: &[u8], fixed_info: &[&[u8]], out: &mut [u8]) {
-    let mut mac = Kmac256::new(salt, KMAC_CUSTOMIZATION);
+pub fn kmac256(
+    ctx: Context,
+    salt: &[u8],
+    z: &[u8],
+    fixed_info: &[&[u8]],
+    out: &mut [u8],
+) {
+    let mut mac = Kmac256::new(ctx, salt, KMAC_CUSTOMIZATION);
     mac.update(&1u32.to_be_bytes());
     mac.update(z);
     fixed_info.iter().for_each(|part| mac.update(part));
@@ -152,12 +169,13 @@ pub fn kmac256(salt: &[u8], z: &[u8], fixed_info: &[&[u8]], out: &mut [u8]) {
 /// Fills `out` with `KMAC128(salt, Z || FixedInfo, L, "KDF")`, the
 /// variant without a counter.
 pub fn kmac128_no_counter(
+    ctx: Context,
     salt: &[u8],
     z: &[u8],
     fixed_info: &[&[u8]],
     out: &mut [u8],
 ) {
-    let mut mac = Kmac128::new(salt, KMAC_CUSTOMIZATION);
+    let mut mac = Kmac128::new(ctx, salt, KMAC_CUSTOMIZATION);
     mac.update(z);
     fixed_info.iter().for_each(|part| mac.update(part));
     mac.finalize_to(out);
@@ -166,12 +184,13 @@ pub fn kmac128_no_counter(
 /// Fills `out` with `KMAC256(salt, Z || FixedInfo, L, "KDF")`, the
 /// variant without a counter.
 pub fn kmac256_no_counter(
+    ctx: Context,
     salt: &[u8],
     z: &[u8],
     fixed_info: &[&[u8]],
     out: &mut [u8],
 ) {
-    let mut mac = Kmac256::new(salt, KMAC_CUSTOMIZATION);
+    let mut mac = Kmac256::new(ctx, salt, KMAC_CUSTOMIZATION);
     mac.update(z);
     fixed_info.iter().for_each(|part| mac.update(part));
     mac.finalize_to(out);
@@ -203,9 +222,15 @@ mod tests {
     #[test]
     fn hash_is_the_definition() {
         let mut out = [0u8; 50];
-        hash::<Sha256>(b"secret", &[b"fix", b"ed"], &mut out).expect("kdf");
+        hash::<Sha256>(
+            crate::Context::default(),
+            b"secret",
+            &[b"fix", b"ed"],
+            &mut out,
+        )
+        .expect("kdf");
         for (i, block) in out.chunks(32).enumerate() {
-            let mut h = Sha256::default();
+            let mut h = Sha256::new(crate::Context::default());
             h.update(&(i as u32 + 1).to_be_bytes());
             h.update(b"secretfixed");
             assert_eq!(block, &h.finalize()[..block.len()]);
@@ -216,9 +241,14 @@ mod tests {
     #[test]
     fn mac_is_the_definition() {
         let mut out = [0u8; 40];
-        mac(&mut HmacSha256::new(b"salt"), b"z", &[b"info"], &mut out)
-            .expect("kdf");
-        let mut want = HmacSha256::new(b"salt");
+        mac(
+            &mut HmacSha256::new(crate::Context::default(), b"salt"),
+            b"z",
+            &[b"info"],
+            &mut out,
+        )
+        .expect("kdf");
+        let mut want = HmacSha256::new(crate::Context::default(), b"salt");
         want.update(&[0, 0, 0, 1]);
         want.update(b"zinfo");
         assert_eq!(out[..32], want.finalize());
@@ -229,15 +259,31 @@ mod tests {
     #[test]
     fn no_counter_is_one_block() {
         let mut out = [0u8; 32];
-        hash_no_counter::<Sha256>(b"z", &[b"info"], &mut out).expect("kdf");
-        assert_eq!(out, Sha256::digest(b"zinfo"));
+        hash_no_counter::<Sha256>(
+            crate::Context::default(),
+            b"z",
+            &[b"info"],
+            &mut out,
+        )
+        .expect("kdf");
+        assert_eq!(out, Sha256::digest(crate::Context::default(), b"zinfo"));
         let mut long = [0u8; 33];
         assert_eq!(
-            hash_no_counter::<Sha256>(b"z", &[], &mut long),
+            hash_no_counter::<Sha256>(
+                crate::Context::default(),
+                b"z",
+                &[],
+                &mut long
+            ),
             Err(Error::InvalidLength(33))
         );
         assert_eq!(
-            mac_no_counter(&mut HmacSha256::new(b"s"), b"z", &[], &mut long),
+            mac_no_counter(
+                &mut HmacSha256::new(crate::Context::default(), b"s"),
+                b"z",
+                &[],
+                &mut long
+            ),
             Err(Error::InvalidLength(33))
         );
     }
@@ -247,19 +293,43 @@ mod tests {
     #[test]
     fn kmac_is_the_definition() {
         let mut out = [0u8; 48];
-        kmac128(b"salt", b"z", &[b"info"], &mut out);
+        kmac128(
+            crate::Context::default(),
+            b"salt",
+            b"z",
+            &[b"info"],
+            &mut out,
+        );
         let mut want = [0u8; 48];
-        let mut m = Kmac128::new(b"salt", b"KDF");
+        let mut m = Kmac128::new(crate::Context::default(), b"salt", b"KDF");
         m.update(b"\x00\x00\x00\x01zinfo");
         m.finalize_to(&mut want);
         assert_eq!(out, want);
-        kmac128_no_counter(b"salt", b"z", &[b"info"], &mut out);
+        kmac128_no_counter(
+            crate::Context::default(),
+            b"salt",
+            b"z",
+            &[b"info"],
+            &mut out,
+        );
         m.update(b"zinfo");
         m.finalize_to(&mut want);
         assert_eq!(out, want);
-        kmac256_no_counter(b"salt", b"z", &[b"info"], &mut want);
+        kmac256_no_counter(
+            crate::Context::default(),
+            b"salt",
+            b"z",
+            &[b"info"],
+            &mut want,
+        );
         assert_ne!(out, want);
-        kmac256(b"salt", b"z", &[b"info"], &mut out);
+        kmac256(
+            crate::Context::default(),
+            b"salt",
+            b"z",
+            &[b"info"],
+            &mut out,
+        );
         assert_ne!(out, want);
     }
 }

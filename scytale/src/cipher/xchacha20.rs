@@ -13,9 +13,11 @@
 //! ```
 //! use scytale::Key;
 //! use scytale::cipher::xchacha20::XChaCha20;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let cipher = XChaCha20::new(&Key::from([0x42u8; 32]));
+//! let ctx = Context::default();
+//! let cipher = XChaCha20::new(ctx, &Key::from([0x42u8; 32]));
 //! let nonce = [0u8; 24];
 //! let mut message = *b"attack at dawn";
 //! cipher.encrypt(&nonce, 0, &mut message)?;
@@ -44,7 +46,7 @@ use zeroize::ZeroizeOnDrop;
 use super::chacha20::{
     self, ChaCha20, HNONCE_SIZE, KEY_SIZE, OwnedAutoStream, hchacha20,
 };
-use crate::{Error, Key, KeyType};
+use crate::{Context, Error, Key, KeyType};
 
 /// The nonce length, in bytes.
 pub const NONCE_SIZE: usize = 24;
@@ -52,6 +54,9 @@ pub const NONCE_SIZE: usize = 24;
 /// XChaCha20 under one key.
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct XChaCha20 {
+    /// What each message's ChaCha20 is built under.
+    #[zeroize(skip)]
+    ctx: Context,
     key: Key<[u8; KEY_SIZE]>,
 }
 
@@ -64,9 +69,13 @@ impl KeyType for XChaCha20 {
 }
 
 impl XChaCha20 {
-    /// Takes the key.
-    pub fn new(key: &Key<[u8; KEY_SIZE]>) -> Self {
-        XChaCha20 { key: key.clone() }
+    /// Takes the key; each message's ChaCha20 takes the best
+    /// implementation `ctx` allows.
+    pub fn new(ctx: Context, key: &Key<[u8; KEY_SIZE]>) -> Self {
+        XChaCha20 {
+            ctx,
+            key: key.clone(),
+        }
     }
 
     /// The ChaCha20 for one message, and its nonce: the key from
@@ -81,7 +90,7 @@ impl XChaCha20 {
         let subkey = hchacha20(&self.key, &head);
         let mut short = [0u8; chacha20::NONCE_SIZE];
         short[4..].copy_from_slice(&nonce[HNONCE_SIZE..]);
-        (ChaCha20::new(&subkey), short)
+        (ChaCha20::new(self.ctx, &subkey), short)
     }
 
     /// Encrypts `data` in place, its first byte at the start of
@@ -205,7 +214,7 @@ mod tests {
 
     fn cipher() -> XChaCha20 {
         let key: [u8; 32] = hex(KEY).try_into().unwrap();
-        XChaCha20::new(&Key::from(key))
+        XChaCha20::new(crate::Context::default(), &Key::from(key))
     }
 
     fn nonce() -> [u8; 24] {

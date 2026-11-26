@@ -85,7 +85,9 @@ fn aft(
         let (data_key, tweak_key) =
             (key_of::<C>(data_key)?, key_of::<C>(tweak_key)?);
         let xts =
-            builder.try_build(|| Xts::<C>::try_new(&data_key, &tweak_key))?;
+            builder.try_build(
+                |ctx| Xts::<C>::try_new(ctx, &data_key, &tweak_key),
+            )?;
         let mut start = 0;
         let mut index = 0u128;
         while start < bits {

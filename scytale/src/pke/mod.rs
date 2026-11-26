@@ -15,10 +15,12 @@
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::pke::rsa::PrivateKey;
 //! use scytale::random::CtrDrbg;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = CtrDrbg::from_system()?;
-//! let key = PrivateKey::generate(&mut rng, 2048)?;
+//! let ctx = Context::default();
+//! let mut rng = CtrDrbg::from_system(ctx)?;
+//! let key = PrivateKey::generate(ctx, &mut rng, 2048)?;
 //!
 //! // The sender encrypts a session key to the public half.
 //! let session_key = [0x42u8; 32];

@@ -14,9 +14,11 @@
 //! ```
 //! use scytale::Key;
 //! use scytale::aead::{Aead, XChaCha20Poly1305};
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let aead = XChaCha20Poly1305::new(&Key::from([0x42u8; 32]));
+//! let ctx = Context::default();
+//! let aead = XChaCha20Poly1305::new(ctx, &Key::from([0x42u8; 32]));
 //! let nonce = [7u8; 24];
 //! let header = b"to: bob";
 //! let mut message = *b"attack at dawn";
@@ -61,7 +63,7 @@ use super::chacha20_poly1305::{Core, TAG};
 use crate::cipher::chacha20::{KEY_SIZE, OwnedAutoStream};
 use crate::cipher::xchacha20::{NONCE_SIZE, XChaCha20};
 use crate::features::{self, Dispatcher, Features};
-use crate::{Error, Key, KeyType};
+use crate::{Context, Error, Key, KeyType};
 
 /// XChaCha20-Poly1305 under one key.
 #[derive(Clone, ZeroizeOnDrop)]
@@ -98,9 +100,9 @@ impl Aead for XChaCha20Poly1305 {
     type Nonce = [u8; NONCE_SIZE];
     type Tag = [u8; TAG];
 
-    fn new(key: &Self::Key) -> Self {
+    fn new(ctx: Context, key: &Self::Key) -> Self {
         // The inherent constructor, which takes precedence here.
-        XChaCha20Poly1305::new(key)
+        XChaCha20Poly1305::new(ctx, key)
     }
 
     fn encrypt(
@@ -139,9 +141,9 @@ impl Aead for XChaCha20Poly1305 {
 
 impl XChaCha20Poly1305 {
     /// Takes the key.
-    pub fn new(key: &Key<[u8; KEY_SIZE]>) -> Self {
+    pub fn new(ctx: Context, key: &Key<[u8; KEY_SIZE]>) -> Self {
         XChaCha20Poly1305 {
-            cipher: XChaCha20::new(key),
+            cipher: XChaCha20::new(ctx, key),
         }
     }
 
@@ -289,7 +291,10 @@ mod tests {
     const TAG_HEX: &str = "c0875924c1c7987947deafd8780acf49";
 
     fn aead() -> XChaCha20Poly1305 {
-        XChaCha20Poly1305::new(&Key::from(hex::<32>(KEY)))
+        XChaCha20Poly1305::new(
+            crate::Context::default(),
+            &Key::from(hex::<32>(KEY)),
+        )
     }
 
     #[test]
@@ -315,8 +320,11 @@ mod tests {
         let subkey = hchacha20(&key, nonce[..16].try_into().unwrap());
         let mut short = [0u8; 12];
         short[4..].copy_from_slice(&nonce[16..]);
-        let block = crate::cipher::chacha20::ChaCha20::new(&subkey)
-            .keystream_block(&short, 0);
+        let block = crate::cipher::chacha20::ChaCha20::new(
+            crate::Context::default(),
+            &subkey,
+        )
+        .keystream_block(&short, 0);
         assert_eq!(block[..32], hex::<32>(POLY_KEY));
     }
 
@@ -334,7 +342,7 @@ mod tests {
         let mut tag_a = [0u8; 16];
         let mut tag_b = [0u8; 16];
         aead().encrypt(&nonce, b"hdr", &mut a, &mut tag_a).unwrap();
-        ChaCha20Poly1305::new(&subkey)
+        ChaCha20Poly1305::new(crate::Context::default(), &subkey)
             .encrypt(&short, b"hdr", &mut b, &mut tag_b)
             .unwrap();
         assert_eq!(a, b);

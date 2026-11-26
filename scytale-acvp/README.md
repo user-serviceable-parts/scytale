@@ -72,19 +72,12 @@ got. A group whose cases share a key the driver generates for it,
 RSA or LMS signing, or the RSA decryption primitive, goes whole. The
 tests run at once too, as many as the harness runs.
 
-The set of features in force is the process's, so the drivers build
-through a builder that puts the kernel's profile in force for the
-while. Builds under one set share it, and builds under another wait
-their turn; the turn ends with the last build, and the set detected
-is put back. An object keeps the kernel it was built with, so a
-builder holds only its construction, and the object runs outside.
-Some calls build as they run, and are made under the builder too: a
-GCM message over a cipher with no kernel of GCM's own starts its own
-GHASH, a GCM-SIV message its own cipher and POLYVAL, ML-KEM reads its
-matrix through SHAKE streams chosen then, and a signature, a KDF or
-a DRBG starts hashes or MACs for every call. A random draw made
-outside its builder fails the case, as a sign that something was
-built there too; a construction made outside one cannot be seen.
+Each kernel's objects are built with a context of its profile, which
+the library's constructors take, and an object that builds others as
+it runs, a GCM message its GHASH, a signature or a KDF its hashes, a
+DRBG its cipher, builds them with its own. Contexts are values and
+share nothing, so every kernel's cases run side by side with no lock
+between them.
 
 A missing or unreadable vector file fails its test: the crate is
 never published, so the vectors are in every copy of it.

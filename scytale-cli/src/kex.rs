@@ -81,18 +81,36 @@ pub fn run(op: KexOp) -> Result<()> {
             Zeroizing::new(secret.to_vec())
         }
         Algorithm::P256 => {
-            let private = ecdh::p256::PrivateKey::try_from_pem(&private)?;
-            let public = ecdh::p256::PublicKey::try_from_pem(&public)?;
+            let private = ecdh::p256::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &private,
+            )?;
+            let public = ecdh::p256::PublicKey::try_from_pem(
+                scytale::Context::default(),
+                &public,
+            )?;
             Zeroizing::new(private.shared_secret(&public).to_vec())
         }
         Algorithm::P384 => {
-            let private = ecdh::p384::PrivateKey::try_from_pem(&private)?;
-            let public = ecdh::p384::PublicKey::try_from_pem(&public)?;
+            let private = ecdh::p384::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &private,
+            )?;
+            let public = ecdh::p384::PublicKey::try_from_pem(
+                scytale::Context::default(),
+                &public,
+            )?;
             Zeroizing::new(private.shared_secret(&public).to_vec())
         }
         _ => {
-            let private = ecdh::p521::PrivateKey::try_from_pem(&private)?;
-            let public = ecdh::p521::PublicKey::try_from_pem(&public)?;
+            let private = ecdh::p521::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &private,
+            )?;
+            let public = ecdh::p521::PublicKey::try_from_pem(
+                scytale::Context::default(),
+                &public,
+            )?;
             Zeroizing::new(private.shared_secret(&public).to_vec())
         }
     };

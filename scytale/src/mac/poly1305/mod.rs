@@ -30,7 +30,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::Mac;
 use crate::features::{self, Dispatcher, Features};
-use crate::{Key, KeyType};
+use crate::{Context, Key, KeyType};
 
 /// The key length in bytes: `r` then `s`.
 pub const KEY_SIZE: usize = 32;
@@ -100,7 +100,9 @@ impl Poly1305 {
     ///
     /// The key is for this message and no other; see the warnings
     /// above.
-    pub fn new(key: &Key<[u8; KEY_SIZE]>) -> Self {
+    // Only x86-64 has a kernel to choose.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
+    pub fn new(ctx: Context, key: &Key<[u8; KEY_SIZE]>) -> Self {
         let key = key.array();
         let word = |at: usize| {
             let mut bytes = [0u8; 8];
@@ -126,7 +128,7 @@ impl Poly1305 {
             used: 0,
             dirty: 0,
             #[cfg(target_arch = "x86_64")]
-            fast: features::choose(KERNELS).and_then(x86_64::Avx2::of),
+            fast: features::choose(ctx, KERNELS).and_then(x86_64::Avx2::of),
             #[cfg(target_arch = "x86_64")]
             powers: None,
             #[cfg(target_arch = "x86_64")]
@@ -319,8 +321,8 @@ impl KeyType for Poly1305 {
 impl Mac for Poly1305 {
     type Tag = [u8; BLOCK];
 
-    fn new(key: &Self::Key) -> Self {
-        Poly1305::new(key)
+    fn new(ctx: Context, key: &Self::Key) -> Self {
+        Poly1305::new(ctx, key)
     }
 
     fn reset(&mut self) {
@@ -442,7 +444,8 @@ pub(crate) mod tests {
 
     /// The tag under the kernel this processor dispatches to.
     fn plain_tag(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
-        let mut mac = Poly1305::new(&Key::from(*key));
+        let mut mac =
+            Poly1305::new(crate::Context::default(), &Key::from(*key));
         mac.update(message);
         mac.finalize()
     }
@@ -452,7 +455,7 @@ pub(crate) mod tests {
         key: &[u8; 32],
         message: &[u8],
     ) -> [u8; 16] {
-        let mut mac = under.build(|| Poly1305::new(&Key::from(*key)));
+        let mut mac = { Poly1305::new(under.ctx(), &Key::from(*key)) };
         mac.update(message);
         mac.finalize()
     }
@@ -506,14 +509,14 @@ pub(crate) mod tests {
         for len in 0..data.len() {
             let want = one_at_a_time(under, &key, &data[..len]);
 
-            let mut p = under.build(|| Poly1305::new(&Key::from(key)));
+            let mut p = { Poly1305::new(under.ctx(), &Key::from(key)) };
             p.update(&data[..len]);
             assert_eq!(p.finalize(), want, "{len} bytes");
 
             // Pieces, so a run starts and ends part way along and the
             // part block is carried between calls.
             for piece in [1, 16, 17, 64, 65] {
-                let mut p = under.build(|| Poly1305::new(&Key::from(key)));
+                let mut p = { Poly1305::new(under.ctx(), &Key::from(key)) };
                 for part in data[..len].chunks(piece) {
                     p.update(part);
                 }
@@ -529,7 +532,7 @@ pub(crate) mod tests {
         key: &[u8; KEY_SIZE],
         message: &[u8],
     ) -> [u8; BLOCK] {
-        let mut p = under.build(|| Poly1305::new(&Key::from(*key)));
+        let mut p = { Poly1305::new(under.ctx(), &Key::from(*key)) };
         let (blocks, rest) = message.as_chunks::<BLOCK>();
         for block in blocks {
             p.absorb(block, 1);
@@ -664,13 +667,15 @@ pub(crate) mod tests {
         let message: [u8; 101] = core::array::from_fn(|i| (i * 13) as u8);
         let expected = plain_tag(key, &message);
         for chunk in [1, 3, 15, 16, 17, 40] {
-            let mut mac = Poly1305::new(&Key::from(*key));
+            let mut mac =
+                Poly1305::new(crate::Context::default(), &Key::from(*key));
             for piece in message.chunks(chunk) {
                 mac.update(piece);
             }
             assert_eq!(mac.finalize(), expected, "chunk {chunk}");
         }
-        let mut mac = Poly1305::new(&Key::from(*key));
+        let mut mac =
+            Poly1305::new(crate::Context::default(), &Key::from(*key));
         mac.update(b"not this");
         mac.reset();
         mac.update(&message);
@@ -684,7 +689,7 @@ pub(crate) mod tests {
         let key = [0x3cu8; KEY_SIZE];
         let message: [u8; 101] = core::array::from_fn(|i| (i * 5) as u8);
         let expected = plain_tag(&key, &message);
-        let mut mac = Poly1305::new(&Key::from(key));
+        let mut mac = Poly1305::new(crate::Context::default(), &Key::from(key));
         mac.update(&[0xa5; 3 * BUFFER + 9]);
         mac.reset();
         mac.update(&message);
@@ -697,7 +702,7 @@ pub(crate) mod tests {
     fn verify_accepts_and_rejects() {
         let key = [7u8; 32];
         let tag = plain_tag(&key, b"message");
-        let mut mac = Poly1305::new(&Key::from(key));
+        let mut mac = Poly1305::new(crate::Context::default(), &Key::from(key));
         mac.update(b"message");
         assert_eq!(mac.clone().verify(&tag), Ok(()));
         let mut wrong = tag;
@@ -721,7 +726,7 @@ pub(crate) mod tests {
             }
         }
         let key = [0x5a; 32];
-        let mut mac = Poly1305::new(&Key::from(key));
+        let mut mac = Poly1305::new(crate::Context::default(), &Key::from(key));
         mac.update(b"abc");
         let mut buffer = Buffer([0; 128], 0);
         fmt::write(&mut buffer, format_args!("{mac:?}")).unwrap();

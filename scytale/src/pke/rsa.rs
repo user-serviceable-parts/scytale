@@ -60,10 +60,12 @@
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::pke::rsa::PrivateKey;
 //! use scytale::random::CtrDrbg;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = CtrDrbg::from_system()?;
-//! let key = PrivateKey::generate(&mut rng, 2048)?;
+//! let ctx = Context::default();
+//! let mut rng = CtrDrbg::from_system(ctx)?;
+//! let key = PrivateKey::generate(ctx, &mut rng, 2048)?;
 //!
 //! // The sender encrypts a session key to the public half.
 //! let session_key = [0x42u8; 32];
@@ -79,7 +81,7 @@
 //! // Stored as PKCS#8 in PEM, the way OpenSSL writes it.
 //! let mut pem = [0u8; 8 * 256];
 //! let n = key.pem_bytes(&mut pem)?;
-//! let key = PrivateKey::try_from_pem(&pem[..n])?;
+//! let key = PrivateKey::try_from_pem(ctx, &pem[..n])?;
 //! assert_eq!(key.bits(), 2048);
 //! # Ok(())
 //! # }
@@ -95,6 +97,7 @@
 //! operation whose time varies with its secrets: how many candidates
 //! fall to the primality tests depends on the randomness drawn.
 
+use crate::Context;
 use core::fmt;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -184,6 +187,8 @@ impl fmt::Debug for Ciphertext {
 /// the shape, which is the same here.
 #[derive(Clone, Copy)]
 pub struct PublicKeyRef<'a> {
+    /// What the key's hashes are built under.
+    ctx: Context,
     raw: Public<'a>,
 }
 
@@ -192,6 +197,8 @@ pub struct PublicKeyRef<'a> {
 /// words are the caller's to wipe; [`PrivateKey`] does so on drop.
 #[derive(Clone, Copy)]
 pub struct PrivateKeyRef<'a> {
+    /// What the key's hashes are built under.
+    ctx: Context,
     raw: Private<'a>,
 }
 
@@ -202,6 +209,8 @@ pub struct PublicKey {
     words: [u64; PUBLIC_WORDS],
     bits: usize,
     choice: Choice,
+    /// What the key was made under, for its hashes.
+    ctx: Context,
 }
 
 /// A decryption key that owns its words, with the public half in
@@ -211,6 +220,8 @@ pub struct PrivateKey {
     words: [u64; PRIVATE_WORDS],
     bits: usize,
     choice: Choice,
+    /// What the key was made under, for its hashes.
+    ctx: Context,
 }
 
 impl crate::features::sealed::Sealed for PublicKey {}
@@ -270,9 +281,10 @@ impl<'a> PublicKeyRef<'a> {
 
     /// The view over words a `fill` laid out. Words that do not hold
     /// a key are [`Error::InvalidPublicKey`].
-    pub fn new(storage: &'a [u64]) -> Result<Self, Error> {
+    pub fn new(ctx: Context, storage: &'a [u64]) -> Result<Self, Error> {
         Ok(PublicKeyRef {
-            raw: Public::new(storage, Choice::bignum())?,
+            ctx,
+            raw: Public::new(storage, Choice::bignum(ctx))?,
         })
     }
 
@@ -302,7 +314,7 @@ impl<'a> PublicKeyRef<'a> {
     }
 
     /// Encrypts with OAEP; see [`PublicKey::encrypt_oaep`].
-    pub fn encrypt_oaep<H: Hash + Default, R: Random>(
+    pub fn encrypt_oaep<H: Hash, R: Random>(
         &self,
         rng: &mut R,
         label: &[u8],
@@ -315,7 +327,7 @@ impl<'a> PublicKeyRef<'a> {
         if self.modulus_len() < 2 * h_len + 2 {
             return Err(Error::MessageTooLong);
         }
-        let mut seed = H::digest(&[]);
+        let mut seed = H::digest(self.ctx, &[]);
         rng.fill(seed.as_mut())?;
         let ciphertext =
             self.oaep_encode::<H>(seed.as_ref(), label, message, scratch);
@@ -325,7 +337,7 @@ impl<'a> PublicKeyRef<'a> {
 
     /// The encoding half of OAEP, with the seed handed in so the
     /// tests can pin it.
-    fn oaep_encode<H: Hash + Default>(
+    fn oaep_encode<H: Hash>(
         &self,
         seed: &[u8],
         label: &[u8],
@@ -344,17 +356,17 @@ impl<'a> PublicKeyRef<'a> {
         let db_len = len - h_len - 1;
         {
             let db = &mut em[1 + h_len..];
-            db[..h_len].copy_from_slice(H::digest(label).as_ref());
+            db[..h_len].copy_from_slice(H::digest(self.ctx, label).as_ref());
             db[db_len - message.len() - 1] = 0x01;
             db[db_len - message.len()..].copy_from_slice(message);
         }
         // Each half masks the other: DB under the seed's mask, then
         // the seed under the masked DB's.
         let (head, db) = em.split_at_mut(1 + h_len);
-        mgf1_xor::<H>(seed, db)?;
+        mgf1_xor::<H>(self.ctx, seed, db)?;
         head[1..].copy_from_slice(seed);
         let (head, db) = em.split_at_mut(1 + h_len);
-        mgf1_xor::<H>(db, &mut head[1..])?;
+        mgf1_xor::<H>(self.ctx, db, &mut head[1..])?;
 
         // The encoded message is below the modulus by construction:
         // its first byte is zero, and a modulus of these bits has
@@ -422,6 +434,7 @@ impl<'a> PrivateKeyRef<'a> {
     /// need `scratch`.
     #[allow(clippy::too_many_arguments)]
     pub fn fill_crt(
+        ctx: Context,
         n: &[u8],
         e: &[u8],
         d: &[u8],
@@ -433,62 +446,80 @@ impl<'a> PrivateKeyRef<'a> {
         storage: &mut [u64],
         scratch: &mut [u64],
     ) -> Result<usize, Error> {
-        let choice = Choice::bignum();
+        let choice = Choice::bignum(ctx);
         Private::fill_crt(choice, n, e, d, p, q, dp, dq, qinv, storage, scratch)
     }
 
     /// Lays out a key from its DER PKCS#8 `PrivateKeyInfo`, as
     /// [`PrivateKey::try_from_der`] reads it.
     pub fn fill_from_der(
+        ctx: Context,
         der: &[u8],
         storage: &mut [u64],
         scratch: &mut [u64],
     ) -> Result<usize, Error> {
-        Private::fill_from_pkcs8(Choice::bignum(), der, false, storage, scratch)
+        Private::fill_from_pkcs8(
+            Choice::bignum(ctx),
+            der,
+            false,
+            storage,
+            scratch,
+        )
     }
 
     /// Lays out a key from the bare PKCS#1 `RSAPrivateKey`, as
     /// [`PrivateKey::try_from_pkcs1`] reads it.
     pub fn fill_from_pkcs1(
+        ctx: Context,
         der: &[u8],
         storage: &mut [u64],
         scratch: &mut [u64],
     ) -> Result<usize, Error> {
-        Private::fill_from_pkcs1(Choice::bignum(), der, storage, scratch)
+        Private::fill_from_pkcs1(Choice::bignum(ctx), der, storage, scratch)
     }
 
     /// Lays out a key from a PEM block, as
     /// [`PrivateKey::try_from_pem`] reads it.
     pub fn fill_from_pem(
+        ctx: Context,
         pem: &[u8],
         storage: &mut [u64],
         scratch: &mut [u64],
     ) -> Result<usize, Error> {
-        Private::fill_from_pem(Choice::bignum(), pem, false, storage, scratch)
+        Private::fill_from_pem(
+            Choice::bignum(ctx),
+            pem,
+            false,
+            storage,
+            scratch,
+        )
     }
 
     /// Generates a fresh key of `bits` in `storage`, returning the
     /// words it took; see [`PrivateKey::generate`].
     pub fn generate<R: Random>(
+        ctx: Context,
         rng: &mut R,
         bits: usize,
         storage: &mut [u64],
         scratch: &mut [u64],
     ) -> Result<usize, Error> {
-        Private::generate(Choice::bignum(), rng, bits, storage, scratch)
+        Private::generate(Choice::bignum(ctx), rng, bits, storage, scratch)
     }
 
     /// The view over words a `fill` laid out. Words that do not hold
     /// a key are [`Error::InvalidPrivateKey`].
-    pub fn new(storage: &'a [u64]) -> Result<Self, Error> {
+    pub fn new(ctx: Context, storage: &'a [u64]) -> Result<Self, Error> {
         Ok(PrivateKeyRef {
-            raw: Private::new(storage, Choice::bignum())?,
+            ctx,
+            raw: Private::new(storage, Choice::bignum(ctx))?,
         })
     }
 
     /// The public half, as a view over the front of the same words.
     pub fn public_key(&self) -> PublicKeyRef<'a> {
         PublicKeyRef {
+            ctx: self.ctx,
             raw: self.raw.public(),
         }
     }
@@ -523,7 +554,7 @@ impl<'a> PrivateKeyRef<'a> {
     }
 
     /// Decrypts an OAEP ciphertext; see [`PrivateKey::decrypt_oaep`].
-    pub fn decrypt_oaep<H: Hash + Default>(
+    pub fn decrypt_oaep<H: Hash>(
         &self,
         label: &[u8],
         ciphertext: &[u8],
@@ -550,14 +581,14 @@ impl<'a> PrivateKeyRef<'a> {
         // Unmask: the seed under the masked DB, then DB under the
         // seed.
         let (head, db) = em.split_at_mut(1 + h_len);
-        mgf1_xor::<H>(db, &mut head[1..])?;
-        mgf1_xor::<H>(&head[1..], db)?;
+        mgf1_xor::<H>(self.ctx, db, &mut head[1..])?;
+        mgf1_xor::<H>(self.ctx, &head[1..], db)?;
 
         // One flag accumulates every check: the leading zero byte,
         // the label hash, and the zeros-then-0x01 frame around the
         // message.
         let mut bad = head[0];
-        let lhash = H::digest(label);
+        let lhash = H::digest(self.ctx, label);
         for (a, b) in db[..h_len].iter().zip(lhash.as_ref()) {
             bad |= a ^ b;
         }
@@ -642,12 +673,14 @@ impl<'a> PrivateKeyRef<'a> {
 impl PublicKey {
     /// The key laid out by `fill` in a fresh array.
     fn filled(
+        ctx: Context,
         fill: impl FnOnce(&mut [u64]) -> Result<usize, Error>,
     ) -> Result<Self, Error> {
         let mut key = PublicKey {
             words: [0; PUBLIC_WORDS],
             bits: 0,
-            choice: Choice::bignum(),
+            choice: Choice::bignum(ctx),
+            ctx,
         };
         fill(&mut key.words)?;
         key.bits = Public::new(&key.words, key.choice)?.bits();
@@ -658,6 +691,7 @@ impl PublicKey {
     /// by this type, so they hold a key of the bits it remembers.
     fn view(&self) -> PublicKeyRef<'_> {
         PublicKeyRef {
+            ctx: self.ctx,
             raw: Public::over(&self.words, self.bits, self.choice),
         }
     }
@@ -670,8 +704,8 @@ impl PublicKey {
     /// in that range is a key, a multiple of eight or not. The
     /// exponent must be odd, at least 3, and fit eight bytes, which
     /// every deployed key's does.
-    pub fn try_new(n: &[u8], e: &[u8]) -> Result<Self, Error> {
-        Self::filled(|words| PublicKeyRef::fill(n, e, words))
+    pub fn try_new(ctx: Context, n: &[u8], e: &[u8]) -> Result<Self, Error> {
+        Self::filled(ctx, |words| PublicKeyRef::fill(n, e, words))
     }
 
     /// An encryption key from its DER `SubjectPublicKeyInfo` (RFC
@@ -683,15 +717,15 @@ impl PublicKey {
     /// it. Another algorithm's key, the PSS marking included, is
     /// [`Error::WrongAlgorithm`], and anything else wrong with the
     /// bytes [`Error::InvalidEncoding`].
-    pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
-        Self::filled(|words| PublicKeyRef::fill_from_der(der, words))
+    pub fn try_from_der(ctx: Context, der: &[u8]) -> Result<Self, Error> {
+        Self::filled(ctx, |words| PublicKeyRef::fill_from_der(der, words))
     }
 
     /// An encryption key from the bare PKCS#1 `RSAPublicKey` (RFC
     /// 8017 A.1.1), the form under `RSA PUBLIC KEY`, which is what
     /// the `SubjectPublicKeyInfo` wraps.
-    pub fn try_from_pkcs1(der: &[u8]) -> Result<Self, Error> {
-        Self::filled(|words| PublicKeyRef::fill_from_pkcs1(der, words))
+    pub fn try_from_pkcs1(ctx: Context, der: &[u8]) -> Result<Self, Error> {
+        Self::filled(ctx, |words| PublicKeyRef::fill_from_pkcs1(der, words))
     }
 
     /// An encryption key from a PEM block (RFC 7468) labelled
@@ -699,8 +733,8 @@ impl PublicKey {
     /// form above. Whitespace and line ends are read leniently;
     /// anything else that is not exactly one well-formed block is
     /// [`Error::InvalidEncoding`].
-    pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
-        Self::filled(|words| PublicKeyRef::fill_from_pem(pem, words))
+    pub fn try_from_pem(ctx: Context, pem: &[u8]) -> Result<Self, Error> {
+        Self::filled(ctx, |words| PublicKeyRef::fill_from_pem(pem, words))
     }
 
     /// The modulus length in bits.
@@ -741,7 +775,7 @@ impl PublicKey {
     /// most the modulus length minus two digest lengths and two
     /// bytes. The label is rarely wanted and usually empty; whatever
     /// it is, decryption must present the same one.
-    pub fn encrypt_oaep<H: Hash + Default, R: Random>(
+    pub fn encrypt_oaep<H: Hash, R: Random>(
         &self,
         rng: &mut R,
         label: &[u8],
@@ -754,7 +788,7 @@ impl PublicKey {
 
     /// The encoding half of OAEP with the seed pinned, for the tests.
     #[cfg(test)]
-    fn oaep_encode<H: Hash + Default>(
+    fn oaep_encode<H: Hash>(
         &self,
         seed: &[u8],
         label: &[u8],
@@ -807,14 +841,15 @@ impl PrivateKey {
     /// The key laid out by `fill` in a fresh array, with the scratch
     /// the checks need and the arithmetic the key will keep, so
     /// that the checks run what the key will.
-    fn filled<F>(fill: F) -> Result<Self, Error>
+    fn filled<F>(ctx: Context, fill: F) -> Result<Self, Error>
     where
         F: FnOnce(Choice, &mut [u64], &mut [u64]) -> Result<usize, Error>,
     {
         let mut key = PrivateKey {
             words: [0; PRIVATE_WORDS],
             bits: 0,
-            choice: Choice::bignum(),
+            choice: Choice::bignum(ctx),
+            ctx,
         };
         let mut scratch = Scratch::new();
         fill(key.choice, &mut key.words, &mut scratch.0)?;
@@ -826,6 +861,7 @@ impl PrivateKey {
     /// by this type, so they hold a key of the bits it remembers.
     fn view(&self) -> PrivateKeyRef<'_> {
         PrivateKeyRef {
+            ctx: self.ctx,
             raw: Private::over(&self.words, self.bits, self.choice),
         }
     }
@@ -836,8 +872,13 @@ impl PrivateKey {
     /// primes should come in through
     /// [`try_new_crt`](PrivateKey::try_new_crt) instead, which
     /// decrypts three times faster.
-    pub fn try_new(n: &[u8], e: &[u8], d: &[u8]) -> Result<Self, Error> {
-        Self::filled(|_, words, _| PrivateKeyRef::fill(n, e, d, words))
+    pub fn try_new(
+        ctx: Context,
+        n: &[u8],
+        e: &[u8],
+        d: &[u8],
+    ) -> Result<Self, Error> {
+        Self::filled(ctx, |_, words, _| PrivateKeyRef::fill(n, e, d, words))
     }
 
     /// A decryption key with its Chinese remainder pieces, in the
@@ -852,6 +893,7 @@ impl PrivateKey {
     /// the check every CRT result gets before it is used.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new_crt(
+        ctx: Context,
         n: &[u8],
         e: &[u8],
         d: &[u8],
@@ -861,7 +903,7 @@ impl PrivateKey {
         dq: &[u8],
         qinv: &[u8],
     ) -> Result<Self, Error> {
-        Self::filled(|choice, words, scratch| {
+        Self::filled(ctx, |choice, words, scratch| {
             Private::fill_crt(
                 choice, n, e, d, p, q, dp, dq, qinv, words, scratch,
             )
@@ -879,10 +921,11 @@ impl PrivateKey {
     /// 2048 bits is the least anyone should make a new key at;
     /// narrower ones are for interoperation and tests.
     pub fn generate<R: Random>(
+        ctx: Context,
         rng: &mut R,
         bits: usize,
     ) -> Result<Self, Error> {
-        Self::filled(|choice, words, scratch| {
+        Self::filled(ctx, |choice, words, scratch| {
             Private::generate(choice, rng, bits, words, scratch)
         })
     }
@@ -899,8 +942,8 @@ impl PrivateKey {
     /// [`Error::WrongAlgorithm`], a multi-prime key
     /// [`Error::UnsupportedVersion`], and anything else wrong with
     /// the bytes [`Error::InvalidEncoding`].
-    pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
-        Self::filled(|choice, words, scratch| {
+    pub fn try_from_der(ctx: Context, der: &[u8]) -> Result<Self, Error> {
+        Self::filled(ctx, |choice, words, scratch| {
             Private::fill_from_pkcs8(choice, der, false, words, scratch)
         })
     }
@@ -908,8 +951,8 @@ impl PrivateKey {
     /// A decryption key from the bare PKCS#1 `RSAPrivateKey` (RFC
     /// 8017 A.1.2), the form under `RSA PRIVATE KEY`, which is what
     /// the `PrivateKeyInfo` wraps.
-    pub fn try_from_pkcs1(der: &[u8]) -> Result<Self, Error> {
-        Self::filled(|choice, words, scratch| {
+    pub fn try_from_pkcs1(ctx: Context, der: &[u8]) -> Result<Self, Error> {
+        Self::filled(ctx, |choice, words, scratch| {
             Private::fill_from_pkcs1(choice, der, words, scratch)
         })
     }
@@ -919,8 +962,8 @@ impl PrivateKey {
     /// form above. Whitespace and line ends are read leniently;
     /// anything else that is not exactly one well-formed block, an
     /// encrypted key included, is [`Error::InvalidEncoding`].
-    pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
-        Self::filled(|choice, words, scratch| {
+    pub fn try_from_pem(ctx: Context, pem: &[u8]) -> Result<Self, Error> {
+        Self::filled(ctx, |choice, words, scratch| {
             Private::fill_from_pem(choice, pem, false, words, scratch)
         })
     }
@@ -931,6 +974,7 @@ impl PrivateKey {
             words: [0; PUBLIC_WORDS],
             bits: self.bits,
             choice: self.choice,
+            ctx: self.ctx,
         };
         let used = public_words(self.bits);
         public.words[..used].copy_from_slice(&self.words[..used]);
@@ -986,7 +1030,7 @@ impl PrivateKey {
     /// failed gives an attacker the message one query at a time
     /// (Manger's attack), so nothing here branches on secret bytes
     /// until the single verdict.
-    pub fn decrypt_oaep<H: Hash + Default>(
+    pub fn decrypt_oaep<H: Hash>(
         &self,
         label: &[u8],
         ciphertext: &[u8],
@@ -1179,13 +1223,23 @@ mod tests {
     const E: &[u8] = &[0x01, 0x00, 0x01];
 
     fn key2048() -> PrivateKey {
-        PrivateKey::try_new(&unhex::<256>(N2048), E, &unhex::<256>(D2048))
-            .unwrap()
+        PrivateKey::try_new(
+            crate::Context::default(),
+            &unhex::<256>(N2048),
+            E,
+            &unhex::<256>(D2048),
+        )
+        .unwrap()
     }
 
     fn key1024() -> PrivateKey {
-        PrivateKey::try_new(&unhex::<128>(N1024), E, &unhex::<128>(D1024))
-            .unwrap()
+        PrivateKey::try_new(
+            crate::Context::default(),
+            &unhex::<128>(N1024),
+            E,
+            &unhex::<128>(D1024),
+        )
+        .unwrap()
     }
 
     const OAEP_SEED256: &str =
@@ -1299,7 +1353,7 @@ mod tests {
     #[test]
     fn oaep_round_trips() {
         use crate::random::CtrDrbg;
-        let mut rng = CtrDrbg::from_system().unwrap();
+        let mut rng = CtrDrbg::from_system(crate::Context::default()).unwrap();
         let key = key1024();
         let public = key.public_key();
         let mut out = [0u8; 128];
@@ -1325,8 +1379,10 @@ mod tests {
     #[test]
     fn generated_key_round_trips() {
         use crate::random::CtrDrbg;
-        let mut rng = CtrDrbg::from_system().unwrap();
-        let key = PrivateKey::generate(&mut rng, 1200).unwrap();
+        let mut rng = CtrDrbg::from_system(crate::Context::default()).unwrap();
+        let key =
+            PrivateKey::generate(crate::Context::default(), &mut rng, 1200)
+                .unwrap();
         assert_eq!(key.bits(), 1200);
         assert_eq!(key.modulus_len(), 150);
         let mut out = [0u8; 150];
@@ -1348,8 +1404,18 @@ mod tests {
         let mut parts = [[0u8; 75]; 5];
         let [p, q, dp, dq, qinv] = &mut parts;
         key.crt_bytes(p, q, dp, dq, qinv).unwrap();
-        let again =
-            PrivateKey::try_new_crt(&nb, &e, &d, p, q, dp, dq, qinv).unwrap();
+        let again = PrivateKey::try_new_crt(
+            crate::Context::default(),
+            &nb,
+            &e,
+            &d,
+            p,
+            q,
+            dp,
+            dq,
+            qinv,
+        )
+        .unwrap();
         let n = again
             .decrypt_oaep::<Sha256>(b"", c.as_ref(), &mut out)
             .unwrap();
@@ -1467,8 +1533,12 @@ mod tests {
     /// public half round-trips too.
     #[test]
     fn formats_round_trip() {
-        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
-        let key = PrivateKey::generate(&mut rng, 1024).unwrap();
+        let mut rng =
+            crate::random::CtrDrbg::from_system(crate::Context::default())
+                .unwrap();
+        let key =
+            PrivateKey::generate(crate::Context::default(), &mut rng, 1024)
+                .unwrap();
         let sealed = key
             .public_key()
             .encrypt_oaep::<Sha256, _>(&mut rng, b"", b"session key")
@@ -1480,18 +1550,22 @@ mod tests {
 
         let n = key.der_bytes(&mut out).unwrap();
         let backs = [
-            PrivateKey::try_from_der(&out[..n]).unwrap(),
+            PrivateKey::try_from_der(crate::Context::default(), &out[..n])
+                .unwrap(),
             {
                 let n = key.pkcs1_bytes(&mut out).unwrap();
-                PrivateKey::try_from_pkcs1(&out[..n]).unwrap()
+                PrivateKey::try_from_pkcs1(crate::Context::default(), &out[..n])
+                    .unwrap()
             },
             {
                 let n = key.pem_bytes(&mut out).unwrap();
-                PrivateKey::try_from_pem(&out[..n]).unwrap()
+                PrivateKey::try_from_pem(crate::Context::default(), &out[..n])
+                    .unwrap()
             },
             {
                 let n = key.pkcs1_pem_bytes(&mut out).unwrap();
-                PrivateKey::try_from_pem(&out[..n]).unwrap()
+                PrivateKey::try_from_pem(crate::Context::default(), &out[..n])
+                    .unwrap()
             },
         ];
         for back in &backs {
@@ -1507,18 +1581,22 @@ mod tests {
         let public = key.public_key();
         let n = public.der_bytes(&mut out).unwrap();
         let backs = [
-            PublicKey::try_from_der(&out[..n]).unwrap(),
+            PublicKey::try_from_der(crate::Context::default(), &out[..n])
+                .unwrap(),
             {
                 let n = public.pkcs1_bytes(&mut out).unwrap();
-                PublicKey::try_from_pkcs1(&out[..n]).unwrap()
+                PublicKey::try_from_pkcs1(crate::Context::default(), &out[..n])
+                    .unwrap()
             },
             {
                 let n = public.pem_bytes(&mut out).unwrap();
-                PublicKey::try_from_pem(&out[..n]).unwrap()
+                PublicKey::try_from_pem(crate::Context::default(), &out[..n])
+                    .unwrap()
             },
             {
                 let n = public.pkcs1_pem_bytes(&mut out).unwrap();
-                PublicKey::try_from_pem(&out[..n]).unwrap()
+                PublicKey::try_from_pem(crate::Context::default(), &out[..n])
+                    .unwrap()
             },
         ];
         for back in &backs {
@@ -1537,8 +1615,12 @@ mod tests {
     /// key without its primes cannot be written.
     #[test]
     fn pss_keys_and_plain_keys_are_refused() {
-        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
-        let key = PrivateKey::generate(&mut rng, 1024).unwrap();
+        let mut rng =
+            crate::random::CtrDrbg::from_system(crate::Context::default())
+                .unwrap();
+        let key =
+            PrivateKey::generate(crate::Context::default(), &mut rng, 1024)
+                .unwrap();
         let mut out = [0u8; 8 * 128];
         let n = key.der_bytes(&mut out).unwrap();
         let oid_end = out[..n]
@@ -1548,7 +1630,8 @@ mod tests {
             + 8;
         out[oid_end] = 0x0a;
         assert_eq!(
-            PrivateKey::try_from_der(&out[..n]).err(),
+            PrivateKey::try_from_der(crate::Context::default(), &out[..n])
+                .err(),
             Some(Error::WrongAlgorithm)
         );
         let n = key.public_key().der_bytes(&mut out).unwrap();
@@ -1559,7 +1642,7 @@ mod tests {
             + 8;
         out[oid_end] = 0x0a;
         assert_eq!(
-            PublicKey::try_from_der(&out[..n]).err(),
+            PublicKey::try_from_der(crate::Context::default(), &out[..n]).err(),
             Some(Error::WrongAlgorithm)
         );
 
@@ -1588,7 +1671,8 @@ mod tests {
             &mut storage,
         )
         .unwrap();
-        let key = PrivateKeyRef::new(&storage).unwrap();
+        let key =
+            PrivateKeyRef::new(crate::Context::default(), &storage).unwrap();
         let got = key
             .public_key()
             .oaep_encode::<Sha256>(&seed, b"", b"hello", &mut scratch)
