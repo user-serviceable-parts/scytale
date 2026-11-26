@@ -18,23 +18,20 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            let encrypt = match text(group, "direction")? {
-                "encrypt" => true,
-                "decrypt" => false,
-                other => return Err(Error::new(format!("direction {other}"))),
-            };
-            let alphabet: Vec<char> =
-                text(group, "alphabet")?.chars().collect();
-            let radix = u32::try_from(int(group, "radix")?)
-                .map_err(|_| Error::new("field radix is too large"))?;
-            match text(group, "testType")? {
-                "AFT" => {
-                    answer_tests(group, |t| aft(t, encrypt, &alphabet, radix))
-                }
-                _ => Err(unknown_test_type(group)),
-            }
-        })
+        let encrypt = match text(group, "direction")? {
+            "encrypt" => true,
+            "decrypt" => false,
+            other => return Err(Error::new(format!("direction {other}"))),
+        };
+        let alphabet: Vec<char> = text(group, "alphabet")?.chars().collect();
+        let radix = u32::try_from(int(group, "radix")?)
+            .map_err(|_| Error::new("field radix is too large"))?;
+        match text(group, "testType")? {
+            "AFT" => answer_tests(group, |t| {
+                aft(t, encrypt, &alphabet, radix, builder)
+            }),
+            _ => Err(unknown_test_type(group)),
+        }
     })
 }
 
@@ -70,6 +67,7 @@ fn aft(
     encrypt: bool,
     alphabet: &[char],
     radix: u32,
+    builder: &Builder,
 ) -> Result<Value, Error> {
     let key = hex(t, "key")?;
     let tweak = <[u8; 7]>::try_from(hex(t, "tweak")?)
@@ -77,7 +75,8 @@ fn aft(
     let (input, output) = if encrypt { ("pt", "ct") } else { ("ct", "pt") };
     let mut data = symbols(text(t, input)?, alphabet)?;
     aes_width!(key, C => {
-        let ff3 = Ff3_1::<C>::try_new(&key_of::<C>(&key)?, radix)?;
+        let k = key_of::<C>(&key)?;
+        let ff3 = builder.try_build(|ctx| Ff3_1::<C>::try_new(ctx, &k, radix))?;
         if encrypt {
             ff3.encrypt(&tweak, &mut data)?;
         } else {

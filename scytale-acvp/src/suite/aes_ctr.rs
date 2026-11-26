@@ -33,17 +33,15 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            let encrypt = match text(group, "direction")? {
-                "encrypt" => true,
-                "decrypt" => false,
-                other => return Err(Error::new(format!("direction {other}"))),
-            };
-            match text(group, "testType")? {
-                "AFT" => answer_tests(group, |t| aft(t, encrypt, rng)),
-                _ => Err(unknown_test_type(group)),
-            }
-        })
+        let encrypt = match text(group, "direction")? {
+            "encrypt" => true,
+            "decrypt" => false,
+            other => return Err(Error::new(format!("direction {other}"))),
+        };
+        match text(group, "testType")? {
+            "AFT" => answer_tests(group, |t| aft(t, encrypt, rng, builder)),
+            _ => Err(unknown_test_type(group)),
+        }
     })
 }
 
@@ -55,7 +53,12 @@ fn truncate(data: &mut [u8], bits: usize) {
     }
 }
 
-fn aft(t: &Value, encrypt: bool, rng: &mut dyn Random) -> Result<Value, Error> {
+fn aft(
+    t: &Value,
+    encrypt: bool,
+    rng: &mut dyn Random,
+    builder: &Builder,
+) -> Result<Value, Error> {
     let key = hex(t, "key")?;
     let bits = int(t, "payloadLen")? as usize;
     let (input, output) = if encrypt { ("pt", "ct") } else { ("ct", "pt") };
@@ -64,6 +67,8 @@ fn aft(t: &Value, encrypt: bool, rng: &mut dyn Random) -> Result<Value, Error> {
         Some(iv) => iv,
         None if encrypt => {
             let mut iv = vec![0u8; 16];
+            // The generator rekeys its cipher as it draws, so a draw is
+            // a build.
             rng.fill(&mut iv[..12])?;
             iv[15] = 1;
             iv
@@ -73,7 +78,8 @@ fn aft(t: &Value, encrypt: bool, rng: &mut dyn Random) -> Result<Value, Error> {
     let block = <[u8; 16]>::try_from(&counter[..])
         .map_err(|_| Error::new("field iv is not one block"))?;
     aes_width!(key, C => {
-        let ctr = Ctr::<C>::new(&key_of::<C>(&key)?);
+        let k = key_of::<C>(&key)?;
+        let ctr = builder.build(|ctx| Ctr::<C>::new(ctx, &k));
         if encrypt {
             ctr.encrypt(&block, &mut data);
         } else {
@@ -99,11 +105,10 @@ mod tests {
     /// must carry an IV under which its ciphertext decrypts.
     #[test]
     fn encrypt_draws_an_iv() {
-        let mut rng = fixed_rng(&Builder::default()).unwrap();
+        let builder = Builder::default();
+        let mut rng = fixed_rng(&builder).unwrap();
         for suite in find("ACVP-AES-CTR") {
-            let Some(doc) = super::super::vendored(suite) else {
-                continue;
-            };
+            let doc = super::super::vendored(suite);
             for group in list(&doc, "testGroups").unwrap() {
                 if group["direction"] != "encrypt" {
                     continue;
@@ -111,7 +116,8 @@ mod tests {
                 for t in list(group, "tests").unwrap() {
                     let mut prompt = t.clone();
                     prompt.as_object_mut().unwrap().remove("iv");
-                    let a = super::aft(&prompt, true, &mut rng).unwrap();
+                    let a =
+                        super::aft(&prompt, true, &mut rng, &builder).unwrap();
                     let iv = hex(&a, "iv").unwrap();
                     assert_eq!(iv.len(), 16);
                     assert_eq!(iv[12..], [0, 0, 0, 1], "RFC 3686 counter");
@@ -121,7 +127,8 @@ mod tests {
                         "iv": a["iv"],
                         "ct": a["ct"],
                     });
-                    let p = super::aft(&back, false, &mut rng).unwrap();
+                    let p =
+                        super::aft(&back, false, &mut rng, &builder).unwrap();
                     assert_eq!(hex(&p, "pt").unwrap(), hex(t, "pt").unwrap());
                 }
             }

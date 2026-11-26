@@ -11,13 +11,14 @@ use super::sha::{Family, Message};
 use super::{answer_groups, answer_tests};
 use crate::profile::Builder;
 use crate::support::{Error, hex, hex_value, int, text, unknown_test_type};
+use scytale::Context;
 use scytale::Random;
 use scytale::hash::sha3::{CShake128, CShake256};
 use scytale::hash::{BitXof, XofReader};
 use serde_json::{Value, json};
 
 /// The constructor of either width.
-type Start<X> = fn(&[u8], &[u8]) -> X;
+type Start<X> = fn(Context, &[u8], &[u8]) -> X;
 
 pub fn answer(
     doc: &Value,
@@ -36,23 +37,22 @@ fn answer_as<X: BitXof>(
     start: Start<X>,
     builder: &Builder,
 ) -> Result<Value, Error> {
-    answer_groups(doc, |group| {
-        builder.try_build(|| match text(group, "testType")? {
-            "AFT" => answer_tests(group, |t| {
-                let bits = int(t, "outLen")? as usize;
-                let name = text(t, "functionName")?.as_bytes();
-                let custom = customization(group, t)?;
-                let out =
-                    squeeze(&Message::of(t)?, name, &custom, bits, start)?;
-                Ok(json!({ "md": hex_value(&out), "outLen": bits }))
-            }),
-            "MCT" => {
-                let lengths = Lengths::of(group)?;
-                let steps = mct_steps(doc);
-                answer_tests(group, |t| mct(t, &lengths, steps, start))
-            }
-            _ => Err(unknown_test_type(group)),
-        })
+    answer_groups(doc, |group| match text(group, "testType")? {
+        "AFT" => answer_tests(group, |t| {
+            let bits = int(t, "outLen")? as usize;
+            let name = text(t, "functionName")?.as_bytes();
+            let custom = customization(group, t)?;
+            let message = Message::of(t)?;
+            let xof = builder.build(|ctx| start(ctx, name, &custom));
+            let out = squeeze(xof, &message, bits)?;
+            Ok(json!({ "md": hex_value(&out), "outLen": bits }))
+        }),
+        "MCT" => {
+            let lengths = Lengths::of(group)?;
+            let steps = mct_steps(doc);
+            answer_tests(group, |t| mct(t, &lengths, steps, start, builder))
+        }
+        _ => Err(unknown_test_type(group)),
     })
 }
 
@@ -76,16 +76,14 @@ pub fn customization(group: &Value, t: &Value) -> Result<Vec<u8>, Error> {
     }
 }
 
-/// cSHAKE of `message` under `name` and `custom`, `bits` of output,
-/// laid out as ACVP lays out a bit string.
+/// `bits` of output from `xof`, a cSHAKE started under its name and
+/// customization, over `message`, laid out as ACVP lays out a bit
+/// string.
 fn squeeze<X: BitXof>(
+    mut xof: X,
     message: &Message,
-    name: &[u8],
-    custom: &[u8],
     bits: usize,
-    start: Start<X>,
 ) -> Result<Vec<u8>, Error> {
-    let mut xof = start(name, custom);
     let (whole, tail) = message.split(Family::Sha3);
     xof.update(whole);
     let mut reader = match tail {
@@ -148,6 +146,7 @@ fn mct<X: BitXof>(
     lengths: &Lengths,
     steps: usize,
     start: Start<X>,
+    builder: &Builder,
 ) -> Result<Value, Error> {
     // The seed's lengths are strings in this group, and it is always
     // whole bytes, so only the bytes are read.
@@ -164,7 +163,10 @@ fn mct<X: BitXof>(
                 bytes: inner.clone(),
                 bits: 128,
             };
-            output = squeeze(&message, b"", &custom, out_bits, start)?;
+            // The customization changes every round, so each round
+            // builds its own.
+            let xof = builder.build(|ctx| start(ctx, b"", &custom));
+            output = squeeze(xof, &message, out_bits)?;
             last_bits = out_bits;
             let right = rightmost_16(&output, out_bits);
             out_bits = lengths.next(right);

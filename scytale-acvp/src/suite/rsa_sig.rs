@@ -24,6 +24,7 @@ use crate::profile::Builder;
 use crate::support::{
     Error, Rng, field, hex, hex_value, int, opt_text, text, unknown_test_type,
 };
+use scytale::Context;
 use scytale::Random;
 use scytale::hash::sha1::Sha1;
 use scytale::hash::sha2::{
@@ -106,29 +107,27 @@ pub fn answer(
         other => return Err(Error::new(format!("mode {other}"))),
     };
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            if let Some(why) = skip_reason(group)? {
-                return skip(group, why);
-            }
-            if text(group, "testType")? != "GDT" {
-                return Err(unknown_test_type(group));
-            }
-            let alg = text(group, "hashAlg")?;
-            let padding = padding(group)?;
-            if generate {
-                with_hash!(alg, H => sig_gen::<H>(group, padding, rng))
-            } else {
-                let key = public_key(group)?;
-                answer_tests(group, |t| {
-                    let message = hex(t, "message")?;
-                    let sig = hex(t, "signature")?;
-                    let ok = with_hash!(alg, H => {
-                        verify::<H>(&key, padding, &message, &sig)
-                    });
-                    Ok(json!({ "testPassed": ok }))
-                })
-            }
-        })
+        if let Some(why) = skip_reason(group)? {
+            return skip(group, why);
+        }
+        if text(group, "testType")? != "GDT" {
+            return Err(unknown_test_type(group));
+        }
+        let alg = text(group, "hashAlg")?;
+        let padding = padding(group)?;
+        if generate {
+            with_hash!(alg, H => sig_gen::<H>(group, padding, rng, builder))
+        } else {
+            answer_tests(group, |t| {
+                let key = builder.try_build(|ctx| public_key(ctx, group))?;
+                let message = hex(t, "message")?;
+                let sig = hex(t, "signature")?;
+                let ok = with_hash!(alg, H => {
+                    verify::<H>(&key, padding, &message, &sig)
+                });
+                Ok(json!({ "testPassed": ok }))
+            })
+        }
     })
 }
 
@@ -164,8 +163,8 @@ fn padding(group: &Value) -> Result<Padding, Error> {
 }
 
 /// The group's key, which must be as wide as the group says.
-fn public_key(group: &Value) -> Result<PublicKey, Error> {
-    let key = PublicKey::try_new(&hex(group, "n")?, &hex(group, "e")?)?;
+fn public_key(ctx: Context, group: &Value) -> Result<PublicKey, Error> {
+    let key = PublicKey::try_new(ctx, &hex(group, "n")?, &hex(group, "e")?)?;
     let modulo = int(group, "modulo")?;
     if key.bits() as u64 != modulo {
         return Err(Error::new(format!(
@@ -176,7 +175,7 @@ fn public_key(group: &Value) -> Result<PublicKey, Error> {
     Ok(key)
 }
 
-fn verify<H: DigestInfo + Default>(
+fn verify<H: DigestInfo>(
     key: &PublicKey,
     padding: Padding,
     message: &[u8],
@@ -191,13 +190,16 @@ fn verify<H: DigestInfo + Default>(
 }
 
 /// Answers a sigGen group under a key generated for it.
-fn sig_gen<H: DigestInfo + Default>(
+fn sig_gen<H: DigestInfo>(
     group: &Value,
     padding: Padding,
     rng: &mut dyn Random,
+    builder: &Builder,
 ) -> Result<Option<Value>, Error> {
     let bits = int(group, "modulo")? as usize;
-    let key = PrivateKey::generate(&mut Rng(&mut *rng), bits)?;
+    let key = builder.try_build(|ctx| {
+        PrivateKey::generate(ctx, &mut Rng(&mut *rng), bits)
+    })?;
     let public = key.public_key();
     let mut n = vec![0u8; public.modulus_len()];
     let len = public.modulus_bytes(&mut n)?;
@@ -234,17 +236,22 @@ pub fn verify_sig_gen(
     answered_group: &Value,
     answered_test: &Value,
 ) -> Result<(), Error> {
+    // Checking an answer is not the kernel under test.
+    let ctx = Context::default();
     let alg = text(vendored_group, "hashAlg")?;
     let padding = padding(vendored_group)?;
     let message = hex(vendored_test, "message")?;
     let n = field(answered_group, "n")?;
     let e = field(answered_group, "e")?;
-    let answered_key = public_key(&json!({
-        "n": n,
-        "e": e,
-        "modulo": field(vendored_group, "modulo")?,
-    }))?;
-    let vendored_key = public_key(vendored_group)?;
+    let answered_key = public_key(
+        ctx,
+        &json!({
+            "n": n,
+            "e": e,
+            "modulo": field(vendored_group, "modulo")?,
+        }),
+    )?;
+    let vendored_key = public_key(ctx, vendored_group)?;
     let answered_sig = hex(answered_test, "signature")?;
     let vendored_sig = hex(vendored_test, "signature")?;
     with_hash!(alg, H => {

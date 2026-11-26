@@ -248,7 +248,7 @@ mod cli {
             }
             runnable
         } else {
-            vec![scytale::features::get()]
+            vec![scytale::features::detected()]
         }
     }
 }

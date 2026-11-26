@@ -51,7 +51,14 @@ pub fn run() {
                 continue;
             };
             // Wycheproof signs under the empty context.
-            let accepted = ed448::verify(&public, b"", &message, &sig).is_ok();
+            let accepted = ed448::verify(
+                crate::Context::default(),
+                &public,
+                b"",
+                &message,
+                &sig,
+            )
+            .is_ok();
             assert_eq!(accepted, expect_valid, "{tag}");
             if expect_valid {
                 valid += 1;

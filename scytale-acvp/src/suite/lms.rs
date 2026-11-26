@@ -11,6 +11,7 @@
 use super::{answer_groups, answer_tests};
 use crate::profile::Builder;
 use crate::support::{Error, Rng, hex, hex_value, text};
+use scytale::Context;
 use scytale::Random;
 use scytale::sig::lms::{Lmots, Lms, PrivateKey, PublicKey};
 use serde_json::{Value, json};
@@ -30,40 +31,51 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
+    // Every LMS call hashes as it runs, starting hashes of its own, so
+    // each runs under `builder`: the tree, each signature and each
+    // verification apart.
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            let (lms, ots) = sets(group)?;
-            match mode {
-                "keyGen" => answer_tests(group, |t| key_gen(lms, ots, t)),
-                "sigGen" => {
-                    let mut key =
-                        PrivateKey::generate(&mut Rng(rng), lms, ots)?;
-                    let public = key.public_key().clone();
-                    let answered =
-                        answer_tests(group, |t| sig_gen(&mut key, rng, t))?;
-                    Ok(answered.map(|mut answered| {
-                        let key = hex_value(&public.bytes()[..public.len()]);
-                        answered["publicKey"] = key;
-                        answered
-                    }))
-                }
-                "sigVer" => {
-                    let public = PublicKey::new(&hex(group, "publicKey")?)?;
-                    answer_tests(group, |t| sig_ver(&public, t))
-                }
-                other => Err(Error::new(format!("mode {other}"))),
+        let (lms, ots) = sets(group)?;
+        match mode {
+            "keyGen" => answer_tests(group, |t| {
+                builder.try_build(|ctx| key_gen(ctx, lms, ots, t))
+            }),
+            "sigGen" => {
+                let mut key = builder.try_build(|ctx| {
+                    PrivateKey::generate(ctx, &mut Rng(rng), lms, ots)
+                })?;
+                let public = key.public_key().clone();
+                let answered =
+                    answer_tests(group, |t| sig_gen(&mut key, rng, t))?;
+                Ok(answered.map(|mut answered| {
+                    let key = hex_value(&public.bytes()[..public.len()]);
+                    answered["publicKey"] = key;
+                    answered
+                }))
             }
-        })
+            "sigVer" => {
+                let public = hex(group, "publicKey")?;
+                let public =
+                    builder.try_build(|ctx| PublicKey::new(ctx, &public))?;
+                answer_tests(group, |t| sig_ver(&public, t))
+            }
+            other => Err(Error::new(format!("mode {other}"))),
+        }
     })
 }
 
-fn key_gen(lms: Lms, ots: Lmots, t: &Value) -> Result<Value, Error> {
+fn key_gen(
+    ctx: Context,
+    lms: Lms,
+    ots: Lmots,
+    t: &Value,
+) -> Result<Value, Error> {
     let i = hex(t, "i")?;
     let i: [u8; 16] = i
         .as_slice()
         .try_into()
         .map_err(|_| Error::new(format!("i of {} bytes", i.len())))?;
-    let key = PrivateKey::from_seed(lms, ots, &i, &hex(t, "seed")?)?;
+    let key = PrivateKey::from_seed(ctx, lms, ots, &i, &hex(t, "seed")?)?;
     let public = key.public_key();
     Ok(json!({ "publicKey": hex_value(&public.bytes()[..public.len()]) }))
 }
@@ -93,12 +105,14 @@ pub fn verify_sig_gen(
     answered_group: &Value,
     answered_test: &Value,
 ) -> Result<(), Error> {
+    // Checking an answer is not the kernel under test.
+    let ctx = Context::default();
     let message = hex(vendored_test, "message")?;
     for (whose, group, t) in [
         ("answered", answered_group, answered_test),
         ("file's", vendored_group, vendored_test),
     ] {
-        let public = PublicKey::new(&hex(group, "publicKey")?)
+        let public = PublicKey::new(ctx, &hex(group, "publicKey")?)
             .map_err(|e| Error::new(format!("{whose} publicKey: {e}")))?;
         public
             .verify(&message, &hex(t, "signature")?)

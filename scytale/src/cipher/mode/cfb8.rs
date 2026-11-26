@@ -21,9 +21,11 @@
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Cfb8;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let cfb = Cfb8::<Aes128>::new(&Key::from([0u8; 16]));
+//! let ctx = Context::default();
+//! let cfb = Cfb8::<Aes128>::new(ctx, &Key::from([0u8; 16]));
 //! let iv = [0u8; 16];
 //!
 //! // Any length, down to a single byte.
@@ -35,6 +37,7 @@
 //! # }
 //! ```
 
+use crate::Context;
 use core::fmt;
 
 use super::shift_in_byte;
@@ -59,12 +62,12 @@ pub struct Cfb8<C: BlockCipher> {
 
 impl<C: BlockCipher> Cfb8<C> {
     /// Takes the key the cipher runs under.
-    pub fn new(key: &C::Key) -> Self {
+    pub fn new(ctx: Context, key: &C::Key) -> Self {
         // A cipher of the caller's own whose block is no bytes at
         // all would leave the loop below with nothing to advance by.
         const { assert!(size_of::<C::Block>() > 0) };
         Cfb8 {
-            cipher: C::new(key),
+            cipher: C::new(ctx, key),
         }
     }
 
@@ -173,7 +176,7 @@ mod tests {
     }
 
     fn cfb<const K: usize>(key: &[u8; K]) -> Cfb8<Aes<K>> {
-        Cfb8::new(&Key::from(*key))
+        Cfb8::new(crate::Context::default(), &Key::from(*key))
     }
 
     /// NIST SP 800-38A F.3.7 and F.3.8, AES-128.

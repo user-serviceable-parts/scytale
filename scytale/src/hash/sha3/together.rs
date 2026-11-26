@@ -160,8 +160,9 @@ pub(crate) mod tests {
     /// in force meets says so.
     #[test]
     fn dispatches_by_the_list() {
-        features::build_alone(|| {
-            let chosen = features::choose(KERNELS).expect("listed");
+        {
+            let chosen = features::choose(crate::Context::default(), KERNELS)
+                .expect("listed");
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             let built = match Shake128Together::new([&[0u8; 1]; WIDTH], chosen)
             {
@@ -171,7 +172,7 @@ pub(crate) mod tests {
             #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
             let built = chosen.kernel();
             features::dispatches(KERNELS, &PROFILES, built);
-        });
+        };
     }
 
     /// The streams together are the streams apart: over messages
@@ -196,7 +197,7 @@ pub(crate) mod tests {
                 return;
             };
             let mut readers = messages.each_ref().map(|message| {
-                let mut xof = Shake128::new();
+                let mut xof = Shake128::new(crate::Context::default());
                 xof.update(message);
                 xof.finalize_xof()
             });

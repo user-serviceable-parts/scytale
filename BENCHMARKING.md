@@ -127,7 +127,8 @@ lines, with nothing to list. The operations, which are measured
 under the reported set alone, are always so.
 
 Everything is built from the public types, and what chooses the code
-under them is the feature set in force, as it is for any caller. A
+under them is the context each is built with, as it is for any
+caller: the reported set's, then each profile's in turn. A
 row is measured again under another profile only when that profile
 moves it onto code not measured yet, so nothing is measured twice
 and every combination a caller can reach is measured once.

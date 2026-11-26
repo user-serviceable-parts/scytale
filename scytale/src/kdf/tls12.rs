@@ -11,6 +11,8 @@
 //! ```
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::kdf::tls12;
+//! use scytale::Context;
+//! let ctx = Context::default();
 //!
 //! let premaster = [0x5a; 48];
 //! let client_random = [0x01; 32];
@@ -19,14 +21,14 @@
 //! // The master secret, then the key block from it; the seed is the
 //! // two randoms, in the order each derivation names.
 //! let mut master = [0u8; 48];
-//! tls12::prf::<Sha256>(
+//! tls12::prf::<Sha256>(ctx,
 //!     &premaster,
 //!     b"master secret",
 //!     &[&client_random, &server_random],
 //!     &mut master,
 //! );
 //! let mut key_block = [0u8; 104];
-//! tls12::prf::<Sha256>(
+//! tls12::prf::<Sha256>(ctx,
 //!     &master,
 //!     b"key expansion",
 //!     &[&server_random, &client_random],
@@ -40,6 +42,7 @@
 //! master secret"` and the session hash as the seed.
 
 use crate::BlockType;
+use crate::Context;
 use crate::hash::Hash;
 use crate::mac::Mac;
 use crate::mac::hmac::Hmac;
@@ -54,7 +57,8 @@ use zeroize::Zeroize;
 /// `P_hash` reads, so an empty one is well defined, and RFC 5705's
 /// exporters pass the application's label through, which may be
 /// empty. The output may be any length, none included.
-pub fn prf<H: Hash + Clone + BlockType + Default>(
+pub fn prf<H: Hash + Clone + BlockType>(
+    ctx: Context,
     secret: &[u8],
     label: &[u8],
     seed: &[&[u8]],
@@ -63,7 +67,7 @@ pub fn prf<H: Hash + Clone + BlockType + Default>(
     // A(0) = label || seed; A(i) = HMAC(secret, A(i-1)); and the
     // output is HMAC(secret, A(i) || label || seed) for i from 1.
     // Each `finalize` leaves the MAC keyed and ready for the next.
-    let mut mac = Hmac::<H>::new(secret);
+    let mut mac = Hmac::<H>::new(ctx, secret);
     mac.update(label);
     for part in seed {
         mac.update(part);
@@ -109,7 +113,13 @@ mod tests {
         let secret = hex::<16>("9bbe436ba940f017b17652849a71db35");
         let seed = hex::<16>("a0ba9f936cda311827a6f796ffd5198c");
         let mut out = [0u8; 100];
-        prf::<Sha256>(&secret, b"test label", &[&seed], &mut out);
+        prf::<Sha256>(
+            crate::Context::default(),
+            &secret,
+            b"test label",
+            &[&seed],
+            &mut out,
+        );
         let want = hex::<100>(
             "e3f229ba727be17b8d122620557cd453c2aab21d07c3d495329b52d4e61edb5a\
              6b301791e90d35c9c9a46b4e14baf9af0fa022f7077def17abfd3797c0564bab\
@@ -125,7 +135,13 @@ mod tests {
         let secret = hex::<16>("b80b733d6ceefcdc71566ea48e5567df");
         let seed = hex::<16>("cd665cf6a8447dd6ff8b27555edb7465");
         let mut out = [0u8; 148];
-        prf::<Sha384>(&secret, b"test label", &[&seed], &mut out);
+        prf::<Sha384>(
+            crate::Context::default(),
+            &secret,
+            b"test label",
+            &[&seed],
+            &mut out,
+        );
         let want = hex::<148>(
             "7b0c18e9ced410ed1804f2cfa34a336a1c14dffb4900bb5fd7942107e81c83cd\
              e9ca0faa60be9fe34f82b1233c9146a0e534cb400fed2700884f9dc236f80edd\
@@ -138,7 +154,13 @@ mod tests {
         let secret = hex::<16>("b0323523c1853599584d88568bbb05eb");
         let seed = hex::<16>("d4640e12e4bcdbfb437f03e6ae418ee5");
         let mut out = [0u8; 196];
-        prf::<Sha512>(&secret, b"test label", &[&seed], &mut out);
+        prf::<Sha512>(
+            crate::Context::default(),
+            &secret,
+            b"test label",
+            &[&seed],
+            &mut out,
+        );
         let want = hex::<196>(
             "1261f588c798c5c201ff036e7a9cb5edcd7fe3f94c669a122a4638d7d508b283\
              042df6789875c7147e906d868bc75c45e20eb40c1cf4a1713b27371f68432592\
@@ -156,13 +178,31 @@ mod tests {
     fn seed_parts_join_and_lengths_vary() {
         let secret = [7u8; 32];
         let mut whole = [0u8; 70];
-        prf::<Sha256>(&secret, b"l", &[b"abcdef"], &mut whole);
+        prf::<Sha256>(
+            crate::Context::default(),
+            &secret,
+            b"l",
+            &[b"abcdef"],
+            &mut whole,
+        );
         let mut parts = [0u8; 70];
-        prf::<Sha256>(&secret, b"l", &[b"ab", b"", b"cdef"], &mut parts);
+        prf::<Sha256>(
+            crate::Context::default(),
+            &secret,
+            b"l",
+            &[b"ab", b"", b"cdef"],
+            &mut parts,
+        );
         assert_eq!(whole, parts);
         // A prefix of the output is the same whatever the length asked.
         let mut short = [0u8; 33];
-        prf::<Sha256>(&secret, b"l", &[b"abcdef"], &mut short);
+        prf::<Sha256>(
+            crate::Context::default(),
+            &secret,
+            b"l",
+            &[b"abcdef"],
+            &mut short,
+        );
         assert_eq!(short[..], whole[..33]);
     }
 
@@ -173,11 +213,23 @@ mod tests {
     fn empty_label_and_output() {
         let secret = [3u8; 48];
         let mut empty = [0u8; 40];
-        prf::<Sha256>(&secret, b"", &[b"abc"], &mut empty);
+        prf::<Sha256>(
+            crate::Context::default(),
+            &secret,
+            b"",
+            &[b"abc"],
+            &mut empty,
+        );
         let mut moved = [0u8; 40];
-        prf::<Sha256>(&secret, b"a", &[b"bc"], &mut moved);
+        prf::<Sha256>(
+            crate::Context::default(),
+            &secret,
+            b"a",
+            &[b"bc"],
+            &mut moved,
+        );
         assert_eq!(empty, moved);
         assert_ne!(empty, [0u8; 40]);
-        prf::<Sha256>(&secret, b"", &[], &mut []);
+        prf::<Sha256>(crate::Context::default(), &secret, b"", &[], &mut []);
     }
 }

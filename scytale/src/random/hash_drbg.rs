@@ -1,5 +1,6 @@
 //! Hash_DRBG (SP 800-90A section 10.1.1).
 
+use crate::Context;
 use core::fmt;
 use core::marker::PhantomData;
 
@@ -37,9 +38,12 @@ const fn seedlen<H: Hash>() -> usize {
 ///
 /// Deliberately not `Clone`, for the reason `CtrDrbg` is not.
 #[derive(ZeroizeOnDrop)]
-pub struct HashDrbg<H: Hash + Default, S: Entropy = entropy::System> {
+pub struct HashDrbg<H: Hash, S: Entropy = entropy::System> {
     #[zeroize(skip)]
     source: S,
+    /// What the generator builds its ciphers or hashes under.
+    #[zeroize(skip)]
+    ctx: Context,
     /// The value and the constant that are the generator's whole
     /// secret, each the first `seedlen::<H>()` bytes of its array.
     v: [u8; MAX_SEEDLEN],
@@ -52,7 +56,7 @@ pub struct HashDrbg<H: Hash + Default, S: Entropy = entropy::System> {
     hash: PhantomData<H>,
 }
 
-impl<H: Hash + Default, S: Entropy> HashDrbg<H, S> {
+impl<H: Hash, S: Entropy> HashDrbg<H, S> {
     const SEEDLEN: usize = seedlen::<H>();
 
     /// A generator seeded from `source`, which is kept for every
@@ -69,10 +73,10 @@ impl<H: Hash + Default, S: Entropy> HashDrbg<H, S> {
     /// # Errors
     ///
     /// Whatever the source refuses with.
-    pub fn try_new(mut source: S) -> Result<Self, Error> {
+    pub fn try_new(ctx: Context, mut source: S) -> Result<Self, Error> {
         let mut raw = [0u8; MIN_SEED * OVERSAMPLE];
         let drawn = source.fill(&mut raw);
-        let built = drawn.and_then(|()| Self::instantiate(&raw, source));
+        let built = drawn.and_then(|()| Self::instantiate(ctx, &raw, source));
         raw.zeroize();
         built
     }
@@ -90,8 +94,12 @@ impl<H: Hash + Default, S: Entropy> HashDrbg<H, S> {
     /// # Errors
     ///
     /// [`Error::InvalidSeedLength`] if `seed` is too short.
-    pub fn try_new_seeded(seed: &[u8], source: S) -> Result<Self, Error> {
-        Self::instantiate(seed, source)
+    pub fn try_new_seeded(
+        ctx: Context,
+        seed: &[u8],
+        source: S,
+    ) -> Result<Self, Error> {
+        Self::instantiate(ctx, seed, source)
     }
 
     /// Reseeds from the generator's own source: the call
@@ -141,6 +149,7 @@ impl<H: Hash + Default, S: Entropy> HashDrbg<H, S> {
         let n = Self::SEEDLEN;
         let mut seed = [0u8; MAX_SEEDLEN];
         derive::<H>(
+            self.ctx,
             &[&[0x01], &self.v[..n], entropy, additional],
             &mut seed[..n],
         );
@@ -171,7 +180,7 @@ impl<H: Hash + Default, S: Entropy> HashDrbg<H, S> {
             self.reseed()?;
         }
         let n = Self::SEEDLEN;
-        let mut hash = H::default();
+        let mut hash = H::new(self.ctx);
         if !additional.is_empty() {
             hash.update(&[0x02]);
             hash.update(&self.v[..n]);
@@ -215,19 +224,24 @@ impl<H: Hash + Default, S: Entropy> HashDrbg<H, S> {
 
     /// Builds a generator from material that has already been
     /// gathered: the entropy, nonce and personalization as one run.
-    fn instantiate(material: &[u8], source: S) -> Result<Self, Error> {
+    fn instantiate(
+        ctx: Context,
+        material: &[u8],
+        source: S,
+    ) -> Result<Self, Error> {
         if material.len() < MIN_SEED {
             return Err(Error::InvalidSeedLength(material.len()));
         }
         let mut rng = HashDrbg {
             source,
+            ctx,
             v: [0u8; MAX_SEEDLEN],
             c: [0u8; MAX_SEEDLEN],
             counter: 1,
             hash: PhantomData,
         };
         let mut seed = [0u8; MAX_SEEDLEN];
-        derive::<H>(&[material], &mut seed[..Self::SEEDLEN]);
+        derive::<H>(ctx, &[material], &mut seed[..Self::SEEDLEN]);
         rng.set_seed(&seed);
         seed.zeroize();
         Ok(rng)
@@ -237,11 +251,11 @@ impl<H: Hash + Default, S: Entropy> HashDrbg<H, S> {
     fn set_seed(&mut self, seed: &[u8; MAX_SEEDLEN]) {
         let n = Self::SEEDLEN;
         self.v = *seed;
-        derive::<H>(&[&[0x00], &self.v[..n]], &mut self.c[..n]);
+        derive::<H>(self.ctx, &[&[0x00], &self.v[..n]], &mut self.c[..n]);
     }
 }
 
-impl<H: Hash + Default> HashDrbg<H, entropy::System> {
+impl<H: Hash> HashDrbg<H, entropy::System> {
     /// A generator seeded from this machine's own source, as
     /// [`CtrDrbg::from_system`](super::CtrDrbg::from_system) is.
     ///
@@ -254,8 +268,8 @@ impl<H: Hash + Default> HashDrbg<H, entropy::System> {
     /// # Errors
     ///
     /// As `CtrDrbg::from_system`.
-    pub fn from_system() -> Result<Self, Error> {
-        Self::try_new(entropy::System::try_new()?)
+    pub fn from_system(ctx: Context) -> Result<Self, Error> {
+        Self::try_new(ctx, entropy::System::try_new()?)
     }
 }
 
@@ -263,21 +277,21 @@ impl<H: Hash + Default> HashDrbg<H, entropy::System> {
 /// seeded from bytes the test holds. Not public, for the reasons
 /// `CtrDrbg`'s is not.
 #[cfg(test)]
-impl<H: Hash + Default> HashDrbg<H, entropy::External> {
+impl<H: Hash> HashDrbg<H, entropy::External> {
     /// A generator seeded from `seed`, the entropy, nonce and
     /// personalization as one run, at least [`MIN_SEED`] bytes.
     pub(crate) fn from_seed(seed: &[u8]) -> Result<Self, Error> {
-        Self::instantiate(seed, entropy::External)
+        Self::instantiate(crate::Context::default(), seed, entropy::External)
     }
 }
 
-impl<H: Hash + Default, S: Entropy> Random for HashDrbg<H, S> {
+impl<H: Hash, S: Entropy> Random for HashDrbg<H, S> {
     fn fill(&mut self, out: &mut [u8]) -> Result<(), Error> {
         self.fill_with(out, &[])
     }
 }
 
-impl<H: Hash + Default, S: Entropy> fmt::Debug for HashDrbg<H, S> {
+impl<H: Hash, S: Entropy> fmt::Debug for HashDrbg<H, S> {
     /// Deliberately omits the state, which is key material.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HashDrbg")
@@ -288,11 +302,11 @@ impl<H: Hash + Default, S: Entropy> fmt::Debug for HashDrbg<H, S> {
 
 /// Hash_df: hashes the concatenation of `parts` out to the length of
 /// `out`, a digest at a time, each under its own counter.
-fn derive<H: Hash + Default>(parts: &[&[u8]], out: &mut [u8]) {
+fn derive<H: Hash>(ctx: Context, parts: &[&[u8]], out: &mut [u8]) {
     // The length goes in as a 32-bit count of bits; a seed is at
     // most 888 of them.
     let bits = (8 * out.len() as u32).to_be_bytes();
-    let mut hash = H::default();
+    let mut hash = H::new(ctx);
     for (i, chunk) in out.chunks_mut(size_of::<H::Output>()).enumerate() {
         hash.update(&[(i + 1) as u8]);
         hash.update(&bits);
@@ -368,8 +382,12 @@ mod tests {
         let whole = [0x44u8; 70];
         let mut joined = [0u8; 55];
         let mut split = [0u8; 55];
-        derive::<Sha256>(&[&whole], &mut joined);
-        derive::<Sha256>(&[&whole[..17], &whole[17..], &[]], &mut split);
+        derive::<Sha256>(crate::Context::default(), &[&whole], &mut joined);
+        derive::<Sha256>(
+            crate::Context::default(),
+            &[&whole[..17], &whole[17..], &[]],
+            &mut split,
+        );
         assert_eq!(joined, split);
         assert_ne!(joined[..32], joined[32..]);
     }
@@ -470,7 +488,9 @@ mod tests {
     /// A generator with a source of its own reseeds itself.
     #[test]
     fn a_generator_with_a_source_reseeds_itself() {
-        let Ok(mut rng) = HashDrbg::<Sha256>::from_system() else {
+        let Ok(mut rng) =
+            HashDrbg::<Sha256>::from_system(crate::Context::default())
+        else {
             return;
         };
         rng.counter = RESEED_INTERVAL + 1;

@@ -11,9 +11,11 @@
 //! ```
 //! use scytale::Key;
 //! use scytale::aead::{Aead, ChaCha20Poly1305};
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let aead = ChaCha20Poly1305::new(&Key::from([0x42u8; 32]));
+//! let ctx = Context::default();
+//! let aead = ChaCha20Poly1305::new(ctx, &Key::from([0x42u8; 32]));
 //! let nonce = [7u8; 12];
 //! let header = b"to: bob";
 //! let mut message = *b"attack at dawn";
@@ -58,7 +60,7 @@ use crate::cipher::chacha20::{
 use crate::features::{self, Dispatcher, Features};
 use crate::mac::Mac;
 use crate::mac::poly1305::{self, Poly1305};
-use crate::{Error, Key, KeyType};
+use crate::{Context, Error, Key, KeyType};
 
 /// The tag length, in bytes.
 pub(super) const TAG: usize = 16;
@@ -104,9 +106,9 @@ impl Aead for ChaCha20Poly1305 {
     type Nonce = [u8; NONCE_SIZE];
     type Tag = [u8; TAG];
 
-    fn new(key: &Self::Key) -> Self {
+    fn new(ctx: Context, key: &Self::Key) -> Self {
         // The inherent constructor, which takes precedence here.
-        ChaCha20Poly1305::new(key)
+        ChaCha20Poly1305::new(ctx, key)
     }
 
     fn encrypt(
@@ -145,9 +147,9 @@ impl Aead for ChaCha20Poly1305 {
 
 impl ChaCha20Poly1305 {
     /// Takes the key.
-    pub fn new(key: &Key<[u8; KEY_SIZE]>) -> Self {
+    pub fn new(ctx: Context, key: &Key<[u8; KEY_SIZE]>) -> Self {
         ChaCha20Poly1305 {
-            cipher: ChaCha20::new(key),
+            cipher: ChaCha20::new(ctx, key),
         }
     }
 
@@ -218,7 +220,7 @@ fn mac(cipher: &ChaCha20, nonce: &[u8; NONCE_SIZE]) -> Result<Poly1305, Error> {
         .split_first_chunk::<32>()
         .ok_or(Error::InvalidKeyLength(block.len()))?;
     let mut key = Key::from(*key);
-    let mac = Poly1305::new(&key);
+    let mac = Poly1305::new(cipher.context(), &key);
     key.zeroize();
     block.zeroize();
     Ok(mac)
@@ -432,7 +434,10 @@ mod tests {
     const TAG_HEX: &str = "1ae10b594f09e26a7e902ecbd0600691";
 
     fn aead() -> ChaCha20Poly1305 {
-        ChaCha20Poly1305::new(&Key::from(hex::<32>(KEY)))
+        ChaCha20Poly1305::new(
+            crate::Context::default(),
+            &Key::from(hex::<32>(KEY)),
+        )
     }
 
     #[test]
@@ -544,7 +549,10 @@ mod tests {
                 Ok(())
             }
         }
-        let aead = ChaCha20Poly1305::new(&Key::from([0x5au8; 32]));
+        let aead = ChaCha20Poly1305::new(
+            crate::Context::default(),
+            &Key::from([0x5au8; 32]),
+        );
         let mut buffer = Buffer([0; 128], 0);
         core::fmt::write(&mut buffer, format_args!("{aead:?}")).unwrap();
         let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();

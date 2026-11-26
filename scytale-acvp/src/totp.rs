@@ -3,6 +3,7 @@
 //! steps from the Unix epoch, the seed as NIST hands it out, base64.
 
 use crate::support::Error;
+use scytale::Context;
 use scytale::codec::base64;
 use scytale::hash::sha2::Sha256;
 use scytale::mac::hmac::Hmac;
@@ -18,7 +19,7 @@ pub fn code_at(seed: &str, now: u64) -> Result<String, Error> {
     let n = base64::decode(seed.trim().as_bytes(), &mut key)
         .map_err(|_| Error::new("TOTP seed is not base64"))?;
     let counter = (now / STEP_SECONDS).to_be_bytes();
-    let mac = Hmac::<Sha256>::mac(&key[..n], &counter);
+    let mac = Hmac::<Sha256>::mac(Context::default(), &key[..n], &counter);
     // Dynamic truncation (RFC 4226): the low nibble of the last byte
     // picks four bytes, read big-endian with the top bit cleared.
     let offset = (mac[mac.len() - 1] & 0x0f) as usize;

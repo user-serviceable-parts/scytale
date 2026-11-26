@@ -181,32 +181,20 @@ pub fn unknown_test_type(group: &Value) -> Error {
     ))
 }
 
-/// Set to `required` by a run that knows it has the vectors. A suite
-/// that skips passes, so a checkout whose vectors cannot be found
-/// looks exactly like one that was tested against them.
-const REQUIRED: &str = "SCYTALE_VECTORS";
-
-/// The vendored file `vectors/<name>` parsed, or `None` if the
-/// vectors are not in this copy.
+/// The vendored file `vectors/<name>` parsed.
+///
+/// The crate is never published, so its vectors are in every copy of
+/// it, and a file that cannot be read is a failure, never a skip.
 ///
 /// # Panics
 ///
-/// If the file is missing and `SCYTALE_VECTORS` is `required`.
-pub fn load(name: &str) -> Option<Value> {
+/// If the file cannot be read or is not JSON.
+pub fn load(name: &str) -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("vectors")
         .join(name);
     match fs::read_to_string(&path) {
-        Ok(text) => Some(serde_json::from_str(&text).expect("valid JSON")),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            assert!(
-                std::env::var(REQUIRED).as_deref() != Ok("required"),
-                "{}: not found, and {REQUIRED} requires it",
-                path.display()
-            );
-            eprintln!("{name}: not vendored in this copy; skipping");
-            None
-        }
+        Ok(text) => serde_json::from_str(&text).expect("valid JSON"),
         Err(e) => panic!("cannot read {}: {e}", path.display()),
     }
 }

@@ -21,11 +21,11 @@
 //! section alike instead of on whichever rows came last.
 //!
 //! Everything is built from the public types, and what chooses the
-//! code under them is the feature set in force, as it is for any
-//! caller. The throughput rows are measured once per feature profile
-//! the types publish (see [`scytale::features`]), each set in force
-//! while its values are built and measured, since some choose their
-//! code per call and not once when built. The first is the set the
+//! code under them is the context each is built with, as it is for
+//! any caller. The throughput rows are measured once per feature
+//! profile the types publish (see [`scytale::features`]), each a
+//! context their values are built with; what a value builds as it
+//! runs follows it. The first is the set the
 //! processor reports; the same set with `isolated` follows, then each
 //! published profile, then `none`. A row is measured under a later
 //! profile only when that profile moves it onto code no earlier one
@@ -64,6 +64,7 @@ use scytale::cipher::mode::{Cbc, Cfb1, Cfb8, Cfb128, Ctr, Kw, Kwp, Ofb, Xts};
 use scytale::cipher::mode::{Ff1, Ff3_1};
 use scytale::cipher::{BlockCipher, aes};
 
+use scytale::Context;
 use scytale::Error;
 use scytale::Random;
 use scytale::features::{self, Dispatcher, Feature, Features};
@@ -340,15 +341,20 @@ impl Run {
 /// Measures every section the filters allow, and says whether any
 /// row ran.
 fn report(run: &mut Run) -> bool {
-    // One pass of every family per feature profile, the set in force
-    // while its values are built and measured. The first is the set
-    // the processor reports, which is what a caller gets; each later
-    // one measures only the rows it moves onto other code.
+    // One pass of every family per feature profile, the context its
+    // values are built under. The first is the set the processor
+    // reports, which is what a caller gets; each later one measures
+    // only the rows it moves onto other code.
     let mut ran = false;
     let mut seen = Vec::new();
     for (index, profile) in profiles().into_iter().enumerate() {
+        // `profiles` kept only the sets a context allows.
+        let Ok(ctx) = Context::try_new(profile) else {
+            continue;
+        };
         let mut under = Under {
             profile,
+            ctx,
             index,
             name: profile.to_string(),
             seen: &mut seen,
@@ -761,17 +767,17 @@ fn profiles() -> Vec<Features> {
     // Every list ends in the empty set; it goes last.
     out.retain(|p| !p.is_empty());
     out.push(Features::new());
-    out.retain(|&p| features::set(p).is_ok());
-    features::reset();
+    out.retain(|&p| Context::try_new(p).is_ok());
     out
 }
 
-/// One profile's sections: the set in force while their values are
-/// built and measured, the name they are printed under, and every
-/// row measured so far with what it ran, so that no code is measured
-/// twice.
+/// One profile's sections: the context their values are built under,
+/// the name they are printed under, and every row measured so far
+/// with what it ran, so that no code is measured twice.
 struct Under<'a> {
     profile: Features,
+    /// The profile as a context, which every value here is built in.
+    ctx: Context,
     /// Where the profile comes among those measured; the first is
     /// the set the processor reports.
     index: usize,
@@ -799,21 +805,17 @@ impl Under<'_> {
             .collect()
     }
 
-    /// Builds with this profile in force, and puts the set back.
-    fn build<T>(&self, f: impl FnOnce() -> T) -> Option<T> {
-        features::set(self.profile).ok()?;
-        let built = f();
-        features::reset();
-        Some(built)
+    /// Builds with this profile's context.
+    fn build<T>(&self, f: impl FnOnce(Context) -> T) -> Option<T> {
+        Some(f(self.ctx))
     }
 
-    /// Measures `tasks` under this name, with this profile in force,
-    /// and records what they ran. In force here as well as in
-    /// [`Under::build`]: a CTR_DRBG keys a new AES per request, and
-    /// GMAC's GHASH chooses per call, so both would otherwise run the
-    /// detected code under every profile.
+    /// Measures `tasks` under this name and records what they ran.
+    /// What the values build as they run, the AES a CTR_DRBG keys per
+    /// request or GMAC's GHASH, follows the context they were built
+    /// under.
     fn measure(&mut self, run: &mut Run, tasks: &mut [Task<'_>]) -> bool {
-        if tasks.is_empty() || features::set(self.profile).is_err() {
+        if tasks.is_empty() {
             return false;
         }
         for (row, _) in tasks.iter() {
@@ -821,7 +823,6 @@ impl Under<'_> {
         }
         eprintln!("speed: measuring {} rows under {}", tasks.len(), self.name);
         throughput_table(run, self.profile, self.index, tasks);
-        features::reset();
         true
     }
 }
@@ -857,11 +858,11 @@ fn hash_section(under: &mut Under<'_>, run: &mut Run) -> bool {
         return false;
     }
     let Some((mut sha256, mut sha512, mut hmac256, mut hmac512)) =
-        under.build(|| {
-            let sha256 = sha2::Sha256::new();
-            let sha512 = sha2::Sha512::new();
-            let hmac256 = Hmac::<sha2::Sha256>::new(&KEY128);
-            let hmac512 = Hmac::<sha2::Sha512>::new(&KEY128);
+        under.build(|ctx| {
+            let sha256 = sha2::Sha256::new(ctx);
+            let sha512 = sha2::Sha512::new(ctx);
+            let hmac256 = Hmac::<sha2::Sha256>::new(ctx, &KEY128);
+            let hmac512 = Hmac::<sha2::Sha512>::new(ctx, &KEY128);
             (sha256, sha512, hmac256, hmac512)
         })
     else {
@@ -918,7 +919,7 @@ fn chacha_section(under: &mut Under<'_>, run: &mut Run) -> bool {
         return false;
     }
     let Some(cipher) =
-        under.build(|| chacha20::ChaCha20::new(&Key::from(KEY256)))
+        under.build(|ctx| chacha20::ChaCha20::new(ctx, &Key::from(KEY256)))
     else {
         return false;
     };
@@ -943,7 +944,8 @@ fn blake2_section(under: &mut Under<'_>, run: &mut Run) -> bool {
     if wanted.is_empty() {
         return false;
     }
-    let (mut b256, mut b512) = (Blake2b256::new(), Blake2b512::new());
+    let (mut b256, mut b512) =
+        (Blake2b256::new(under.ctx), Blake2b512::new(under.ctx));
     let mut tasks: Vec<Task<'_>> = vec![
         (
             "blake2b-256",
@@ -972,12 +974,12 @@ fn sha3_section(under: &mut Under<'_>, run: &mut Run) -> bool {
     if wanted.is_empty() {
         return false;
     }
-    let Some((mut d256, mut d512, mut x128, mut x256)) = under.build(|| {
+    let Some((mut d256, mut d512, mut x128, mut x256)) = under.build(|ctx| {
         (
-            sha3::Sha3_256::new(),
-            sha3::Sha3_512::new(),
-            sha3::Shake128::new(),
-            sha3::Shake256::new(),
+            sha3::Sha3_256::new(ctx),
+            sha3::Sha3_512::new(ctx),
+            sha3::Shake128::new(ctx),
+            sha3::Shake256::new(ctx),
         )
     }) else {
         return false;
@@ -1059,36 +1061,38 @@ fn other_section(under: &mut Under<'_>, run: &mut Run) -> bool {
     }
     // The generators are seeded rather than drawn, so a run repeats
     // and no entropy source is needed for a measurement.
-    let Some((generators, macs, lanes)) = under.build(|| {
+    let Some((generators, macs, lanes)) = under.build(|ctx| {
         let generators = (
-            CtrDrbg::try_new_seeded(&[0x5au8; 64], NoEntropy),
+            CtrDrbg::try_new_seeded(ctx, &[0x5au8; 64], NoEntropy),
             HashDrbg::<sha2::Sha256, _>::try_new_seeded(
+                ctx,
                 &[0x5au8; 64],
                 NoEntropy,
             ),
             HmacDrbg::<sha2::Sha256, _>::try_new_seeded(
+                ctx,
                 &[0x5au8; 64],
                 NoEntropy,
             ),
         );
         let macs = (
-            Sha1::new(),
-            Poly1305::new(&Key::from(KEY256)),
-            ChaCha20Poly1305::new(&Key::from(KEY256)),
-            XChaCha20Poly1305::new(&Key::from(KEY256)),
-            Kmac128::new(&KEY256, b""),
-            TupleHash128::new(b""),
-            Aegis128L::new(&Key::from(KEY128)),
-            Aegis256::new(&Key::from(KEY256)),
+            Sha1::new(ctx),
+            Poly1305::new(ctx, &Key::from(KEY256)),
+            ChaCha20Poly1305::new(ctx, &Key::from(KEY256)),
+            XChaCha20Poly1305::new(ctx, &Key::from(KEY256)),
+            Kmac128::new(ctx, &KEY256, b""),
+            TupleHash128::new(ctx, b""),
+            Aegis128L::new(ctx, &Key::from(KEY128)),
+            Aegis256::new(ctx, &Key::from(KEY256)),
         );
         // Built here with the rest, under the profile: a value keeps
         // the kernel it was built with, so one built outside would
         // be the reported set's under every profile.
         let lanes = (
-            Aegis128X2::new(&Key::from(KEY128)),
-            Aegis128X4::new(&Key::from(KEY128)),
-            Aegis256X2::new(&Key::from(KEY256)),
-            Aegis256X4::new(&Key::from(KEY256)),
+            Aegis128X2::new(ctx, &Key::from(KEY128)),
+            Aegis128X4::new(ctx, &Key::from(KEY128)),
+            Aegis256X2::new(ctx, &Key::from(KEY256)),
+            Aegis256X4::new(ctx, &Key::from(KEY256)),
         );
         (generators, macs, lanes)
     }) else {
@@ -1329,7 +1333,7 @@ const FF3_TWEAK: [u8; 7] = [0x3c; 7];
 /// A generator seeded rather than drawn, so that every key below is
 /// the same one on every run.
 fn seeded() -> Result<CtrDrbg<NoEntropy>, Error> {
-    CtrDrbg::try_new_seeded(&[0x5au8; 64], NoEntropy)
+    CtrDrbg::try_new_seeded(Context::default(), &[0x5au8; 64], NoEntropy)
 }
 
 /// An entropy source with nothing to give, for a generator that is
@@ -1499,6 +1503,7 @@ fn kdf_ops(run: &mut Run) -> bool {
             Box::new(|| {
                 let mut out = [0u8; 32];
                 let _ = hkdf::derive::<sha2::Sha256>(
+                    Context::default(),
                     &KEY128,
                     &KEY256,
                     &[],
@@ -1512,6 +1517,7 @@ fn kdf_ops(run: &mut Run) -> bool {
             Box::new(|| {
                 let mut out = [0u8; 32];
                 let _ = hkdf::derive::<sha2::Sha512>(
+                    Context::default(),
                     &KEY128,
                     &KEY256,
                     &[],
@@ -1525,7 +1531,11 @@ fn kdf_ops(run: &mut Run) -> bool {
             Box::new(|| {
                 let mut out = [0u8; 32];
                 let _ = pbkdf2::pbkdf2::<sha2::Sha256>(
-                    &KEY128, &KEY128, ITERATIONS, &mut out,
+                    Context::default(),
+                    &KEY128,
+                    &KEY128,
+                    ITERATIONS,
+                    &mut out,
                 );
                 black_box(out);
             }),
@@ -1535,7 +1545,11 @@ fn kdf_ops(run: &mut Run) -> bool {
             Box::new(|| {
                 let mut out = [0u8; 32];
                 let _ = pbkdf2::pbkdf2::<sha2::Sha512>(
-                    &KEY128, &KEY128, ITERATIONS, &mut out,
+                    Context::default(),
+                    &KEY128,
+                    &KEY128,
+                    ITERATIONS,
+                    &mut out,
                 );
                 black_box(out);
             }),
@@ -1545,6 +1559,7 @@ fn kdf_ops(run: &mut Run) -> bool {
             Box::new(|| {
                 let mut out = [0u8; 48];
                 tls12::prf::<sha2::Sha256>(
+                    Context::default(),
                     &KEY256,
                     b"master secret",
                     &[&KEY256, &KEY256],
@@ -1557,7 +1572,8 @@ fn kdf_ops(run: &mut Run) -> bool {
             "sp800-108-hmac-sha-256",
             Box::new(|| {
                 let mut out = [0u8; 32];
-                let mut prf = Hmac::<sha2::Sha256>::new(&KEY256);
+                let mut prf =
+                    Hmac::<sha2::Sha256>::new(Context::default(), &KEY256);
                 let _ = sp800_108::counter(
                     &mut prf,
                     32,
@@ -1572,7 +1588,13 @@ fn kdf_ops(run: &mut Run) -> bool {
             "kdf-kmac128",
             Box::new(|| {
                 let mut out = [0u8; 32];
-                sp800_108::kmac128(&KEY256, b"label", &KEY128, &mut out);
+                sp800_108::kmac128(
+                    Context::default(),
+                    &KEY256,
+                    b"label",
+                    &KEY128,
+                    &mut out,
+                );
                 black_box(out);
             }),
         ),
@@ -1581,6 +1603,7 @@ fn kdf_ops(run: &mut Run) -> bool {
             Box::new(|| {
                 let mut out = [0u8; 32];
                 let _ = one_step::hash::<sha2::Sha256>(
+                    Context::default(),
                     &KEY256,
                     &[&KEY128, &[0, 0, 1, 0]],
                     &mut out,
@@ -1592,8 +1615,12 @@ fn kdf_ops(run: &mut Run) -> bool {
             "x963-sha-256",
             Box::new(|| {
                 let mut out = [0u8; 32];
-                let _ =
-                    x963::derive::<sha2::Sha256>(&KEY256, &[&KEY128], &mut out);
+                let _ = x963::derive::<sha2::Sha256>(
+                    Context::default(),
+                    &KEY256,
+                    &[&KEY128],
+                    &mut out,
+                );
                 black_box(out);
             }),
         ),
@@ -1632,16 +1659,16 @@ fn kex_ops(run: &mut Run) -> bool {
     let secret448 = [0x42u8; x448::KEY_SIZE];
     let peer448 = x448::public_key(&[0x24u8; x448::KEY_SIZE]);
     let (Ok(p256), Ok(p256_peer), Ok(p384), Ok(p384_peer)) = (
-        ecdh::p256::PrivateKey::generate(&mut build),
-        ecdh::p256::PrivateKey::generate(&mut build),
-        ecdh::p384::PrivateKey::generate(&mut build),
-        ecdh::p384::PrivateKey::generate(&mut build),
+        ecdh::p256::PrivateKey::generate(Context::default(), &mut build),
+        ecdh::p256::PrivateKey::generate(Context::default(), &mut build),
+        ecdh::p384::PrivateKey::generate(Context::default(), &mut build),
+        ecdh::p384::PrivateKey::generate(Context::default(), &mut build),
     ) else {
         return false;
     };
     let (Ok(p521), Ok(p521_peer)) = (
-        ecdh::p521::PrivateKey::generate(&mut build),
-        ecdh::p521::PrivateKey::generate(&mut build),
+        ecdh::p521::PrivateKey::generate(Context::default(), &mut build),
+        ecdh::p521::PrivateKey::generate(Context::default(), &mut build),
     ) else {
         return false;
     };
@@ -1676,7 +1703,11 @@ fn kex_ops(run: &mut Run) -> bool {
         (
             "ecdh-p256-keygen",
             Box::new(|| {
-                black_box(ecdh::p256::PrivateKey::generate(&mut rng256)).ok();
+                black_box(ecdh::p256::PrivateKey::generate(
+                    Context::default(),
+                    &mut rng256,
+                ))
+                .ok();
             }),
         ),
         (
@@ -1688,7 +1719,11 @@ fn kex_ops(run: &mut Run) -> bool {
         (
             "ecdh-p384-keygen",
             Box::new(|| {
-                black_box(ecdh::p384::PrivateKey::generate(&mut rng384)).ok();
+                black_box(ecdh::p384::PrivateKey::generate(
+                    Context::default(),
+                    &mut rng384,
+                ))
+                .ok();
             }),
         ),
         (
@@ -1700,7 +1735,11 @@ fn kex_ops(run: &mut Run) -> bool {
         (
             "ecdh-p521-keygen",
             Box::new(|| {
-                black_box(ecdh::p521::PrivateKey::generate(&mut rng521)).ok();
+                black_box(ecdh::p521::PrivateKey::generate(
+                    Context::default(),
+                    &mut rng521,
+                ))
+                .ok();
             }),
         ),
         (
@@ -1766,22 +1805,24 @@ fn sig_ops(run: &mut Run) -> bool {
         return false;
     };
     let ed_secret = KEY256;
-    let ed_key = ed25519::PrivateKey::new(&Key::from(ed_secret));
+    let ed_key =
+        ed25519::PrivateKey::new(Context::default(), &Key::from(ed_secret));
     let ed_public = ed_key.public_key().bytes();
     let ed_signature = ed_key.sign_deterministic(MESSAGE);
     let Ok(mut hedge448) = seeded() else {
         return false;
     };
     let ed448_secret = [0x42u8; ed448::KEY_SIZE];
-    let ed448_key = ed448::PrivateKey::new(&Key::from(ed448_secret));
+    let ed448_key =
+        ed448::PrivateKey::new(Context::default(), &Key::from(ed448_secret));
     let ed448_public = ed448_key.public_key().bytes();
     let Ok(ed448_signature) = ed448_key.sign_deterministic(b"", MESSAGE) else {
         return false;
     };
     let (Ok(p256), Ok(p384), Ok(p521)) = (
-        ecdsa::p256::PrivateKey::generate(&mut build),
-        ecdsa::p384::PrivateKey::generate(&mut build),
-        ecdsa::p521::PrivateKey::generate(&mut build),
+        ecdsa::p256::PrivateKey::generate(Context::default(), &mut build),
+        ecdsa::p384::PrivateKey::generate(Context::default(), &mut build),
+        ecdsa::p521::PrivateKey::generate(Context::default(), &mut build),
     ) else {
         return false;
     };
@@ -1802,7 +1843,9 @@ fn sig_ops(run: &mut Run) -> bool {
         }) {
             continue;
         }
-        let Ok(key) = rsa::PrivateKey::generate(&mut build, bits) else {
+        let Ok(key) =
+            rsa::PrivateKey::generate(Context::default(), &mut build, bits)
+        else {
             return false;
         };
         let Ok(signature) =
@@ -1816,7 +1859,7 @@ fn sig_ops(run: &mut Run) -> bool {
         (
             "ed25519-keygen",
             Box::new(|| {
-                black_box(ed25519::public_key(&ed_secret));
+                black_box(ed25519::public_key(Context::default(), &ed_secret));
             }) as Once<'_>,
         ),
         (
@@ -1834,14 +1877,19 @@ fn sig_ops(run: &mut Run) -> bool {
         (
             "ed25519-verify",
             Box::new(|| {
-                black_box(ed25519::verify(&ed_public, MESSAGE, &ed_signature))
-                    .ok();
+                black_box(ed25519::verify(
+                    Context::default(),
+                    &ed_public,
+                    MESSAGE,
+                    &ed_signature,
+                ))
+                .ok();
             }),
         ),
         (
             "ed448-keygen",
             Box::new(|| {
-                black_box(ed448::public_key(&ed448_secret));
+                black_box(ed448::public_key(Context::default(), &ed448_secret));
             }),
         ),
         (
@@ -1860,6 +1908,7 @@ fn sig_ops(run: &mut Run) -> bool {
             "ed448-verify",
             Box::new(|| {
                 black_box(ed448::verify(
+                    Context::default(),
                     &ed448_public,
                     b"",
                     MESSAGE,
@@ -1871,7 +1920,11 @@ fn sig_ops(run: &mut Run) -> bool {
         (
             "ecdsa-p256-keygen",
             Box::new(|| {
-                black_box(ecdsa::p256::PrivateKey::generate(&mut rng256)).ok();
+                black_box(ecdsa::p256::PrivateKey::generate(
+                    Context::default(),
+                    &mut rng256,
+                ))
+                .ok();
             }),
         ),
         (
@@ -1900,7 +1953,11 @@ fn sig_ops(run: &mut Run) -> bool {
         (
             "ecdsa-p384-keygen",
             Box::new(|| {
-                black_box(ecdsa::p384::PrivateKey::generate(&mut rng384)).ok();
+                black_box(ecdsa::p384::PrivateKey::generate(
+                    Context::default(),
+                    &mut rng384,
+                ))
+                .ok();
             }),
         ),
         (
@@ -1929,7 +1986,11 @@ fn sig_ops(run: &mut Run) -> bool {
         (
             "ecdsa-p521-keygen",
             Box::new(|| {
-                black_box(ecdsa::p521::PrivateKey::generate(&mut rng521)).ok();
+                black_box(ecdsa::p521::PrivateKey::generate(
+                    Context::default(),
+                    &mut rng521,
+                ))
+                .ok();
             }),
         ),
         (
@@ -2015,7 +2076,7 @@ fn rsa_rows<'a>(
 /// are bound before the job list, since the closures borrow them.
 macro_rules! pq_sig_key {
     ($key:ident, $signature:ident, $build:expr, $private:ty) => {
-        let Ok($key) = <$private>::generate($build) else {
+        let Ok($key) = <$private>::generate(Context::default(), $build) else {
             return false;
         };
         let Ok($signature) = $key.sign_deterministic(&[], MESSAGE) else {
@@ -2031,7 +2092,7 @@ macro_rules! pq_sig_rows {
         $jobs.push((
             concat!($name, "-keygen"),
             Box::new(|| {
-                black_box(<$private>::generate($rng)).ok();
+                black_box(<$private>::generate(Context::default(), $rng)).ok();
             }) as Once<'_>,
         ));
         $jobs.push((
@@ -2082,11 +2143,13 @@ impl<const L: usize> HssBench<L> {
         sets: [(scytale::sig::lms::Lms, scytale::sig::lms::Lmots); L],
     ) -> Option<Self> {
         use scytale::sig::lms::hss::{PrivateKey, der_max};
-        let key = PrivateKey::<L>::generate(rng, &sets).ok()?;
+        let key =
+            PrivateKey::<L>::generate(Context::default(), rng, &sets).ok()?;
         let mut der = vec![0u8; der_max(L)];
         let n = key.der_bytes(&mut der).ok()?;
         der.truncate(n);
-        let mut signer = PrivateKey::<L>::try_from_der(&der).ok()?;
+        let mut signer =
+            PrivateKey::<L>::try_from_der(Context::default(), &der).ok()?;
         let mut signature = vec![0u8; signer.signature_len()];
         signer.sign(rng, MESSAGE, &mut signature).ok()?;
         Some(HssBench {
@@ -2118,7 +2181,12 @@ impl<const L: usize> HssBench<L> {
         jobs.push((
             keygen,
             Box::new(|| {
-                black_box(PrivateKey::<L>::generate(keygen_rng, sets)).ok();
+                black_box(PrivateKey::<L>::generate(
+                    Context::default(),
+                    keygen_rng,
+                    sets,
+                ))
+                .ok();
             }) as Once<'_>,
         ));
         jobs.push((
@@ -2126,7 +2194,8 @@ impl<const L: usize> HssBench<L> {
             Box::new(|| {
                 let mut out = [0u8; scytale::sig::lms::hss::signature_max(2)];
                 if signer.remaining() == 0
-                    && let Ok(fresh) = PrivateKey::<L>::try_from_der(der)
+                    && let Ok(fresh) =
+                        PrivateKey::<L>::try_from_der(Context::default(), der)
                 {
                     *signer = fresh;
                 }
@@ -2307,7 +2376,7 @@ fn pq_sig_ops(run: &mut Run) -> bool {
 /// An ML-KEM key and one ciphertext under it, likewise.
 macro_rules! kem_key {
     ($key:ident, $ciphertext:ident, $build:expr, $private:ty) => {
-        let Ok($key) = <$private>::generate($build) else {
+        let Ok($key) = <$private>::generate(Context::default(), $build) else {
             return false;
         };
         let Ok(($ciphertext, _)) = $key.public_key().encapsulate($build) else {
@@ -2323,7 +2392,8 @@ macro_rules! kem_rows {
         $jobs.push((
             concat!($name, "-keygen"),
             Box::new(|| {
-                black_box(<$private>::generate($keygen)).ok();
+                black_box(<$private>::generate(Context::default(), $keygen))
+                    .ok();
             }) as Once<'_>,
         ));
         // A key keeps its matrix and its hash from the moment it is
@@ -2334,7 +2404,7 @@ macro_rules! kem_rows {
         $jobs.push((
             concat!($name, "-public-key"),
             Box::new(move || {
-                black_box(<$public>::try_new(&bytes)).ok();
+                black_box(<$public>::try_new(Context::default(), &bytes)).ok();
             }),
         ));
         $jobs.push((
@@ -2446,10 +2516,14 @@ fn pke_ops(run: &mut Run) -> bool {
     else {
         return false;
     };
-    let Ok(key) = oaep::PrivateKey::generate(&mut build, 2048) else {
+    let Ok(key) =
+        oaep::PrivateKey::generate(Context::default(), &mut build, 2048)
+    else {
         return false;
     };
-    let Ok(recipient) = hpke::x25519::PrivateKey::generate(&mut build) else {
+    let Ok(recipient) =
+        hpke::x25519::PrivateKey::generate(Context::default(), &mut build)
+    else {
         return false;
     };
     let recipient_public = *recipient.public_key();
@@ -2537,8 +2611,8 @@ fn fpe_ops(run: &mut Run) -> bool {
         return false;
     }
     let (Ok(ff1), Ok(ff3)) = (
-        Ff1::<Aes128>::try_new(&Key::from(KEY128), 10),
-        Ff3_1::<Aes128>::try_new(&Key::from(KEY128), 10),
+        Ff1::<Aes128>::try_new(Context::default(), &Key::from(KEY128), 10),
+        Ff3_1::<Aes128>::try_new(Context::default(), &Key::from(KEY128), 10),
     ) else {
         return false;
     };
@@ -2677,32 +2751,33 @@ where
     B: BlockCipher<Block = [u8; 16], Key = Key<[u8; 32]>>,
 {
     /// The keys, each mode built with `new`, as a caller builds it,
-    /// so that it takes the kernel the features in force allow.
-    fn try_new() -> Result<Self, Error> {
+    /// so that it takes the kernel `ctx` allows.
+    fn try_new(ctx: Context) -> Result<Self, Error> {
         let k128 = Key::from(KEY128);
         let k256 = Key::from(KEY256);
         Ok(Keys {
-            ecb128: A::new(&k128),
-            ecb256: B::new(&k256),
-            cbc: Cbc::new(&k128),
-            cfb1: Cfb1::new(&k128),
-            cfb8: Cfb8::new(&k128),
-            cfb128: Cfb128::new(&k128),
-            ofb: Ofb::new(&k128),
-            ctr: Ctr::new(&k128),
-            ctr256: Ctr::new(&k256),
-            gcm128: Gcm::new(&k128),
-            gcm256: Gcm::new(&k256),
-            siv: GcmSiv::new(&k128),
-            xpn: Xpn::new(&k128),
-            ccm: Ccm::new(&k128),
+            ecb128: A::new(ctx, &k128),
+            ecb256: B::new(ctx, &k256),
+            cbc: Cbc::new(ctx, &k128),
+            cfb1: Cfb1::new(ctx, &k128),
+            cfb8: Cfb8::new(ctx, &k128),
+            cfb128: Cfb128::new(ctx, &k128),
+            ofb: Ofb::new(ctx, &k128),
+            ctr: Ctr::new(ctx, &k128),
+            ctr256: Ctr::new(ctx, &k256),
+            gcm128: Gcm::new(ctx, &k128),
+            gcm256: Gcm::new(ctx, &k256),
+            siv: GcmSiv::new(ctx, &k128),
+            xpn: Xpn::new(ctx, &k128),
+            ccm: Ccm::new(ctx, &k128),
             xts: Xts::try_new(
+                ctx,
                 &Key::from(KEY_XTS_DATA),
                 &Key::from(KEY_XTS_TWEAK),
             )?,
-            kw: Kw::new(&k128),
-            kwp: Kwp::new(&k128),
-            cmac: Cmac::new(&k128),
+            kw: Kw::new(ctx, &k128),
+            kwp: Kwp::new(ctx, &k128),
+            cmac: Cmac::new(ctx, &k128),
             wrapped: [
                 vec![0u8; SIZES[SIZES.len() - 1] + 8],
                 vec![0u8; SIZES[SIZES.len() - 1] + 8],
@@ -4652,6 +4727,7 @@ fn self_test() -> bool {
     let mut seen = Vec::new();
     let under = Under {
         profile: walk[0],
+        ctx: Context::default(),
         index: 0,
         name: walk[0].to_string(),
         seen: &mut seen,
@@ -4674,7 +4750,8 @@ fn self_test() -> bool {
     );
 
     // Every named row is built, or a filter would silently drop it.
-    let mut keys = Keys::<Aes128, Aes256>::try_new().expect("AES keys");
+    let mut keys =
+        Keys::<Aes128, Aes256>::try_new(Context::default()).expect("AES keys");
     let mut built = keys.tasks();
     check(
         "every algorithm has a task",

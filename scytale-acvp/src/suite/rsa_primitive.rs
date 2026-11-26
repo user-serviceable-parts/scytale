@@ -53,26 +53,31 @@ pub fn answer(
         other => return Err(Error::new(format!("mode {other}"))),
     };
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            if text(group, "testType")? != "AFT" {
-                return Err(unknown_test_type(group));
-            }
-            if signature {
-                answer_tests(group, |t| signature_case(group, t))
-            } else {
-                decryption_group(group, rng)
-            }
-        })
+        if text(group, "testType")? != "AFT" {
+            return Err(unknown_test_type(group));
+        }
+        if signature {
+            answer_tests(group, |t| signature_case(group, t, builder))
+        } else {
+            decryption_group(group, rng, builder)
+        }
     })
 }
 
-/// One signature-primitive case.
-fn signature_case(group: &Value, t: &Value) -> Result<Value, Error> {
+/// One signature-primitive case. The primitives run on the key's
+/// own arithmetic, chosen when it was built, so only the key is
+/// built under `builder`.
+fn signature_case(
+    group: &Value,
+    t: &Value,
+    builder: &Builder,
+) -> Result<Value, Error> {
     let n = hex(t, "n")?;
     let e = hex(t, "e")?;
-    let key = match text(group, "keyMode")? {
-        "standard" => PrivateKey::try_new(&n, &e, &hex(t, "d")?)?,
-        "crt" => PrivateKey::try_new_crt(
+    let key = builder.try_build(|ctx| match text(group, "keyMode")? {
+        "standard" => Ok(PrivateKey::try_new(ctx, &n, &e, &hex(t, "d")?)?),
+        "crt" => Ok(PrivateKey::try_new_crt(
+            ctx,
             &n,
             &e,
             &match opt_hex(t, "d")? {
@@ -84,9 +89,9 @@ fn signature_case(group: &Value, t: &Value) -> Result<Value, Error> {
             &hex(t, "dmp1")?,
             &hex(t, "dmq1")?,
             &hex(t, "iqmp")?,
-        )?,
-        other => return Err(Error::new(format!("keyMode {other}"))),
-    };
+        )?),
+        other => Err(Error::new(format!("keyMode {other}"))),
+    })?;
     let modulo = int(group, "modulo")?;
     if key.bits() as u64 != modulo {
         return Err(Error::new(format!(
@@ -126,6 +131,7 @@ const KEY_TRIES: usize = 64;
 fn decryption_group(
     group: &Value,
     rng: &mut dyn Random,
+    builder: &Builder,
 ) -> Result<Option<Value>, Error> {
     let bits = int(group, "modulo")? as usize;
     let len = bits.div_ceil(8);
@@ -139,7 +145,7 @@ fn decryption_group(
         let mut results = Vec::new();
         for (i, r) in entries.iter().enumerate() {
             let entry = match (opt_hex(r, "n")?, opt_hex(r, "e")?) {
-                (Some(n), Some(e)) => given_key_entry(r, &n, &e),
+                (Some(n), Some(e)) => given_key_entry(r, &n, &e, builder),
                 _ => {
                     let ct = hex(r, "cipherText")?;
                     let key = key_for(
@@ -148,6 +154,7 @@ fn decryption_group(
                         refuse.as_ref().map(|set| set[i]),
                         bits,
                         rng,
+                        builder,
                     )?;
                     generated_key_entry(r, key)
                 }
@@ -201,12 +208,14 @@ fn key_for<'k>(
     refuse: Option<bool>,
     bits: usize,
     rng: &mut dyn Random,
+    builder: &Builder,
 ) -> Result<&'k PkePrivateKey, Error> {
     for _ in 0..KEY_TRIES {
         let key = match generated {
             Some(key) => key,
-            None => generated
-                .insert(PkePrivateKey::generate(&mut Rng(&mut *rng), bits)?),
+            None => generated.insert(builder.try_build(|ctx| {
+                PkePrivateKey::generate(ctx, &mut Rng(&mut *rng), bits)
+            })?),
         };
         match refuse {
             None => break,
@@ -285,13 +294,18 @@ fn generated_key_entry(r: &Value, key: &PkePrivateKey) -> Result<Value, Error> {
 
 /// An entry under the key the vendored file names, which comes with
 /// its plaintext but no private exponent.
-fn given_key_entry(r: &Value, n: &[u8], e: &[u8]) -> Result<Value, Error> {
+fn given_key_entry(
+    r: &Value,
+    n: &[u8],
+    e: &[u8],
+    builder: &Builder,
+) -> Result<Value, Error> {
     let mut out = json!({ "e": hex_value(e), "n": hex_value(n) });
     // A failing entry can be bad in either of two ways, and the crate
     // refuses them at different points: an even modulus never becomes
     // a key at all, while a ciphertext at or above the modulus is
     // caught by the primitive.
-    let Ok(key) = PkePublicKey::try_new(n, e) else {
+    let Ok(key) = builder.build(|ctx| PkePublicKey::try_new(ctx, n, e)) else {
         out["testPassed"] = json!(false);
         return Ok(out);
     };
@@ -485,11 +499,8 @@ mod tests {
     /// give the file's signature.
     #[test]
     fn private_exponent_is_derived_from_the_primes() {
-        let Some(doc) =
-            super::super::vendored(find("RSA-SignaturePrimitive-2.0")[0])
-        else {
-            return;
-        };
+        let ctx = scytale::Context::default();
+        let doc = super::super::vendored(find("RSA-SignaturePrimitive-2.0")[0]);
         let mut seen = 0;
         for group in list(&doc, "testGroups").unwrap() {
             if group["keyMode"] != "crt" {
@@ -506,7 +517,7 @@ mod tests {
                     &e,
                 )
                 .unwrap();
-                let key = PrivateKey::try_new(&n, &e, &d).unwrap();
+                let key = PrivateKey::try_new(ctx, &n, &e, &d).unwrap();
                 let mut signature = vec![0u8; key.modulus_len()];
                 key.sign_primitive(&hex(t, "message").unwrap(), &mut signature)
                     .unwrap();
@@ -519,11 +530,8 @@ mod tests {
 
     #[test]
     fn crt_cases_sign_without_a_private_exponent() {
-        let Some(mut doc) =
-            super::super::vendored(find("RSA-SignaturePrimitive-2.0")[0])
-        else {
-            return;
-        };
+        let mut doc =
+            super::super::vendored(find("RSA-SignaturePrimitive-2.0")[0]);
         let with = answer(
             &doc,
             &mut fixed_rng(&Builder::default()).unwrap(),
@@ -560,6 +568,7 @@ mod tests {
 
     #[test]
     fn decryption_without_a_key_generates_one() {
+        let ctx = scytale::Context::default();
         let low = format!("{:0>512}", "01");
         let high = "FF".repeat(256);
         let doc = json!({
@@ -585,6 +594,7 @@ mod tests {
         assert_eq!(fail["testPassed"], false);
         assert!(fail.get("plainText").is_none());
         let key = PkePublicKey::try_new(
+            ctx,
             &hex(pass, "n").unwrap(),
             &hex(pass, "e").unwrap(),
         )

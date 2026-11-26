@@ -41,7 +41,7 @@ use core::fmt;
 
 use crate::cipher::BlockCipher;
 use crate::cipher::aes::{BLOCK_SIZE, KeySize, MAX_WORDS, expand_words};
-use crate::{BlockType, Key, KeyType};
+use crate::{BlockType, Context, Key, KeyType};
 use tables::{INV_SBOX, SBOX, TD, TE};
 use zeroize::ZeroizeOnDrop;
 
@@ -149,7 +149,8 @@ impl<const K: usize> KeyType for Aes<K> {
 }
 
 impl<const K: usize> BlockCipher for Aes<K> {
-    fn new(key: &Self::Key) -> Self {
+    /// One kernel, so `ctx` has nothing to choose.
+    fn new(_ctx: Context, key: &Self::Key) -> Self {
         Aes::new(key.array())
     }
 
@@ -433,7 +434,10 @@ mod tests {
 
     #[test]
     fn trait_construction() {
-        let a = <Aes<24> as BlockCipher>::new(&Key::from([1; 24]));
+        let a = <Aes<24> as BlockCipher>::new(
+            crate::Context::default(),
+            &Key::from([1; 24]),
+        );
         assert_eq!(a.rounds(), 12);
         let mut data = [[7u8; BLOCK_SIZE]; 3];
         BlockCipher::encrypt(&a, &mut data);

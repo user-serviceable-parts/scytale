@@ -7,8 +7,8 @@
 //! selected by `SCYTALE_KERNELS`.
 //!
 //! A kernel is reached through the feature profiles the library's
-//! types publish: setting a profile puts a feature set in force, and
-//! a type takes the first of its profiles the set meets. A vector
+//! types publish: an object built with a context of a profile's set
+//! takes the first of its type's profiles that set meets. A vector
 //! tests the kernels of one type: a hash suite the hash's, AES-ECB
 //! the cipher's, a mode's suite the mode's, an ECDSA group its
 //! curve's, the RSA suites RSA's. It is answered under each profile
@@ -18,22 +18,20 @@
 //! each hash kernel, and a suite with no kernel of its own, HMAC or
 //! LMS or a KDF, is answered once, under the features detected.
 //!
-//! The work is cut into units, a test group each, or a single case of
-//! a large-data group, of SLH-DSA signing or of LMS key generation,
-//! since those cases are minutes apiece under emulation. A unit is
-//! answered under each kernel that tests it, and the units of every
-//! kernel of the suite go to one pool: one worker per core takes the
-//! next, heaviest first, and answers it through its kernel's
-//! [`Builder`], so that kernels and suites run side by side and only
-//! wait for one another while something is being built or run under
-//! another set; see there.
+//! The work is cut into units, a case each, or a whole group where
+//! its cases share a key the driver generates for it, as RSA and LMS
+//! signing do. A unit is answered under each kernel that tests it,
+//! and the units of every kernel of the suite go to one pool: one
+//! worker per core takes the next, heaviest first, and answers it
+//! through its kernel's [`Builder`], so that kernels and suites run
+//! side by side and only wait for one another while something is
+//! being built under another set; see there.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use scytale::Random;
 use scytale::aead::{Ccm, Gcm, GcmSiv, Xpn};
 use scytale::cipher::aes::Aes128;
 use scytale::cipher::mode::{Cbc, Ctr, Xts};
@@ -43,7 +41,7 @@ use scytale::hash::sha2::{Sha256, Sha512};
 use scytale::hash::sha3::Sha3_256;
 use scytale::kem::ml_kem::ml_kem_768;
 use scytale::sig::{ecdsa, rsa};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::profile::Builder;
 use crate::suite::{SUITES, Suite, compare, fixed_rng, vendored};
@@ -162,21 +160,34 @@ pub struct Unit {
 }
 
 /// The expected cost of a unit, in the worth of an ordinary case.
-/// An ordinary group weighs its cases. A large-data case hashes
+/// A whole group weighs its cases. A large-data case hashes
 /// `fullLength` bits, and one of 2^36 measured as some eight
-/// thousand ordinary cases, so a case weighs its bits over 2^23. An
-/// SLH-DSA signature is dominated by the WOTS+ public keys of the
-/// hypertree, `d` layers of 2^(h/d) leaves each of `len` chains of
-/// fifteen hashes, plus the FORS tree, `k` trees of 2^a leaves; ten
-/// thousand of those hashes measured as one ordinary case.
+/// thousand ordinary cases, so a case weighs its bits over 2^23. A
+/// Monte Carlo case, a hundred steps of a thousand chained calls,
+/// weighs [`MCT`]. An SLH-DSA signature, `signing`, is dominated
+/// by the WOTS+ public keys of the hypertree, `d` layers of 2^(h/d)
+/// leaves each of `len` chains of fifteen hashes, plus the FORS
+/// tree, `k` trees of 2^a leaves; ten thousand of those hashes
+/// measured as one ordinary case.
 ///
 /// LMS is weighed by [`lms_weight`], where the units are made.
-fn weight(group: &Value, case: Option<&Value>, cases: usize) -> u64 {
+fn weight(
+    group: &Value,
+    case: Option<&Value>,
+    cases: usize,
+    signing: bool,
+) -> u64 {
     let Some(case) = case else {
         return cases as u64;
     };
     if let Some(bits) = case["largeMsg"]["fullLength"].as_u64() {
         return (bits >> 23).max(1);
+    }
+    if group["testType"] == "MCT" {
+        return MCT;
+    }
+    if !signing {
+        return 1;
     }
     let set = group["parameterSet"].as_str().unwrap_or("");
     // FIPS 205 table 2: h, d, len, k, a, for each security level and
@@ -231,11 +242,33 @@ fn lms_weight(group: &Value, leaves: impl Fn(u32) -> u64) -> Option<u64> {
     Some((leaves(h) * hashes / 10_000).max(1))
 }
 
+/// What a Monte Carlo case weighs, on the scale of [`weight`]: the
+/// AES, SHA-2, SHA-3 and SHAKE ones measured as a hundredth to a
+/// three-hundredth of a large-data case of 2^36 bits, under the
+/// portable kernels.
+const MCT: u64 = 50;
+
+/// Whether the cases of a group of `suite` share a key the driver
+/// generates once for the group and answers at the group's level, so
+/// that the group must be answered whole: RSA and LMS signing, and
+/// the RSA decryption primitive, whose generated key serves case
+/// after case. Every other driver answers a case from that case
+/// alone, or from a key the file gives the group, and where a group
+/// has a key of the driver's making, ECDSA's or EdDSA's when the file
+/// gives none, it is drawn first from the fixed generator, so every
+/// one of the group's units draws the same one.
+fn shares_a_key(suite: &Suite) -> bool {
+    matches!(
+        (suite.algorithm, suite.mode),
+        ("RSA" | "LMS", Some("sigGen")) | ("RSA", Some("decryptionPrimitive"))
+    )
+}
+
 /// Every unit of `doc`, the vendored document of suite `suite` in
-/// the registry, in a fixed order: a unit per group, except that the
-/// large-data groups, SLH-DSA signing and LMS key generation give a
-/// unit per case. An LMS signing group stays whole, since its cases
-/// share the one key the group generates.
+/// the registry, in a fixed order: a unit per case, so that a
+/// group's cases are answered side by side, except that a group
+/// whose cases share a key the driver generates, see
+/// `shares_a_key`, is a unit whole.
 pub fn units(suite: usize, doc: &Value) -> Vec<Unit> {
     let mut out = Vec::new();
     let Some(groups) = doc["testGroups"].as_array() else {
@@ -244,28 +277,12 @@ pub fn units(suite: usize, doc: &Value) -> Vec<Unit> {
     let s = &SUITES[suite];
     let signing = s.algorithm == "SLH-DSA" && s.mode == Some("sigGen");
     let lms = |mode| s.algorithm == "LMS" && s.mode == Some(mode);
+    let whole = shares_a_key(s);
     for (group, g) in groups.iter().enumerate() {
         let cases = g["tests"].as_array().map_or(0, Vec::len);
-        let tree = lms("keyGen").then(|| lms_weight(g, |h| 1 << h)).flatten();
-        if let Some(weight) = tree.filter(|_| cases > 0) {
-            out.extend((0..cases).map(|case| Unit {
-                suite,
-                group,
-                case: Some(case),
-                weight,
-            }));
-        } else if (g["testType"] == "LDT" || signing) && cases > 0 {
-            for case in 0..cases {
-                out.push(Unit {
-                    suite,
-                    group,
-                    case: Some(case),
-                    weight: weight(g, Some(&g["tests"][case]), cases),
-                });
-            }
-        } else {
+        if whole || cases == 0 {
             let signed = cases as u64;
-            let whole = lms("sigGen")
+            let tree = lms("sigGen")
                 .then(|| {
                     lms_weight(g, |h| (1 << h) + signed * u64::from(h / 2 + 2))
                 })
@@ -274,31 +291,24 @@ pub fn units(suite: usize, doc: &Value) -> Vec<Unit> {
                 suite,
                 group,
                 case: None,
-                weight: whole.unwrap_or_else(|| weight(g, None, cases)),
+                weight: tree.unwrap_or_else(|| weight(g, None, cases, signing)),
+            });
+            continue;
+        }
+        let tree = lms("keyGen").then(|| lms_weight(g, |h| 1 << h)).flatten();
+        for case in 0..cases {
+            let weight = tree.unwrap_or_else(|| {
+                weight(g, Some(&g["tests"][case]), cases, signing)
+            });
+            out.push(Unit {
+                suite,
+                group,
+                case: Some(case),
+                weight,
             });
         }
     }
     out
-}
-
-/// A generator that notes any draw made while its builder's set is
-/// not in force. A driver that draws outside the builder has very
-/// likely built outside it too, and a build there takes whatever set
-/// another thread has put in force; the answers cannot show it, since
-/// every kernel answers alike, but a draw can.
-struct Watched<R> {
-    rng: R,
-    set: Features,
-    strayed: bool,
-}
-
-impl<R: Random> Random for Watched<R> {
-    fn fill(&mut self, out: &mut [u8]) -> Result<(), scytale::Error> {
-        if features::get() != self.set {
-            self.strayed = true;
-        }
-        self.rng.fill(out)
-    }
 }
 
 /// Answers `unit` of `doc` under `builder` with a fresh fixed
@@ -310,26 +320,37 @@ pub fn answer_unit(
     unit: &Unit,
     builder: &Builder,
 ) -> Result<Option<usize>, Error> {
-    let mut group = doc["testGroups"][unit.group].clone();
-    if let Some(case) = unit.case {
-        let test = group["tests"][case].clone();
-        group["tests"] = Value::Array(vec![test]);
-    }
-    let mut cut = doc.clone();
-    cut["testGroups"] = Value::Array(vec![group]);
-    let mut rng = Watched {
-        rng: fixed_rng(builder)?,
-        set: builder.set(),
-        strayed: false,
+    // Copied field by field, leaving out what the unit does not hold:
+    // a unit is often a single case of thousands, and copying them all
+    // for each would cost more than answering it.
+    let without = |v: &Value, name: &str| -> Map<String, Value> {
+        let mut out = Map::new();
+        if let Some(fields) = v.as_object() {
+            for (k, v) in fields.iter().filter(|(k, _)| *k != name) {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+        out
     };
+    let source = &doc["testGroups"][unit.group];
+    let mut group = without(source, "tests");
+    let tests = match unit.case {
+        Some(case) => Value::Array(vec![source["tests"][case].clone()]),
+        None => source["tests"].clone(),
+    };
+    group.insert("tests".into(), tests);
+    let mut cut = without(doc, "testGroups");
+    cut.insert(
+        "testGroups".into(),
+        Value::Array(vec![Value::Object(group)]),
+    );
+    let cut = Value::Object(cut);
+    let mut rng = fixed_rng(builder)?;
     let answered = (suite.answer)(&cut, &mut rng, builder)?;
-    if rng.strayed {
-        return Err(Error::new("drew randomness outside the builder"));
-    }
     if answered["testGroups"].as_array().is_some_and(Vec::is_empty) {
         return Ok(None);
     }
-    compare(suite, doc, &answered, builder).map(Some)
+    compare(suite, doc, &answered).map(Some)
 }
 
 /// The seconds between two lines of progress.
@@ -355,13 +376,6 @@ pub fn short_name(features: Features) -> String {
     }
     let names: Vec<&str> = features.iter().map(Feature::name).collect();
     names.join("+")
-}
-
-/// The kernels `SCYTALE_KERNELS` names, separated by white space, or
-/// `None` when it is unset, which selects every kernel.
-fn selected() -> Option<Vec<String>> {
-    let list = std::env::var("SCYTALE_KERNELS").ok()?;
-    Some(list.split_whitespace().map(Into::into).collect())
 }
 
 /// The kernels the units `all` of `doc` test, each as the profile
@@ -509,26 +523,35 @@ fn answer_all(
 /// each of its kernels, as the test `name`, and prints the cases
 /// compared and a line for every kernel: run, not run with the
 /// features it lacks, not selected, or failed, with what went wrong
-/// on stderr. A suite whose vectors are not in this copy is skipped.
+/// on stderr.
 /// Fails if any kernel's run fails, and on a suite that answers fewer
 /// cases than its minimum when every unit was answered.
+///
+/// `selected` names the kernels to run, as the lines spell them, and
+/// `None` runs every one. `default` is the set a suite with no kernel
+/// of its own builds under, and `None` the set detected: such a suite
+/// tests no kernel, so which ones its objects take is free to choose,
+/// and under an emulator the choice is time. QEMU runs the RISC-V
+/// vector instructions through helpers, and SHA-256 on the vector
+/// kernel measured nearly twice as slow there as on the scalar one.
 ///
 /// The kernels run at once, each unit building through its kernel's
 /// [`Builder`], so suites may be checked from several threads at
 /// once too.
-pub fn check(name: &str, directory: &str) -> Result<(), Error> {
+pub fn check(
+    name: &str,
+    directory: &str,
+    selected: Option<&[String]>,
+    default: Option<Features>,
+) -> Result<(), Error> {
     let s = SUITES
         .iter()
         .position(|s| s.directory == directory)
         .ok_or_else(|| Error::new(format!("{directory}: not registered")))?;
     let suite = &SUITES[s];
-    let Some(doc) = vendored(suite) else {
-        println!("{name}: {directory}: no vectors in this copy, skipped");
-        return Ok(());
-    };
+    let doc = vendored(suite);
     let types = kernels_tested(suite)?;
     let all = units(s, &doc);
-    let selected = selected();
     let hardware = features::detected();
     let kernels = kernels(&types, &doc, &all);
     // Each kernel's name, and its builder if it is to run or else
@@ -548,10 +571,15 @@ pub fn check(name: &str, directory: &str) -> Result<(), Error> {
             format!("{name}/{}", short_name(*profile))
         };
         let missing = profile.without(Feature::Isolated) - hardware;
-        let built = if selected.as_ref().is_some_and(|s| !s.contains(&kernel)) {
+        let built = if selected.is_some_and(|s| !s.contains(&kernel)) {
             Err("not selected".to_string())
         } else if types.is_empty() {
-            Ok(Builder::default())
+            Ok(match default {
+                Some(set) => Builder::try_new(set).map_err(|e| {
+                    Error::new(format!("the default set {set}: {e}"))
+                })?,
+                None => Builder::default(),
+            })
         } else {
             Builder::try_new(*profile)
                 .map_err(|_| format!("not run: needs {}", short_name(missing)))
@@ -740,47 +768,10 @@ mod tests {
         let whole = of("sigGen");
         assert_eq!(whole.len(), 1);
         assert_eq!((whole[0].case, whole[0].weight), (None, 33));
-        // Verifying is an ordinary case.
+        // Verifying is ordinary cases, one each.
         let verified = of("sigVer");
-        assert_eq!((verified[0].case, verified[0].weight), (None, 10));
-    }
-
-    /// A driver that draws outside its builder fails its unit, which
-    /// can be seen only under a profile the processor would not pick
-    /// by itself: under the set detected, outside looks like inside.
-    #[test]
-    fn a_draw_outside_the_builder_fails_the_unit() {
-        if features::detected().is_empty() {
-            return;
-        }
-        let suite = |answer| Suite {
-            directory: "x",
-            algorithm: "x",
-            mode: None,
-            revision: "1.0",
-            answer,
-            verify: None,
-            minimum: 0,
-        };
-        let inside = suite(|doc, rng, builder| {
-            builder.try_build(|| rng.fill(&mut [0u8; 8]))?;
-            Ok(json!({ "testGroups": [], "vsId": doc["vsId"] }))
-        });
-        let outside = suite(|doc, rng, _| {
-            rng.fill(&mut [0u8; 8])?;
-            Ok(json!({ "testGroups": [], "vsId": doc["vsId"] }))
-        });
-        let doc = json!({"testGroups": [{"tgId": 1, "tests": []}]});
-        let unit = Unit {
-            suite: 0,
-            group: 0,
-            case: None,
-            weight: 1,
-        };
-        let portable = Builder::try_new(Features::new()).unwrap();
-        assert_eq!(answer_unit(&inside, &doc, &unit, &portable), Ok(None));
-        let e = answer_unit(&outside, &doc, &unit, &portable).unwrap_err();
-        assert_eq!(e.message, "drew randomness outside the builder");
+        assert_eq!(verified.len(), 10);
+        assert!(verified.iter().all(|u| u.case.is_some() && u.weight == 1));
     }
 
     #[test]
@@ -796,7 +787,7 @@ mod tests {
     }
 
     #[test]
-    fn units_split_large_data_by_case_and_keep_other_groups() {
+    fn units_are_cases_weighed_by_their_kind() {
         // The first suite in the registry stands for any ordinary
         // one.
         let doc = json!({"testGroups": [
@@ -805,6 +796,7 @@ mod tests {
             {"tgId": 3, "testType": "LDT", "tests": [
                 {"tcId": 4, "largeMsg": {"fullLength": 1u64 << 23}},
                 {"tcId": 5, "largeMsg": {"fullLength": 1u64 << 24}}]},
+            {"tgId": 4, "testType": "AFT", "tests": []},
         ]});
         let got = units(0, &doc);
         let unit = |group, case, weight| Unit {
@@ -816,25 +808,50 @@ mod tests {
         assert_eq!(
             got,
             [
-                unit(0, None, 2),
-                unit(1, None, 1),
+                unit(0, Some(0), 1),
+                unit(0, Some(1), 1),
+                unit(1, Some(0), MCT),
                 unit(2, Some(0), 1),
-                unit(2, Some(1), 2)
+                unit(2, Some(1), 2),
+                unit(3, None, 0),
             ]
         );
     }
 
     #[test]
+    fn a_group_sharing_a_generated_key_is_one_unit() {
+        let doc = json!({"testGroups": [
+            {"tgId": 1, "testType": "GDT", "tests": [{"tcId": 1}, {"tcId": 2}]},
+        ]});
+        let rsa = units(suite_of("RSA", Some("sigGen")), &doc);
+        assert_eq!(rsa.len(), 1);
+        assert_eq!((rsa[0].case, rsa[0].weight), (None, 2));
+        let primitive =
+            units(suite_of("RSA", Some("decryptionPrimitive")), &doc);
+        assert_eq!(primitive.len(), 1);
+        // The file gives ECDSA's key, or else every unit draws the same
+        // one first, so its cases are split.
+        assert_eq!(units(suite_of("ECDSA", Some("sigGen")), &doc).len(), 2);
+        assert_eq!(units(suite_of("RSA", Some("sigVer")), &doc).len(), 2);
+    }
+
+    #[test]
     fn weights_follow_length_and_parameter_set() {
         let ldt = json!({"largeMsg": {"fullLength": 1u64 << 36}});
-        assert_eq!(weight(&json!({}), Some(&ldt), 4), 1 << 13);
+        assert_eq!(weight(&json!({}), Some(&ldt), 4, false), 1 << 13);
         let set = |name| json!({"parameterSet": name});
-        let w = |name| weight(&set(name), Some(&json!({})), 7);
+        let w = |name| weight(&set(name), Some(&json!({})), 7, true);
         assert!(w("SLH-DSA-SHA2-128s") > 10 * w("SLH-DSA-SHA2-128f"));
         assert!(w("SLH-DSA-SHAKE-192s") > w("SLH-DSA-SHAKE-128s"));
         // 7 * 512 * 35 * 15 + 14 * 4096 hashes.
         assert_eq!(w("SLH-DSA-SHA2-128s"), 193);
-        assert_eq!(weight(&json!({}), None, 914), 914);
+        // Only a signature climbs the hypertree.
+        let verify =
+            weight(&set("SLH-DSA-SHA2-128s"), Some(&json!({})), 7, false);
+        assert_eq!(verify, 1);
+        let mct = json!({"testType": "MCT"});
+        assert_eq!(weight(&mct, Some(&json!({})), 1, false), MCT);
+        assert_eq!(weight(&json!({}), None, 914, false), 914);
     }
 
     #[test]

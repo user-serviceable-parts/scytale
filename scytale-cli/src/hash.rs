@@ -181,7 +181,10 @@ fn tuple_hash(args: &HashArgs, name: &str, as_hex: bool) -> Result<()> {
     let mut digest = vec![0u8; args.length.unwrap_or(0)];
     macro_rules! tuple {
         ($T:ident) => {{
-            let mut hash = scytale::hash::sha3::$T::new(&custom);
+            let mut hash = scytale::hash::sha3::$T::new(
+                scytale::Context::default(),
+                &custom,
+            );
             elements.iter().for_each(|e| hash.push(e));
             hash.finalize_to(&mut digest);
         }};
@@ -221,16 +224,24 @@ fn digest(
         }
         use scytale::hash::sha3::{CShake128, CShake256, Shake128, Shake256};
         match name {
-            "shake128" => squeeze!(Shake128::default()),
-            "shake256" => squeeze!(Shake256::default()),
-            "cshake128" => squeeze!(CShake128::new(&function, &custom)),
-            _ => squeeze!(CShake256::new(&function, &custom)),
+            "shake128" => squeeze!(Shake128::new(scytale::Context::default())),
+            "shake256" => squeeze!(Shake256::new(scytale::Context::default())),
+            "cshake128" => squeeze!(CShake128::new(
+                scytale::Context::default(),
+                &function,
+                &custom
+            )),
+            _ => squeeze!(CShake256::new(
+                scytale::Context::default(),
+                &function,
+                &custom
+            )),
         }
         return Ok(out);
     }
     macro_rules! whole {
         ($H:ty) => {{
-            let mut hash = <$H>::default();
+            let mut hash = <$H>::new(scytale::Context::default());
             io::for_each_chunk(&mut *input, |chunk| {
                 hash.update(chunk);
                 Ok(())
@@ -255,7 +266,7 @@ mod tests {
     fn table_matches_types() {
         for name in names::HASHES {
             let n = with_hash!(name, H => Ok::<usize, crate::fail::Fail>(
-                H::default().finalize().as_ref().len()
+                H::new(scytale::Context::default()).finalize().as_ref().len()
             ))
             .unwrap();
             assert_eq!(Some(n), names::digest_len(name), "{name}");
@@ -267,8 +278,12 @@ mod tests {
     fn blake2_table_matches_types() {
         use scytale::hash::blake2::{Blake2b256, Blake2b512};
         let lens = [
-            Blake2b256::default().finalize().len(),
-            Blake2b512::default().finalize().len(),
+            Blake2b256::new(scytale::Context::default())
+                .finalize()
+                .len(),
+            Blake2b512::new(scytale::Context::default())
+                .finalize()
+                .len(),
         ];
         for (entry, n) in names::BLAKE2.iter().zip(lens) {
             assert_eq!(entry.output, Len::Exact(n), "{}", entry.name);

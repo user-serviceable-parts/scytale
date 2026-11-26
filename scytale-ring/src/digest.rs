@@ -149,11 +149,19 @@ impl Context {
     /// A fresh hash with `algorithm`.
     pub fn new(algorithm: &'static Algorithm) -> Self {
         let state = match algorithm.id {
-            Id::SHA1 => State::Sha1(Sha1::new()),
-            Id::SHA256 => State::Sha256(Sha256::new()),
-            Id::SHA384 => State::Sha384(Sha384::new()),
-            Id::SHA512 => State::Sha512(Sha512::new()),
-            Id::SHA512_256 => State::Sha512_256(Sha512_256::new()),
+            Id::SHA1 => State::Sha1(Sha1::new(scytale::Context::default())),
+            Id::SHA256 => {
+                State::Sha256(Sha256::new(scytale::Context::default()))
+            }
+            Id::SHA384 => {
+                State::Sha384(Sha384::new(scytale::Context::default()))
+            }
+            Id::SHA512 => {
+                State::Sha512(Sha512::new(scytale::Context::default()))
+            }
+            Id::SHA512_256 => {
+                State::Sha512_256(Sha512_256::new(scytale::Context::default()))
+            }
         };
         Context { state, algorithm }
     }

@@ -50,9 +50,11 @@
 //! use scytale::Key;
 //! use scytale::aead::Ccm;
 //! use scytale::cipher::aes::Aes128;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let ccm = Ccm::<Aes128>::new(&Key::from([0u8; 16]));
+//! let ctx = Context::default();
+//! let ccm = Ccm::<Aes128>::new(ctx, &Key::from([0u8; 16]));
 //! // A 13-byte nonce and an 8-byte tag, as RFC 3610's examples use.
 //! let nonce = [0u8; 13];
 //!
@@ -83,7 +85,7 @@ use crate::constant_time;
 use crate::features::{self, Dispatcher, Features};
 #[cfg(test)]
 use crate::kernel::Kernel;
-use crate::{Error, KeyType};
+use crate::{Context, Error, KeyType};
 
 /// The block width CCM is defined over.
 const BLOCK: usize = 16;
@@ -148,9 +150,9 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Aead for Ccm<C> {
     type Nonce = [u8; NONCE];
     type Tag = [u8; TAG];
 
-    fn new(key: &Self::Key) -> Self {
+    fn new(ctx: Context, key: &Self::Key) -> Self {
         // The inherent constructor, which takes precedence here.
-        Ccm::new(key)
+        Ccm::new(ctx, key)
     }
 
     fn encrypt(
@@ -176,12 +178,12 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Aead for Ccm<C> {
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
     /// Takes the key the cipher runs under.
-    pub fn new(key: &C::Key) -> Self {
+    pub fn new(ctx: Context, key: &C::Key) -> Self {
         Ccm {
-            ctr: Ctr::new(key),
-            chain: MacEngine::new(),
+            ctr: Ctr::new(ctx, key),
+            chain: MacEngine::new(ctx),
             #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-            native: best_native(),
+            native: best_native(ctx),
         }
     }
 
@@ -346,15 +348,15 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
 /// The interleaved loop for the kernel counter mode would take, where
 /// there is one written for it.
 #[cfg(target_arch = "aarch64")]
-fn best_native<C: BlockCipher>() -> Option<aarch64::Engine<C>> {
-    features::choose(ctr::kernels::<C>()).and_then(aarch64::Engine::of)
+fn best_native<C: BlockCipher>(ctx: Context) -> Option<aarch64::Engine<C>> {
+    features::choose(ctx, ctr::kernels::<C>()).and_then(aarch64::Engine::of)
 }
 
 /// The interleaved loop for the kernel counter mode would take, where
 /// there is one written for it.
 #[cfg(target_arch = "x86_64")]
-fn best_native<C: BlockCipher>() -> Option<x86_64::Engine<C>> {
-    features::choose(ctr::kernels::<C>()).and_then(x86_64::Engine::of)
+fn best_native<C: BlockCipher>(ctx: Context) -> Option<x86_64::Engine<C>> {
+    features::choose(ctx, ctr::kernels::<C>()).and_then(x86_64::Engine::of)
 }
 
 /// Refuses nonce and tag lengths the standard does not define, and a
@@ -477,7 +479,7 @@ pub(crate) mod tests {
         let expected = unhex(expected);
         let (ct, tag) = expected.split_at(expected.len() - tag_len);
         {
-            let ccm = under.build(|| Ccm::<Aes128>::new(&Key::from(*key)));
+            let ccm = { Ccm::<Aes128>::new(under.ctx(), &Key::from(*key)) };
             let mut data = pt.to_vec();
             let mut got = vec![0u8; tag_len];
             ccm.encrypt(&nonce, aad, &mut data, &mut got)
@@ -625,7 +627,10 @@ pub(crate) mod tests {
     /// anything is written.
     #[test]
     fn refuses_bad_lengths() {
-        let ccm = Ccm::<Aes128>::new(&Key::from([0u8; 16]));
+        let ccm = Ccm::<Aes128>::new(
+            crate::Context::default(),
+            &Key::from([0u8; 16]),
+        );
         let mut data = *b"data";
         for n in [0, 6, 14, 16] {
             let nonce = vec![0u8; n];
@@ -652,7 +657,10 @@ pub(crate) mod tests {
     /// bytes is the longest message and one more is refused.
     #[test]
     fn message_limit_follows_the_nonce() {
-        let ccm = Ccm::<Aes128>::new(&Key::from([0u8; 16]));
+        let ccm = Ccm::<Aes128>::new(
+            crate::Context::default(),
+            &Key::from([0u8; 16]),
+        );
         let mut tag = [0u8; 8];
         let mut data = vec![0u8; 1 << 16];
         assert_eq!(
@@ -670,7 +678,10 @@ pub(crate) mod tests {
     /// unauthenticated plaintext.
     #[test]
     fn rejects_tampering() {
-        let ccm = Ccm::<Aes256>::new(&Key::from([7u8; 32]));
+        let ccm = Ccm::<Aes256>::new(
+            crate::Context::default(),
+            &Key::from([7u8; 32]),
+        );
         let nonce = [9u8; 13];
         let mut sealed = *b"a message longer than a block";
         let mut tag = [0u8; 12];
@@ -705,9 +716,8 @@ pub(crate) mod tests {
     /// that land either side of block and group boundaries.
     fn kernels_agree(under: &crate::features::Under) {
         let key = [0x33u8; 16];
-        let reference = crate::features::build_portable(|| {
-            Ccm::<Aes128>::new(&Key::from(key))
-        });
+        let reference =
+            { Ccm::<Aes128>::new(crate::Context::portable(), &Key::from(key)) };
         let aad = counting(1, 37);
         for len in [0, 1, 15, 16, 17, 255, 256, 257, 1000] {
             let pt = counting(5, len);
@@ -716,7 +726,7 @@ pub(crate) mod tests {
             reference
                 .encrypt(&[1u8; 11], &aad, &mut want, &mut want_tag)
                 .expect("encrypt");
-            let ccm = under.build(|| Ccm::<Aes128>::new(&Key::from(key)));
+            let ccm = { Ccm::<Aes128>::new(under.ctx(), &Key::from(key)) };
             let mut got = pt.clone();
             let mut tag = [0u8; 16];
             ccm.encrypt(&[1u8; 11], &aad, &mut got, &mut tag)

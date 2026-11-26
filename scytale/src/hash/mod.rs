@@ -7,20 +7,27 @@
 //! strings rather than bytes also offer [`BitHash`].
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::hash::sha2::{Sha256, Sha512_256};
 //! use scytale::hash::{BitHash, Hash};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
+//! // Every hash chooses its kernel from a context when it is made.
+//! let ctx = Context::default();
+//!
 //! // Written once, for any hash.
-//! fn fingerprint<H: Hash + Default>(parts: &[&[u8]]) -> H::Output {
-//!     let mut hash = H::default();
+//! fn fingerprint<H: Hash>(ctx: Context, parts: &[&[u8]]) -> H::Output {
+//!     let mut hash = H::new(ctx);
 //!     for part in parts {
 //!         hash.update(part);
 //!     }
 //!     hash.finalize()
 //! }
-//! assert_eq!(fingerprint::<Sha256>(&[b"ab", b"c"]), Sha256::digest(b"abc"));
-//! let wide = fingerprint::<Sha512_256>(&[b"abc"]);
+//! assert_eq!(
+//!     fingerprint::<Sha256>(ctx, &[b"ab", b"c"]),
+//!     Sha256::digest(ctx, b"abc")
+//! );
+//! let wide = fingerprint::<Sha512_256>(ctx, &[b"abc"]);
 //! assert_eq!(wide.len(), 32);
 //!
 //! // Or as an object, for code that learns its hash at run time.
@@ -28,17 +35,17 @@
 //!     hash.update(b"abc");
 //!     hash.finalize()
 //! }
-//! let mut sha256 = Sha256::new();
-//! let mut sha512_256 = Sha512_256::new();
-//! assert_eq!(feed(&mut sha256), Sha256::digest(b"abc"));
+//! let mut sha256 = Sha256::new(ctx);
+//! let mut sha512_256 = Sha512_256::new(ctx);
+//! assert_eq!(feed(&mut sha256), Sha256::digest(ctx, b"abc"));
 //! assert_eq!(feed(&mut sha512_256), wide);
 //!
 //! // A message of 19 bits: two whole bytes, then the top three bits
 //! // of a third.
-//! let mut hash = Sha256::new();
+//! let mut hash = Sha256::new(ctx);
 //! hash.update(&[0xff, 0x00]);
 //! let digest = hash.finalize_bits(0b1010_0000, 3)?;
-//! assert_ne!(digest, Sha256::digest(&[0xff, 0x00, 0xa0]));
+//! assert_ne!(digest, Sha256::digest(ctx, &[0xff, 0x00, 0xa0]));
 //! # Ok(())
 //! # }
 //! ```
@@ -90,6 +97,7 @@ pub mod sha3;
 
 #[cfg(doc)]
 use crate::BlockType;
+use crate::Context;
 use crate::{ByteArray, Error};
 
 /// A hash function over byte strings, computed incrementally.
@@ -113,6 +121,11 @@ pub trait Hash {
     /// length is the size of its type.
     type Output: ByteArray;
 
+    /// A new hash, with the best kernel `ctx` allows.
+    fn new(ctx: Context) -> Self
+    where
+        Self: Sized;
+
     /// Returns to the state of a new hash, without asking the
     /// processor again.
     fn reset(&mut self);
@@ -126,11 +139,11 @@ pub trait Hash {
     fn finalize(&mut self) -> Self::Output;
 
     /// The digest of `data`, in one call.
-    fn digest(data: &[u8]) -> Self::Output
+    fn digest(ctx: Context, data: &[u8]) -> Self::Output
     where
-        Self: Sized + Default,
+        Self: Sized,
     {
-        let mut hash = Self::default();
+        let mut hash = Self::new(ctx);
         hash.update(data);
         hash.finalize()
     }
@@ -180,6 +193,12 @@ pub trait BitHash: Hash {
 pub trait Xof {
     /// What the output is squeezed from.
     type Reader: XofReader;
+
+    /// A new function, with the best kernel `ctx` allows, and for a
+    /// customisable one the empty customisation.
+    fn new(ctx: Context) -> Self
+    where
+        Self: Sized;
 
     /// Returns to the state of a new function, without asking the
     /// processor again.
@@ -232,12 +251,21 @@ mod tests {
             hash.update(b"c");
             hash.finalize()
         }
-        let mut sha256 = Sha256::new();
-        let mut sha512_256 = Sha512_256::new();
-        let mut sha3_256 = Sha3_256::new();
-        assert_eq!(feed(&mut sha256), Sha256::digest(b"abc"));
-        assert_eq!(feed(&mut sha512_256), Sha512_256::digest(b"abc"));
-        assert_eq!(feed(&mut sha3_256), Sha3_256::digest(b"abc"));
+        let mut sha256 = Sha256::new(crate::Context::default());
+        let mut sha512_256 = Sha512_256::new(crate::Context::default());
+        let mut sha3_256 = Sha3_256::new(crate::Context::default());
+        assert_eq!(
+            feed(&mut sha256),
+            Sha256::digest(crate::Context::default(), b"abc")
+        );
+        assert_eq!(
+            feed(&mut sha512_256),
+            Sha512_256::digest(crate::Context::default(), b"abc")
+        );
+        assert_eq!(
+            feed(&mut sha3_256),
+            Sha3_256::digest(crate::Context::default(), b"abc")
+        );
 
         fn squeeze(
             xof: &mut dyn Xof<Reader = sha3::Shake128Reader>,
@@ -247,8 +275,8 @@ mod tests {
             xof.finalize_xof().squeeze(&mut out);
             out
         }
-        let mut shake = Shake128::new();
-        let mut fresh = Shake128::new();
+        let mut shake = Shake128::new(crate::Context::default());
+        let mut fresh = Shake128::new(crate::Context::default());
         fresh.update(b"abc");
         let mut expected = [0u8; 40];
         fresh.finalize_xof().squeeze(&mut expected);
@@ -262,8 +290,10 @@ mod tests {
             xof.finalize_xof().squeeze(&mut out);
             out
         }
-        let mut custom = CShake128::new(b"", b"label");
-        let mut fresh = CShake128::new(b"", b"label");
+        let mut custom =
+            CShake128::new(crate::Context::default(), b"", b"label");
+        let mut fresh =
+            CShake128::new(crate::Context::default(), b"", b"label");
         fresh.update(b"abc");
         fresh.finalize_xof().squeeze(&mut expected);
         assert_eq!(squeeze_c(&mut custom), expected);
@@ -272,12 +302,15 @@ mod tests {
     /// `finalize` leaves a new hash: the next message hashes alone.
     #[test]
     fn finalize_resets() {
-        fn check<H: Hash + Default>() {
-            let mut hash = H::default();
+        fn check<H: Hash>() {
+            let mut hash = H::new(crate::Context::default());
             hash.update(b"garbage");
             let _ = hash.finalize();
             hash.update(b"abc");
-            assert_eq!(hash.finalize().as_ref(), H::digest(b"abc").as_ref());
+            assert_eq!(
+                hash.finalize().as_ref(),
+                H::digest(crate::Context::default(), b"abc").as_ref()
+            );
         }
         check::<Sha1>();
         check::<Sha256>();
@@ -287,14 +320,14 @@ mod tests {
 
     #[test]
     fn xof_finalize_resets() {
-        fn check<X: Xof + Default>() {
-            let mut xof = X::default();
+        fn check<X: Xof>() {
+            let mut xof = X::new(crate::Context::default());
             xof.update(b"garbage");
             let _ = xof.finalize_xof();
             xof.update(b"abc");
             let mut again = [0u8; 40];
             xof.finalize_xof().squeeze(&mut again);
-            let mut fresh = X::default();
+            let mut fresh = X::new(crate::Context::default());
             fresh.update(b"abc");
             let mut expected = [0u8; 40];
             fresh.finalize_xof().squeeze(&mut expected);

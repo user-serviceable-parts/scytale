@@ -39,15 +39,13 @@ const X448: Curve<{ x448::KEY_SIZE }> = Curve {
 pub fn answer(
     doc: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
+    _: &Builder,
 ) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
-    answer_groups(doc, |group| {
-        builder.try_build(|| match text(group, "curve")? {
-            "Curve25519" => answer_group(&X25519, mode, group, rng),
-            "Curve448" => answer_group(&X448, mode, group, rng),
-            curve => Err(Error::new(format!("no curve named {curve}"))),
-        })
+    answer_groups(doc, |group| match text(group, "curve")? {
+        "Curve25519" => answer_group(&X25519, mode, group, rng),
+        "Curve448" => answer_group(&X448, mode, group, rng),
+        curve => Err(Error::new(format!("no curve named {curve}"))),
     })
 }
 
@@ -67,12 +65,11 @@ fn answer_group<const N: usize>(
             }))
         }),
         ("SSC", "AFT") => answer_tests(group, |t| {
-            let private: [u8; N] = private_key(t, "privateIut", rng)?;
             let server = key(&hex(t, "publicServer")?, "publicServer")?;
-            Ok(json!({
-                "publicIut": hex_value(&(curve.public_key)(&private)),
-                "z": hex_value(&(curve.function)(&private, &server)),
-            }))
+            let private: [u8; N] = private_key(t, "privateIut", rng)?;
+            let public = (curve.public_key)(&private);
+            let z = (curve.function)(&private, &server);
+            Ok(json!({ "publicIut": hex_value(&public), "z": hex_value(&z) }))
         }),
         _ => Err(unknown_test_type(group)),
     }
@@ -139,9 +136,7 @@ mod tests {
     #[test]
     fn server_side_agrees() {
         let suite = super::super::find("XECDH-SSC-RFC7748")[0];
-        let Some(doc) = super::super::vendored(suite) else {
-            return;
-        };
+        let doc = super::super::vendored(suite);
         fn check<const N: usize>(curve: &Curve<N>, t: &Value) {
             let key = |name| key::<N>(&hex(t, name).unwrap(), name).unwrap();
             let z = (curve.function)(&key("privateServer"), &key("publicIut"));

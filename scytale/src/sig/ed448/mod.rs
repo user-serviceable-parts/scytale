@@ -34,10 +34,12 @@
 //! use scytale::Key;
 //! use scytale::random::CtrDrbg;
 //! use scytale::sig::ed448::PrivateKey;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = CtrDrbg::from_system()?;
-//! let key = PrivateKey::new(&Key::from([0x42u8; 57]));
+//! let ctx = Context::default();
+//! let mut rng = CtrDrbg::from_system(ctx)?;
+//! let key = PrivateKey::new(ctx, &Key::from([0x42u8; 57]));
 //! let signature = key.sign(&mut rng, b"", b"the message")?;
 //! key.public_key().verify(b"", b"the message", &signature)?;
 //! assert!(key.public_key().verify(b"", b"another", &signature).is_err());
@@ -97,8 +99,8 @@ pub const PREHASH_SIZE: usize = 64;
 const WIDE: usize = 114;
 
 /// SHAKE256 of the parts, in order, to `out`.
-fn shake(parts: &[&[u8]], out: &mut [u8]) {
-    let mut xof = Shake256::new();
+fn shake(ctx: crate::Context, parts: &[&[u8]], out: &mut [u8]) {
+    let mut xof = Shake256::new(ctx);
     for part in parts {
         xof.update(part);
     }
@@ -109,8 +111,11 @@ fn shake(parts: &[&[u8]], out: &mut [u8]) {
 ///
 /// Any 57 bytes are a valid secret key; take them from
 /// [`random`](crate::random).
-pub fn public_key(secret: &[u8; KEY_SIZE]) -> [u8; PUBLIC_KEY_SIZE] {
-    let mut h = expand(secret);
+pub fn public_key(
+    ctx: crate::Context,
+    secret: &[u8; KEY_SIZE],
+) -> [u8; PUBLIC_KEY_SIZE] {
+    let mut h = expand(ctx, secret);
     let mut a = secret_scalar(&h);
     let public = Point::mul_base(&a).compress();
     h.zeroize();
@@ -131,6 +136,7 @@ fn noise<R: Random>(rng: &mut R) -> Result<[u8; 32], Error> {
 /// The context is up to [`CONTEXT_MAX`] bytes and may be empty; a
 /// longer one is [`Error::InvalidLength`].
 pub fn sign<R: Random>(
+    ctx: crate::Context,
     secret: &[u8; KEY_SIZE],
     rng: &mut R,
     context: &[u8],
@@ -139,8 +145,9 @@ pub fn sign<R: Random>(
     let head = dom4(PURE, context)?;
     let mut z = noise(rng)?;
     let signature = sign_with(
+        ctx,
         secret,
-        &public_key(secret),
+        &public_key(ctx, secret),
         &[&head, context],
         message,
         Some(&z),
@@ -153,14 +160,16 @@ pub fn sign<R: Random>(
 /// context and message always giving the same signature. For test
 /// vectors and repeatable output; [`sign`] otherwise.
 pub fn sign_deterministic(
+    ctx: crate::Context,
     secret: &[u8; KEY_SIZE],
     context: &[u8],
     message: &[u8],
 ) -> Result<[u8; SIGNATURE_SIZE], Error> {
     let head = dom4(PURE, context)?;
     Ok(sign_with(
+        ctx,
         secret,
-        &public_key(secret),
+        &public_key(ctx, secret),
         &[&head, context],
         message,
         None,
@@ -175,21 +184,22 @@ pub fn sign_deterministic(
 /// [`CONTEXT_MAX`]; [`Error::InvalidSignature`] for everything else,
 /// which deliberately says no more than that.
 pub fn verify(
+    ctx: crate::Context,
     public: &[u8; PUBLIC_KEY_SIZE],
     context: &[u8],
     message: &[u8],
     signature: &[u8; SIGNATURE_SIZE],
 ) -> Result<(), Error> {
     let head = dom4(PURE, context)?;
-    verify_with(public, &[&head, context], message, signature)
+    verify_with(ctx, public, &[&head, context], message, signature)
 }
 
 /// The prehash Ed448ph signs: the first 64 bytes of SHAKE256 of the
 /// message, which can be fed to SHAKE256 in as many pieces as it
 /// arrives in.
-pub fn prehash(message: &[u8]) -> [u8; PREHASH_SIZE] {
+pub fn prehash(ctx: crate::Context, message: &[u8]) -> [u8; PREHASH_SIZE] {
     let mut out = [0u8; PREHASH_SIZE];
-    shake(&[message], &mut out);
+    shake(ctx, &[message], &mut out);
     out
 }
 
@@ -197,6 +207,7 @@ pub fn prehash(message: &[u8]) -> [u8; PREHASH_SIZE] {
 /// by Ed448ph, the nonce hedged by 32 bytes from `rng`. The context
 /// is refused as [`sign`] refuses it.
 pub fn sign_ph<R: Random>(
+    ctx: crate::Context,
     secret: &[u8; KEY_SIZE],
     rng: &mut R,
     context: &[u8],
@@ -205,8 +216,9 @@ pub fn sign_ph<R: Random>(
     let head = dom4(PH, context)?;
     let mut z = noise(rng)?;
     let signature = sign_with(
+        ctx,
         secret,
-        &public_key(secret),
+        &public_key(ctx, secret),
         &[&head, context],
         prehash,
         Some(&z),
@@ -217,14 +229,16 @@ pub fn sign_ph<R: Random>(
 
 /// Ed448ph as RFC 8032 does it, deterministically.
 pub fn sign_ph_deterministic(
+    ctx: crate::Context,
     secret: &[u8; KEY_SIZE],
     context: &[u8],
     prehash: &[u8; PREHASH_SIZE],
 ) -> Result<[u8; SIGNATURE_SIZE], Error> {
     let head = dom4(PH, context)?;
     Ok(sign_with(
+        ctx,
         secret,
-        &public_key(secret),
+        &public_key(ctx, secret),
         &[&head, context],
         prehash,
         None,
@@ -234,13 +248,14 @@ pub fn sign_ph_deterministic(
 /// Checks that `signature` signs the SHAKE256 digest `prehash` under
 /// `context` and `public`, by Ed448ph; the errors are [`verify`]'s.
 pub fn verify_ph(
+    ctx: crate::Context,
     public: &[u8; PUBLIC_KEY_SIZE],
     context: &[u8],
     prehash: &[u8; PREHASH_SIZE],
     signature: &[u8; SIGNATURE_SIZE],
 ) -> Result<(), Error> {
     let head = dom4(PH, context)?;
-    verify_with(public, &[&head, context], prehash, signature)
+    verify_with(ctx, public, &[&head, context], prehash, signature)
 }
 
 /// The phflag of plain Ed448.
@@ -266,9 +281,9 @@ fn dom4(flag: u8, context: &[u8]) -> Result<[u8; 10], Error> {
 
 /// SHAKE256 of the secret, 114 bytes: the scalar's half, then the
 /// prefix.
-fn expand(secret: &[u8; KEY_SIZE]) -> [u8; WIDE] {
+fn expand(ctx: crate::Context, secret: &[u8; KEY_SIZE]) -> [u8; WIDE] {
     let mut h = [0u8; WIDE];
-    shake(&[secret], &mut h);
+    shake(ctx, &[secret], &mut h);
     h
 }
 
@@ -276,13 +291,14 @@ fn expand(secret: &[u8; KEY_SIZE]) -> [u8; WIDE] {
 /// with `dom` hashed ahead of both hashes. With `noise`, the nonce is
 /// hedged as the module's notes say.
 fn sign_with(
+    ctx: crate::Context,
     secret: &[u8; KEY_SIZE],
     public: &[u8; PUBLIC_KEY_SIZE],
     dom: &[&[u8]],
     message: &[u8],
     noise: Option<&[u8; 32]>,
 ) -> [u8; SIGNATURE_SIZE] {
-    let mut h = expand(secret);
+    let mut h = expand(ctx, secret);
     let mut a = secret_scalar(&h);
 
     // The prefix, or hedged, the first 57 bytes of
@@ -290,7 +306,7 @@ fn sign_with(
     // before anything public.
     let mut prefix = [0u8; KEY_SIZE];
     match noise {
-        Some(z) => shake(&[&h[KEY_SIZE..], z], &mut prefix),
+        Some(z) => shake(ctx, &[&h[KEY_SIZE..], z], &mut prefix),
         None => prefix.copy_from_slice(&h[KEY_SIZE..]),
     }
 
@@ -301,13 +317,13 @@ fn sign_with(
     parts[..dom.len()].copy_from_slice(dom);
     parts[dom.len()] = &prefix;
     parts[dom.len() + 1] = message;
-    shake(&parts[..dom.len() + 2], &mut wide);
+    shake(ctx, &parts[..dom.len() + 2], &mut wide);
     prefix.zeroize();
     let mut r = Scalar::from_wide(&wide);
     let big_r = Point::mul_base(&r).compress();
 
     // The challenge binds R, the public key and the message.
-    let k = challenge(dom, &big_r, public, message);
+    let k = challenge(ctx, dom, &big_r, public, message);
 
     let mut s = k.mul_add(&a, &r);
     let mut signature = [0u8; SIGNATURE_SIZE];
@@ -325,6 +341,7 @@ fn sign_with(
 /// Verification under either variant, `dom` as [`sign_with`] takes
 /// it.
 fn verify_with(
+    ctx: crate::Context,
     public: &[u8; PUBLIC_KEY_SIZE],
     dom: &[&[u8]],
     message: &[u8],
@@ -340,7 +357,7 @@ fn verify_with(
 
     let mut big_r = [0u8; KEY_SIZE];
     big_r.copy_from_slice(&signature[..KEY_SIZE]);
-    let k = challenge(dom, &big_r, public, message);
+    let k = challenge(ctx, dom, &big_r, public, message);
 
     // SB = R + kA, checked as R = SB - kA so R need never be
     // decompressed: its bytes are compared directly, and only the
@@ -354,6 +371,7 @@ fn verify_with(
 
 /// `k = SHAKE256(dom || R || A || M, 114)`, reduced into the group.
 fn challenge(
+    ctx: crate::Context,
     dom: &[&[u8]],
     big_r: &[u8; KEY_SIZE],
     public: &[u8; PUBLIC_KEY_SIZE],
@@ -365,7 +383,7 @@ fn challenge(
     parts[dom.len() + 1] = public;
     parts[dom.len() + 2] = message;
     let mut wide = [0u8; WIDE];
-    shake(&parts[..dom.len() + 3], &mut wide);
+    shake(ctx, &parts[..dom.len() + 3], &mut wide);
     Scalar::from_wide(&wide)
 }
 
@@ -392,12 +410,16 @@ pub const PUBLIC_KEY_PEM_SIZE: usize = der::curve_public_pem_len(KEY_SIZE);
 /// under `id-Ed448` with the NULL parameters RFC 8410 forbids, is
 /// [`Error::WrongAlgorithm`]; anything else wrong with the bytes is
 /// [`Error::InvalidEncoding`].
-pub fn secret_from_der(der: &[u8]) -> Result<[u8; KEY_SIZE], Error> {
-    secret_from_der_with_form(der).map(|(secret, _)| secret)
+pub fn secret_from_der(
+    ctx: crate::Context,
+    der: &[u8],
+) -> Result<[u8; KEY_SIZE], Error> {
+    secret_from_der_with_form(ctx, der).map(|(secret, _)| secret)
 }
 
 /// As [`secret_from_der`], and also which form the structure took.
 pub fn secret_from_der_with_form(
+    ctx: crate::Context,
     der: &[u8],
 ) -> Result<([u8; KEY_SIZE], Pkcs8Form), Error> {
     let found = der::curve_secret_from_der(&der::ED448, der)?;
@@ -405,17 +427,18 @@ pub fn secret_from_der_with_form(
         v1: found.v1,
         public_key: found.public.is_some(),
     };
-    Ok((checked(found.secret, found.public)?, form))
+    Ok((checked(ctx, found.secret, found.public)?, form))
 }
 
 /// The secret a structure carried, once the public key it may have
 /// carried beside it is checked to be the secret's own.
 fn checked(
+    ctx: crate::Context,
     mut secret: [u8; KEY_SIZE],
     carried: Option<[u8; PUBLIC_KEY_SIZE]>,
 ) -> Result<[u8; KEY_SIZE], Error> {
     if let Some(carried) = carried
-        && carried != public_key(&secret)
+        && carried != public_key(ctx, &secret)
     {
         secret.zeroize();
         return Err(Error::InconsistentKey);
@@ -445,9 +468,12 @@ pub fn public_key_der(
 
 /// A secret key from a `PRIVATE KEY` PEM block (RFC 7468) around
 /// [`secret_der`]'s bytes, read as [`secret_from_der`] reads them.
-pub fn secret_from_pem(pem: &[u8]) -> Result<[u8; KEY_SIZE], Error> {
+pub fn secret_from_pem(
+    ctx: crate::Context,
+    pem: &[u8],
+) -> Result<[u8; KEY_SIZE], Error> {
     let found = der::curve_secret_from_pem(&der::ED448, pem)?;
-    checked(found.secret, found.public)
+    checked(ctx, found.secret, found.public)
 }
 
 /// The secret key as a `PRIVATE KEY` PEM block, always [`PEM_SIZE`]
@@ -483,6 +509,9 @@ pub const PAIR_PEM_SIZE: usize = der::curve_pair_pem_len(KEY_SIZE);
 /// code that has them already.
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct PrivateKey {
+    /// What the key was made under, for its hashes.
+    #[zeroize(skip)]
+    ctx: crate::Context,
     secret: Key<[u8; KEY_SIZE]>,
     #[zeroize(skip)]
     public: PublicKey,
@@ -491,6 +520,8 @@ pub struct PrivateKey {
 /// A verifying key: a point in its compressed form.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PublicKey {
+    /// What the key was made under, for its hashes.
+    ctx: crate::Context,
     bytes: [u8; PUBLIC_KEY_SIZE],
 }
 
@@ -512,18 +543,23 @@ impl fmt::Debug for PublicKey {
 impl PrivateKey {
     /// A key drawn from `rng`: 57 bytes from the source, since any
     /// 57 bytes are a secret key, and the public key they give.
-    pub fn generate<R: Random>(rng: &mut R) -> Result<Self, Error> {
+    pub fn generate<R: Random>(
+        ctx: crate::Context,
+        rng: &mut R,
+    ) -> Result<Self, Error> {
         let mut secret = Key::zeroed();
         rng.fill(secret.as_mut())?;
-        Ok(Self::new(&secret))
+        Ok(Self::new(ctx, &secret))
     }
 
     /// The key `secret` is the seed of; every 57 bytes are one.
-    pub fn new(secret: &Key<[u8; KEY_SIZE]>) -> Self {
+    pub fn new(ctx: crate::Context, secret: &Key<[u8; KEY_SIZE]>) -> Self {
         let public = PublicKey {
-            bytes: public_key(secret.array()),
+            ctx,
+            bytes: public_key(ctx, secret.array()),
         };
         PrivateKey {
+            ctx,
             secret: secret.clone(),
             public,
         }
@@ -603,15 +639,25 @@ impl PrivateKey {
         message: &[u8],
         noise: Option<&[u8; 32]>,
     ) -> [u8; SIGNATURE_SIZE] {
-        sign_with(self.secret.array(), &self.public.bytes, dom, message, noise)
+        sign_with(
+            self.ctx,
+            self.secret.array(),
+            &self.public.bytes,
+            dom,
+            message,
+            noise,
+        )
     }
 
     /// A key from its DER `PrivateKeyInfo`, of either version; a
     /// version 1 structure's public key is checked against the
     /// secret's own, as [`secret_from_der`] describes.
-    pub fn try_from_der(bytes: &[u8]) -> Result<Self, Error> {
-        let mut secret = Key::from(secret_from_der(bytes)?);
-        let key = Self::new(&secret);
+    pub fn try_from_der(
+        ctx: crate::Context,
+        bytes: &[u8],
+    ) -> Result<Self, Error> {
+        let mut secret = Key::from(secret_from_der(ctx, bytes)?);
+        let key = Self::new(ctx, &secret);
         secret.zeroize();
         Ok(key)
     }
@@ -630,9 +676,12 @@ impl PrivateKey {
 
     /// A key from a `PRIVATE KEY` PEM block, read as
     /// [`secret_from_pem`] reads one.
-    pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
-        let mut secret = Key::from(secret_from_pem(pem)?);
-        let key = Self::new(&secret);
+    pub fn try_from_pem(
+        ctx: crate::Context,
+        pem: &[u8],
+    ) -> Result<Self, Error> {
+        let mut secret = Key::from(secret_from_pem(ctx, pem)?);
+        let key = Self::new(ctx, &secret);
         secret.zeroize();
         Ok(key)
     }
@@ -652,8 +701,8 @@ impl PrivateKey {
 impl PublicKey {
     /// The key those bytes are, unchecked: they are checked where
     /// they are used, as [`verify`] describes.
-    pub fn new(bytes: &[u8; PUBLIC_KEY_SIZE]) -> Self {
-        PublicKey { bytes: *bytes }
+    pub fn new(ctx: crate::Context, bytes: &[u8; PUBLIC_KEY_SIZE]) -> Self {
+        PublicKey { ctx, bytes: *bytes }
     }
 
     /// The compressed point.
@@ -669,7 +718,7 @@ impl PublicKey {
         message: &[u8],
         signature: &[u8; SIGNATURE_SIZE],
     ) -> Result<(), Error> {
-        verify(&self.bytes, context, message, signature)
+        verify(self.ctx, &self.bytes, context, message, signature)
     }
 
     /// Checks that `signature` signs the SHAKE256 digest `prehash`
@@ -681,12 +730,16 @@ impl PublicKey {
         prehash: &[u8; PREHASH_SIZE],
         signature: &[u8; SIGNATURE_SIZE],
     ) -> Result<(), Error> {
-        verify_ph(&self.bytes, context, prehash, signature)
+        verify_ph(self.ctx, &self.bytes, context, prehash, signature)
     }
 
     /// A key from its DER `SubjectPublicKeyInfo`.
-    pub fn try_from_der(bytes: &[u8]) -> Result<Self, Error> {
+    pub fn try_from_der(
+        ctx: crate::Context,
+        bytes: &[u8],
+    ) -> Result<Self, Error> {
         Ok(PublicKey {
+            ctx,
             bytes: public_key_from_der(bytes)?,
         })
     }
@@ -697,8 +750,12 @@ impl PublicKey {
     }
 
     /// A key from a `PUBLIC KEY` PEM block.
-    pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
+    pub fn try_from_pem(
+        ctx: crate::Context,
+        pem: &[u8],
+    ) -> Result<Self, Error> {
         Ok(PublicKey {
+            ctx,
             bytes: public_key_from_pem(pem)?,
         })
     }

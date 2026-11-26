@@ -10,6 +10,7 @@ use crate::profile::Builder;
 use crate::support::{
     Error, decode_hex, flag, hex_value, int, list, text, unknown_test_type,
 };
+use scytale::Context;
 use scytale::Random;
 use scytale::hash::XofReader;
 use scytale::hash::sha3::{TupleHash128, TupleHash256};
@@ -17,7 +18,7 @@ use serde_json::{Value, json};
 
 /// The two widths, as the driver drives them.
 pub trait Tuple {
-    fn start(customization: &[u8]) -> Self;
+    fn start(ctx: Context, customization: &[u8]) -> Self;
     fn push(&mut self, element: &[u8]);
     /// TupleHash, or TupleHashXOF if `xof`, filling `out`.
     fn finish(&mut self, xof: bool, out: &mut [u8]);
@@ -26,8 +27,8 @@ pub trait Tuple {
 macro_rules! tuple {
     ($ty:ty) => {
         impl Tuple for $ty {
-            fn start(customization: &[u8]) -> Self {
-                <$ty>::new(customization)
+            fn start(ctx: Context, customization: &[u8]) -> Self {
+                <$ty>::new(ctx, customization)
             }
 
             fn push(&mut self, element: &[u8]) {
@@ -62,23 +63,24 @@ pub fn answer(
 
 fn answer_as<T: Tuple>(doc: &Value, builder: &Builder) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            let xof = flag(group, "xof")?;
-            match text(group, "testType")? {
-                "AFT" => answer_tests(group, |t| {
-                    let bits = int(t, "outLen")? as usize;
-                    let custom = customization(group, t)?;
-                    let out = hash::<T>(&tuple_of(t)?, &custom, xof, bits)?;
-                    Ok(json!({ "md": hex_value(&out), "outLen": bits }))
-                }),
-                "MCT" => {
-                    let lengths = Lengths::of(group)?;
-                    let steps = mct_steps(doc);
-                    answer_tests(group, |t| mct::<T>(t, xof, &lengths, steps))
-                }
-                _ => Err(unknown_test_type(group)),
+        let xof = flag(group, "xof")?;
+        match text(group, "testType")? {
+            "AFT" => answer_tests(group, |t| {
+                let bits = int(t, "outLen")? as usize;
+                let custom = customization(group, t)?;
+                let tuple = tuple_of(t)?;
+                let out = hash::<T>(&tuple, &custom, xof, bits, builder)?;
+                Ok(json!({ "md": hex_value(&out), "outLen": bits }))
+            }),
+            "MCT" => {
+                let lengths = Lengths::of(group)?;
+                let steps = mct_steps(doc);
+                answer_tests(group, |t| {
+                    mct::<T>(t, xof, &lengths, steps, builder)
+                })
             }
-        })
+            _ => Err(unknown_test_type(group)),
+        }
     })
 }
 
@@ -87,11 +89,12 @@ fn hash<T: Tuple>(
     custom: &[u8],
     xof: bool,
     bits: usize,
+    builder: &Builder,
 ) -> Result<Vec<u8>, Error> {
     if !bits.is_multiple_of(8) {
         return Err(Error::new("an output of part of a byte"));
     }
-    let mut h = T::start(custom);
+    let mut h = builder.build(|ctx| T::start(ctx, custom));
     tuple.iter().for_each(|e| h.push(e));
     let mut out = vec![0u8; bits / 8];
     h.finish(xof, &mut out);
@@ -133,6 +136,7 @@ fn mct<T: Tuple>(
     xof: bool,
     lengths: &Lengths,
     steps: usize,
+    builder: &Builder,
 ) -> Result<Value, Error> {
     let mut output = tuple_of(t)?
         .into_iter()
@@ -149,7 +153,9 @@ fn mct<T: Tuple>(
             let size = usize::from(working[0] >> 5) % 4 + 1;
             let tuple: Vec<Vec<u8>> =
                 working.chunks(36 / size).map(<[u8]>::to_vec).collect();
-            output = hash::<T>(&tuple, &custom, xof, out_bits)?;
+            // The customization changes every round, so each round
+            // builds its own.
+            output = hash::<T>(&tuple, &custom, xof, out_bits, builder)?;
             last_bits = out_bits;
             let right = rightmost_16(&output, out_bits);
             out_bits = lengths.next(right);

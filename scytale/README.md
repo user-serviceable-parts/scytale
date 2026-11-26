@@ -17,14 +17,15 @@ cargo add scytale
 use scytale::aead::{Aead, Gcm};
 use scytale::cipher::aes::Aes256;
 use scytale::random::CtrDrbg;
-use scytale::{KeyType, Random};
+use scytale::{Context, KeyType, Random};
 
-let mut rng = CtrDrbg::from_system()?;
+let ctx = Context::default();
+let mut rng = CtrDrbg::from_system(ctx)?;
 let key = Aes256::random_key(&mut rng)?;
 let mut nonce = [0u8; 12];
 rng.fill(&mut nonce)?;
 
-let gcm = Gcm::<Aes256>::new(&key);
+let gcm = Gcm::<Aes256>::new(ctx, &key);
 let header = b"to: alice";
 let mut message = *b"attack at dawn";
 let mut tag = [0u8; 16];
@@ -34,16 +35,20 @@ gcm.decrypt(&nonce, header, &mut message, &tag)?;
 assert_eq!(&message, b"attack at dawn");
 ```
 
-That is the whole setup: no builder, no context object, nothing to
-initialise, and no choice to make about which implementation to run.
-`Aes256` takes the best implementation the processor has when a key
-is expanded, and every call after that is one predictable branch.
-The same binary does that on a laptop with VAES and on a board with
-no cryptographic instructions at all. A program that wants a say
-edits one set, `scytale::features`: remove a feature and the
+That is the whole setup. Every object is made with a `Context`, which
+says what it may use; `Context::default()` is everything the processor
+has, and there is nothing else to initialise and no choice to make
+about which implementation to run. `Aes256` takes the best
+implementation its context allows when a key is expanded, and every
+call after that is one predictable branch. The same binary does that
+on a laptop with VAES and on a board with no cryptographic
+instructions at all. A program that wants a say makes a context of
+its own set, `Context::try_new`: remove a feature and the
 implementation below it is chosen; grant `Isolated`, the word that
 nothing untrusted shares the processor, and the table-driven AES is
-admitted where there are no AES instructions.
+admitted where there are no AES instructions. Contexts are plain
+values, so two in one program never meet, and an object hands its
+own to whatever it builds as it runs.
 
 The API documentation is on [docs.rs](https://docs.rs/scytale), and
 `cargo doc --open` builds it locally.
@@ -482,7 +487,7 @@ to the portable code.
 use scytale::cipher::aes::Aes128;
 use scytale::cipher::BlockCipher;
 
-let aes = Aes128::new(&key); // key: Key<[u8; 16]>
+let aes = Aes128::new(ctx, &key); // key: Key<[u8; 16]>
 
 let mut block = [0u8; 16];
 aes.encrypt(core::slice::from_mut(&mut block));
@@ -499,7 +504,7 @@ before the plaintext is worth anything:
 use scytale::aead::{Aead, Gcm};
 use scytale::cipher::aes::Aes128;
 
-let gcm = Gcm::<Aes128>::new(&key);
+let gcm = Gcm::<Aes128>::new(ctx, &key);
 
 let mut tag = [0u8; 16];
 gcm.encrypt(&nonce, associated_data, &mut buffer, &mut tag)?;
@@ -524,10 +529,10 @@ is checked with `verify`, never by comparing bytes yourself:
 use scytale::hash::{sha2::Sha256, Hash};
 use scytale::mac::{hmac::HmacSha256, Mac};
 
-let digest = Sha256::digest(message);
+let digest = Sha256::digest(ctx, message);
 
-let tag = HmacSha256::mac(&key, message);
-let mut mac = HmacSha256::new(&key);
+let tag = HmacSha256::mac(ctx, &key, message);
+let mut mac = HmacSha256::new(ctx, &key);
 mac.update(message);
 mac.verify(&tag)?;
 ```
@@ -536,8 +541,9 @@ mac.verify(&tag)?;
 
 `Aes128`, `Aes192` and `Aes256` are the ciphers; `Sha256`,
 `Sha3_256`, `Shake128` and the rest are the hashes. Each picks the
-best implementation this processor supports, probing once on first
-use, and then dispatches with a single predictable branch.
+best implementation its context allows when it is made, the
+processor having been asked once, and then dispatches with a single
+predictable branch.
 
 Which implementation that is is not a choice a caller makes. The
 implementations are private: hardware instructions where the processor
@@ -546,8 +552,8 @@ table-driven AES in the crate that is about seventy percent faster
 than the constant-time portable one, and it is not chosen unless the
 program asks, because it indexes tables with bytes derived from the
 key and so leaks the key to an attacker who can measure cache timing.
-An application that runs nothing untrusted beside it may put
-`Feature::Isolated` in force, which admits it below any AES
+An application that runs nothing untrusted beside it may add
+`Feature::Isolated` to its context, which admits it below any AES
 instructions the processor has; see the `features` module.
 
 ### Keys wipe themselves

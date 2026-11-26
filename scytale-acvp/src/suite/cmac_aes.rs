@@ -24,24 +24,23 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            let generate = match text(group, "direction")? {
-                "gen" => true,
-                "ver" => false,
-                other => return Err(Error::new(format!("direction {other}"))),
-            };
-            let mac_len = int(group, "macLen")? as usize / 8;
-            match text(group, "testType")? {
-                "AFT" => answer_tests(group, |t| {
-                    let key = hex(t, "key")?;
-                    aes_width!(key, C => {
-                        let mac = Cmac::<C>::new(&key_of::<C>(&key)?);
-                        aft(mac, t, generate, mac_len)
-                    })
-                }),
-                _ => Err(unknown_test_type(group)),
-            }
-        })
+        let generate = match text(group, "direction")? {
+            "gen" => true,
+            "ver" => false,
+            other => return Err(Error::new(format!("direction {other}"))),
+        };
+        let mac_len = int(group, "macLen")? as usize / 8;
+        match text(group, "testType")? {
+            "AFT" => answer_tests(group, |t| {
+                let key = hex(t, "key")?;
+                aes_width!(key, C => {
+                    let k = key_of::<C>(&key)?;
+                    let mac = builder.build(|ctx| Cmac::<C>::new(ctx, &k));
+                    aft(mac, t, generate, mac_len)
+                })
+            }),
+            _ => Err(unknown_test_type(group)),
+        }
     })
 }
 

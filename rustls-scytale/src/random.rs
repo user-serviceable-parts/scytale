@@ -35,7 +35,7 @@ pub(crate) fn fill(buf: &mut [u8]) -> Result<(), Error> {
 /// A fresh generator, for the scytale calls that take one: key
 /// generation, encapsulation, signing salts.
 pub(crate) fn generator() -> Result<CtrDrbg, Error> {
-    CtrDrbg::from_system()
+    CtrDrbg::from_system(scytale::Context::default())
 }
 
 #[cfg(test)]

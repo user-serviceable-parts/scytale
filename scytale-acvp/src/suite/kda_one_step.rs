@@ -13,6 +13,7 @@ use crate::profile::Builder;
 use crate::support::{
     Error, field, hex, hex_value, int, opt_hex, text, unknown_test_type,
 };
+use scytale::Context;
 use scytale::hash::Hash;
 use scytale::hash::sha1::Sha1;
 use scytale::hash::sha2::{Sha224, Sha256, Sha384, Sha512};
@@ -71,28 +72,25 @@ fn answer_one_step(
     builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            let validate = match text(group, "testType")? {
-                "AFT" => false,
-                "VAL" => true,
-                _ => return Err(unknown_test_type(group)),
-            };
-            let cfg = field(group, "kdfConfiguration")?;
-            if text(cfg, "fixedInfoPattern")? != "t||uPartyInfo||vPartyInfo||l"
-            {
-                return Err(Error::new("fixedInfoPattern"));
-            }
-            if text(cfg, "fixedInfoEncoding")? != "concatenation" {
-                return Err(Error::new("fixedInfoEncoding"));
-            }
-            let aux = text(cfg, "auxFunction")?;
-            answer_tests(group, |t| {
-                let dkm = one_step_case(t, aux, counter)?;
-                Ok(if validate {
-                    json!({ "testPassed": dkm == hex(t, "dkm")? })
-                } else {
-                    json!({ "dkm": hex_value(&dkm) })
-                })
+        let validate = match text(group, "testType")? {
+            "AFT" => false,
+            "VAL" => true,
+            _ => return Err(unknown_test_type(group)),
+        };
+        let cfg = field(group, "kdfConfiguration")?;
+        if text(cfg, "fixedInfoPattern")? != "t||uPartyInfo||vPartyInfo||l" {
+            return Err(Error::new("fixedInfoPattern"));
+        }
+        if text(cfg, "fixedInfoEncoding")? != "concatenation" {
+            return Err(Error::new("fixedInfoEncoding"));
+        }
+        let aux = text(cfg, "auxFunction")?;
+        answer_tests(group, |t| {
+            let dkm = one_step_case(t, aux, counter, builder)?;
+            Ok(if validate {
+                json!({ "testPassed": dkm == hex(t, "dkm")? })
+            } else {
+                json!({ "dkm": hex_value(&dkm) })
             })
         })
     })
@@ -103,6 +101,7 @@ fn one_step_case(
     t: &Value,
     aux: &str,
     counter: bool,
+    builder: &Builder,
 ) -> Result<Vec<u8>, Error> {
     let param = field(t, "kdfParameter")?;
     let bits = u32::try_from(int(param, "l")?)
@@ -131,31 +130,34 @@ fn one_step_case(
         out: &mut out,
         counter,
     };
-    match aux.strip_prefix("HMAC-") {
-        Some(alg) => with_hash!(alg, hmac(inputs)),
+    // The derivation starts its own hashes or KMAC; the HMAC one
+    // keys its own HMAC first.
+    builder.try_build(|ctx| match aux.strip_prefix("HMAC-") {
+        Some(alg) => with_hash!(alg, hmac(ctx, inputs)),
         None => match aux {
-            "KMAC-128" | "KMAC-256" => kmac(aux, inputs),
-            alg => with_hash!(alg, hash(inputs)),
+            "KMAC-128" | "KMAC-256" => kmac(ctx, aux, inputs),
+            alg => with_hash!(alg, hash(ctx, inputs)),
         },
-    }?;
+    })?;
     Ok(out)
 }
 
-fn hash<H: Hash + Default>(i: Inputs<'_>) -> Result<(), Error> {
+fn hash<H: Hash>(ctx: Context, i: Inputs<'_>) -> Result<(), Error> {
     let fixed: [&[u8]; 1] = [i.fixed_info];
     if i.counter {
-        one_step::hash::<H>(i.z, &fixed, i.out)
+        one_step::hash::<H>(ctx, i.z, &fixed, i.out)
     } else {
-        one_step::hash_no_counter::<H>(i.z, &fixed, i.out)
+        one_step::hash_no_counter::<H>(ctx, i.z, &fixed, i.out)
     }?;
     Ok(())
 }
 
-fn hmac<H: Hash + Clone + BlockType + Default>(
+fn hmac<H: Hash + Clone + BlockType>(
+    ctx: Context,
     i: Inputs<'_>,
 ) -> Result<(), Error> {
     let fixed: [&[u8]; 1] = [i.fixed_info];
-    let mut mac = Hmac::<H>::new(i.salt);
+    let mut mac = Hmac::<H>::new(ctx, i.salt);
     if i.counter {
         one_step::mac(&mut mac, i.z, &fixed, i.out)
     } else {
@@ -164,7 +166,7 @@ fn hmac<H: Hash + Clone + BlockType + Default>(
     Ok(())
 }
 
-fn kmac(aux: &str, i: Inputs<'_>) -> Result<(), Error> {
+fn kmac(ctx: Context, aux: &str, i: Inputs<'_>) -> Result<(), Error> {
     let fixed: [&[u8]; 1] = [i.fixed_info];
     let kdf = match (aux, i.counter) {
         ("KMAC-128", true) => one_step::kmac128,
@@ -175,35 +177,37 @@ fn kmac(aux: &str, i: Inputs<'_>) -> Result<(), Error> {
             return Err(Error::new(format!("auxFunction {other}")));
         }
     };
-    kdf(i.salt, i.z, &fixed, i.out);
+    kdf(ctx, i.salt, i.z, &fixed, i.out);
     Ok(())
 }
 
 fn answer_x963(doc: &Value, builder: &Builder) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            if text(group, "testType")? != "AFT" {
-                return Err(unknown_test_type(group));
-            }
-            let alg = text(group, "hashAlg")?;
-            let bits = int(group, "keyDataLength")?;
-            if !bits.is_multiple_of(8) {
-                return Err(Error::new("keyDataLength is not whole bytes"));
-            }
-            answer_tests(group, |t| {
-                let mut out = vec![0u8; bits as usize / 8];
-                with_hash!(alg, x963_case(t, &mut out))?;
-                Ok(json!({ "keyData": hex_value(&out) }))
-            })
+        if text(group, "testType")? != "AFT" {
+            return Err(unknown_test_type(group));
+        }
+        let alg = text(group, "hashAlg")?;
+        let bits = int(group, "keyDataLength")?;
+        if !bits.is_multiple_of(8) {
+            return Err(Error::new("keyDataLength is not whole bytes"));
+        }
+        answer_tests(group, |t| {
+            let mut out = vec![0u8; bits as usize / 8];
+            // The derivation starts its own hashes.
+            builder.try_build(|ctx| {
+                with_hash!(alg, x963_case(ctx, t, &mut out))
+            })?;
+            Ok(json!({ "keyData": hex_value(&out) }))
         })
     })
 }
 
-fn x963_case<H: Hash + Default>(
+fn x963_case<H: Hash>(
+    ctx: Context,
     t: &Value,
     out: &mut [u8],
 ) -> Result<(), Error> {
     let shared: [&[u8]; 1] = [&hex(t, "sharedInfo")?];
-    x963::derive::<H>(&hex(t, "z")?, &shared, out)?;
+    x963::derive::<H>(ctx, &hex(t, "z")?, &shared, out)?;
     Ok(())
 }

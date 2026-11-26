@@ -43,12 +43,10 @@ pub fn answer(
     }
 }
 
-/// The Monte Carlo and large-data cases run for a second or more
-/// each, the large-data ones for minutes under emulation, so they
-/// only build their hash under `builder` and feed it outside, where
-/// another kernel's builds need not wait for them: a hash keeps the
-/// kernel it was built with.
-fn answer_as<H: BitHash + Default>(
+/// Every case only builds its hash under `builder` and feeds it
+/// outside, where another kernel's builds need not wait for it: a
+/// hash keeps the kernel it was built with.
+fn answer_as<H: BitHash>(
     doc: &Value,
     family: Family,
     builder: &Builder,
@@ -57,11 +55,10 @@ where
     H::Output: AsRef<[u8]>,
 {
     answer_groups(doc, |group| match text(group, "testType")? {
-        "AFT" => builder.try_build(|| {
-            answer_tests(group, |t| {
-                let digest = Message::of(t)?.digest(H::default(), family);
-                Ok(json!({ "md": hex_value(digest.as_ref()) }))
-            })
+        "AFT" => answer_tests(group, |t| {
+            let message = Message::of(t)?;
+            let digest = message.digest(builder.build(H::new), family);
+            Ok(json!({ "md": hex_value(digest.as_ref()) }))
         }),
         "MCT" => {
             let alternate = match opt_text(group, "mctVersion") {
@@ -134,7 +131,7 @@ impl Message {
 /// the previous three digests each time, in the standard version as
 /// they are and in the alternate one cut or padded with zeros to the
 /// length of the seed; SHA-3 hashes just the previous digest.
-fn mct<H: BitHash + Default>(
+fn mct<H: BitHash>(
     t: &Value,
     family: Family,
     alternate: bool,
@@ -148,7 +145,7 @@ where
         return Err(Error::new("bit-length seed"));
     }
     let seed = seed.bytes;
-    let mut hash = builder.build(H::default)?;
+    let mut hash = builder.build(H::new);
     let mut md: Vec<u8> = seed.clone();
     let mut steps = Vec::with_capacity(100);
     for _ in 0..100 {
@@ -207,7 +204,7 @@ where
 
 /// Large Data Test: a short piece repeated to gigabytes, hashed as
 /// it is generated.
-fn ldt<H: Hash + Default>(t: &Value, builder: &Builder) -> Result<Value, Error>
+fn ldt<H: Hash>(t: &Value, builder: &Builder) -> Result<Value, Error>
 where
     H::Output: AsRef<[u8]>,
 {
@@ -225,7 +222,7 @@ where
     // Feed in chunks of many pieces to keep the call count sane.
     let per_chunk = (1 << 20) / piece.len().max(1);
     let chunk: Vec<u8> = piece.repeat(per_chunk);
-    let mut hash = builder.build(H::default)?;
+    let mut hash = builder.build(H::new);
     let mut left = repeats;
     while left > 0 {
         let n = left.min(per_chunk as u64) as usize;

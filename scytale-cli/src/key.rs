@@ -6,6 +6,7 @@
 //! name the scheme they run and check the file holds a key for it,
 //! so a swapped file is caught rather than used.
 
+use scytale::Context;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand};
@@ -329,12 +330,17 @@ pub fn run(op: KeyOp) -> Result<()> {
             let half = if info.private { "private" } else { "public" };
             let detail = match (info.algorithm, info.private) {
                 (Algorithm::Rsa | Algorithm::RsaPss, true) => {
-                    let key =
-                        scytale::sig::rsa::PrivateKey::try_from_pem(&pem)?;
+                    let key = scytale::sig::rsa::PrivateKey::try_from_pem(
+                        scytale::Context::default(),
+                        &pem,
+                    )?;
                     format!(", {} bits", key.bits())
                 }
                 (Algorithm::Rsa | Algorithm::RsaPss, false) => {
-                    let key = scytale::sig::rsa::PublicKey::try_from_pem(&pem)?;
+                    let key = scytale::sig::rsa::PublicKey::try_from_pem(
+                        scytale::Context::default(),
+                        &pem,
+                    )?;
                     format!(", {} bits", key.bits())
                 }
                 (Algorithm::Hss, private) => hss::detail(&pem, private)?,
@@ -348,7 +354,7 @@ pub fn run(op: KeyOp) -> Result<()> {
 
 /// A fresh private key under `name`, as PEM.
 fn generate(name: &str) -> Result<Zeroizing<Vec<u8>>> {
-    let mut rng = CtrDrbg::from_system()?;
+    let mut rng = CtrDrbg::from_system(scytale::Context::default())?;
     let mut pem = Zeroizing::new(vec![0u8; PEM_ROOM]);
     macro_rules! into_pem {
         ($key:expr) => {{
@@ -372,17 +378,27 @@ fn generate(name: &str) -> Result<Zeroizing<Vec<u8>>> {
                  of 8; 3072 is the size to reach for"
             ));
         }
-        let key = scytale::sig::rsa::PrivateKey::generate(&mut rng, bits)?;
+        let key = scytale::sig::rsa::PrivateKey::generate(
+            scytale::Context::default(),
+            &mut rng,
+            bits,
+        )?;
         into_pem!(key);
     }
     let name = names::KEY.find(name)?.name;
     match name {
         "ed25519" => {
-            let key = scytale::sig::ed25519::PrivateKey::generate(&mut rng)?;
+            let key = scytale::sig::ed25519::PrivateKey::generate(
+                scytale::Context::default(),
+                &mut rng,
+            )?;
             Ok(Zeroizing::new(key.pem_bytes().to_vec()))
         }
         "ed448" => {
-            let key = scytale::sig::ed448::PrivateKey::generate(&mut rng)?;
+            let key = scytale::sig::ed448::PrivateKey::generate(
+                scytale::Context::default(),
+                &mut rng,
+            )?;
             Ok(Zeroizing::new(key.pem_bytes().to_vec()))
         }
         "x25519" => {
@@ -395,16 +411,19 @@ fn generate(name: &str) -> Result<Zeroizing<Vec<u8>>> {
         }
         "ecdsa-p256" | "ecdh-p256" => {
             into_pem!(scytale::sig::ecdsa::p256::PrivateKey::generate(
+                scytale::Context::default(),
                 &mut rng
             )?)
         }
         "ecdsa-p384" | "ecdh-p384" => {
             into_pem!(scytale::sig::ecdsa::p384::PrivateKey::generate(
+                scytale::Context::default(),
                 &mut rng
             )?)
         }
         "ecdsa-p521" | "ecdh-p521" => {
             into_pem!(scytale::sig::ecdsa::p521::PrivateKey::generate(
+                scytale::Context::default(),
                 &mut rng
             )?)
         }
@@ -412,10 +431,11 @@ fn generate(name: &str) -> Result<Zeroizing<Vec<u8>>> {
             let Some(algorithm) = pq_by_name(name) else {
                 return Err(usage!("no key algorithm named \"{name}\""));
             };
+            let ctx = Context::default();
             with_kem!(algorithm, m => {
-                into_pem!(m::PrivateKey::generate(&mut rng)?)
+                into_pem!(m::PrivateKey::generate(ctx, &mut rng)?)
             }, _ => with_pq_sig!(algorithm, m => {
-                into_pem!(m::PrivateKey::generate(&mut rng)?)
+                into_pem!(m::PrivateKey::generate(ctx, &mut rng)?)
             }, _ => Err(usage!("no key algorithm named \"{name}\""))))
         }
     }
@@ -433,11 +453,17 @@ fn public(algorithm: Algorithm, pem: &[u8]) -> Result<Vec<u8>> {
     }
     match algorithm {
         Algorithm::Ed25519 => {
-            let key = scytale::sig::ed25519::PrivateKey::try_from_pem(pem)?;
+            let key = scytale::sig::ed25519::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )?;
             Ok(key.public_key().pem_bytes().to_vec())
         }
         Algorithm::Ed448 => {
-            let key = scytale::sig::ed448::PrivateKey::try_from_pem(pem)?;
+            let key = scytale::sig::ed448::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )?;
             Ok(key.public_key().pem_bytes().to_vec())
         }
         Algorithm::X25519 => {
@@ -449,27 +475,42 @@ fn public(algorithm: Algorithm, pem: &[u8]) -> Result<Vec<u8>> {
             Ok(key.public_key().pem_bytes().to_vec())
         }
         Algorithm::P256 => {
-            let key = scytale::sig::ecdsa::p256::PrivateKey::try_from_pem(pem)?;
+            let key = scytale::sig::ecdsa::p256::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )?;
             into_pem!(key.public_key())
         }
         Algorithm::P384 => {
-            let key = scytale::sig::ecdsa::p384::PrivateKey::try_from_pem(pem)?;
+            let key = scytale::sig::ecdsa::p384::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )?;
             into_pem!(key.public_key())
         }
         Algorithm::P521 => {
-            let key = scytale::sig::ecdsa::p521::PrivateKey::try_from_pem(pem)?;
+            let key = scytale::sig::ecdsa::p521::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )?;
             into_pem!(key.public_key())
         }
         Algorithm::Rsa | Algorithm::RsaPss => {
-            let key = scytale::sig::rsa::PrivateKey::try_from_pem(pem)?;
+            let key = scytale::sig::rsa::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )?;
             into_pem!(key.public_key())
         }
         Algorithm::Hss => hss::public(pem),
-        other => with_kem!(other, m => {
-            into_pem!(m::PrivateKey::try_from_pem(pem)?.public_key())
-        }, _ => with_pq_sig!(other, m => {
-            into_pem!(m::PrivateKey::try_from_pem(pem)?.public_key())
-        }, _ => Err(usage!("{other}: no public half is defined")))),
+        other => {
+            let ctx = Context::default();
+            with_kem!(other, m => {
+                into_pem!(m::PrivateKey::try_from_pem(ctx, pem)?.public_key())
+            }, _ => with_pq_sig!(other, m => {
+                into_pem!(m::PrivateKey::try_from_pem(ctx, pem)?.public_key())
+            }, _ => Err(usage!("{other}: no public half is defined"))))
+        }
     }
 }
 

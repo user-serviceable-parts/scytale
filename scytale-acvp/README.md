@@ -61,25 +61,26 @@ not run for the features the processor lacks, or was not selected. A
 test fails only if a kernel it ran fails. `SCYTALE_KERNELS` takes
 kernel names, separated by white space, and runs those alone, which
 is how a run on one machine names the kernels another must run.
-The work is cut into test groups, and a suite's kernels run at once:
-the groups of every kernel go to one pool, heaviest first, spread
-over the cores, and while it runs a line a minute says how far it
-has got. The tests run at once too, as many as the harness runs.
+`SCYTALE_DEFAULT_FEATURES` names the set a suite with no kernel of
+its own builds under, in place of the set detected: such a suite
+tests no kernel, so under an emulator CI keeps it off the RISC-V
+vector instructions, which QEMU runs slowly.
+The work is cut into cases, and a suite's kernels run at once: the
+cases of every kernel go to one pool, heaviest first, spread over
+the cores, and while it runs a line a minute says how far it has
+got. A group whose cases share a key the driver generates for it,
+RSA or LMS signing, or the RSA decryption primitive, goes whole. The
+tests run at once too, as many as the harness runs.
 
-The set of features in force is the process's, so the drivers build
-and run whatever a group needs through a builder that puts the
-kernel's profile in force for the while. Builds under one set share
-it, and builds under another wait their turn; the turn ends with the
-last build, and the set detected is put back. A builder holds the
-whole group rather than just its constructors, since the library
-chooses a kernel inside some operations too, the big-number and
-curve arithmetic, a GCM-SIV message, a hash-based signature, a KDF;
-the large-data and Monte Carlo hashes only build under it and hash
-outside. A random draw made outside its builder fails the group, as
-a sign that something was built there too.
+Each kernel's objects are built with a context of its profile, which
+the library's constructors take, and an object that builds others as
+it runs, a GCM message its GHASH, a signature or a KDF its hashes, a
+DRBG its cipher, builds them with its own. Contexts are values and
+share nothing, so every kernel's cases run side by side with no lock
+between them.
 
-`SCYTALE_VECTORS=required` makes a missing vector file a failure
-rather than a skip.
+A missing or unreadable vector file fails its test: the crate is
+never published, so the vectors are in every copy of it.
 
 ## Online
 

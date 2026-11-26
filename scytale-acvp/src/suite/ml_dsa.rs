@@ -10,6 +10,7 @@
 use super::{answer_groups, answer_tests, skip};
 use crate::profile::Builder;
 use crate::support::{Error, flag, hex, hex_value, text};
+use scytale::Context;
 use scytale::Random;
 use scytale::sig::ml_dsa::{ml_dsa_44, ml_dsa_65, ml_dsa_87};
 use serde_json::{Value, json};
@@ -40,17 +41,24 @@ fn array<const N: usize>(bytes: &[u8], name: &str) -> Result<[u8; N], Error> {
 trait Set {
     const NAME: &'static str;
     /// `pk || sk` from the seed.
-    fn key_gen(seed: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error>;
+    fn key_gen(ctx: Context, seed: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error>;
     /// A signature from the seed or the expanded key, hedged with
     /// `rnd` when given and deterministic otherwise.
     fn sign(
+        ctx: Context,
         seed: Option<&[u8]>,
         sk: &[u8],
         rnd: Option<&[u8]>,
         context: &[u8],
         message: &[u8],
     ) -> Result<Vec<u8>, Error>;
-    fn verify(pk: &[u8], context: &[u8], message: &[u8], sig: &[u8]) -> bool;
+    fn verify(
+        ctx: Context,
+        pk: &[u8],
+        context: &[u8],
+        message: &[u8],
+        sig: &[u8],
+    ) -> bool;
 }
 
 macro_rules! set {
@@ -58,13 +66,17 @@ macro_rules! set {
         struct $name;
         impl Set for $name {
             const NAME: &'static str = $acvp;
-            fn key_gen(seed: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
+            fn key_gen(
+                ctx: Context,
+                seed: &[u8],
+            ) -> Result<(Vec<u8>, Vec<u8>), Error> {
                 let mut rng = Fixed(seed.to_vec());
-                let key = $module::PrivateKey::generate(&mut rng)?;
+                let key = $module::PrivateKey::generate(ctx, &mut rng)?;
                 let pk = key.public_key().bytes().to_vec();
                 Ok((pk, key.key_bytes().to_vec()))
             }
             fn sign(
+                ctx: Context,
                 seed: Option<&[u8]>,
                 sk: &[u8],
                 rnd: Option<&[u8]>,
@@ -74,11 +86,11 @@ macro_rules! set {
                 let key = match seed {
                     Some(seed) => {
                         let seed = array::<32>(seed, "seed")?;
-                        $module::PrivateKey::from_seed(&seed)
+                        $module::PrivateKey::from_seed(ctx, &seed)
                     }
                     None => {
                         let sk = array::<{ $module::KEY_SIZE }>(sk, "sk")?;
-                        $module::PrivateKey::try_new(&sk)?
+                        $module::PrivateKey::try_new(ctx, &sk)?
                     }
                 };
                 let sig = match rnd {
@@ -90,6 +102,7 @@ macro_rules! set {
                 Ok(sig.to_vec())
             }
             fn verify(
+                ctx: Context,
                 pk: &[u8],
                 context: &[u8],
                 message: &[u8],
@@ -103,7 +116,7 @@ macro_rules! set {
                 else {
                     return false;
                 };
-                let key = $module::PublicKey::new(&pk);
+                let key = $module::PublicKey::new(ctx, &pk);
                 key.verify(context, message, &sig).is_ok()
             }
         }
@@ -127,41 +140,47 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
-    answer_groups(doc, |group| {
-        builder.try_build(|| match text(group, "parameterSet")? {
-            Set44::NAME => answer_group::<Set44>(mode, group),
-            Set65::NAME => answer_group::<Set65>(mode, group),
-            Set87::NAME => answer_group::<Set87>(mode, group),
-            other => Err(Error::new(format!("parameter set {other}"))),
-        })
+    answer_groups(doc, |group| match text(group, "parameterSet")? {
+        Set44::NAME => answer_group::<Set44>(mode, group, builder),
+        Set65::NAME => answer_group::<Set65>(mode, group, builder),
+        Set87::NAME => answer_group::<Set87>(mode, group, builder),
+        other => Err(Error::new(format!("parameter set {other}"))),
     })
 }
 
+/// Every case builds its key from the case's bytes and runs it once,
+/// and every call hashes as it runs, starting hashes of its own: each
+/// case runs whole under `builder`.
 fn answer_group<S: Set>(
     mode: &str,
     group: &Value,
+    builder: &Builder,
 ) -> Result<Option<Value>, Error> {
+    let each = |answer: &dyn Fn(&Value) -> Result<Value, Error>| {
+        answer_tests(group, answer)
+    };
     if mode != "keyGen" && !pure_external(group) {
         return skip(group, "only the pure external interface is offered");
     }
     match mode {
-        "keyGen" => answer_tests(group, key_gen::<S>),
+        "keyGen" => each(&|t| key_gen::<S>(builder.ctx(), t)),
         "sigGen" => {
             let deterministic = flag(group, "deterministic")?;
             let seed = text(group, "keyFormat")? == "seed";
-            answer_tests(group, |t| sig_gen::<S>(t, deterministic, seed))
+            each(&|t| sig_gen::<S>(builder.ctx(), t, deterministic, seed))
         }
-        "sigVer" => answer_tests(group, sig_ver::<S>),
+        "sigVer" => each(&|t| sig_ver::<S>(builder.ctx(), t)),
         other => Err(Error::new(format!("mode {other}"))),
     }
 }
 
-fn key_gen<S: Set>(t: &Value) -> Result<Value, Error> {
-    let (pk, sk) = S::key_gen(&hex(t, "seed")?)?;
+fn key_gen<S: Set>(ctx: Context, t: &Value) -> Result<Value, Error> {
+    let (pk, sk) = S::key_gen(ctx, &hex(t, "seed")?)?;
     Ok(json!({ "pk": hex_value(&pk), "sk": hex_value(&sk) }))
 }
 
 fn sig_gen<S: Set>(
+    ctx: Context,
     t: &Value,
     deterministic: bool,
     seed: bool,
@@ -175,6 +194,7 @@ fn sig_gen<S: Set>(
     let seed_bytes = if seed { Some(hex(t, "seed")?) } else { None };
     let sk = if seed { Vec::new() } else { hex(t, "sk")? };
     let sig = S::sign(
+        ctx,
         seed_bytes.as_deref(),
         &sk,
         rnd.as_deref(),
@@ -184,8 +204,9 @@ fn sig_gen<S: Set>(
     Ok(json!({ "signature": hex_value(&sig) }))
 }
 
-fn sig_ver<S: Set>(t: &Value) -> Result<Value, Error> {
+fn sig_ver<S: Set>(ctx: Context, t: &Value) -> Result<Value, Error> {
     let passed = S::verify(
+        ctx,
         &hex(t, "pk")?,
         &hex(t, "context")?,
         &hex(t, "message")?,

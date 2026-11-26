@@ -22,7 +22,7 @@ use super::{Decryptor, Encryptor, Lane, State, TAG, lengths, open, seal, xor};
 use crate::aead::Aead;
 use crate::cipher::aes::{BLOCK_SIZE, Kernel};
 use crate::features::{self, Dispatcher, Features};
-use crate::{Error, Key, KeyType};
+use crate::{Context, Error, Key, KeyType};
 
 #[cfg(target_arch = "x86_64")]
 use super::x86_64;
@@ -57,11 +57,11 @@ pub type Aegis256X4 = Aegis256X<4>;
 
 impl<const D: usize> Aegis256X<D> {
     /// Takes the key.
-    pub fn new(key: &Key<[u8; KEY_SIZE]>) -> Self {
+    pub fn new(ctx: Context, key: &Key<[u8; KEY_SIZE]>) -> Self {
         const { assert!(D == 2 || D == 4, "two lanes or four") };
         Aegis256X {
             key: key.clone(),
-            kernel: features::select(KERNELS).unwrap_or(Kernel::Bitsliced),
+            kernel: features::select(ctx, KERNELS).unwrap_or(Kernel::Bitsliced),
         }
     }
 
@@ -307,10 +307,10 @@ macro_rules! degree {
             type Nonce = [u8; NONCE_SIZE];
             type Tag = [u8; TAG];
 
-            fn new(key: &Self::Key) -> Self {
+            fn new(ctx: Context, key: &Self::Key) -> Self {
                 // The inherent constructor, which takes precedence
                 // here.
-                Aegis256X::new(key)
+                Aegis256X::new(ctx, key)
             }
 
             fn encrypt(
@@ -411,14 +411,12 @@ pub(crate) mod tests {
         hex(s).try_into().unwrap()
     }
 
-    /// Each kernel this processor can run under the set in force,
-    /// the virtual features granted.
     /// This variant under one kernel: the draft's vectors and the
     /// rest below, each against the portable kernel. The kernel the
     /// list chooses under the row's features is the one they build
     /// on, through the test constructor that trusts its caller.
     pub(crate) fn kernel(under: &features::Under) {
-        let chosen = under.build(|| features::select(KERNELS)).expect("listed");
+        let chosen = features::select(under.ctx(), KERNELS).expect("listed");
         UNDER.set(Some(chosen));
         initial_state_of_two();
         initial_state_of_four();
@@ -459,16 +457,18 @@ pub(crate) mod tests {
 
     #[test]
     fn dispatches() {
-        features::build_alone(|| {
-            let two = Aegis256X2::new(&Key::zeroed());
+        {
+            let two =
+                Aegis256X2::new(crate::Context::default(), &Key::zeroed());
             features::dispatches(KERNELS, Aegis256X2::profiles(), two.kernel());
-            let four = Aegis256X4::new(&Key::zeroed());
+            let four =
+                Aegis256X4::new(crate::Context::default(), &Key::zeroed());
             features::dispatches(
                 KERNELS,
                 Aegis256X4::profiles(),
                 four.kernel(),
             );
-        });
+        };
     }
 
     /// The state after `Init`, a lane to a row, against what the
@@ -723,13 +723,13 @@ pub(crate) mod tests {
     fn the_variants_differ() {
         let mut tags = [[0u8; 16]; 3];
         let [base, two, four] = &mut tags;
-        Aegis256::new(&key())
+        Aegis256::new(crate::Context::default(), &key())
             .encrypt(&nonce(), b"", &mut [], base)
             .unwrap();
-        Aegis256X2::new(&key())
+        Aegis256X2::new(crate::Context::default(), &key())
             .encrypt(&nonce(), b"", &mut [], two)
             .unwrap();
-        Aegis256X4::new(&key())
+        Aegis256X4::new(crate::Context::default(), &key())
             .encrypt(&nonce(), b"", &mut [], four)
             .unwrap();
         assert_ne!(tags[0], tags[1]);
@@ -739,11 +739,11 @@ pub(crate) mod tests {
 
     #[test]
     fn aad_after_message_is_out_of_order() {
-        let aead = Aegis256X2::new(&Key::zeroed());
+        let aead = Aegis256X2::new(crate::Context::default(), &Key::zeroed());
         let mut e = aead.encryptor(&nonce());
         e.update(&mut [0u8; 3]).unwrap();
         assert_eq!(e.aad(b"late"), Err(Error::OutOfOrder));
-        let aead = Aegis256X4::new(&Key::zeroed());
+        let aead = Aegis256X4::new(crate::Context::default(), &Key::zeroed());
         let mut d = aead.decryptor(&nonce());
         d.update(&mut []).unwrap();
         assert_eq!(d.aad(b"late"), Err(Error::OutOfOrder));
@@ -754,7 +754,10 @@ pub(crate) mod tests {
         fn wipes<T: ZeroizeOnDrop>() {}
         wipes::<Aegis256X2>();
         wipes::<Aegis256X4>();
-        let aead = Aegis256X4::new(&Key::from([0x5au8; KEY_SIZE]));
+        let aead = Aegis256X4::new(
+            crate::Context::default(),
+            &Key::from([0x5au8; KEY_SIZE]),
+        );
         let text = std::format!("{aead:?}");
         assert!(!text.contains("5a"), "{text}");
         let text = std::format!("{:?}", aead.encryptor(&[0x5au8; NONCE_SIZE]));

@@ -30,13 +30,15 @@
 //! ```
 //! use scytale::random::CtrDrbg;
 //! use scytale::sig::slh_dsa::shake_128f::{PrivateKey, PublicKey};
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = CtrDrbg::from_system()?;
-//! let key = PrivateKey::generate(&mut rng)?;
+//! let ctx = Context::default();
+//! let mut rng = CtrDrbg::from_system(ctx)?;
+//! let key = PrivateKey::generate(ctx, &mut rng)?;
 //! let signature = key.sign(&mut rng, b"", b"release v1.2")?;
 //!
-//! let public = PublicKey::new(&key.public_key().bytes());
+//! let public = PublicKey::new(ctx, &key.public_key().bytes());
 //! public.verify(b"", b"release v1.2", &signature)?;
 //! assert!(public.verify(b"", b"release v1.3", &signature).is_err());
 //! # Ok(())
@@ -51,6 +53,7 @@
 //! from the signature. Secret material reaches the hashes as input
 //! and nowhere else.
 
+use crate::Context;
 use zeroize::Zeroize;
 
 use crate::constant_time;
@@ -219,10 +222,15 @@ trait Family {
     type Seeded;
 
     /// Prepares `pk_seed` for the parameter set `p`.
-    fn seed(p: &Params, pk_seed: &[u8]) -> Result<Self::Seeded, Error>;
+    fn seed(
+        ctx: Context,
+        p: &Params,
+        pk_seed: &[u8],
+    ) -> Result<Self::Seeded, Error>;
 
     /// `H_msg`.
     fn h_msg(
+        ctx: Context,
         p: &Params,
         r: &[u8],
         pk_seed: &[u8],
@@ -242,6 +250,7 @@ trait Family {
 
     /// `PRF_msg`.
     fn prf_msg(
+        ctx: Context,
         p: &Params,
         sk_prf: &[u8],
         opt_rand: &[u8],
@@ -272,8 +281,8 @@ trait Family {
 /// The SHAKE family: everything is SHAKE256 over the concatenation.
 struct Shake;
 
-fn shake(parts: &[&[u8]], out: &mut [u8]) -> Result<(), Error> {
-    let mut xof = Shake256::new();
+fn shake(ctx: Context, parts: &[&[u8]], out: &mut [u8]) -> Result<(), Error> {
+    let mut xof = Shake256::new(ctx);
     for part in parts {
         xof.update(part);
     }
@@ -284,6 +293,8 @@ fn shake(parts: &[&[u8]], out: &mut [u8]) -> Result<(), Error> {
 /// The public seed as SHAKE takes it: as it is, since it shares its
 /// block with everything after it and there is nothing to save.
 struct ShakeSeed {
+    /// What the key's SHAKE is built under.
+    ctx: Context,
     seed: Node,
     n: usize,
 }
@@ -291,13 +302,18 @@ struct ShakeSeed {
 impl Family for Shake {
     type Seeded = ShakeSeed;
 
-    fn seed(p: &Params, pk_seed: &[u8]) -> Result<ShakeSeed, Error> {
+    fn seed(
+        ctx: Context,
+        p: &Params,
+        pk_seed: &[u8],
+    ) -> Result<ShakeSeed, Error> {
         let mut seed = Node::default();
         seed[..p.n].copy_from_slice(pk_seed);
-        Ok(ShakeSeed { seed, n: p.n })
+        Ok(ShakeSeed { ctx, seed, n: p.n })
     }
 
     fn h_msg(
+        ctx: Context,
         _: &Params,
         r: &[u8],
         pk_seed: &[u8],
@@ -305,7 +321,7 @@ impl Family for Shake {
         message: &[&[u8]],
         out: &mut [u8],
     ) -> Result<(), Error> {
-        let mut xof = Shake256::new();
+        let mut xof = Shake256::new(ctx);
         xof.update(r);
         xof.update(pk_seed);
         xof.update(pk_root);
@@ -324,17 +340,18 @@ impl Family for Shake {
         out: &mut [u8],
     ) -> Result<(), Error> {
         let pk_seed = &seeded.seed[..seeded.n];
-        shake(&[pk_seed, &adrs.0, sk_seed], out)
+        shake(seeded.ctx, &[pk_seed, &adrs.0, sk_seed], out)
     }
 
     fn prf_msg(
+        ctx: Context,
         _: &Params,
         sk_prf: &[u8],
         opt_rand: &[u8],
         message: &[&[u8]],
         out: &mut [u8],
     ) -> Result<(), Error> {
-        let mut xof = Shake256::new();
+        let mut xof = Shake256::new(ctx);
         xof.update(sk_prf);
         xof.update(opt_rand);
         for part in message {
@@ -351,7 +368,7 @@ impl Family for Shake {
         m1: &[u8],
         out: &mut [u8],
     ) -> Result<(), Error> {
-        shake(&[&seeded.seed[..seeded.n], &adrs.0, m1], out)
+        shake(seeded.ctx, &[&seeded.seed[..seeded.n], &adrs.0, m1], out)
     }
 
     fn t(
@@ -361,7 +378,7 @@ impl Family for Shake {
         parts: &[&[u8]],
         out: &mut [u8],
     ) -> Result<(), Error> {
-        let mut xof = Shake256::new();
+        let mut xof = Shake256::new(seeded.ctx);
         xof.update(&seeded.seed[..seeded.n]);
         xof.update(&adrs.0);
         for part in parts {
@@ -380,11 +397,12 @@ struct Sha2;
 
 /// A hash that has taken the public seed padded to its block, so the
 /// seed's compression is done once for a key.
-fn sha2_seeded<H: Hash + Default>(
+fn sha2_seeded<H: Hash>(
+    ctx: Context,
     block: usize,
     pk_seed: &[u8],
 ) -> Result<H, Error> {
-    let mut hash = H::default();
+    let mut hash = H::new(ctx);
     hash.update(pk_seed);
     hash.update(&[0u8; 128][..block - pk_seed.len()]);
     Ok(hash)
@@ -392,7 +410,7 @@ fn sha2_seeded<H: Hash + Default>(
 
 /// `Trunc_n` of a hash over the parts, from `seeded`, which has taken
 /// the padded seed already.
-fn sha2_tweaked<H: Hash + Clone + Default>(
+fn sha2_tweaked<H: Hash + Clone>(
     seeded: &H,
     adrs: &Adrs,
     parts: &[&[u8]],
@@ -409,13 +427,14 @@ fn sha2_tweaked<H: Hash + Clone + Default>(
 }
 
 /// MGF1 over `seed`, `out.len()` bytes.
-fn mgf1<H: Hash + Default>(
+fn mgf1<H: Hash>(
+    ctx: Context,
     seed: &[&[u8]],
     out: &mut [u8],
 ) -> Result<(), Error> {
     let size = size_of::<H::Output>();
     for (counter, chunk) in out.chunks_mut(size).enumerate() {
-        let mut hash = H::default();
+        let mut hash = H::new(ctx);
         for part in seed {
             hash.update(part);
         }
@@ -428,14 +447,15 @@ fn mgf1<H: Hash + Default>(
 
 /// `H_msg` for the SHA2 family with hash `H`: MGF1 over the
 /// randomiser, the seed and a digest of everything.
-fn sha2_h_msg<H: Hash + Default>(
+fn sha2_h_msg<H: Hash>(
+    ctx: Context,
     r: &[u8],
     pk_seed: &[u8],
     pk_root: &[u8],
     message: &[&[u8]],
     out: &mut [u8],
 ) -> Result<(), Error> {
-    let mut hash = H::default();
+    let mut hash = H::new(ctx);
     hash.update(r);
     hash.update(pk_seed);
     hash.update(pk_root);
@@ -443,17 +463,18 @@ fn sha2_h_msg<H: Hash + Default>(
         hash.update(part);
     }
     let digest = hash.finalize();
-    mgf1::<H>(&[r, pk_seed, digest.as_ref()], out)
+    mgf1::<H>(ctx, &[r, pk_seed, digest.as_ref()], out)
 }
 
 /// `PRF_msg` for the SHA2 family: truncated HMAC.
-fn sha2_prf_msg<H: Hash + Clone + BlockType + Default>(
+fn sha2_prf_msg<H: Hash + Clone + BlockType>(
+    ctx: Context,
     sk_prf: &[u8],
     opt_rand: &[u8],
     message: &[&[u8]],
     out: &mut [u8],
 ) -> Result<(), Error> {
-    let mut mac = Hmac::<H>::new(sk_prf);
+    let mut mac = Hmac::<H>::new(ctx, sk_prf);
     mac.update(opt_rand);
     for part in message {
         mac.update(part);
@@ -474,19 +495,24 @@ struct Sha2Seed {
 impl Family for Sha2 {
     type Seeded = Sha2Seed;
 
-    fn seed(p: &Params, pk_seed: &[u8]) -> Result<Sha2Seed, Error> {
+    fn seed(
+        ctx: Context,
+        p: &Params,
+        pk_seed: &[u8],
+    ) -> Result<Sha2Seed, Error> {
         let wide = if p.n == 16 {
             None
         } else {
-            Some(sha2_seeded::<Sha512>(128, pk_seed)?)
+            Some(sha2_seeded::<Sha512>(ctx, 128, pk_seed)?)
         };
         Ok(Sha2Seed {
-            narrow: sha2_seeded::<Sha256>(64, pk_seed)?,
+            narrow: sha2_seeded::<Sha256>(ctx, 64, pk_seed)?,
             wide,
         })
     }
 
     fn h_msg(
+        ctx: Context,
         p: &Params,
         r: &[u8],
         pk_seed: &[u8],
@@ -495,9 +521,9 @@ impl Family for Sha2 {
         out: &mut [u8],
     ) -> Result<(), Error> {
         if p.n == 16 {
-            sha2_h_msg::<Sha256>(r, pk_seed, pk_root, message, out)
+            sha2_h_msg::<Sha256>(ctx, r, pk_seed, pk_root, message, out)
         } else {
-            sha2_h_msg::<Sha512>(r, pk_seed, pk_root, message, out)
+            sha2_h_msg::<Sha512>(ctx, r, pk_seed, pk_root, message, out)
         }
     }
 
@@ -512,6 +538,7 @@ impl Family for Sha2 {
     }
 
     fn prf_msg(
+        ctx: Context,
         p: &Params,
         sk_prf: &[u8],
         opt_rand: &[u8],
@@ -519,9 +546,9 @@ impl Family for Sha2 {
         out: &mut [u8],
     ) -> Result<(), Error> {
         if p.n == 16 {
-            sha2_prf_msg::<Sha256>(sk_prf, opt_rand, message, out)
+            sha2_prf_msg::<Sha256>(ctx, sk_prf, opt_rand, message, out)
         } else {
-            sha2_prf_msg::<Sha512>(sk_prf, opt_rand, message, out)
+            sha2_prf_msg::<Sha512>(ctx, sk_prf, opt_rand, message, out)
         }
     }
 
@@ -1020,6 +1047,7 @@ impl<F: Family> Ctx<'_, F> {
 /// private key is `sk_seed || sk_prf || pk_seed || pk_root` and the
 /// public key `pk_seed || pk_root`.
 fn key_gen<F: Family>(
+    context: Context,
     p: &Params,
     seeds: &[u8],
     sk: &mut [u8],
@@ -1031,7 +1059,7 @@ fn key_gen<F: Family>(
     let (secret, root) = sk.split_at_mut(3 * n);
     let ctx = Ctx::<F> {
         p,
-        seeded: F::seed(p, &secret[2 * n..])?,
+        seeded: F::seed(context, p, &secret[2 * n..])?,
     };
     let mut adrs = Adrs::ZERO;
     adrs.set_layer(p.d as u32 - 1);
@@ -1062,6 +1090,7 @@ fn split_digest(p: &Params, digest: &[u8]) -> (usize, u64, u32) {
 /// `slh_sign_internal`, over the formatted message, with `opt_rand`
 /// the hedging bytes or the public seed.
 fn sign<F: Family>(
+    context: Context,
     p: &Params,
     sk: &[u8],
     message: &[&[u8]],
@@ -1073,12 +1102,12 @@ fn sign<F: Family>(
         (&sk[..n], &sk[n..2 * n], &sk[2 * n..3 * n], &sk[3 * n..]);
     let ctx = Ctx::<F> {
         p,
-        seeded: F::seed(p, pk_seed)?,
+        seeded: F::seed(context, p, pk_seed)?,
     };
     let (r, rest) = sig.split_at_mut(n);
-    F::prf_msg(p, sk_prf, opt_rand, message, r)?;
+    F::prf_msg(context, p, sk_prf, opt_rand, message, r)?;
     let mut digest = [0u8; 49];
-    F::h_msg(p, r, pk_seed, pk_root, message, &mut digest[..p.m])?;
+    F::h_msg(context, p, r, pk_seed, pk_root, message, &mut digest[..p.m])?;
     let (md_len, idx_tree, idx_leaf) = split_digest(p, &digest[..p.m]);
     let md = &digest[..md_len];
 
@@ -1096,6 +1125,7 @@ fn sign<F: Family>(
 
 /// `slh_verify_internal`.
 fn verify<F: Family>(
+    context: Context,
     p: &Params,
     pk: &[u8],
     message: &[&[u8]],
@@ -1105,11 +1135,11 @@ fn verify<F: Family>(
     let (pk_seed, pk_root) = pk.split_at(n);
     let ctx = Ctx::<F> {
         p,
-        seeded: F::seed(p, pk_seed)?,
+        seeded: F::seed(context, p, pk_seed)?,
     };
     let r = &sig[..n];
     let mut digest = [0u8; 49];
-    F::h_msg(p, r, pk_seed, pk_root, message, &mut digest[..p.m])?;
+    F::h_msg(context, p, r, pk_seed, pk_root, message, &mut digest[..p.m])?;
     let (md_len, idx_tree, idx_leaf) = split_digest(p, &digest[..p.m]);
     let md = &digest[..md_len];
 
@@ -1212,6 +1242,8 @@ macro_rules! parameter_set {
 
         #[doc = concat!("An ", $name, " signing key; wiped on drop.")]
         pub struct PrivateKey {
+            /// What the key was made under, for its hashes.
+            ctx: crate::Context,
             bytes: [u8; KEY_SIZE],
             public: PublicKey,
         }
@@ -1219,6 +1251,8 @@ macro_rules! parameter_set {
         #[doc = concat!("An ", $name, " verification key.")]
         #[derive(Clone)]
         pub struct PublicKey {
+            /// What the key was made under, for its hashes.
+            ctx: crate::Context,
             bytes: [u8; PUBLIC_KEY_SIZE],
         }
 
@@ -1229,26 +1263,31 @@ macro_rules! parameter_set {
         }
 
         impl PrivateKey {
-            fn from_bytes(bytes: [u8; KEY_SIZE]) -> Self {
+            fn from_bytes(ctx: crate::Context, bytes: [u8; KEY_SIZE]) -> Self {
                 let mut public = [0u8; PUBLIC_KEY_SIZE];
                 public.copy_from_slice(&bytes[KEY_SIZE - PUBLIC_KEY_SIZE..]);
                 PrivateKey {
+                    ctx,
                     bytes,
-                    public: PublicKey { bytes: public },
+                    public: PublicKey { ctx, bytes: public },
                 }
             }
 
             /// A fresh key from three random seeds, `3n` bytes, with
             /// the public root computed from them, which costs about
             /// as much as a signature.
-            pub fn generate<R: Random>(rng: &mut R) -> Result<Self, Error> {
+            pub fn generate<R: Random>(
+                ctx: crate::Context,
+                rng: &mut R,
+            ) -> Result<Self, Error> {
                 let mut seeds = [0u8; 3 * P.n];
                 rng.fill(&mut seeds)?;
                 let mut bytes = [0u8; KEY_SIZE];
-                let result = slh_dsa::key_gen::<$family>(P, &seeds, &mut bytes);
+                let result =
+                    slh_dsa::key_gen::<$family>(ctx, P, &seeds, &mut bytes);
                 seeds.zeroize();
                 result?;
-                Ok(Self::from_bytes(bytes))
+                Ok(Self::from_bytes(ctx, bytes))
             }
 
             /// A key from its bytes, `SK.seed || SK.prf || PK.seed ||
@@ -1256,8 +1295,8 @@ macro_rules! parameter_set {
             /// recomputing the root would cost a signature's worth of
             /// hashing, so they are taken as given: a wrong root makes
             /// signatures that do not verify, and nothing worse.
-            pub fn new(bytes: &[u8; KEY_SIZE]) -> Self {
-                Self::from_bytes(*bytes)
+            pub fn new(ctx: crate::Context, bytes: &[u8; KEY_SIZE]) -> Self {
+                Self::from_bytes(ctx, *bytes)
             }
 
             /// The key's bytes. The caller holds a secret now, and
@@ -1314,6 +1353,7 @@ macro_rules! parameter_set {
                     slh_dsa::format_message(context, message, &mut prefix)?;
                 let mut out = [0u8; SIGNATURE_SIZE];
                 slh_dsa::sign::<$family>(
+                    self.ctx,
                     P,
                     &self.bytes,
                     &m_prime,
@@ -1328,7 +1368,10 @@ macro_rules! parameter_set {
             /// OCTET STRING under this parameter set's OID. Another set
             /// is [`Error::WrongAlgorithm`], and anything else wrong
             /// with the bytes [`Error::InvalidEncoding`].
-            pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
+            pub fn try_from_der(
+                ctx: crate::Context,
+                der: &[u8],
+            ) -> Result<Self, Error> {
                 let info = crate::der::read_pkcs8(der)?;
                 let algorithm = &info.algorithm;
                 if algorithm.oid != OID || !algorithm.params.is_empty() {
@@ -1339,7 +1382,7 @@ macro_rules! parameter_set {
                 inner.end()?;
                 let bytes: &[u8; KEY_SIZE] =
                     bytes.try_into().map_err(|_| Error::InvalidEncoding)?;
-                Ok(Self::new(bytes))
+                Ok(Self::new(ctx, bytes))
             }
 
             /// Writes the key as a `PrivateKeyInfo` into the front of
@@ -1354,12 +1397,15 @@ macro_rules! parameter_set {
             /// the DER above; whitespace and line ends are read
             /// leniently, and anything else that is not exactly one
             /// well-formed block is [`Error::InvalidEncoding`].
-            pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
+            pub fn try_from_pem(
+                ctx: crate::Context,
+                pem: &[u8],
+            ) -> Result<Self, Error> {
                 let mut der = [0u8; slh_dsa::SCRATCH];
                 let labels = [slh_dsa::PRIVATE_LABEL];
                 let result =
                     crate::codec::pem::decode_one_of(&labels, pem, &mut der)
-                        .and_then(|(_, n)| Self::try_from_der(&der[..n]));
+                        .and_then(|(_, n)| Self::try_from_der(ctx, &der[..n]));
                 der.zeroize();
                 result
             }
@@ -1382,8 +1428,11 @@ macro_rules! parameter_set {
             /// A public key from its bytes, `PK.seed || PK.root`. Any
             /// bytes of the length are a key, so there is nothing to
             /// report.
-            pub fn new(bytes: &[u8; PUBLIC_KEY_SIZE]) -> Self {
-                PublicKey { bytes: *bytes }
+            pub fn new(
+                ctx: crate::Context,
+                bytes: &[u8; PUBLIC_KEY_SIZE],
+            ) -> Self {
+                PublicKey { ctx, bytes: *bytes }
             }
 
             /// The key's bytes.
@@ -1403,20 +1452,29 @@ macro_rules! parameter_set {
                 let mut prefix = [0u8; 2];
                 let m_prime =
                     slh_dsa::format_message(context, message, &mut prefix)?;
-                slh_dsa::verify::<$family>(P, &self.bytes, &m_prime, signature)
+                slh_dsa::verify::<$family>(
+                    self.ctx,
+                    P,
+                    &self.bytes,
+                    &m_prime,
+                    signature,
+                )
             }
 
             /// A key from its DER `SubjectPublicKeyInfo`, the form
             /// under `PUBLIC KEY` in a PEM file, which must name this
             /// parameter set.
-            pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
+            pub fn try_from_der(
+                ctx: crate::Context,
+                der: &[u8],
+            ) -> Result<Self, Error> {
                 let (algorithm, key) = crate::der::read_spki(der)?;
                 if algorithm.oid != OID || !algorithm.params.is_empty() {
                     return Err(Error::WrongAlgorithm);
                 }
                 let key: &[u8; PUBLIC_KEY_SIZE] =
                     key.try_into().map_err(|_| Error::InvalidEncoding)?;
-                Ok(Self::new(key))
+                Ok(Self::new(ctx, key))
             }
 
             /// Writes the key as a `SubjectPublicKeyInfo` into the
@@ -1427,12 +1485,15 @@ macro_rules! parameter_set {
 
             /// A key from a `PUBLIC KEY` PEM block, read as
             /// [`PrivateKey::try_from_pem`] reads its own.
-            pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
+            pub fn try_from_pem(
+                ctx: crate::Context,
+                pem: &[u8],
+            ) -> Result<Self, Error> {
                 let mut der = [0u8; slh_dsa::SCRATCH];
                 let labels = [slh_dsa::PUBLIC_LABEL];
                 let (_, n) =
                     crate::codec::pem::decode_one_of(&labels, pem, &mut der)?;
-                Self::try_from_der(&der[..n])
+                Self::try_from_der(ctx, &der[..n])
             }
 
             /// Writes the key as a `PUBLIC KEY` PEM block into the
@@ -1533,8 +1594,13 @@ mod tests {
         macro_rules! check {
             ($module:ident) => {{
                 use $module::*;
-                let mut rng = crate::random::CtrDrbg::from_system().unwrap();
-                let key = PrivateKey::generate(&mut rng).unwrap();
+                let mut rng = crate::random::CtrDrbg::from_system(
+                    crate::Context::default(),
+                )
+                .unwrap();
+                let key =
+                    PrivateKey::generate(crate::Context::default(), &mut rng)
+                        .unwrap();
                 let public = key.public_key();
                 let sig = key.sign(&mut rng, b"ctx", b"message").unwrap();
                 public.verify(b"ctx", b"message", &sig).unwrap();
@@ -1550,25 +1616,44 @@ mod tests {
                     key.sign(&mut rng, &[0u8; 256], b"m").err(),
                     Some(Error::InvalidLength(256))
                 );
-                let again = PrivateKey::new(&key.key_bytes());
+                let again = PrivateKey::new(
+                    crate::Context::default(),
+                    &key.key_bytes(),
+                );
                 assert_eq!(again.public_key().bytes(), public.bytes());
 
                 let mut out = [0u8; 1024];
                 let n = key.der_bytes(&mut out).unwrap();
                 assert_eq!(n, DER_SIZE);
-                let back = PrivateKey::try_from_der(&out[..n]).unwrap();
+                let back = PrivateKey::try_from_der(
+                    crate::Context::default(),
+                    &out[..n],
+                )
+                .unwrap();
                 assert_eq!(back.key_bytes(), key.key_bytes());
                 let n = key.pem_bytes(&mut out).unwrap();
                 assert_eq!(n, PEM_SIZE);
-                let back = PrivateKey::try_from_pem(&out[..n]).unwrap();
+                let back = PrivateKey::try_from_pem(
+                    crate::Context::default(),
+                    &out[..n],
+                )
+                .unwrap();
                 assert_eq!(back.key_bytes(), key.key_bytes());
                 let n = public.der_bytes(&mut out).unwrap();
                 assert_eq!(n, PUBLIC_KEY_DER_SIZE);
-                let back = PublicKey::try_from_der(&out[..n]).unwrap();
+                let back = PublicKey::try_from_der(
+                    crate::Context::default(),
+                    &out[..n],
+                )
+                .unwrap();
                 assert_eq!(back.bytes(), public.bytes());
                 let n = public.pem_bytes(&mut out).unwrap();
                 assert_eq!(n, PUBLIC_KEY_PEM_SIZE);
-                let back = PublicKey::try_from_pem(&out[..n]).unwrap();
+                let back = PublicKey::try_from_pem(
+                    crate::Context::default(),
+                    &out[..n],
+                )
+                .unwrap();
                 assert_eq!(back.bytes(), public.bytes());
             }};
         }
@@ -1578,17 +1663,31 @@ mod tests {
 
     #[test]
     fn sets_do_not_mix() {
-        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
-        let key = shake_128f::PrivateKey::generate(&mut rng).unwrap();
+        let mut rng =
+            crate::random::CtrDrbg::from_system(crate::Context::default())
+                .unwrap();
+        let key = shake_128f::PrivateKey::generate(
+            crate::Context::default(),
+            &mut rng,
+        )
+        .unwrap();
         let mut out = [0u8; 1024];
         let n = key.der_bytes(&mut out).unwrap();
         assert_eq!(
-            sha2_128f::PrivateKey::try_from_der(&out[..n]).err(),
+            sha2_128f::PrivateKey::try_from_der(
+                crate::Context::default(),
+                &out[..n]
+            )
+            .err(),
             Some(Error::WrongAlgorithm)
         );
         let n = key.public_key().der_bytes(&mut out).unwrap();
         assert_eq!(
-            shake_128s::PublicKey::try_from_der(&out[..n]).err(),
+            shake_128s::PublicKey::try_from_der(
+                crate::Context::default(),
+                &out[..n]
+            )
+            .err(),
             Some(Error::WrongAlgorithm)
         );
     }

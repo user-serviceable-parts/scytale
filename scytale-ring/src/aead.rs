@@ -227,10 +227,19 @@ impl Inner {
         bytes: &[u8],
     ) -> Result<Self, error::Unspecified> {
         Ok(match algorithm.id {
-            Id::AES_128_GCM => Inner::Aes128Gcm(Gcm::new(&key(bytes)?)),
-            Id::AES_256_GCM => Inner::Aes256Gcm(Gcm::new(&key(bytes)?)),
+            Id::AES_128_GCM => Inner::Aes128Gcm(Gcm::new(
+                scytale::Context::default(),
+                &key(bytes)?,
+            )),
+            Id::AES_256_GCM => Inner::Aes256Gcm(Gcm::new(
+                scytale::Context::default(),
+                &key(bytes)?,
+            )),
             Id::CHACHA20_POLY1305 => {
-                Inner::ChaCha20Poly1305(ChaCha20Poly1305::new(&key(bytes)?))
+                Inner::ChaCha20Poly1305(ChaCha20Poly1305::new(
+                    scytale::Context::default(),
+                    &key(bytes)?,
+                ))
             }
         })
     }

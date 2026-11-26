@@ -39,9 +39,11 @@
 //! ```
 //! use scytale::Key;
 //! use scytale::aead::{Aead, Aegis128L};
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let aead = Aegis128L::new(&Key::from([0x42u8; 16]));
+//! let ctx = Context::default();
+//! let aead = Aegis128L::new(ctx, &Key::from([0x42u8; 16]));
 //! let nonce = [7u8; 16];
 //! let header = b"to: bob";
 //! let mut message = *b"attack at dawn";

@@ -21,36 +21,41 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            let encrypt = match text(group, "direction")? {
-                "encrypt" => true,
-                "decrypt" => false,
-                other => return Err(Error::new(format!("direction {other}"))),
-            };
-            // The standard lets the wrapping be built on either direction
-            // of the cipher, and the suite exercises both.
-            let forward = match text(group, "kwCipher")? {
-                "cipher" => true,
-                "inverse" => false,
-                other => return Err(Error::new(format!("kwCipher {other}"))),
-            };
-            match text(group, "testType")? {
-                "AFT" => answer_tests(group, |t| aft(t, encrypt, forward)),
-                _ => Err(unknown_test_type(group)),
-            }
-        })
+        let encrypt = match text(group, "direction")? {
+            "encrypt" => true,
+            "decrypt" => false,
+            other => return Err(Error::new(format!("direction {other}"))),
+        };
+        // The standard lets the wrapping be built on either direction
+        // of the cipher, and the suite exercises both.
+        let forward = match text(group, "kwCipher")? {
+            "cipher" => true,
+            "inverse" => false,
+            other => return Err(Error::new(format!("kwCipher {other}"))),
+        };
+        match text(group, "testType")? {
+            "AFT" => answer_tests(group, |t| aft(t, encrypt, forward, builder)),
+            _ => Err(unknown_test_type(group)),
+        }
     })
 }
 
-fn aft(t: &Value, encrypt: bool, forward: bool) -> Result<Value, Error> {
+fn aft(
+    t: &Value,
+    encrypt: bool,
+    forward: bool,
+    builder: &Builder,
+) -> Result<Value, Error> {
     let key = hex(t, "key")?;
     aes_width!(key, C => {
         let key = key_of::<C>(&key)?;
-        let kwp = if forward {
-            Kwp::<C>::new(&key)
-        } else {
-            Kwp::<C>::new_inverse(&key)
-        };
+        let kwp = builder.build(|ctx| {
+            if forward {
+                Kwp::<C>::new(ctx, &key)
+            } else {
+                Kwp::<C>::new_inverse(ctx, &key)
+            }
+        });
         if encrypt {
             let plain = hex(t, "pt")?;
             let mut out = vec![0u8; plain.len().next_multiple_of(8) + 8];

@@ -16,10 +16,12 @@
 //! ```
 //! use scytale::random::CtrDrbg;
 //! use scytale::sig::ed25519::{PrivateKey, PublicKey};
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = CtrDrbg::from_system()?;
-//! let key = PrivateKey::generate(&mut rng)?;
+//! let ctx = Context::default();
+//! let mut rng = CtrDrbg::from_system(ctx)?;
+//! let key = PrivateKey::generate(ctx, &mut rng)?;
 //!
 //! // Made with the secret, checked with the public.
 //! let signature = key.sign(&mut rng, b"release v1.2")?;
@@ -29,7 +31,7 @@
 //!
 //! // The public key in the form other software reads.
 //! let pem = public.pem_bytes();
-//! assert_eq!(&PublicKey::try_from_pem(&pem)?, public);
+//! assert_eq!(&PublicKey::try_from_pem(ctx, &pem)?, public);
 //! # Ok(())
 //! # }
 //! ```

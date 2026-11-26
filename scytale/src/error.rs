@@ -75,9 +75,9 @@ pub enum Error {
     /// A call came in an order the mode does not allow, such as
     /// additional data after the message has begun.
     OutOfOrder,
-    /// [`features::set`](crate::features::set) was handed a feature
-    /// of this architecture that the processor does not have. The set
-    /// in force is unchanged.
+    /// [`Context::try_new`](crate::Context::try_new) was handed a
+    /// feature of this architecture that the processor does not
+    /// have.
     UnsupportedFeature(crate::features::Feature),
     /// The authentication tag is not a length the mode allows.
     InvalidTagLength(usize),

@@ -3,23 +3,21 @@
 //! types publish.
 //!
 //! The kernels themselves are private to the library. What a type
-//! publishes is the feature set each one needs, best first, and
-//! [`features::set`] puts a set in force for everything built
-//! afterwards. Setting a type's profile selects that row of it and,
-//! for every other type, the best row the same features allow; the
-//! empty set selects the portable row of everything. So the union of
-//! every profile, plus the detected set with and without
-//! [`Feature::Isolated`], reaches every row the processor can run,
-//! and a vector set answered under each of them must come out the
-//! same.
+//! publishes is the feature set each one needs, best first, and an
+//! object built with a context of that set takes that row. A context
+//! of a type's profile selects that row of it and, for every other
+//! type, the best row the same features allow; the empty set selects
+//! the portable row of everything. So the union of every profile,
+//! plus the detected set with and without [`Feature::Isolated`],
+//! reaches every row the processor can run, and a vector set answered
+//! under each of them must come out the same.
 //!
-//! The set in force is the process's, so a profile is put in force
-//! only through a [`Builder`], which several threads may share: see
-//! there.
+//! A profile is carried as a [`Builder`], which is a context and
+//! nothing more: profiles share nothing, so any number of threads
+//! answer under any number of them at once.
 
 use crate::suite::Suite;
 use crate::support::{Error, FixedEntropy};
-use scytale::Random;
 use scytale::aead::{
     Aegis128L, Aegis128X2, Aegis128X4, Aegis256, Aegis256X2, Aegis256X4, Ccm,
     ChaCha20Poly1305, Gcm, GcmSiv, XChaCha20Poly1305, Xpn,
@@ -39,8 +37,8 @@ use scytale::kex::ecdh;
 use scytale::mac::poly1305::Poly1305;
 use scytale::random::{CtrDrbg, MIN_SEED};
 use scytale::sig::{self, ecdsa};
+use scytale::{Context, Random};
 use serde_json::Value;
-use std::sync::{Condvar, Mutex, PoisonError};
 
 /// The seed every profile's generator starts from, so the answers
 /// a run compares drew the same randomness.
@@ -56,7 +54,8 @@ impl Seed {
     /// A seed drawn from the operating system.
     pub fn random() -> Result<Self, Error> {
         let mut seed = Seed([0; MIN_SEED]);
-        scytale::random::CtrDrbg::from_system()?.fill(&mut seed.0)?;
+        scytale::random::CtrDrbg::from_system(Context::default())?
+            .fill(&mut seed.0)?;
         Ok(seed)
     }
 
@@ -66,126 +65,83 @@ impl Seed {
         &self,
         builder: &Builder,
     ) -> Result<CtrDrbg<FixedEntropy>, Error> {
-        builder.try_build(|| {
-            CtrDrbg::try_new_seeded(&self.0, FixedEntropy::default())
+        builder.try_build(|ctx| {
+            CtrDrbg::try_new_seeded(ctx, &self.0, FixedEntropy::default())
         })
     }
 }
 
-/// Where the drivers build the library's objects and run them: under
-/// one feature profile, or under the set the processor offers, as a
-/// program that never calls [`features::set`] would.
+/// Where the drivers build the library's objects: the context of one
+/// feature profile, or the default context, the processor's own set,
+/// as a program that never names a set would build them.
 ///
-/// A type chooses its kernel from the set in force when it is built,
-/// and some objects build others as they are used: a GCM-SIV message
-/// builds its own cipher and POLYVAL, a hash-based signature or a KDF
-/// starts a hash for every call, and the generator rekeys its cipher.
-/// So a driver runs a whole test group inside [`build`](Self::build),
-/// not just its constructors, and steps outside only to feed an
-/// object it built, as the large-data hashes do.
-///
-/// The set in force is process-wide, so a builder takes a turn: it
-/// waits while builds under another set are running, puts its own in
-/// force if it is first, and the last build of a turn puts the set
-/// detected back. Builds under the same set share the turn, so the
-/// suites with no kernel of their own, whose signatures run for
-/// minutes, run side by side, and with them every kernel the
-/// processor's whole set selects.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Builder(Option<Features>);
-
-/// The set the running builds share, and how many there are.
-struct Turn {
-    set: Features,
-    builds: usize,
+/// An object chooses its kernel from its context when it is built,
+/// and so does everything it builds as it runs: the GHASH a GCM
+/// message starts, the cipher and POLYVAL of a GCM-SIV message, the
+/// hashes of a signature, a KDF or a DRBG. So a driver hands the
+/// context to the constructors it calls and nothing else, and runs
+/// the objects wherever it likes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Builder {
+    profile: Option<Features>,
+    ctx: Context,
 }
 
-static TURN: Mutex<Turn> = Mutex::new(Turn {
-    set: Features::new(),
-    builds: 0,
-});
-
-/// Signalled when a turn ends.
-static ENDED: Condvar = Condvar::new();
+impl Default for Builder {
+    /// The default context: the set detected.
+    fn default() -> Self {
+        Builder {
+            profile: None,
+            ctx: Context::default(),
+        }
+    }
+}
 
 impl Builder {
-    /// A builder under `profile`, or the error [`features::set`]
-    /// gives when the processor lacks some of it, which is found out
-    /// here, once, rather than at every build.
+    /// A builder under `profile`, or the error the context gives when
+    /// the processor lacks some of it.
     pub fn try_new(profile: Features) -> Result<Self, Error> {
-        let builder = Builder(Some(profile));
-        builder.build(|| ())?;
-        Ok(builder)
+        Ok(Builder {
+            profile: Some(profile),
+            ctx: Context::try_new(profile)?,
+        })
     }
 
-    /// The profile this builder puts in force, or `None` for the set
+    /// The profile this builder builds under, or `None` for the set
     /// detected.
     pub fn profile(&self) -> Option<Features> {
-        self.0
+        self.profile
     }
 
-    /// The set in force while this builder builds.
+    /// The set this builder builds under.
     pub fn set(&self) -> Features {
-        self.0.unwrap_or_else(features::detected)
+        self.ctx.features()
     }
 
-    /// Runs `build` with this builder's set in force.
-    pub fn build<T>(&self, build: impl FnOnce() -> T) -> Result<T, Error> {
-        let _turn = self.enter()?;
-        Ok(build())
+    /// The context the objects are built with.
+    pub fn ctx(&self) -> Context {
+        self.ctx
+    }
+
+    /// Runs `build` with this builder's context.
+    pub fn build<T>(&self, build: impl FnOnce(Context) -> T) -> T {
+        build(self.ctx)
     }
 
     /// As [`build`](Self::build), for a build that may fail.
     pub fn try_build<T, E>(
         &self,
-        build: impl FnOnce() -> Result<T, E>,
+        build: impl FnOnce(Context) -> Result<T, E>,
     ) -> Result<T, Error>
     where
         Error: From<E>,
     {
-        let _turn = self.enter()?;
-        Ok(build()?)
-    }
-
-    /// Waits until this builder's set is in force or nothing is
-    /// building, and joins the turn. A build that starts another
-    /// under the same builder joins its own turn, so nesting is safe.
-    fn enter(&self) -> Result<Building, Error> {
-        let wanted = self.set();
-        let mut turn = TURN.lock().unwrap_or_else(PoisonError::into_inner);
-        while turn.builds > 0 && turn.set != wanted {
-            turn = ENDED.wait(turn).unwrap_or_else(PoisonError::into_inner);
-        }
-        // Between turns the set detected is in force, which is what a
-        // builder without a profile wants, so only a profile is set.
-        if turn.builds == 0
-            && let Some(profile) = self.0
-        {
-            features::set(profile)?;
-        }
-        turn.set = wanted;
-        turn.builds += 1;
-        Ok(Building)
-    }
-}
-
-/// One build's share of a turn. Dropped however the build ends, so
-/// that a panic does not leave the next turn a narrowed set.
-struct Building;
-
-impl Drop for Building {
-    fn drop(&mut self) {
-        let mut turn = TURN.lock().unwrap_or_else(PoisonError::into_inner);
-        turn.builds -= 1;
-        if turn.builds == 0 {
-            features::reset();
-            ENDED.notify_all();
-        }
+        Ok(build(self.ctx)?)
     }
 }
 
 /// The profiles every dispatching type tells apart, in walking order:
-/// the set in force, the same isolated, each type's rows best first,
+/// the set detected, the same isolated, each type's rows best first,
 /// and the empty set.
 pub(crate) fn candidates() -> Vec<Features> {
     let mut out = Vec::new();
@@ -194,7 +150,7 @@ pub(crate) fn candidates() -> Vec<Features> {
             out.push(f);
         }
     };
-    let current = features::get();
+    let current = features::detected();
     push(current);
     push(current.with(Feature::Isolated));
     let lists: &[&[Features]] = &[

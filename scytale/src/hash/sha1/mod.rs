@@ -27,9 +27,11 @@
 //! ```
 //! use scytale::hash::sha1::Sha1;
 //! use scytale::hash::Hash;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let digest = Sha1::digest(b"abc");
+//! let ctx = Context::default();
+//! let digest = Sha1::digest(ctx, b"abc");
 //! assert_eq!(digest[..4], [0xa9, 0x99, 0x3e, 0x36]);
 //! # Ok(())
 //! # }
@@ -46,7 +48,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::features::{self, Dispatcher, Features};
 use crate::hash::{BitHash, Hash};
-use crate::{BlockType, Error};
+use crate::{BlockType, Context, Error};
 
 /// Which compression function a hash runs on.
 ///
@@ -114,9 +116,9 @@ enum Compressor {
 }
 
 impl Compressor {
-    /// The first kernel the set in force allows.
-    fn chosen() -> Self {
-        match features::choose(KERNELS) {
+    /// The first kernel `ctx` allows.
+    fn chosen(ctx: Context) -> Self {
+        match features::choose(ctx, KERNELS) {
             #[cfg(target_arch = "x86_64")]
             Some(c) if c.kernel() == Kernel::ShaNi => x86_64::ShaNi::of(c)
                 .map_or(Compressor::Portable, Compressor::ShaNi),
@@ -201,15 +203,15 @@ fn portable(state: &mut [u32; 5], blocks: &[[u8; 64]]) {
 }
 
 impl Sha1 {
-    /// Starts a new hash.
-    pub fn new() -> Self {
+    /// Starts a new hash, with the best kernel `ctx` allows.
+    pub fn new(ctx: Context) -> Self {
         Sha1 {
             state: IV,
             block: [0; 64],
             used: 0,
             dirty: 0,
             bytes: 0,
-            compressor: Compressor::chosen(),
+            compressor: Compressor::chosen(ctx),
         }
     }
 
@@ -262,12 +264,6 @@ impl Dispatcher for Sha1 {
     }
 }
 
-impl Default for Sha1 {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Clone for Sha1 {
     fn clone(&self) -> Self {
         Sha1 {
@@ -291,6 +287,10 @@ impl BlockType for Sha1 {
 
 impl Hash for Sha1 {
     type Output = [u8; 20];
+
+    fn new(ctx: Context) -> Self {
+        Self::new(ctx)
+    }
 
     fn reset(&mut self) {
         self.state = IV;
@@ -391,7 +391,7 @@ pub(crate) mod tests {
     /// up to several blocks, whole and in pieces.
     pub(crate) fn kernel(under: &features::Under) {
         let digest = |data: &[u8]| {
-            let mut hash = under.build(Sha1::new);
+            let mut hash = Sha1::new(under.ctx());
             hash.update(data);
             hash.finalize()
         };
@@ -399,7 +399,7 @@ pub(crate) mod tests {
             digest(b"abc"),
             unhex("a9993e364706816aba3e25717850c26c9cd0d89d")
         );
-        let mut hash = under.build(Sha1::new);
+        let mut hash = Sha1::new(under.ctx());
         for _ in 0..1000 {
             hash.update(&[b'a'; 1000]);
         }
@@ -409,11 +409,11 @@ pub(crate) mod tests {
         );
         let data: [u8; 600] = core::array::from_fn(|i| (i * 31 + 5) as u8);
         for len in 0..data.len() {
-            let mut reference = features::build_portable(Sha1::new);
+            let mut reference = { Sha1::new(crate::Context::portable()) };
             reference.update(&data[..len]);
             let want = reference.finalize();
             assert_eq!(digest(&data[..len]), want, "len {len}");
-            let mut pieces = under.build(Sha1::new);
+            let mut pieces = Sha1::new(under.ctx());
             for part in data[..len].chunks(67) {
                 pieces.update(part);
             }
@@ -423,30 +423,32 @@ pub(crate) mod tests {
 
     #[test]
     fn picks_the_first_kernel_whose_needs_are_met() {
-        features::build_alone(|| {
-            let kernel = Sha1::new().compressor.kernel();
+        {
+            let kernel =
+                Sha1::new(crate::Context::default()).compressor.kernel();
             features::dispatches(KERNELS, Sha1::profiles(), kernel);
-        });
+        };
     }
 
     /// FIPS 180-4's examples and the NIST CAVP one-million-`a` case.
     #[test]
     fn known_answers() {
         assert_eq!(
-            Sha1::digest(b""),
+            Sha1::digest(crate::Context::default(), b""),
             unhex("da39a3ee5e6b4b0d3255bfef95601890afd80709")
         );
         assert_eq!(
-            Sha1::digest(b"abc"),
+            Sha1::digest(crate::Context::default(), b"abc"),
             unhex("a9993e364706816aba3e25717850c26c9cd0d89d")
         );
         assert_eq!(
             Sha1::digest(
+                crate::Context::default(),
                 b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
             ),
             unhex("84983e441c3bd26ebaae4aa1f95129e5e54670f1")
         );
-        let mut hash = Sha1::new();
+        let mut hash = Sha1::new(crate::Context::default());
         for _ in 0..1000 {
             hash.update(&[b'a'; 1000]);
         }
@@ -462,9 +464,9 @@ pub(crate) mod tests {
     fn pieces_agree_with_one_call() {
         let data: [u8; 200] = core::array::from_fn(|i| (i * 7) as u8);
         for len in [0usize, 1, 55, 56, 57, 63, 64, 65, 119, 120, 128, 200] {
-            let whole = Sha1::digest(&data[..len]);
+            let whole = Sha1::digest(crate::Context::default(), &data[..len]);
             for piece in [1usize, 3, 16, 63, 64, 65] {
-                let mut hash = Sha1::new();
+                let mut hash = Sha1::new(crate::Context::default());
                 for chunk in data[..len].chunks(piece) {
                     hash.update(chunk);
                 }
@@ -481,7 +483,7 @@ pub(crate) mod tests {
     fn nothing_is_left_behind() {
         let data: [u8; 200] = core::array::from_fn(|i| (i as u8) | 1);
         for len in [1usize, 5, 55, 56, 63, 64, 65, 130, 200] {
-            let mut hash = Sha1::new();
+            let mut hash = Sha1::new(crate::Context::default());
             for chunk in data[..len].chunks(37) {
                 hash.update(chunk);
             }
@@ -502,21 +504,26 @@ pub(crate) mod tests {
     /// over bit strings.
     #[test]
     fn bit_string() {
-        let digest = Sha1::new().finalize_bits(0b0110_0000, 5).unwrap();
+        let digest = Sha1::new(crate::Context::default())
+            .finalize_bits(0b0110_0000, 5)
+            .unwrap();
         assert_eq!(digest, unhex("80c0e3041a384f9edd3a4b03cc351af075b9069e"));
         assert_eq!(
-            Sha1::new().finalize_bits(0, 8),
+            Sha1::new(crate::Context::default()).finalize_bits(0, 8),
             Err(Error::InvalidBitCount(8))
         );
     }
 
     #[test]
     fn reset_and_debug() {
-        let mut hash = Sha1::new();
+        let mut hash = Sha1::new(crate::Context::default());
         hash.update(b"garbage");
         hash.reset();
         hash.update(b"abc");
-        assert_eq!(hash.clone().finalize(), Sha1::digest(b"abc"));
+        assert_eq!(
+            hash.clone().finalize(),
+            Sha1::digest(crate::Context::default(), b"abc")
+        );
         extern crate std;
         assert_eq!(std::format!("{hash:?}"), "Sha1 { bytes: 3 }");
     }

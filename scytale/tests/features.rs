@@ -1,14 +1,11 @@
 //! The public face of `features`: what a program outside the crate
-//! can see and do. The set in force is global to the process, so the
-//! tests that edit it hold a lock, and this file has a binary to
-//! itself so that no other test runs beside them.
+//! can see and do. A context is a value, so these tests share nothing
+//! and run side by side like any others.
 //!
 //! The kernels themselves are not visible from here, by design; the
 //! library's own tests check which one a set selects. What can be
 //! checked from outside is the shape of each type's profiles, that a
 //! narrowed set is honoured, and that every profile answers the same.
-
-use std::sync::{Mutex, MutexGuard};
 
 use scytale::aead::{
     Aegis128L, Aegis128X2, Aegis128X4, Aegis256, Aegis256X2, Aegis256X4, Ccm,
@@ -27,58 +24,26 @@ use scytale::hash::sha3::{Sha3_256, Shake128};
 use scytale::kex::ecdh;
 use scytale::mac::poly1305::Poly1305;
 use scytale::sig::ecdsa;
-use scytale::{Error, Key};
+use scytale::{Context, Error, Key};
 use scytale::{pke, sig};
 
-static LOCK: Mutex<()> = Mutex::new(());
-
-/// Holds the lock and, when dropped, puts the hardware back in force.
-struct Edit(#[allow(dead_code)] MutexGuard<'static, ()>);
-
-impl Edit {
-    fn begin() -> Self {
-        let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        features::reset();
-        Edit(guard)
-    }
-}
-
-impl Drop for Edit {
-    fn drop(&mut self) {
-        features::reset();
-    }
-}
-
 #[test]
-fn the_hardware_is_in_force_until_set() {
-    let _edit = Edit::begin();
-    assert_eq!(features::get(), features::detected());
+fn the_default_context_is_the_hardware() {
+    assert_eq!(Context::default().features(), features::detected());
     assert!(!features::detected().contains(Feature::Isolated));
 }
 
 #[test]
-fn set_replaces_and_reset_restores() {
-    let _edit = Edit::begin();
-    features::set(Features::new()).unwrap();
-    assert_eq!(features::get(), Features::new());
-    features::reset();
-    assert_eq!(features::get(), features::detected());
-}
-
-#[test]
 fn a_virtual_feature_may_be_added() {
-    let _edit = Edit::begin();
     let mut f = features::detected();
     f.insert(Feature::Isolated);
-    features::set(f).unwrap();
-    assert_eq!(features::get(), f);
-    assert!(features::get().contains(Feature::Isolated));
+    let ctx = Context::try_new(f).unwrap();
+    assert_eq!(ctx.features(), f);
+    assert!(ctx.features().contains(Feature::Isolated));
 }
 
 #[test]
 fn a_feature_the_processor_lacks_is_refused() {
-    let _edit = Edit::begin();
-    let before = features::get();
     let detected = features::detected();
     // Every architecture's features that this processor does not
     // have; on another architecture they are all inert instead.
@@ -96,14 +61,12 @@ fn a_feature_the_processor_lacks_is_refused() {
             Feature::Riscv64(_) => cfg!(target_arch = "riscv64"),
             _ => false,
         };
-        let result = features::set(Features::of(&[f]));
+        let result = Context::try_new(Features::of(&[f]));
         if native {
             assert_eq!(result, Err(Error::UnsupportedFeature(f)), "{f}");
-            assert_eq!(features::get(), before, "{f} left a mark");
         } else {
-            assert_eq!(result, Ok(()), "{f} should be inert");
-            assert_eq!(features::get(), Features::of(&[f]));
-            features::reset();
+            let kept = result.map(Context::features);
+            assert_eq!(kept, Ok(Features::of(&[f])), "{f} should be inert");
         }
     }
 }
@@ -168,14 +131,13 @@ fn profiles_end_in_nothing_and_are_each_reachable() {
 /// the same answer. This is the agreement a vector run relies on.
 #[test]
 fn every_profile_answers_the_same() {
-    let _edit = Edit::begin();
     let hardware = features::detected();
     let key = Key::from([0x42u8; 16]);
     let message = b"the quick brown fox jumps over the lazy dog";
 
-    let reference_hash = Sha256::digest(message);
+    let reference_hash = Sha256::digest(Context::default(), message);
     let mut reference_block = [[0x5au8; 16]];
-    Aes128::new(&key).encrypt(&mut reference_block);
+    Aes128::new(Context::default(), &key).encrypt(&mut reference_block);
 
     // Virtual features are granted rather than detected, so a profile
     // naming one is satisfiable whenever its hardware part is.
@@ -183,14 +145,14 @@ fn every_profile_answers_the_same() {
     let satisfiable = |p: &Features| p.is_subset(grantable);
     let mut tried = 0;
     for &profile in Sha256::profiles().iter().filter(|p| satisfiable(p)) {
-        features::set(profile).unwrap();
-        assert_eq!(Sha256::digest(message), reference_hash, "{profile}");
+        let ctx = Context::try_new(profile).unwrap();
+        assert_eq!(Sha256::digest(ctx, message), reference_hash, "{profile}");
         tried += 1;
     }
     for &profile in Aes128::profiles().iter().filter(|p| satisfiable(p)) {
-        features::set(profile).unwrap();
+        let ctx = Context::try_new(profile).unwrap();
         let mut block = [[0x5au8; 16]];
-        Aes128::new(&key).encrypt(&mut block);
+        Aes128::new(ctx, &key).encrypt(&mut block);
         assert_eq!(block, reference_block, "{profile}");
         tried += 1;
     }

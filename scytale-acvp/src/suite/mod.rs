@@ -10,9 +10,13 @@
 //! server then fails its cases, and the offline check counts what
 //! was answered against the suite's minimum.
 //!
-//! A driver answers each group inside the [`Builder`] it is given,
-//! so that whatever the group builds and runs does so under the
-//! kernel being checked, whatever other threads are checking.
+//! A driver builds everything inside the [`Builder`] it is given, and
+//! makes inside it every call that builds as it runs, so that all a
+//! case builds does so under the kernel being checked, whatever other
+//! threads are checking; see there. It answers each case from the
+//! case alone, except where a group's cases share a key the driver
+//! generates for the group, so that the offline check can answer the
+//! cases apart.
 
 use crate::profile::Builder;
 use crate::support::{Error, FixedEntropy, list, load, object};
@@ -20,7 +24,7 @@ use scytale::Random;
 use scytale::random::CtrDrbg;
 use serde_json::{Map, Value, json};
 
-/// Answers one vector set, building under the builder given.
+/// Answers one vector set, building with the builder's context.
 pub type Answer = fn(&Value, &mut dyn Random, &Builder) -> Result<Value, Error>;
 
 /// Checks one answered test against the vendored one, for a suite
@@ -761,10 +765,13 @@ pub fn chosen(names: &[String]) -> Result<Vec<&'static Suite>, Error> {
     Ok(out)
 }
 
-/// The vendored file of `suite`, or `None` if the vectors are not in
-/// this copy.
-pub fn vendored(suite: &Suite) -> Option<Value> {
-    let doc = load(&format!("{}/internalProjection.json", suite.directory))?;
+/// The vendored file of `suite`.
+///
+/// # Panics
+///
+/// If the file cannot be read, or is not the suite's.
+pub fn vendored(suite: &Suite) -> Value {
+    let doc = load(&format!("{}/internalProjection.json", suite.directory));
     assert_eq!(doc["algorithm"], suite.algorithm, "{}", suite.directory);
     if let Some(mode) = suite.mode {
         assert_eq!(doc["mode"], mode, "{}", suite.directory);
@@ -773,14 +780,14 @@ pub fn vendored(suite: &Suite) -> Option<Value> {
     if !doc["revision"].is_null() {
         assert_eq!(doc["revision"], suite.revision, "{}", suite.directory);
     }
-    Some(doc)
+    doc
 }
 
 /// A generator whose output is a function of nothing but the order
 /// of the calls, so two runs of one suite answer alike; built by
 /// `builder`.
 pub fn fixed_rng(builder: &Builder) -> Result<CtrDrbg<FixedEntropy>, Error> {
-    builder.try_build(|| CtrDrbg::try_new(FixedEntropy::default()))
+    builder.try_build(|ctx| CtrDrbg::try_new(ctx, FixedEntropy::default()))
 }
 
 /// The server's `/expected` for the vector set `prompt`, with each
@@ -835,13 +842,11 @@ fn fill(into: &mut Value, from: &Value, except: &[&str]) -> Result<(), Error> {
 
 /// Compares `answered` with `expected`, the vendored file or the
 /// server's `/expected` made into the shape of one by
-/// [`with_prompt`]; returns the cases compared. A suite that verifies
-/// does so under `builder`.
+/// [`with_prompt`]; returns the cases compared.
 pub fn compare(
     suite: &Suite,
     expected: &Value,
     answered: &Value,
-    builder: &Builder,
 ) -> Result<usize, Error> {
     let mut count = 0;
     for group in list(answered, "testGroups")? {
@@ -865,9 +870,7 @@ pub fn compare(
                 .map_err(tag)?;
             let tag = |e: Error| tag(Error::new(format!("tcId {id}: {e}")));
             match suite.verify {
-                Some(verify) => {
-                    builder.try_build(|| verify(vendored, stored, group, test))
-                }
+                Some(verify) => verify(vendored, stored, group, test),
                 None => compare_fields(test, stored, &[]),
             }
             .map_err(tag)?;
@@ -974,7 +977,7 @@ mod tests {
     #[test]
     fn a_verified_suite_is_checked_against_a_server_answer() {
         let suite = find("LMS-sigGen-SP800-208")[0];
-        let Some(file) = vendored(suite) else { return };
+        let file = vendored(suite);
         let answer_only = |keep: &[&str]| {
             let mut doc = file.clone();
             for group in members(&mut doc, "testGroups").unwrap() {
@@ -1000,10 +1003,9 @@ mod tests {
             doc
         };
         let expected = answer_only(&["tcId", "signature"]);
-        let builder = Builder::default();
-        assert!(compare(suite, &expected, &expected, &builder).is_err());
+        assert!(compare(suite, &expected, &expected).is_err());
         let merged = with_prompt(&prompt, &expected).unwrap();
-        assert_eq!(compare(suite, &merged, &expected, &builder).unwrap(), 42);
+        assert_eq!(compare(suite, &merged, &expected).unwrap(), 42);
     }
 
     #[test]
@@ -1015,12 +1017,11 @@ mod tests {
         let good = json!({"testGroups": [{"tgId": 1, "tests": [
             {"tcId": 1, "ct": "aa"}, {"tcId": 2, "ct": "bb"},
         ]}]});
-        let builder = Builder::default();
-        assert_eq!(compare(&suite, &file, &good, &builder).unwrap(), 2);
+        assert_eq!(compare(&suite, &file, &good).unwrap(), 2);
         let bad = json!({"testGroups": [
             {"tgId": 1, "tests": [{"tcId": 2, "ct": "cc"}]}
         ]});
-        let e = compare(&suite, &file, &bad, &builder).unwrap_err().message;
+        let e = compare(&suite, &file, &bad).unwrap_err().message;
         assert_eq!(e, "tgId 1: tcId 2: ct: answered \"cc\", file has \"BB\"");
     }
 }

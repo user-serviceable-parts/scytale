@@ -57,38 +57,44 @@ fn answer_kdf(
     builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            if text(group, "testType")? != "AFT" {
-                return Err(unknown_test_type(group));
-            }
-            let mac = text(group, "macMode")?;
-            if mac == "CMAC-TDES" {
-                return skip(group, "no Triple DES");
-            }
-            answer_tests(group, |t| {
-                let key = hex(t, "keyIn")?;
-                match mac {
-                    "CMAC-AES128" => cmac::<Aes128>(&key, group, t, rng),
-                    "CMAC-AES192" => cmac::<Aes192>(&key, group, t, rng),
-                    "CMAC-AES256" => cmac::<Aes256>(&key, group, t, rng),
-                    "HMAC-SHA-1" => hmac::<Sha1>(&key, group, t, rng),
-                    "HMAC-SHA2-224" => hmac::<Sha224>(&key, group, t, rng),
-                    "HMAC-SHA2-256" => hmac::<Sha256>(&key, group, t, rng),
-                    "HMAC-SHA2-384" => hmac::<Sha384>(&key, group, t, rng),
-                    "HMAC-SHA2-512" => hmac::<Sha512>(&key, group, t, rng),
-                    "HMAC-SHA2-512/224" => {
-                        hmac::<Sha512_224>(&key, group, t, rng)
-                    }
-                    "HMAC-SHA2-512/256" => {
-                        hmac::<Sha512_256>(&key, group, t, rng)
-                    }
-                    "HMAC-SHA3-224" => hmac::<Sha3_224>(&key, group, t, rng),
-                    "HMAC-SHA3-256" => hmac::<Sha3_256>(&key, group, t, rng),
-                    "HMAC-SHA3-384" => hmac::<Sha3_384>(&key, group, t, rng),
-                    "HMAC-SHA3-512" => hmac::<Sha3_512>(&key, group, t, rng),
-                    other => Err(Error::new(format!("macMode {other}"))),
+        if text(group, "testType")? != "AFT" {
+            return Err(unknown_test_type(group));
+        }
+        let mac = text(group, "macMode")?;
+        if mac == "CMAC-TDES" {
+            return skip(group, "no Triple DES");
+        }
+        answer_tests(group, |t| {
+            let key = hex(t, "keyIn")?;
+            match mac {
+                "CMAC-AES128" => cmac::<Aes128>(&key, group, t, rng, builder),
+                "CMAC-AES192" => cmac::<Aes192>(&key, group, t, rng, builder),
+                "CMAC-AES256" => cmac::<Aes256>(&key, group, t, rng, builder),
+                "HMAC-SHA-1" => hmac::<Sha1>(&key, group, t, rng, builder),
+                "HMAC-SHA2-224" => hmac::<Sha224>(&key, group, t, rng, builder),
+                "HMAC-SHA2-256" => hmac::<Sha256>(&key, group, t, rng, builder),
+                "HMAC-SHA2-384" => hmac::<Sha384>(&key, group, t, rng, builder),
+                "HMAC-SHA2-512" => hmac::<Sha512>(&key, group, t, rng, builder),
+                "HMAC-SHA2-512/224" => {
+                    hmac::<Sha512_224>(&key, group, t, rng, builder)
                 }
-            })
+                "HMAC-SHA2-512/256" => {
+                    hmac::<Sha512_256>(&key, group, t, rng, builder)
+                }
+                "HMAC-SHA3-224" => {
+                    hmac::<Sha3_224>(&key, group, t, rng, builder)
+                }
+                "HMAC-SHA3-256" => {
+                    hmac::<Sha3_256>(&key, group, t, rng, builder)
+                }
+                "HMAC-SHA3-384" => {
+                    hmac::<Sha3_384>(&key, group, t, rng, builder)
+                }
+                "HMAC-SHA3-512" => {
+                    hmac::<Sha3_512>(&key, group, t, rng, builder)
+                }
+                other => Err(Error::new(format!("macMode {other}"))),
+            }
         })
     })
 }
@@ -98,11 +104,13 @@ fn hmac<H>(
     group: &Value,
     t: &Value,
     rng: &mut dyn Random,
+    builder: &Builder,
 ) -> Result<Value, Error>
 where
-    H: Hash + Clone + BlockType + Default,
+    H: Hash + Clone + BlockType,
 {
-    case(&mut Hmac::<H>::new(key), group, t, rng)
+    let mut prf = builder.build(|ctx| Hmac::<H>::new(ctx, key));
+    case(&mut prf, group, t, rng)
 }
 
 fn cmac<C>(
@@ -110,16 +118,19 @@ fn cmac<C>(
     group: &Value,
     t: &Value,
     rng: &mut dyn Random,
+    builder: &Builder,
 ) -> Result<Value, Error>
 where
     C: BlockCipher<Block = [u8; 16]>,
 {
     let key = key_of::<Cmac<C>>(key)?;
-    case(&mut Cmac::<C>::new(&key), group, t, rng)
+    let mut prf = builder.build(|ctx| Cmac::<C>::new(ctx, &key));
+    case(&mut prf, group, t, rng)
 }
 
 /// One derivation: the output, the fixed data, and for a counter in
-/// the middle of the fixed data, where it went.
+/// the middle of the fixed data, where it went. The derivation only
+/// runs `prf`, built already, so it runs outside `builder`.
 fn case<M: Mac>(
     prf: &mut M,
     group: &Value,
@@ -130,6 +141,7 @@ fn case<M: Mac>(
         Some(fixed) => fixed,
         None => {
             let mut fixed = vec![0u8; FIXED_DATA_LEN];
+            // The generator rekeys its cipher as it draws.
             rng.fill(&mut fixed)?;
             fixed
         }
@@ -198,31 +210,25 @@ fn case<M: Mac>(
 
 fn answer_kmac(doc: &Value, builder: &Builder) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            if text(group, "testType")? != "AFT" {
-                return Err(unknown_test_type(group));
+        if text(group, "testType")? != "AFT" {
+            return Err(unknown_test_type(group));
+        }
+        let kdf = match text(group, "macMode")? {
+            "KMAC-128" => sp800_108::kmac128,
+            "KMAC-256" => sp800_108::kmac256,
+            other => return Err(Error::new(format!("macMode {other}"))),
+        };
+        answer_tests(group, |t| {
+            let bits = int(t, "derivedKeyLength")?;
+            if !bits.is_multiple_of(8) {
+                return Err(Error::new("derivedKeyLength is not whole bytes"));
             }
-            let kdf = match text(group, "macMode")? {
-                "KMAC-128" => sp800_108::kmac128,
-                "KMAC-256" => sp800_108::kmac256,
-                other => return Err(Error::new(format!("macMode {other}"))),
-            };
-            answer_tests(group, |t| {
-                let bits = int(t, "derivedKeyLength")?;
-                if !bits.is_multiple_of(8) {
-                    return Err(Error::new(
-                        "derivedKeyLength is not whole bytes",
-                    ));
-                }
-                let mut out = vec![0u8; bits as usize / 8];
-                kdf(
-                    &hex(t, "keyDerivationKey")?,
-                    &hex(t, "label")?,
-                    &hex(t, "context")?,
-                    &mut out,
-                );
-                Ok(json!({ "derivedKey": hex_value(&out) }))
-            })
+            let mut out = vec![0u8; bits as usize / 8];
+            let (key, label) = (hex(t, "keyDerivationKey")?, hex(t, "label")?);
+            let context = hex(t, "context")?;
+            // The derivation starts its own KMAC.
+            builder.build(|ctx| kdf(ctx, &key, &label, &context, &mut out));
+            Ok(json!({ "derivedKey": hex_value(&out) }))
         })
     })
 }

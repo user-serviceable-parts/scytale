@@ -58,7 +58,8 @@ struct Counts {
 fn public_key(group: &Value) -> PublicKey {
     let n = hex(&group["publicKey"]["modulus"]);
     let e = hex(&group["publicKey"]["publicExponent"]);
-    let key = PublicKey::try_new(&n, &e).expect("public key");
+    let key = PublicKey::try_new(crate::Context::default(), &n, &e)
+        .expect("public key");
     check_public_formats(group, &key);
     key
 }
@@ -86,9 +87,17 @@ fn check_public_formats(group: &Value, key: &PublicKey) {
     let e = key.exponent_bytes();
     let same =
         |other: &PublicKey| modulus(other) == n && other.exponent_bytes() == e;
-    assert!(same(&PublicKey::try_from_der(&der).expect("der")));
-    assert!(same(&PublicKey::try_from_pkcs1(&asn).expect("asn")));
-    assert!(same(&PublicKey::try_from_pem(pem.as_bytes()).expect("pem")));
+    assert!(same(
+        &PublicKey::try_from_der(crate::Context::default(), &der).expect("der")
+    ));
+    assert!(same(
+        &PublicKey::try_from_pkcs1(crate::Context::default(), &asn)
+            .expect("asn")
+    ));
+    assert!(same(
+        &PublicKey::try_from_pem(crate::Context::default(), pem.as_bytes())
+            .expect("pem")
+    ));
 
     let mut out = vec![0u8; 3 * key.modulus_len()];
     let m = key.der_bytes(&mut out).expect("export der");
@@ -99,7 +108,7 @@ fn check_public_formats(group: &Value, key: &PublicKey) {
     assert_eq!(&out[..m], pem.as_bytes(), "PEM");
 }
 
-fn pkcs1<H: DigestInfo + Default>(file: &str, counts: &mut Counts) {
+fn pkcs1<H: DigestInfo>(file: &str, counts: &mut Counts) {
     let Some(doc) = load(file, "RSASSA-PKCS1-v1_5") else {
         return;
     };
@@ -117,7 +126,7 @@ fn pkcs1<H: DigestInfo + Default>(file: &str, counts: &mut Counts) {
     }
 }
 
-fn pss<H: Hash + Default>(file: &str, counts: &mut Counts) {
+fn pss<H: Hash>(file: &str, counts: &mut Counts) {
     let Some(doc) = load(file, "RSASSA-PSS") else {
         return;
     };
@@ -138,7 +147,7 @@ fn pss<H: Hash + Default>(file: &str, counts: &mut Counts) {
     }
 }
 
-fn oaep<H: Hash + Default>(file: &str, counts: &mut Counts) {
+fn oaep<H: Hash>(file: &str, counts: &mut Counts) {
     let Some(doc) = load(file, "RSAES-OAEP") else {
         return;
     };
@@ -172,9 +181,13 @@ fn private_key(group: &Value) -> PrivateKey {
     let sk = &group["privateKey"];
     let der = hex(&group["privateKeyPkcs8"]);
     let pem = group["privateKeyPem"].as_str().expect("privateKeyPem");
-    let key = PrivateKey::try_from_der(&der).expect("pkcs8");
-    let from_pem = PrivateKey::try_from_pem(pem.as_bytes()).expect("pem");
+    let key = PrivateKey::try_from_der(crate::Context::default(), &der)
+        .expect("pkcs8");
+    let from_pem =
+        PrivateKey::try_from_pem(crate::Context::default(), pem.as_bytes())
+            .expect("pem");
     let from_parts = PrivateKey::try_new_crt(
+        crate::Context::default(),
         &hex(&sk["modulus"]),
         &hex(&sk["publicExponent"]),
         &hex(&sk["privateExponent"]),

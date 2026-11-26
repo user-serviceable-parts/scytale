@@ -20,13 +20,7 @@ pub(crate) static PRF_SHA384: PrfOver<Sha384> = PrfOver(PhantomData);
 
 impl<H> Prf for PrfOver<H>
 where
-    H: scytale::hash::Hash
-        + Clone
-        + BlockType
-        + Default
-        + Send
-        + Sync
-        + 'static,
+    H: scytale::hash::Hash + Clone + BlockType + Send + Sync + 'static,
 {
     fn for_key_exchange(
         &self,
@@ -38,7 +32,13 @@ where
     ) -> Result<(), Error> {
         let secret = kx
             .complete_for_tls_version(peer_pub_key, ProtocolVersion::TLSv1_2)?;
-        tls12::prf::<H>(secret.secret_bytes(), label, &[seed], output);
+        tls12::prf::<H>(
+            scytale::Context::default(),
+            secret.secret_bytes(),
+            label,
+            &[seed],
+            output,
+        );
         Ok(())
     }
 
@@ -59,19 +59,19 @@ struct Master<H> {
 
 impl<H> PrfSecret for Master<H>
 where
-    H: scytale::hash::Hash
-        + Clone
-        + BlockType
-        + Default
-        + Send
-        + Sync
-        + 'static,
+    H: scytale::hash::Hash + Clone + BlockType + Send + Sync + 'static,
 {
     /// rustls documents a label as always present, but its exporter
     /// passes the application's through, which may be empty; the PRF
     /// takes either.
     fn prf(&self, output: &mut [u8], label: &[u8], seed: &[u8]) {
-        tls12::prf::<H>(&*self.secret, label, &[seed], output);
+        tls12::prf::<H>(
+            scytale::Context::default(),
+            &*self.secret,
+            label,
+            &[seed],
+            output,
+        );
     }
 }
 
@@ -89,7 +89,13 @@ mod tests {
             .new_secret(&master)
             .prf(&mut a, b"key expansion", b"seed");
         let mut b = [0u8; 104];
-        tls12::prf::<Sha256>(&master, b"key expansion", &[b"seed"], &mut b);
+        tls12::prf::<Sha256>(
+            scytale::Context::default(),
+            &master,
+            b"key expansion",
+            &[b"seed"],
+            &mut b,
+        );
         assert_eq!(a, b);
         let mut c = [0u8; 104];
         PRF_SHA384

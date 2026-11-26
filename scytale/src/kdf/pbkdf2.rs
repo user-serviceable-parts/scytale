@@ -16,14 +16,16 @@
 //! ```
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::kdf::pbkdf2::pbkdf2;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
+//! let ctx = Context::default();
 //! // The salt is stored beside the derived key, and differs for
 //! // every password.
 //! let salt = [0x1f; 16];
 //! let mut key = [0u8; 32];
 //! let password = b"correct horse battery staple";
-//! pbkdf2::<Sha256>(password, &salt, 600_000, &mut key)?;
+//! pbkdf2::<Sha256>(ctx, password, &salt, 600_000, &mut key)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -39,6 +41,7 @@
 //! as processors get faster; it is stored beside the salt, so old
 //! keys keep working.
 
+use crate::Context;
 use crate::hash::Hash;
 use crate::mac::Mac;
 use crate::mac::hmac::Hmac;
@@ -50,7 +53,8 @@ use zeroize::Zeroize;
 /// Returns [`Error::InvalidIterations`] for zero iterations, and
 /// [`Error::InvalidLength`] if `key` is longer than the construction
 /// can number, which no real key is.
-pub fn pbkdf2<H: Hash + Clone + BlockType + Default>(
+pub fn pbkdf2<H: Hash + Clone + BlockType>(
+    ctx: Context,
     password: &[u8],
     salt: &[u8],
     iterations: u32,
@@ -64,7 +68,7 @@ pub fn pbkdf2<H: Hash + Clone + BlockType + Default>(
     }
     // The password is the HMAC key, processed once here rather than
     // once per iteration.
-    let mut mac = Hmac::<H>::new(password);
+    let mut mac = Hmac::<H>::new(ctx, password);
     for (i, chunk) in key.chunks_mut(size_of::<H::Output>()).enumerate() {
         let mut t = block(&mut mac, salt, iterations, i);
         chunk.copy_from_slice(&t.as_ref()[..chunk.len()]);
@@ -82,7 +86,8 @@ pub fn pbkdf2<H: Hash + Clone + BlockType + Default>(
 /// Returns [`Error::AuthenticationFailed`] on a mismatch, and the
 /// errors [`pbkdf2`] returns for the same inputs. An empty `key` is
 /// [`Error::InvalidLength`]: nothing can be checked against nothing.
-pub fn verify<H: Hash + Clone + BlockType + Default>(
+pub fn verify<H: Hash + Clone + BlockType>(
+    ctx: Context,
     password: &[u8],
     salt: &[u8],
     iterations: u32,
@@ -96,7 +101,7 @@ pub fn verify<H: Hash + Clone + BlockType + Default>(
     {
         return Err(Error::InvalidLength(key.len()));
     }
-    let mut mac = Hmac::<H>::new(password);
+    let mut mac = Hmac::<H>::new(ctx, password);
     let mut same = true;
     for (i, chunk) in key.chunks(size_of::<H::Output>()).enumerate() {
         let mut t = block(&mut mac, salt, iterations, i);
@@ -114,7 +119,7 @@ pub fn verify<H: Hash + Clone + BlockType + Default>(
 /// Block `i` of the output, counted from zero, under a MAC keyed with
 /// the password: U_1 = PRF(P, S || INT(i + 1)), U_j = PRF(P, U_{j-1}),
 /// and the block is their XOR. The result is output key material.
-fn block<H: Hash + Clone + BlockType + Default>(
+fn block<H: Hash + Clone + BlockType>(
     mac: &mut Hmac<H>,
     salt: &[u8],
     iterations: u32,
@@ -157,7 +162,14 @@ mod tests {
     #[test]
     fn sha256_one_iteration() {
         let mut key = [0u8; 32];
-        pbkdf2::<Sha256>(b"password", b"salt", 1, &mut key).unwrap();
+        pbkdf2::<Sha256>(
+            crate::Context::default(),
+            b"password",
+            b"salt",
+            1,
+            &mut key,
+        )
+        .unwrap();
         assert_eq!(
             key,
             hex::<32>(
@@ -170,7 +182,14 @@ mod tests {
     #[test]
     fn sha256_two_iterations() {
         let mut key = [0u8; 32];
-        pbkdf2::<Sha256>(b"password", b"salt", 2, &mut key).unwrap();
+        pbkdf2::<Sha256>(
+            crate::Context::default(),
+            b"password",
+            b"salt",
+            2,
+            &mut key,
+        )
+        .unwrap();
         assert_eq!(
             key,
             hex::<32>(
@@ -183,7 +202,14 @@ mod tests {
     #[test]
     fn sha256_4096_iterations() {
         let mut key = [0u8; 32];
-        pbkdf2::<Sha256>(b"password", b"salt", 4096, &mut key).unwrap();
+        pbkdf2::<Sha256>(
+            crate::Context::default(),
+            b"password",
+            b"salt",
+            4096,
+            &mut key,
+        )
+        .unwrap();
         assert_eq!(
             key,
             hex::<32>(
@@ -198,31 +224,77 @@ mod tests {
     #[test]
     fn verify_agrees_with_derivation() {
         let mut key = [0u8; 40];
-        pbkdf2::<Sha256>(b"password", b"salt", 3, &mut key).unwrap();
-        assert_eq!(verify::<Sha256>(b"password", b"salt", 3, &key), Ok(()));
+        pbkdf2::<Sha256>(
+            crate::Context::default(),
+            b"password",
+            b"salt",
+            3,
+            &mut key,
+        )
+        .unwrap();
         assert_eq!(
-            verify::<Sha256>(b"password", b"salt", 3, &key[..7]),
+            verify::<Sha256>(
+                crate::Context::default(),
+                b"password",
+                b"salt",
+                3,
+                &key
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            verify::<Sha256>(
+                crate::Context::default(),
+                b"password",
+                b"salt",
+                3,
+                &key[..7]
+            ),
             Ok(())
         );
         for i in [0, 31, 32, 39] {
             let mut wrong = key;
             wrong[i] ^= 1;
             assert_eq!(
-                verify::<Sha256>(b"password", b"salt", 3, &wrong),
+                verify::<Sha256>(
+                    crate::Context::default(),
+                    b"password",
+                    b"salt",
+                    3,
+                    &wrong
+                ),
                 Err(Error::AuthenticationFailed),
                 "{i}"
             );
         }
         assert_eq!(
-            verify::<Sha256>(b"password", b"salt", 2, &key),
+            verify::<Sha256>(
+                crate::Context::default(),
+                b"password",
+                b"salt",
+                2,
+                &key
+            ),
             Err(Error::AuthenticationFailed)
         );
         assert_eq!(
-            verify::<Sha256>(b"password", b"salt", 3, &[]),
+            verify::<Sha256>(
+                crate::Context::default(),
+                b"password",
+                b"salt",
+                3,
+                &[]
+            ),
             Err(Error::InvalidLength(0))
         );
         assert_eq!(
-            verify::<Sha256>(b"password", b"salt", 0, &key),
+            verify::<Sha256>(
+                crate::Context::default(),
+                b"password",
+                b"salt",
+                0,
+                &key
+            ),
             Err(Error::InvalidIterations)
         );
     }
@@ -232,6 +304,7 @@ mod tests {
     fn sha256_long_output() {
         let mut key = [0u8; 40];
         pbkdf2::<Sha256>(
+            crate::Context::default(),
             b"passwordPASSWORDpassword",
             b"saltSALTsaltSALTsaltSALTsaltSALTsalt",
             4096,
@@ -250,7 +323,14 @@ mod tests {
     #[test]
     fn sha512_one_iteration() {
         let mut key = [0u8; 64];
-        pbkdf2::<Sha512>(b"password", b"salt", 1, &mut key).unwrap();
+        pbkdf2::<Sha512>(
+            crate::Context::default(),
+            b"password",
+            b"salt",
+            1,
+            &mut key,
+        )
+        .unwrap();
         assert_eq!(
             key,
             hex::<64>(
@@ -265,7 +345,13 @@ mod tests {
     fn zero_iterations_is_refused() {
         let mut key = [0u8; 16];
         assert_eq!(
-            pbkdf2::<Sha256>(b"p", b"s", 0, &mut key),
+            pbkdf2::<Sha256>(
+                crate::Context::default(),
+                b"p",
+                b"s",
+                0,
+                &mut key
+            ),
             Err(Error::InvalidIterations)
         );
     }
@@ -274,8 +360,10 @@ mod tests {
     fn a_prefix_is_a_prefix() {
         let mut long = [0u8; 40];
         let mut short = [0u8; 35];
-        pbkdf2::<Sha256>(b"p", b"s", 3, &mut long).unwrap();
-        pbkdf2::<Sha256>(b"p", b"s", 3, &mut short).unwrap();
+        pbkdf2::<Sha256>(crate::Context::default(), b"p", b"s", 3, &mut long)
+            .unwrap();
+        pbkdf2::<Sha256>(crate::Context::default(), b"p", b"s", 3, &mut short)
+            .unwrap();
         assert_eq!(long[..35], short);
     }
 }

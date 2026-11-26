@@ -77,9 +77,11 @@
 //! use scytale::aead::{Aead, Gcm};
 //! use scytale::cipher::Nonces;
 //! use scytale::cipher::aes::Aes128;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let gcm = Gcm::<Aes128>::new(&Key::from([0u8; 16]));
+//! let ctx = Context::default();
+//! let gcm = Gcm::<Aes128>::new(ctx, &Key::from([0u8; 16]));
 //! let mut nonces = Nonces::<[u8; 12]>::try_new(&[0x5a; 8], 0)?;
 //!
 //! let nonce = nonces.take()?;
@@ -118,7 +120,7 @@ pub use xchacha20_poly1305::XChaCha20Poly1305;
 pub use xpn::Xpn;
 
 use crate::traits::ByteArray;
-use crate::{Error, KeyType};
+use crate::{Context, Error, KeyType};
 
 /// Authenticated encryption under one key.
 ///
@@ -157,11 +159,11 @@ pub trait Aead: KeyType {
     /// The tag; `[u8; 16]` for all of these.
     type Tag: Copy + AsRef<[u8]> + AsMut<[u8]>;
 
-    /// Takes the key.
+    /// Takes the key, for the best kernel `ctx` allows.
     ///
     /// Every one of these has a portable implementation, so there is
     /// no processor on which taking a key can fail.
-    fn new(key: &Self::Key) -> Self
+    fn new(ctx: Context, key: &Self::Key) -> Self
     where
         Self: Sized;
 
@@ -233,9 +235,9 @@ mod tests {
         }
 
         let key = Key::from([0x42u8; 16]);
-        let gcm = Gcm::<Aes128>::new(&key);
-        let siv = GcmSiv::<Aes128>::new(&key);
-        let ccm = Ccm::<Aes128>::new(&key);
+        let gcm = Gcm::<Aes128>::new(crate::Context::default(), &key);
+        let siv = GcmSiv::<Aes128>::new(crate::Context::default(), &key);
+        let ccm = Ccm::<Aes128>::new(crate::Context::default(), &key);
         let sealed = [round_trip(&gcm), round_trip(&siv), round_trip(&ccm)];
         assert_ne!(sealed[0], sealed[1]);
         assert_ne!(sealed[0], sealed[2]);
@@ -250,7 +252,7 @@ mod tests {
             key: &A::Key,
             nonce: &A::Nonce,
         ) -> [u8; 16] {
-            let aead = A::new(key);
+            let aead = A::new(crate::Context::default(), key);
             let mut tag = [0u8; 16];
             aead.encrypt(nonce, b"", &mut [], &mut tag)
                 .expect("encrypt");

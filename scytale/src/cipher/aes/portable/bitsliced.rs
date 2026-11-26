@@ -22,7 +22,7 @@ use core::fmt;
 
 use crate::cipher::BlockCipher;
 use crate::cipher::aes::{BLOCK_SIZE, KeySize, expand_words};
-use crate::{BlockType, Key, KeyType};
+use crate::{BlockType, Context, Key, KeyType};
 use zeroize::ZeroizeOnDrop;
 
 /// Round keys for the largest key size (AES-256: 15 round keys).
@@ -129,7 +129,8 @@ impl<const K: usize> KeyType for Aes<K> {
 }
 
 impl<const K: usize> BlockCipher for Aes<K> {
-    fn new(key: &Self::Key) -> Self {
+    /// One kernel, so `ctx` has nothing to choose.
+    fn new(_ctx: Context, key: &Self::Key) -> Self {
         Aes::new(key.array())
     }
 

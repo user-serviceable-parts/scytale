@@ -26,7 +26,6 @@ use core::marker::PhantomData;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::features::Chosen;
-use crate::hash::{BitHash, Hash};
 use crate::{BlockType, ByteArray, Error};
 
 /// Keeps the traits here to this crate's own implementations.
@@ -226,10 +225,10 @@ macro_rules! engine {
             }
         }
 
-        impl<C: $compress, V: $variant> Hash for $name<C, V> {
-            type Output = V::Output;
-
-            fn reset(&mut self) {
+        // Inherent rather than `Hash`: an engine is one kernel, built
+        // from its proof, where a `Hash` is built from a context.
+        impl<C: $compress, V: $variant> $name<C, V> {
+            pub(crate) fn reset(&mut self) {
                 self.state = V::IV;
                 self.block[..self.dirty].zeroize();
                 self.used = 0;
@@ -237,7 +236,7 @@ macro_rules! engine {
                 self.bytes = 0;
             }
 
-            fn update(&mut self, mut data: &[u8]) {
+            pub(crate) fn update(&mut self, mut data: &[u8]) {
                 self.bytes = self.bytes.wrapping_add(data.len() as $length);
                 if self.used > 0 {
                     let room = $block - self.used;
@@ -261,20 +260,18 @@ macro_rules! engine {
                 self.dirty = self.dirty.max(self.used);
             }
 
-            fn finalize(&mut self) -> Self::Output {
+            pub(crate) fn finalize(&mut self) -> V::Output {
                 self.pad(0x80, 0);
                 let out = self.output();
                 self.reset();
                 out
             }
-        }
 
-        impl<C: $compress, V: $variant> BitHash for $name<C, V> {
-            fn finalize_bits(
+            pub(crate) fn finalize_bits(
                 &mut self,
                 last: u8,
                 bits: u32,
-            ) -> Result<Self::Output, Error> {
+            ) -> Result<V::Output, Error> {
                 let trailer = trailer(last, bits)?;
                 self.pad(trailer, bits as $length);
                 let out = self.output();

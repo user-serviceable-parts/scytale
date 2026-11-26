@@ -18,9 +18,11 @@
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Cbc;
 //! use scytale::cipher::padding::pkcs7;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let cbc = Cbc::<Aes128>::new(&Key::from([0u8; 16]));
+//! let ctx = Context::default();
+//! let cbc = Cbc::<Aes128>::new(ctx, &Key::from([0u8; 16]));
 //! let iv = [0u8; 16];
 //!
 //! // Room for the message and up to one more block of padding.

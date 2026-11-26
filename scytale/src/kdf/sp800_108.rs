@@ -11,9 +11,11 @@
 //! ```
 //! use scytale::kdf::sp800_108;
 //! use scytale::mac::hmac::HmacSha256;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut prf = HmacSha256::new(&[0x4b; 32]);
+//! let ctx = Context::default();
+//! let mut prf = HmacSha256::new(ctx, &[0x4b; 32]);
 //! let mut key = [0u8; 32];
 //! let length = (8 * key.len() as u32).to_be_bytes();
 //! let fixed: [&[u8]; 4] = [b"encryption", &[0], b"session 7", &length];
@@ -40,6 +42,7 @@
 //!
 //! [`hkdf::expand`]: super::hkdf::expand
 
+use crate::Context;
 use zeroize::Zeroize;
 
 use crate::Error;
@@ -171,15 +174,27 @@ pub fn double_pipeline<M: Mac>(
 /// There is no counter or fixed-input layout to choose: the label is
 /// KMAC's customization string and the output length is absorbed by
 /// KMAC itself.
-pub fn kmac128(key: &[u8], label: &[u8], context: &[u8], out: &mut [u8]) {
-    let mut mac = Kmac128::new(key, label);
+pub fn kmac128(
+    ctx: Context,
+    key: &[u8],
+    label: &[u8],
+    context: &[u8],
+    out: &mut [u8],
+) {
+    let mut mac = Kmac128::new(ctx, key, label);
     mac.update(context);
     mac.finalize_to(out);
 }
 
 /// KDF-KMAC with KMAC256, as [`kmac128`].
-pub fn kmac256(key: &[u8], label: &[u8], context: &[u8], out: &mut [u8]) {
-    let mut mac = Kmac256::new(key, label);
+pub fn kmac256(
+    ctx: Context,
+    key: &[u8],
+    label: &[u8],
+    context: &[u8],
+    out: &mut [u8],
+) {
+    let mut mac = Kmac256::new(ctx, key, label);
     mac.update(context);
     mac.finalize_to(out);
 }
@@ -377,7 +392,7 @@ mod tests {
     use crate::{Key, KeyType};
 
     fn prf() -> HmacSha256 {
-        HmacSha256::new(&[0x4b; 32])
+        HmacSha256::new(crate::Context::default(), &[0x4b; 32])
     }
 
     /// The fixed input in parts derives what it derives in one piece,
@@ -515,10 +530,16 @@ mod tests {
     /// CMAC is as good a PRF as HMAC here: any keyed MAC will do.
     #[test]
     fn any_mac_is_a_prf() {
-        let mut cmac = Cmac::<Aes128>::new(&Key::from([9u8; 16]));
+        let mut cmac = Cmac::<Aes128>::new(
+            crate::Context::default(),
+            &Key::from([9u8; 16]),
+        );
         let mut out = [0u8; 40];
         counter(&mut cmac, 8, 0, &[b"x"], &mut out).expect("derive");
-        let mut again = Cmac::<Aes128>::new(&Cmac::<Aes128>::zero_key());
+        let mut again = Cmac::<Aes128>::new(
+            crate::Context::default(),
+            &Cmac::<Aes128>::zero_key(),
+        );
         let mut other = [0u8; 40];
         counter(&mut again, 8, 0, &[b"x"], &mut other).expect("derive");
         assert_ne!(out, other);
@@ -529,13 +550,26 @@ mod tests {
     #[test]
     fn kmac_is_kmac() {
         let mut out = [0u8; 40];
-        kmac128(b"key material", b"label", b"context", &mut out);
-        let mut mac = Kmac128::new(b"key material", b"label");
+        kmac128(
+            crate::Context::default(),
+            b"key material",
+            b"label",
+            b"context",
+            &mut out,
+        );
+        let mut mac =
+            Kmac128::new(crate::Context::default(), b"key material", b"label");
         mac.update(b"context");
         let mut want = [0u8; 40];
         mac.finalize_to(&mut want);
         assert_eq!(out, want);
-        kmac256(b"key material", b"label", b"context", &mut want);
+        kmac256(
+            crate::Context::default(),
+            b"key material",
+            b"label",
+            b"context",
+            &mut want,
+        );
         assert_ne!(out, want);
     }
 }

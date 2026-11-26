@@ -73,9 +73,10 @@ impl Kem for X25519 {
     ) -> Result<(Vec<u8>, Context<H, A>), Error> {
         let public = public.try_into().map_err(|_| bad_length("public key"))?;
         let mut rng = generator().map_err(|e| general("randomness", e))?;
-        let (enc, context) = hpke::x25519::PublicKey::new(public)
-            .sender(&mut rng, info)
-            .map_err(|e| general("encapsulation", e))?;
+        let (enc, context) =
+            hpke::x25519::PublicKey::new(scytale::Context::default(), public)
+                .sender(&mut rng, info)
+                .map_err(|e| general("encapsulation", e))?;
         Ok((enc.to_vec(), context))
     }
 
@@ -87,15 +88,18 @@ impl Kem for X25519 {
         let secret = scytale::Key::try_from(secret)
             .map_err(|_| bad_length("private key"))?;
         let enc = enc.try_into().map_err(|_| bad_length("encapsulation"))?;
-        hpke::x25519::PrivateKey::new(&secret)
+        hpke::x25519::PrivateKey::new(scytale::Context::default(), &secret)
             .recipient(enc, info)
             .map_err(|e| general("decapsulation", e))
     }
 
     fn generate() -> Result<(Vec<u8>, Vec<u8>), Error> {
         let mut rng = generator().map_err(|e| general("randomness", e))?;
-        let key = hpke::x25519::PrivateKey::generate(&mut rng)
-            .map_err(|e| general("key generation", e))?;
+        let key = hpke::x25519::PrivateKey::generate(
+            scytale::Context::default(),
+            &mut rng,
+        )
+        .map_err(|e| general("key generation", e))?;
         let mut secret = key.secret_bytes();
         let pair = (key.public_key().bytes().to_vec(), secret.to_vec());
         secret.zeroize();
@@ -115,7 +119,10 @@ macro_rules! nist_kem {
             ) -> Result<(Vec<u8>, Context<H, A>), Error> {
                 let public =
                     public.try_into().map_err(|_| bad_length("public key"))?;
-                let public = hpke::$module::PublicKey::try_new(public)
+                let public = hpke::$module::PublicKey::try_new(
+                    scytale::Context::default(),
+                    public,
+                )
                     .map_err(|e| general("public key", e))?;
                 let mut rng =
                     generator().map_err(|e| general("randomness", e))?;
@@ -134,7 +141,10 @@ macro_rules! nist_kem {
                     secret.try_into().map_err(|_| bad_length("private key"))?;
                 let enc =
                     enc.try_into().map_err(|_| bad_length("encapsulation"))?;
-                hpke::$module::PrivateKey::try_new(secret)
+                hpke::$module::PrivateKey::try_new(
+                    scytale::Context::default(),
+                    secret,
+                )
                     .and_then(|key| key.recipient(enc, info))
                     .map_err(|e| general("decapsulation", e))
             }
@@ -142,7 +152,10 @@ macro_rules! nist_kem {
             fn generate() -> Result<(Vec<u8>, Vec<u8>), Error> {
                 let mut rng =
                     generator().map_err(|e| general("randomness", e))?;
-                let key = hpke::$module::PrivateKey::generate(&mut rng)
+                let key = hpke::$module::PrivateKey::generate(
+                    scytale::Context::default(),
+                    &mut rng,
+                )
                     .map_err(|e| general("key generation", e))?;
                 let mut secret = key.secret_bytes();
                 let pair =

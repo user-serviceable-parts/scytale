@@ -33,6 +33,7 @@ use crate::support::{
     Error, NoEntropy, flag, hex, hex_value, int, list, opt_text, text,
     unknown_test_type,
 };
+use scytale::Context;
 use scytale::Random;
 use scytale::random::{CtrDrbg, MIN_SEED};
 use serde_json::{Value, json};
@@ -43,21 +44,28 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            if text(group, "testType")? != "AFT" {
-                return Err(unknown_test_type(group));
-            }
-            if text(group, "mode")? != "AES-256" {
-                return skip(group, "not AES-256");
-            }
-            let bits = int(group, "returnedBitsLen")? as usize;
-            let derivation = flag(group, "derFunc")?;
-            answer_tests(group, |t| aft(t, bits, derivation))
+        if text(group, "testType")? != "AFT" {
+            return Err(unknown_test_type(group));
+        }
+        if text(group, "mode")? != "AES-256" {
+            return skip(group, "not AES-256");
+        }
+        let bits = int(group, "returnedBitsLen")? as usize;
+        let derivation = flag(group, "derFunc")?;
+        answer_tests(group, |t| {
+            // Built whole: every request and reseed rekeys the
+            // generator's cipher.
+            builder.try_build(|ctx| aft(ctx, t, bits, derivation))
         })
     })
 }
 
-fn aft(t: &Value, bits: usize, derivation: bool) -> Result<Value, Error> {
+fn aft(
+    ctx: Context,
+    t: &Value,
+    bits: usize,
+    derivation: bool,
+) -> Result<Value, Error> {
     // The source is never drawn on: every reseeding is handed its
     // entropy by the vectors.
     let mut rng = if derivation {
@@ -67,7 +75,7 @@ fn aft(t: &Value, bits: usize, derivation: bool) -> Result<Value, Error> {
         let mut material = hex(t, "entropyInput")?;
         material.extend(hex(t, "nonce")?);
         material.extend(hex(t, "persoString")?);
-        CtrDrbg::try_new_seeded(&material, NoEntropy)?
+        CtrDrbg::try_new_seeded(ctx, &material, NoEntropy)?
     } else {
         // Without it the entropy is the seed itself, no nonce, and
         // the personalization is applied over it.
@@ -75,6 +83,7 @@ fn aft(t: &Value, bits: usize, derivation: bool) -> Result<Value, Error> {
             .try_into()
             .map_err(|_| Error::new("entropyInput is not a seed"))?;
         CtrDrbg::try_new_full_entropy(
+            ctx,
             &entropy,
             &hex(t, "persoString")?,
             NoEntropy,

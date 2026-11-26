@@ -32,17 +32,19 @@
 //! use scytale::kdf::hkdf;
 //! use scytale::kex::ecdh::p256::PrivateKey;
 //! use scytale::random::CtrDrbg;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = CtrDrbg::from_system()?;
-//! let alice = PrivateKey::generate(&mut rng)?;
-//! let bob = PrivateKey::generate(&mut rng)?;
+//! let ctx = Context::default();
+//! let mut rng = CtrDrbg::from_system(ctx)?;
+//! let alice = PrivateKey::generate(ctx, &mut rng)?;
+//! let bob = PrivateKey::generate(ctx, &mut rng)?;
 //!
 //! // Each side needs only the other's public key.
 //! let shared = alice.shared_secret(bob.public_key());
 //! assert_eq!(shared, bob.shared_secret(alice.public_key()));
 //! let mut key = [0u8; 32];
-//! hkdf::derive::<Sha256>(b"", &shared, &[b"session v1"], &mut key)?;
+//! hkdf::derive::<Sha256>(ctx, b"", &shared, &[b"session v1"], &mut key)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -154,8 +156,12 @@ mod tests {
             "53020d908b0219328b658b525f26780e3ae12bcd952bb25a93bc0895e1714285",
             &mut buf,
         );
-        let key = p256::PrivateKey::try_new(&private).unwrap();
-        let peer = p256::PublicKey::try_from_der(peer).unwrap();
+        let key =
+            p256::PrivateKey::try_new(crate::Context::default(), &private)
+                .unwrap();
+        let peer =
+            p256::PublicKey::try_from_der(crate::Context::default(), peer)
+                .unwrap();
         assert_eq!(key.shared_secret(&peer)[..], shared[..]);
     }
 
@@ -187,8 +193,12 @@ mod tests {
              a3b2",
             &mut buf,
         );
-        let key = p521::PrivateKey::try_new(&private).unwrap();
-        let peer = p521::PublicKey::try_from_pem(PEER_PEM).unwrap();
+        let key =
+            p521::PrivateKey::try_new(crate::Context::default(), &private)
+                .unwrap();
+        let peer =
+            p521::PublicKey::try_from_pem(crate::Context::default(), PEER_PEM)
+                .unwrap();
         assert_eq!(key.shared_secret(&peer)[..], shared[..]);
     }
 
@@ -196,48 +206,74 @@ mod tests {
     /// key form.
     #[test]
     fn agreement_through_formats() {
-        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
-        let a = p384::PrivateKey::generate(&mut rng).unwrap();
-        let b = p384::PrivateKey::generate(&mut rng).unwrap();
+        let mut rng =
+            crate::random::CtrDrbg::from_system(crate::Context::default())
+                .unwrap();
+        let a = p384::PrivateKey::generate(crate::Context::default(), &mut rng)
+            .unwrap();
+        let b = p384::PrivateKey::generate(crate::Context::default(), &mut rng)
+            .unwrap();
         let shared = a.shared_secret(b.public_key());
         let mut out = [0u8; 512];
         let n = b.public_key().der_bytes(&mut out).unwrap();
         assert_eq!(n, p384::PUBLIC_KEY_DER_SIZE);
-        let via_der = p384::PublicKey::try_from_der(&out[..n]).unwrap();
+        let via_der =
+            p384::PublicKey::try_from_der(crate::Context::default(), &out[..n])
+                .unwrap();
         assert_eq!(a.shared_secret(&via_der), shared);
         let n = b.public_key().pem_bytes(&mut out).unwrap();
-        let via_pem = p384::PublicKey::try_from_pem(&out[..n]).unwrap();
+        let via_pem =
+            p384::PublicKey::try_from_pem(crate::Context::default(), &out[..n])
+                .unwrap();
         assert_eq!(a.shared_secret(&via_pem), shared);
         let n = a.der_bytes(&mut out).unwrap();
         assert_eq!(n, p384::DER_SIZE);
-        let a2 = p384::PrivateKey::try_from_der(&out[..n]).unwrap();
+        let a2 = p384::PrivateKey::try_from_der(
+            crate::Context::default(),
+            &out[..n],
+        )
+        .unwrap();
         assert_eq!(b.shared_secret(a2.public_key()), shared);
 
         // The same round trip on P-521, whose encodings carry a
         // 66-byte scalar and 133-byte point.
-        let a = p521::PrivateKey::generate(&mut rng).unwrap();
-        let b = p521::PrivateKey::generate(&mut rng).unwrap();
+        let a = p521::PrivateKey::generate(crate::Context::default(), &mut rng)
+            .unwrap();
+        let b = p521::PrivateKey::generate(crate::Context::default(), &mut rng)
+            .unwrap();
         let shared = a.shared_secret(b.public_key());
         let n = b.public_key().der_bytes(&mut out).unwrap();
         assert_eq!(n, p521::PUBLIC_KEY_DER_SIZE);
-        let via_der = p521::PublicKey::try_from_der(&out[..n]).unwrap();
+        let via_der =
+            p521::PublicKey::try_from_der(crate::Context::default(), &out[..n])
+                .unwrap();
         assert_eq!(a.shared_secret(&via_der), shared);
         let n = a.der_bytes(&mut out).unwrap();
         assert_eq!(n, p521::DER_SIZE);
-        let a2 = p521::PrivateKey::try_from_der(&out[..n]).unwrap();
+        let a2 = p521::PrivateKey::try_from_der(
+            crate::Context::default(),
+            &out[..n],
+        )
+        .unwrap();
         assert_eq!(b.shared_secret(a2.public_key()), shared);
         assert_eq!(p521::PUBLIC_KEY_SIZE, 133);
         assert_eq!(p521::KEY_SIZE, 66);
 
         // A P-256 point is not a P-384 key, however presented.
-        let c = p256::PrivateKey::generate(&mut rng).unwrap();
+        let c = p256::PrivateKey::generate(crate::Context::default(), &mut rng)
+            .unwrap();
         let n = c.public_key().der_bytes(&mut out).unwrap();
         assert_eq!(
-            p384::PublicKey::try_from_der(&out[..n]).err(),
+            p384::PublicKey::try_from_der(crate::Context::default(), &out[..n])
+                .err(),
             Some(Error::WrongAlgorithm)
         );
         assert_eq!(
-            p384::PublicKey::try_from_sec1(&c.public_key().sec1_bytes()).err(),
+            p384::PublicKey::try_from_sec1(
+                crate::Context::default(),
+                &c.public_key().sec1_bytes()
+            )
+            .err(),
             Some(Error::InvalidPublicKey)
         );
     }

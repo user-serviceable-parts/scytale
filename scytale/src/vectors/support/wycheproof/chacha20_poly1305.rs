@@ -46,7 +46,7 @@ pub fn run() {
             let Ok(key) = Key::try_from(&hex(&t["key"])[..]) else {
                 continue;
             };
-            let aead = ChaCha20Poly1305::new(&key);
+            let aead = ChaCha20Poly1305::new(crate::Context::default(), &key);
             let nonce: [u8; 12] = hex(&t["iv"]).try_into().expect("nonce");
             let aad = hex(&t["aad"]);
             let msg = hex(&t["msg"]);

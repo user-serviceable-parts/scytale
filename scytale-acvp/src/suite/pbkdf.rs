@@ -4,6 +4,7 @@
 use super::{answer_groups, answer_tests};
 use crate::profile::Builder;
 use crate::support::{Error, hex, hex_value, int, text, unknown_test_type};
+use scytale::Context;
 use scytale::Random;
 use scytale::hash::sha1::Sha1;
 use scytale::hash::sha2::{
@@ -19,33 +20,36 @@ pub fn answer(
     builder: &Builder,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
-        builder.try_build(|| {
-            if text(group, "testType")? != "AFT" {
-                return Err(unknown_test_type(group));
-            }
-            let derive = match text(group, "hmacAlg")? {
-                "SHA-1" => pbkdf2::<Sha1>,
-                "SHA2-224" => pbkdf2::<Sha224>,
-                "SHA2-256" => pbkdf2::<Sha256>,
-                "SHA2-384" => pbkdf2::<Sha384>,
-                "SHA2-512" => pbkdf2::<Sha512>,
-                "SHA2-512/224" => pbkdf2::<Sha512_224>,
-                "SHA2-512/256" => pbkdf2::<Sha512_256>,
-                "SHA3-224" => pbkdf2::<Sha3_224>,
-                "SHA3-256" => pbkdf2::<Sha3_256>,
-                "SHA3-384" => pbkdf2::<Sha3_384>,
-                "SHA3-512" => pbkdf2::<Sha3_512>,
-                other => return Err(Error::new(format!("hmacAlg {other}"))),
-            };
-            answer_tests(group, |t| derived(t, derive))
-        })
+        if text(group, "testType")? != "AFT" {
+            return Err(unknown_test_type(group));
+        }
+        let derive = match text(group, "hmacAlg")? {
+            "SHA-1" => pbkdf2::<Sha1>,
+            "SHA2-224" => pbkdf2::<Sha224>,
+            "SHA2-256" => pbkdf2::<Sha256>,
+            "SHA2-384" => pbkdf2::<Sha384>,
+            "SHA2-512" => pbkdf2::<Sha512>,
+            "SHA2-512/224" => pbkdf2::<Sha512_224>,
+            "SHA2-512/256" => pbkdf2::<Sha512_256>,
+            "SHA3-224" => pbkdf2::<Sha3_224>,
+            "SHA3-256" => pbkdf2::<Sha3_256>,
+            "SHA3-384" => pbkdf2::<Sha3_384>,
+            "SHA3-512" => pbkdf2::<Sha3_512>,
+            other => return Err(Error::new(format!("hmacAlg {other}"))),
+        };
+        answer_tests(group, |t| derived(t, derive, builder))
     })
 }
 
 /// [`pbkdf2`] over one hash: password, salt, iterations, key.
-type Derive = fn(&[u8], &[u8], u32, &mut [u8]) -> Result<(), scytale::Error>;
+type Derive =
+    fn(Context, &[u8], &[u8], u32, &mut [u8]) -> Result<(), scytale::Error>;
 
-fn derived(t: &Value, derive: Derive) -> Result<Value, Error> {
+fn derived(
+    t: &Value,
+    derive: Derive,
+    builder: &Builder,
+) -> Result<Value, Error> {
     let password = text(t, "password")?;
     let salt = hex(t, "salt")?;
     let iterations = u32::try_from(int(t, "iterationCount")?)
@@ -55,6 +59,13 @@ fn derived(t: &Value, derive: Derive) -> Result<Value, Error> {
         return Err(Error::new("keyLen of part of a byte"));
     }
     let mut key = vec![0u8; bits / 8];
-    derive(password.as_bytes(), &salt, iterations, &mut key)?;
+    // The derivation keys its own HMAC.
+    derive(
+        builder.ctx(),
+        password.as_bytes(),
+        &salt,
+        iterations,
+        &mut key,
+    )?;
     Ok(json!({ "derivedKey": hex_value(&key) }))
 }
