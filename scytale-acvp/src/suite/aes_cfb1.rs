@@ -5,7 +5,7 @@
 //! answers carry them the same way.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{
     Error, hex, hex_value, int, key_of, text, unknown_test_type,
 };
@@ -25,7 +25,7 @@ const HISTORY: usize = 128;
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         let encrypt = match text(group, "direction")? {
@@ -34,8 +34,8 @@ pub fn answer(
             other => return Err(Error::new(format!("direction {other}"))),
         };
         match text(group, "testType")? {
-            "AFT" => answer_tests(group, |t| aft(t, encrypt, builder)),
-            "MCT" => answer_tests(group, |t| mct(t, encrypt, builder)),
+            "AFT" => answer_tests(group, |t| aft(t, encrypt, profile)),
+            "MCT" => answer_tests(group, |t| mct(t, encrypt, profile)),
             _ => Err(unknown_test_type(group)),
         }
     })
@@ -49,7 +49,7 @@ fn block(bytes: &[u8]) -> Result<[u8; 16], Error> {
 }
 
 /// Algorithm Functional Test: `payloadLen` bits, one IV.
-fn aft(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
+fn aft(t: &Value, encrypt: bool, profile: &Profile) -> Result<Value, Error> {
     let key = hex(t, "key")?;
     let iv = block(&hex(t, "iv")?)?;
     let bits = usize::try_from(int(t, "payloadLen")?)
@@ -58,7 +58,7 @@ fn aft(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
     let mut data = hex(t, input)?;
     aes_width!(key, C => {
         let k = key_of::<C>(&key)?;
-        let cfb = builder.build(|ctx| Cfb1::<C>::new(ctx, &k));
+        let cfb = Cfb1::<C>::new(profile.ctx(), &k);
         if encrypt {
             cfb.encrypt(&iv, &mut data, bits)?;
         } else {
@@ -71,7 +71,7 @@ fn aft(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
 /// Monte Carlo Test: each of 100 steps runs 1000 single bits through
 /// one continuing state, then derives the next key, IV and input bit
 /// from the outputs.
-fn mct(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
+fn mct(t: &Value, encrypt: bool, profile: &Profile) -> Result<Value, Error> {
     let (input_name, output_name) =
         if encrypt { ("pt", "ct") } else { ("ct", "pt") };
     let mut key = hex(t, "key")?;
@@ -89,7 +89,7 @@ fn mct(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
         let mut segment = [input << 7];
         aes_width!(key, C => {
             let k = key_of::<C>(&key)?;
-        let cfb = builder.build(|ctx| Cfb1::<C>::new(ctx, &k));
+        let cfb = Cfb1::<C>::new(profile.ctx(), &k);
             if encrypt {
                 let mut state = cfb.encryptor(&register);
                 for j in 0..MCT_SEGMENTS {

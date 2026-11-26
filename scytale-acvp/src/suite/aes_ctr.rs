@@ -19,7 +19,7 @@
 //! lays the counter block out and the server checks.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{
     Error, hex, hex_value, int, key_of, opt_hex, text, unknown_test_type,
 };
@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 pub fn answer(
     doc: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         let encrypt = match text(group, "direction")? {
@@ -39,7 +39,7 @@ pub fn answer(
             other => return Err(Error::new(format!("direction {other}"))),
         };
         match text(group, "testType")? {
-            "AFT" => answer_tests(group, |t| aft(t, encrypt, rng, builder)),
+            "AFT" => answer_tests(group, |t| aft(t, encrypt, rng, profile)),
             _ => Err(unknown_test_type(group)),
         }
     })
@@ -57,7 +57,7 @@ fn aft(
     t: &Value,
     encrypt: bool,
     rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     let key = hex(t, "key")?;
     let bits = int(t, "payloadLen")? as usize;
@@ -79,7 +79,7 @@ fn aft(
         .map_err(|_| Error::new("field iv is not one block"))?;
     aes_width!(key, C => {
         let k = key_of::<C>(&key)?;
-        let ctr = builder.build(|ctx| Ctr::<C>::new(ctx, &k));
+        let ctr = Ctr::<C>::new(profile.ctx(), &k);
         if encrypt {
             ctr.encrypt(&block, &mut data);
         } else {
@@ -97,7 +97,7 @@ fn aft(
 #[cfg(test)]
 mod tests {
     use super::super::{find, fixed_rng};
-    use crate::profile::Builder;
+    use crate::profile::Profile;
     use crate::support::{hex, list};
     use serde_json::json;
 
@@ -105,8 +105,8 @@ mod tests {
     /// must carry an IV under which its ciphertext decrypts.
     #[test]
     fn encrypt_draws_an_iv() {
-        let builder = Builder::default();
-        let mut rng = fixed_rng(&builder).unwrap();
+        let profile = Profile::default();
+        let mut rng = fixed_rng(&profile).unwrap();
         for suite in find("ACVP-AES-CTR") {
             let doc = super::super::vendored(suite);
             for group in list(&doc, "testGroups").unwrap() {
@@ -117,7 +117,7 @@ mod tests {
                     let mut prompt = t.clone();
                     prompt.as_object_mut().unwrap().remove("iv");
                     let a =
-                        super::aft(&prompt, true, &mut rng, &builder).unwrap();
+                        super::aft(&prompt, true, &mut rng, &profile).unwrap();
                     let iv = hex(&a, "iv").unwrap();
                     assert_eq!(iv.len(), 16);
                     assert_eq!(iv[12..], [0, 0, 0, 1], "RFC 3686 counter");
@@ -128,7 +128,7 @@ mod tests {
                         "ct": a["ct"],
                     });
                     let p =
-                        super::aft(&back, false, &mut rng, &builder).unwrap();
+                        super::aft(&back, false, &mut rng, &profile).unwrap();
                     assert_eq!(hex(&p, "pt").unwrap(), hex(t, "pt").unwrap());
                 }
             }

@@ -30,7 +30,7 @@
 //! direction instead, which must give back the ciphertext.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{
     Error, Rng, hex, hex_value, int, list, opt_hex, opt_int, text,
     unknown_test_type,
@@ -45,7 +45,7 @@ use serde_json::{Value, json};
 pub fn answer(
     doc: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     let signature = match text(doc, "mode")? {
         "signaturePrimitive" => true,
@@ -57,27 +57,29 @@ pub fn answer(
             return Err(unknown_test_type(group));
         }
         if signature {
-            answer_tests(group, |t| signature_case(group, t, builder))
+            answer_tests(group, |t| signature_case(group, t, profile))
         } else {
-            decryption_group(group, rng, builder)
+            decryption_group(group, rng, profile)
         }
     })
 }
 
 /// One signature-primitive case. The primitives run on the key's
-/// own arithmetic, chosen when it was built, so only the key is
-/// built under `builder`.
+/// own arithmetic, chosen from the profile's context when it was
+/// built.
 fn signature_case(
     group: &Value,
     t: &Value,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     let n = hex(t, "n")?;
     let e = hex(t, "e")?;
-    let key = builder.try_build(|ctx| match text(group, "keyMode")? {
-        "standard" => Ok(PrivateKey::try_new(ctx, &n, &e, &hex(t, "d")?)?),
+    let key = match text(group, "keyMode")? {
+        "standard" => {
+            Ok(PrivateKey::try_new(profile.ctx(), &n, &e, &hex(t, "d")?)?)
+        }
         "crt" => Ok(PrivateKey::try_new_crt(
-            ctx,
+            profile.ctx(),
             &n,
             &e,
             &match opt_hex(t, "d")? {
@@ -91,7 +93,7 @@ fn signature_case(
             &hex(t, "iqmp")?,
         )?),
         other => Err(Error::new(format!("keyMode {other}"))),
-    })?;
+    }?;
     let modulo = int(group, "modulo")?;
     if key.bits() as u64 != modulo {
         return Err(Error::new(format!(
@@ -131,7 +133,7 @@ const KEY_TRIES: usize = 64;
 fn decryption_group(
     group: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Option<Value>, Error> {
     let bits = int(group, "modulo")? as usize;
     let len = bits.div_ceil(8);
@@ -145,7 +147,7 @@ fn decryption_group(
         let mut results = Vec::new();
         for (i, r) in entries.iter().enumerate() {
             let entry = match (opt_hex(r, "n")?, opt_hex(r, "e")?) {
-                (Some(n), Some(e)) => given_key_entry(r, &n, &e, builder),
+                (Some(n), Some(e)) => given_key_entry(r, &n, &e, profile),
                 _ => {
                     let ct = hex(r, "cipherText")?;
                     let key = key_for(
@@ -154,7 +156,7 @@ fn decryption_group(
                         refuse.as_ref().map(|set| set[i]),
                         bits,
                         rng,
-                        builder,
+                        profile,
                     )?;
                     generated_key_entry(r, key)
                 }
@@ -208,14 +210,18 @@ fn key_for<'k>(
     refuse: Option<bool>,
     bits: usize,
     rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<&'k PkePrivateKey, Error> {
     for _ in 0..KEY_TRIES {
         let key = match generated {
             Some(key) => key,
-            None => generated.insert(builder.try_build(|ctx| {
-                PkePrivateKey::generate(ctx, &mut Rng(&mut *rng), bits)
-            })?),
+            None => generated.insert({
+                PkePrivateKey::generate(
+                    profile.ctx(),
+                    &mut Rng(&mut *rng),
+                    bits,
+                )
+            }?),
         };
         match refuse {
             None => break,
@@ -298,14 +304,14 @@ fn given_key_entry(
     r: &Value,
     n: &[u8],
     e: &[u8],
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     let mut out = json!({ "e": hex_value(e), "n": hex_value(n) });
     // A failing entry can be bad in either of two ways, and the crate
     // refuses them at different points: an even modulus never becomes
     // a key at all, while a ciphertext at or above the modulus is
     // caught by the primitive.
-    let Ok(key) = builder.build(|ctx| PkePublicKey::try_new(ctx, n, e)) else {
+    let Ok(key) = PkePublicKey::try_new(profile.ctx(), n, e) else {
         out["testPassed"] = json!(false);
         return Ok(out);
     };
@@ -534,8 +540,8 @@ mod tests {
             super::super::vendored(find("RSA-SignaturePrimitive-2.0")[0]);
         let with = answer(
             &doc,
-            &mut fixed_rng(&Builder::default()).unwrap(),
-            &Builder::default(),
+            &mut fixed_rng(&Profile::default()).unwrap(),
+            &Profile::default(),
         )
         .unwrap();
         for group in doc["testGroups"].as_array_mut().unwrap() {
@@ -548,8 +554,8 @@ mod tests {
         }
         let without = answer(
             &doc,
-            &mut fixed_rng(&Builder::default()).unwrap(),
-            &Builder::default(),
+            &mut fixed_rng(&Profile::default()).unwrap(),
+            &Profile::default(),
         )
         .unwrap();
         assert_eq!(with, without);
@@ -582,8 +588,8 @@ mod tests {
         });
         let answered = answer(
             &doc,
-            &mut fixed_rng(&Builder::default()).unwrap(),
-            &Builder::default(),
+            &mut fixed_rng(&Profile::default()).unwrap(),
+            &Profile::default(),
         )
         .unwrap();
         let entries = &answered["testGroups"][0]["tests"][0]["resultsArray"];
@@ -626,8 +632,8 @@ mod tests {
         });
         let answered = answer(
             &doc,
-            &mut fixed_rng(&Builder::default()).unwrap(),
-            &Builder::default(),
+            &mut fixed_rng(&Profile::default()).unwrap(),
+            &Profile::default(),
         )
         .unwrap();
         let entries = &answered["testGroups"][0]["tests"][0]["resultsArray"];
@@ -646,8 +652,8 @@ mod tests {
             json!(format!("80{}", "00".repeat(255)));
         let err = answer(
             &doc,
-            &mut fixed_rng(&Builder::default()).unwrap(),
-            &Builder::default(),
+            &mut fixed_rng(&Profile::default()).unwrap(),
+            &Profile::default(),
         )
         .unwrap_err();
         assert!(err.message.contains("no key"), "{}", err.message);

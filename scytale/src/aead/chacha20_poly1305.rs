@@ -9,9 +9,9 @@
 //! nonce must be.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Key;
 //! use scytale::aead::{Aead, ChaCha20Poly1305};
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -434,10 +434,7 @@ mod tests {
     const TAG_HEX: &str = "1ae10b594f09e26a7e902ecbd0600691";
 
     fn aead() -> ChaCha20Poly1305 {
-        ChaCha20Poly1305::new(
-            crate::Context::default(),
-            &Key::from(hex::<32>(KEY)),
-        )
+        ChaCha20Poly1305::new(Context::default(), &Key::from(hex::<32>(KEY)))
     }
 
     #[test]
@@ -549,10 +546,8 @@ mod tests {
                 Ok(())
             }
         }
-        let aead = ChaCha20Poly1305::new(
-            crate::Context::default(),
-            &Key::from([0x5au8; 32]),
-        );
+        let aead =
+            ChaCha20Poly1305::new(Context::default(), &Key::from([0x5au8; 32]));
         let mut buffer = Buffer([0; 128], 0);
         core::fmt::write(&mut buffer, format_args!("{aead:?}")).unwrap();
         let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();

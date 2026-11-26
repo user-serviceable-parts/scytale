@@ -67,15 +67,27 @@ pub fn run(op: KexOp) -> Result<()> {
     };
     let secret: Zeroizing<Vec<u8>> = match algorithm {
         Algorithm::X25519 => {
-            let private = x25519::PrivateKey::try_from_pem(&private)?;
-            let public = x25519::PublicKey::try_from_pem(&public)?;
+            let private = x25519::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &private,
+            )?;
+            let public = x25519::PublicKey::try_from_pem(
+                scytale::Context::default(),
+                &public,
+            )?;
             let secret =
                 private.shared_secret(&public).map_err(|_| low_order())?;
             Zeroizing::new(secret.to_vec())
         }
         Algorithm::X448 => {
-            let private = x448::PrivateKey::try_from_pem(&private)?;
-            let public = x448::PublicKey::try_from_pem(&public)?;
+            let private = x448::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &private,
+            )?;
+            let public = x448::PublicKey::try_from_pem(
+                scytale::Context::default(),
+                &public,
+            )?;
             let secret =
                 private.shared_secret(&public).map_err(|_| low_order())?;
             Zeroizing::new(secret.to_vec())

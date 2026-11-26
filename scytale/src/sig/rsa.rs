@@ -61,10 +61,10 @@
 //! array behind them; the arithmetic is the same.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::random::CtrDrbg;
 //! use scytale::sig::rsa::{PrivateKey, PublicKey};
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -1472,7 +1472,7 @@ mod tests {
 
     fn key2048() -> PrivateKey {
         PrivateKey::try_new(
-            crate::Context::default(),
+            Context::default(),
             &unhex::<256>(N2048),
             E,
             &unhex::<256>(D2048),
@@ -1482,7 +1482,7 @@ mod tests {
 
     fn key1024() -> PrivateKey {
         PrivateKey::try_new(
-            crate::Context::default(),
+            Context::default(),
             &unhex::<128>(N1024),
             E,
             &unhex::<128>(D1024),
@@ -1555,8 +1555,7 @@ mod tests {
     #[test]
     fn a_drawn_salt_is_the_digest_length() {
         let mut rng =
-            crate::random::CtrDrbg::from_system(crate::Context::default())
-                .unwrap();
+            crate::random::CtrDrbg::from_system(Context::default()).unwrap();
         let key = key1024();
         let a = key.sign_pss::<Sha256, _>(&mut rng, MSG).unwrap();
         let b = key.sign_pss::<Sha256, _>(&mut rng, MSG).unwrap();
@@ -1630,7 +1629,7 @@ mod tests {
         let mut n = [0xa5u8; 1024];
         n[0] |= 0x80;
         n[1023] |= 1;
-        let key = PublicKey::try_new(crate::Context::default(), &n, &[1, 0, 1])
+        let key = PublicKey::try_new(Context::default(), &n, &[1, 0, 1])
             .expect("key");
         assert_eq!(key.bits(), MAX_BITS);
         let mut back = [0u8; 1024];
@@ -1646,8 +1645,7 @@ mod tests {
         let mut wider = [0xa5u8; 1025];
         wider[1024] |= 1;
         assert_eq!(
-            PublicKey::try_new(crate::Context::default(), &wider, &[1, 0, 1])
-                .err(),
+            PublicKey::try_new(Context::default(), &wider, &[1, 0, 1]).err(),
             Some(Error::InvalidKeyLength(8200))
         );
     }
@@ -1659,7 +1657,7 @@ mod tests {
         let mut n = [0x5au8; 257];
         n[0] = 0x01;
         n[256] |= 1;
-        let key = PublicKey::try_new(crate::Context::default(), &n, &[1, 0, 1])
+        let key = PublicKey::try_new(Context::default(), &n, &[1, 0, 1])
             .expect("key");
         assert_eq!(key.bits(), 2049);
         assert_eq!(key.modulus_len(), 257);
@@ -1673,9 +1671,8 @@ mod tests {
         // Leading zeros are not part of the length.
         let mut padded = [0u8; 260];
         padded[3..].copy_from_slice(&n);
-        let key =
-            PublicKey::try_new(crate::Context::default(), &padded, &[1, 0, 1])
-                .expect("key");
+        let key = PublicKey::try_new(Context::default(), &padded, &[1, 0, 1])
+            .expect("key");
         assert_eq!(key.bits(), 2049);
     }
 
@@ -1728,8 +1725,8 @@ mod tests {
              9cc0b713ad292c244e",
         );
         let message = b"an odd length of modulus";
-        let public = PublicKey::try_from_der(crate::Context::default(), &spki)
-            .expect("spki");
+        let public =
+            PublicKey::try_from_der(Context::default(), &spki).expect("spki");
         assert_eq!(public.bits(), 1025);
         public
             .verify_pss::<Sha256>(message, &signature_theirs)
@@ -1738,9 +1735,8 @@ mod tests {
         // And the other way: what this signs, it verifies, and the
         // top byte of the encoding's integer stayed clear, which is
         // what lets anyone else verify it too.
-        let private =
-            PrivateKey::try_from_der(crate::Context::default(), &pkcs8)
-                .expect("pkcs8");
+        let private = PrivateKey::try_from_der(Context::default(), &pkcs8)
+            .expect("pkcs8");
         let signature = private
             .sign_pss_with_salt::<Sha256>(message, &[0x5a; 32])
             .expect("sign");
@@ -1787,32 +1783,31 @@ mod tests {
 
         // Too short, and then even.
         assert_eq!(
-            PublicKey::try_new(crate::Context::default(), &n[1..], E).err(),
+            PublicKey::try_new(Context::default(), &n[1..], E).err(),
             Some(Error::InvalidKeyLength(1014)),
         );
         let mut even = n;
         even[127] &= 0xfe;
         assert_eq!(
-            PublicKey::try_new(crate::Context::default(), &even, E).err(),
+            PublicKey::try_new(Context::default(), &even, E).err(),
             Some(Error::InvalidPublicKey),
         );
 
         // Even, tiny, and oversized public exponents.
         for e in [&[0x02][..], &[0x01], &[0xff; 9]] {
             assert_eq!(
-                PublicKey::try_new(crate::Context::default(), &n, e).err(),
+                PublicKey::try_new(Context::default(), &n, e).err(),
                 Some(Error::InvalidPublicKey),
             );
         }
 
         // A zero or out-of-range private exponent.
         assert_eq!(
-            PrivateKey::try_new(crate::Context::default(), &n, E, &[0u8; 4])
-                .err(),
+            PrivateKey::try_new(Context::default(), &n, E, &[0u8; 4]).err(),
             Some(Error::InvalidPrivateKey),
         );
         assert_eq!(
-            PrivateKey::try_new(crate::Context::default(), &n, E, &n).err(),
+            PrivateKey::try_new(Context::default(), &n, E, &n).err(),
             Some(Error::InvalidPrivateKey),
         );
     }
@@ -1829,12 +1824,8 @@ mod tests {
         }
         for bits in [0, 512, 1023, 1025, 1200 + 4, MAX_BITS + 8] {
             assert_eq!(
-                PrivateKey::generate(
-                    crate::Context::default(),
-                    &mut Zeros,
-                    bits
-                )
-                .err(),
+                PrivateKey::generate(Context::default(), &mut Zeros, bits)
+                    .err(),
                 Some(Error::InvalidKeyLength(bits)),
                 "{bits}"
             );
@@ -1897,7 +1888,7 @@ mod tests {
     fn crt_key_2048() -> PrivateKey {
         let (p, q, dp, dq, qinv) = crt_parts_2048();
         PrivateKey::try_new_crt(
-            crate::Context::default(),
+            Context::default(),
             &unhex::<256>(N2048),
             E,
             &unhex::<256>(D2048),
@@ -1938,7 +1929,7 @@ mod tests {
         let (p, q, dp, dq, qinv) = crt_parts_2048();
         let build = |p: &[u8], q: &[u8], dp: &[u8], dq: &[u8], qinv: &[u8]| {
             PrivateKey::try_new_crt(
-                crate::Context::default(),
+                Context::default(),
                 &n,
                 E,
                 &d,
@@ -1994,7 +1985,7 @@ mod tests {
         let mut bad_dp = dp;
         bad_dp[100] ^= 1;
         let key = PrivateKey::try_new_crt(
-            crate::Context::default(),
+            Context::default(),
             &n,
             E,
             &d,
@@ -2017,11 +2008,10 @@ mod tests {
     #[test]
     fn generates_working_keys() {
         use crate::random::CtrDrbg;
-        let mut rng = CtrDrbg::from_system(crate::Context::default()).unwrap();
+        let mut rng = CtrDrbg::from_system(Context::default()).unwrap();
         for bits in [1024, 1200] {
-            let key =
-                PrivateKey::generate(crate::Context::default(), &mut rng, bits)
-                    .unwrap();
+            let key = PrivateKey::generate(Context::default(), &mut rng, bits)
+                .unwrap();
             assert_eq!(key.bits(), bits);
             let len = bits / 8;
             assert_eq!(key.modulus_len(), len);
@@ -2059,7 +2049,7 @@ mod tests {
             // three keys make the same signature, which also proves
             // d and the CRT pieces agree.
             let with_crt = PrivateKey::try_new_crt(
-                crate::Context::default(),
+                Context::default(),
                 &n[..len],
                 &e,
                 &d[..len],
@@ -2071,7 +2061,7 @@ mod tests {
             )
             .unwrap();
             let plain = PrivateKey::try_new(
-                crate::Context::default(),
+                Context::default(),
                 &n[..len],
                 &e,
                 &d[..len],
@@ -2093,12 +2083,8 @@ mod tests {
             }
         }
         assert_eq!(
-            PrivateKey::generate(
-                crate::Context::default(),
-                &mut Zeros,
-                MIN_BITS
-            )
-            .err(),
+            PrivateKey::generate(Context::default(), &mut Zeros, MIN_BITS)
+                .err(),
             Some(Error::KeyGenerationFailed),
         );
     }
@@ -2118,7 +2104,7 @@ mod tests {
         let crt_key = {
             let (p, q, dp, dq, qinv) = crt_parts_1024();
             PrivateKey::try_new_crt(
-                crate::Context::default(),
+                Context::default(),
                 &unhex::<128>(N1024),
                 E,
                 &unhex::<128>(D1024),
@@ -2174,7 +2160,7 @@ mod tests {
     fn crt_matches_plain_signing_1024() {
         let (p, q, dp, dq, qinv) = crt_parts_1024();
         let key = PrivateKey::try_new_crt(
-            crate::Context::default(),
+            Context::default(),
             &unhex::<128>(N1024),
             E,
             &unhex::<128>(D1024),
@@ -2256,9 +2242,8 @@ mod tests {
 
     fn generated() -> PrivateKey {
         let mut rng =
-            crate::random::CtrDrbg::from_system(crate::Context::default())
-                .unwrap();
-        PrivateKey::generate(crate::Context::default(), &mut rng, 1024).unwrap()
+            crate::random::CtrDrbg::from_system(Context::default()).unwrap();
+        PrivateKey::generate(Context::default(), &mut rng, 1024).unwrap()
     }
 
     fn same_key(a: &PrivateKey, b: &PrivateKey) -> bool {
@@ -2292,13 +2277,11 @@ mod tests {
         let m = key.pkcs1_bytes(&mut pkcs1).unwrap();
         assert!(der[..n].windows(m).any(|w| w == &pkcs1[..m]));
         let back =
-            PrivateKey::try_from_der(crate::Context::default(), &der[..n])
-                .unwrap();
+            PrivateKey::try_from_der(Context::default(), &der[..n]).unwrap();
         assert!(same_key(&back, &key));
         assert_eq!(back.sign_pkcs1::<Sha256>(MSG).unwrap(), sig);
-        let back =
-            PrivateKey::try_from_pkcs1(crate::Context::default(), &pkcs1[..m])
-                .unwrap();
+        let back = PrivateKey::try_from_pkcs1(Context::default(), &pkcs1[..m])
+            .unwrap();
         assert!(same_key(&back, &key));
         // A key that came through the structure signs through the
         // primes it carries.
@@ -2307,14 +2290,12 @@ mod tests {
         let n = key.pem_bytes(&mut pem).unwrap();
         assert!(pem.starts_with(b"-----BEGIN PRIVATE KEY-----\n"));
         let back =
-            PrivateKey::try_from_pem(crate::Context::default(), &pem[..n])
-                .unwrap();
+            PrivateKey::try_from_pem(Context::default(), &pem[..n]).unwrap();
         assert!(same_key(&back, &key));
         let n = key.pkcs1_pem_bytes(&mut pem).unwrap();
         assert!(pem.starts_with(b"-----BEGIN RSA PRIVATE KEY-----\n"));
         let back =
-            PrivateKey::try_from_pem(crate::Context::default(), &pem[..n])
-                .unwrap();
+            PrivateKey::try_from_pem(Context::default(), &pem[..n]).unwrap();
         assert!(same_key(&back, &key));
 
         let n = public.der_bytes(&mut der).unwrap();
@@ -2323,10 +2304,8 @@ mod tests {
         let mut want = [0u8; 128];
         public.modulus_bytes(&mut want).unwrap();
         for back in [
-            PublicKey::try_from_der(crate::Context::default(), &der[..n])
-                .unwrap(),
-            PublicKey::try_from_pkcs1(crate::Context::default(), &pkcs1[..m])
-                .unwrap(),
+            PublicKey::try_from_der(Context::default(), &der[..n]).unwrap(),
+            PublicKey::try_from_pkcs1(Context::default(), &pkcs1[..m]).unwrap(),
         ] {
             let mut got = [0u8; 128];
             back.modulus_bytes(&mut got).unwrap();
@@ -2336,14 +2315,12 @@ mod tests {
         let n = public.pem_bytes(&mut pem).unwrap();
         assert!(pem.starts_with(b"-----BEGIN PUBLIC KEY-----\n"));
         let back =
-            PublicKey::try_from_pem(crate::Context::default(), &pem[..n])
-                .unwrap();
+            PublicKey::try_from_pem(Context::default(), &pem[..n]).unwrap();
         assert_eq!(back.bits(), 1024);
         let n = public.pkcs1_pem_bytes(&mut pem).unwrap();
         assert!(pem.starts_with(b"-----BEGIN RSA PUBLIC KEY-----\n"));
         let back =
-            PublicKey::try_from_pem(crate::Context::default(), &pem[..n])
-                .unwrap();
+            PublicKey::try_from_pem(Context::default(), &pem[..n]).unwrap();
         assert_eq!(back.bits(), 1024);
     }
 
@@ -2402,22 +2379,19 @@ mod tests {
             .unwrap()
             + 8;
         out[oid_end] = 0x0a;
-        PrivateKey::try_from_der(crate::Context::default(), &out[..n]).unwrap();
+        PrivateKey::try_from_der(Context::default(), &out[..n]).unwrap();
         out[oid_end] = 0x02;
         assert_eq!(
-            PrivateKey::try_from_der(crate::Context::default(), &out[..n])
-                .err(),
+            PrivateKey::try_from_der(Context::default(), &out[..n]).err(),
             Some(Error::WrongAlgorithm)
         );
         out[oid_end] = 0x01;
         assert_eq!(
-            PrivateKey::try_from_der(crate::Context::default(), &out[..n - 1])
-                .err(),
+            PrivateKey::try_from_der(Context::default(), &out[..n - 1]).err(),
             Some(Error::InvalidEncoding)
         );
         assert_eq!(
-            PrivateKey::try_from_der(crate::Context::default(), &out[..n + 1])
-                .err(),
+            PrivateKey::try_from_der(Context::default(), &out[..n + 1]).err(),
             Some(Error::InvalidEncoding)
         );
         let n = key.public_key().der_bytes(&mut out).unwrap();
@@ -2427,10 +2401,10 @@ mod tests {
             .unwrap()
             + 8;
         out[oid_end] = 0x0a;
-        PublicKey::try_from_der(crate::Context::default(), &out[..n]).unwrap();
+        PublicKey::try_from_der(Context::default(), &out[..n]).unwrap();
         out[oid_end] = 0x02;
         assert_eq!(
-            PublicKey::try_from_der(crate::Context::default(), &out[..n]).err(),
+            PublicKey::try_from_der(Context::default(), &out[..n]).err(),
             Some(Error::WrongAlgorithm)
         );
 
@@ -2439,16 +2413,14 @@ mod tests {
         assert_eq!(out[..7], [0x30, 0x82, out[2], out[3], 0x02, 0x01, 0x00]);
         out[6] = 1;
         assert_eq!(
-            PrivateKey::try_from_pkcs1(crate::Context::default(), &out[..n])
-                .err(),
+            PrivateKey::try_from_pkcs1(Context::default(), &out[..n]).err(),
             Some(Error::UnsupportedVersion)
         );
 
         // A public block is not a private key, whatever it holds.
         let n = key.public_key().pem_bytes(&mut out).unwrap();
         assert_eq!(
-            PrivateKey::try_from_pem(crate::Context::default(), &out[..n])
-                .err(),
+            PrivateKey::try_from_pem(Context::default(), &out[..n]).err(),
             Some(Error::InvalidEncoding)
         );
     }
@@ -2467,7 +2439,7 @@ mod tests {
         let mut storage = [0u64; private_words(2048)];
         let mut scratch = [0u64; scratch_words(2048)];
         let used = PrivateKeyRef::fill_crt(
-            crate::Context::default(),
+            Context::default(),
             &unhex::<256>(N2048),
             E,
             &unhex::<256>(D2048),
@@ -2481,8 +2453,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(used, private_words(2048));
-        let key =
-            PrivateKeyRef::new(crate::Context::default(), &storage).unwrap();
+        let key = PrivateKeyRef::new(Context::default(), &storage).unwrap();
         assert_eq!(key.bits(), 2048);
         let got = key
             .sign_pss_with_salt::<Sha256>(MSG, &salt, &mut scratch)
@@ -2504,12 +2475,8 @@ mod tests {
             Some(Error::ScratchTooSmall(public_words(2048)))
         );
         // Words that are not a key are refused as one.
-        assert!(
-            PrivateKeyRef::new(crate::Context::default(), &[0u64; 8]).is_err()
-        );
-        assert!(
-            PublicKeyRef::new(crate::Context::default(), &[0u64; 8]).is_err()
-        );
+        assert!(PrivateKeyRef::new(Context::default(), &[0u64; 8]).is_err());
+        assert!(PublicKeyRef::new(Context::default(), &[0u64; 8]).is_err());
     }
 
     /// The public view over a private key's words is the public key.
@@ -2523,13 +2490,12 @@ mod tests {
             &mut storage,
         )
         .unwrap();
-        let key =
-            PrivateKeyRef::new(crate::Context::default(), &storage).unwrap();
+        let key = PrivateKeyRef::new(Context::default(), &storage).unwrap();
         let mut scratch = [0u64; scratch_words(1024)];
         let sig = key.sign_pkcs1::<Sha256>(MSG, &mut scratch).unwrap();
         assert_eq!(sig.as_ref(), &unhex::<128>(V15_1024_SHA256)[..]);
         let public = PublicKeyRef::new(
-            crate::Context::default(),
+            Context::default(),
             &storage[..public_words(1024)],
         )
         .unwrap();

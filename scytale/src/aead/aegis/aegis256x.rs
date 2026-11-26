@@ -458,11 +458,9 @@ pub(crate) mod tests {
     #[test]
     fn dispatches() {
         {
-            let two =
-                Aegis256X2::new(crate::Context::default(), &Key::zeroed());
+            let two = Aegis256X2::new(Context::default(), &Key::zeroed());
             features::dispatches(KERNELS, Aegis256X2::profiles(), two.kernel());
-            let four =
-                Aegis256X4::new(crate::Context::default(), &Key::zeroed());
+            let four = Aegis256X4::new(Context::default(), &Key::zeroed());
             features::dispatches(
                 KERNELS,
                 Aegis256X4::profiles(),
@@ -723,13 +721,13 @@ pub(crate) mod tests {
     fn the_variants_differ() {
         let mut tags = [[0u8; 16]; 3];
         let [base, two, four] = &mut tags;
-        Aegis256::new(crate::Context::default(), &key())
+        Aegis256::new(Context::default(), &key())
             .encrypt(&nonce(), b"", &mut [], base)
             .unwrap();
-        Aegis256X2::new(crate::Context::default(), &key())
+        Aegis256X2::new(Context::default(), &key())
             .encrypt(&nonce(), b"", &mut [], two)
             .unwrap();
-        Aegis256X4::new(crate::Context::default(), &key())
+        Aegis256X4::new(Context::default(), &key())
             .encrypt(&nonce(), b"", &mut [], four)
             .unwrap();
         assert_ne!(tags[0], tags[1]);
@@ -739,11 +737,11 @@ pub(crate) mod tests {
 
     #[test]
     fn aad_after_message_is_out_of_order() {
-        let aead = Aegis256X2::new(crate::Context::default(), &Key::zeroed());
+        let aead = Aegis256X2::new(Context::default(), &Key::zeroed());
         let mut e = aead.encryptor(&nonce());
         e.update(&mut [0u8; 3]).unwrap();
         assert_eq!(e.aad(b"late"), Err(Error::OutOfOrder));
-        let aead = Aegis256X4::new(crate::Context::default(), &Key::zeroed());
+        let aead = Aegis256X4::new(Context::default(), &Key::zeroed());
         let mut d = aead.decryptor(&nonce());
         d.update(&mut []).unwrap();
         assert_eq!(d.aad(b"late"), Err(Error::OutOfOrder));
@@ -754,10 +752,8 @@ pub(crate) mod tests {
         fn wipes<T: ZeroizeOnDrop>() {}
         wipes::<Aegis256X2>();
         wipes::<Aegis256X4>();
-        let aead = Aegis256X4::new(
-            crate::Context::default(),
-            &Key::from([0x5au8; KEY_SIZE]),
-        );
+        let aead =
+            Aegis256X4::new(Context::default(), &Key::from([0x5au8; KEY_SIZE]));
         let text = std::format!("{aead:?}");
         assert!(!text.contains("5a"), "{text}");
         let text = std::format!("{:?}", aead.encryptor(&[0x5au8; NONCE_SIZE]));

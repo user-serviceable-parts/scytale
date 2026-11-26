@@ -17,9 +17,9 @@
 //! `CtrDrbg`, with the same constructors and limits.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Random;
 //! use scytale::random::CtrDrbg;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -695,7 +695,7 @@ impl CtrDrbg<entropy::External> {
     /// `seed`, which must be at least [`MIN_SEED`] bytes.
     pub(crate) fn from_seed(seed: &[u8]) -> Result<Self, Error> {
         Self::instantiate(
-            crate::Context::default(),
+            Context::default(),
             seed,
             &[],
             entropy::External,
@@ -715,7 +715,7 @@ impl CtrDrbg<entropy::External> {
         personalization: &[u8],
     ) -> Result<Self, Error> {
         Self::instantiate(
-            crate::Context::default(),
+            Context::default(),
             entropy,
             personalization,
             entropy::External,
@@ -1039,7 +1039,7 @@ mod tests {
             return;
         };
         let mut rng =
-            CtrDrbg::try_new(crate::Context::default(), system).expect("rng");
+            CtrDrbg::try_new(Context::default(), system).expect("rng");
         rng.counter = RESEED_INTERVAL + 1;
         let mut buf = [0u8; 16];
         rng.fill(&mut buf).expect("fill");
@@ -1074,10 +1074,8 @@ mod tests {
         spoiled[499] ^= 1;
         let mut first = [0u8; SEED];
         let mut second = [0u8; SEED];
-        derive(crate::Context::default(), &[&long], &mut first)
-            .expect("derive");
-        derive(crate::Context::default(), &[&spoiled], &mut second)
-            .expect("derive");
+        derive(Context::default(), &[&long], &mut first).expect("derive");
+        derive(Context::default(), &[&spoiled], &mut second).expect("derive");
         assert_ne!(first, second);
     }
 
@@ -1088,10 +1086,9 @@ mod tests {
         let whole = [0x44u8; 70];
         let mut joined = [0u8; SEED];
         let mut split = [0u8; SEED];
-        derive(crate::Context::default(), &[&whole], &mut joined)
-            .expect("derive");
+        derive(Context::default(), &[&whole], &mut joined).expect("derive");
         derive(
-            crate::Context::default(),
+            Context::default(),
             &[&whole[..17], &whole[17..], &[]],
             &mut split,
         )
@@ -1280,7 +1277,7 @@ mod tests {
             for &len in &lengths {
                 let mut rng = CtrDrbg::from_seed(&seed()).expect("seed");
                 rng.v = start;
-                let aes = Aes256::new(crate::Context::default(), &rng.key);
+                let aes = Aes256::new(Context::default(), &rng.key);
                 let mut expected = vec![0u8; len];
                 let mut v = start;
                 for chunk in expected.chunks_mut(BLOCK_SIZE) {
@@ -1364,8 +1361,8 @@ mod tests {
                 Ok(())
             }
         }
-        let mut rng = CtrDrbg::try_new(crate::Context::default(), Board(1))
-            .expect("board");
+        let mut rng =
+            CtrDrbg::try_new(Context::default(), Board(1)).expect("board");
         let mut buf = [0u8; 32];
         rng.fill(&mut buf).expect("fill");
         assert_ne!(buf, [0u8; 32]);

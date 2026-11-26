@@ -16,7 +16,7 @@
 //! integer, as IEEE 1619 numbers its data units.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{
     Error, hex, hex_value, int, key_of, opt_hex, opt_int, text,
     unknown_test_type,
@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         let encrypt = match text(group, "direction")? {
@@ -45,7 +45,7 @@ pub fn answer(
                 } as usize;
                 let unit =
                     opt_int(t, "dataUnitLen").map_or(bits, |u| u as usize);
-                aft(t, encrypt, bits, unit, builder)
+                aft(t, encrypt, bits, unit, profile)
             }),
             _ => Err(unknown_test_type(group)),
         }
@@ -69,7 +69,7 @@ fn aft(
     encrypt: bool,
     bits: usize,
     unit: usize,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     let key = hex(t, "key")?;
     // The key field holds the data key and then the tweak key.
@@ -85,9 +85,7 @@ fn aft(
         let (data_key, tweak_key) =
             (key_of::<C>(data_key)?, key_of::<C>(tweak_key)?);
         let xts =
-            builder.try_build(
-                |ctx| Xts::<C>::try_new(ctx, &data_key, &tweak_key),
-            )?;
+            Xts::<C>::try_new(profile.ctx(), &data_key, &tweak_key)?;
         let mut start = 0;
         let mut index = 0u128;
         while start < bits {

@@ -7,7 +7,7 @@
 //! secret. The key checks answer whether the library accepts the key.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{Error, hex, hex_value, text};
 use scytale::Context;
 use scytale::Random;
@@ -129,42 +129,41 @@ set!(Set1024, ml_kem_1024, "ML-KEM-1024");
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
     answer_groups(doc, |group| match text(group, "parameterSet")? {
-        Set512::NAME => answer_group::<Set512>(mode, group, builder),
-        Set768::NAME => answer_group::<Set768>(mode, group, builder),
-        Set1024::NAME => answer_group::<Set1024>(mode, group, builder),
+        Set512::NAME => answer_group::<Set512>(mode, group, profile),
+        Set768::NAME => answer_group::<Set768>(mode, group, profile),
+        Set1024::NAME => answer_group::<Set1024>(mode, group, profile),
         other => Err(Error::new(format!("parameter set {other}"))),
     })
 }
 
-/// Every case builds its key from the case's bytes and runs it once,
-/// and every call hashes as it runs, starting hashes of its own: each
-/// case runs whole under `builder`.
+/// Every case builds its key from the case's bytes, with the
+/// profile's context, and runs it once.
 fn answer_group<S: Set>(
     mode: &str,
     group: &Value,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Option<Value>, Error> {
     let each = |answer: &dyn Fn(&Value) -> Result<Value, Error>| {
         answer_tests(group, answer)
     };
     match mode {
-        "keyGen" => each(&|t| key_gen::<S>(builder.ctx(), t)),
+        "keyGen" => each(&|t| key_gen::<S>(profile.ctx(), t)),
         "encapDecap" => match text(group, "function")? {
-            "encapsulation" => each(&|t| encapsulation::<S>(builder.ctx(), t)),
+            "encapsulation" => each(&|t| encapsulation::<S>(profile.ctx(), t)),
             "decapsulation" => {
                 let seed = text(group, "keyFormat")? == "seed";
-                each(&|t| decapsulation::<S>(builder.ctx(), t, seed))
+                each(&|t| decapsulation::<S>(profile.ctx(), t, seed))
             }
             "encapsulationKeyCheck" => each(&|t| {
-                let ok = S::public_ok(builder.ctx(), &hex(t, "ek")?);
+                let ok = S::public_ok(profile.ctx(), &hex(t, "ek")?);
                 Ok(json!({ "testPassed": ok }))
             }),
             "decapsulationKeyCheck" => each(&|t| {
-                let ok = S::private_ok(builder.ctx(), &hex(t, "dk")?);
+                let ok = S::private_ok(profile.ctx(), &hex(t, "dk")?);
                 Ok(json!({ "testPassed": ok }))
             }),
             other => Err(Error::new(format!("function {other}"))),

@@ -152,6 +152,7 @@ mod wide {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::Context;
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     use crate::features::Chosen;
 
@@ -161,8 +162,8 @@ pub(crate) mod tests {
     #[test]
     fn dispatches_by_the_list() {
         {
-            let chosen = features::choose(crate::Context::default(), KERNELS)
-                .expect("listed");
+            let chosen =
+                features::choose(Context::default(), KERNELS).expect("listed");
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             let built = match Shake128Together::new([&[0u8; 1]; WIDTH], chosen)
             {
@@ -197,7 +198,7 @@ pub(crate) mod tests {
                 return;
             };
             let mut readers = messages.each_ref().map(|message| {
-                let mut xof = Shake128::new(crate::Context::default());
+                let mut xof = Shake128::new(Context::default());
                 xof.update(message);
                 xof.finalize_xof()
             });

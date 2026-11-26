@@ -6,7 +6,7 @@ use super::*;
 use crate::random::CtrDrbg;
 
 fn rng() -> CtrDrbg {
-    CtrDrbg::from_system(crate::Context::default()).expect("system entropy")
+    CtrDrbg::from_system(Context::default()).expect("system entropy")
 }
 
 /// The sets of each family with the given height suffix and width.
@@ -79,14 +79,14 @@ fn typecodes_name_the_sets() {
 fn mismatched_hashes_are_refused() {
     let mut rng = rng();
     let bad = PrivateKey::generate(
-        crate::Context::default(),
+        Context::default(),
         &mut rng,
         Lms::Sha256M32H5,
         Lmots::ShakeN32W8,
     );
     assert_eq!(bad.err(), Some(Error::WrongAlgorithm));
     let bad = PrivateKey::generate(
-        crate::Context::default(),
+        Context::default(),
         &mut rng,
         Lms::Sha256M24H5,
         Lmots::Sha256N32W8,
@@ -96,39 +96,34 @@ fn mismatched_hashes_are_refused() {
         (Lms::Sha256M32H5, Lmots::Sha256N32W8),
         (Lms::ShakeM32H5, Lmots::ShakeN32W8),
     ];
-    let bad = hss::PrivateKey::<2>::generate(
-        crate::Context::default(),
-        &mut rng,
-        &sets,
-    );
+    let bad =
+        hss::PrivateKey::<2>::generate(Context::default(), &mut rng, &sets);
     assert_eq!(bad.err(), Some(Error::WrongAlgorithm));
     let mut bytes = [0u8; 56];
     bytes[..4].copy_from_slice(&5u32.to_be_bytes());
     bytes[4..8].copy_from_slice(&9u32.to_be_bytes());
     assert_eq!(
-        PublicKey::new(crate::Context::default(), &bytes).err(),
+        PublicKey::new(Context::default(), &bytes).err(),
         Some(Error::WrongAlgorithm)
     );
     bytes[4..8].copy_from_slice(&4u32.to_be_bytes());
-    assert!(PublicKey::new(crate::Context::default(), &bytes).is_ok());
+    assert!(PublicKey::new(Context::default(), &bytes).is_ok());
     assert_eq!(
-        PublicKey::new(crate::Context::default(), &bytes[..55]).err(),
+        PublicKey::new(Context::default(), &bytes[..55]).err(),
         Some(Error::InvalidEncoding)
     );
     bytes[..4].copy_from_slice(&99u32.to_be_bytes());
     assert_eq!(
-        PublicKey::new(crate::Context::default(), &bytes).err(),
+        PublicKey::new(Context::default(), &bytes).err(),
         Some(Error::WrongAlgorithm)
     );
 }
 
 #[test]
 fn rfc8554_test_case_1() {
-    let public = hss::PublicKey::new(
-        crate::Context::default(),
-        &hex(rfc8554::TC1_PUBLIC_KEY),
-    )
-    .unwrap();
+    let public =
+        hss::PublicKey::new(Context::default(), &hex(rfc8554::TC1_PUBLIC_KEY))
+            .unwrap();
     assert_eq!(public.levels(), 2);
     assert_eq!(public.top().lms(), Lms::Sha256M32H5);
     assert_eq!(public.top().lmots(), Lmots::Sha256N32W8);
@@ -144,11 +139,9 @@ fn rfc8554_test_case_1() {
 
 #[test]
 fn rfc8554_test_case_2() {
-    let public = hss::PublicKey::new(
-        crate::Context::default(),
-        &hex(rfc8554::TC2_PUBLIC_KEY),
-    )
-    .unwrap();
+    let public =
+        hss::PublicKey::new(Context::default(), &hex(rfc8554::TC2_PUBLIC_KEY))
+            .unwrap();
     assert_eq!(public.top().lms(), Lms::Sha256M32H10);
     assert_eq!(public.top().lmots(), Lmots::Sha256N32W4);
     let message = hex(rfc8554::TC2_MESSAGE);
@@ -162,7 +155,7 @@ fn rfc8554_test_case_2() {
     let seed = &private[..32];
     let i: [u8; I_SIZE] = private[32..48].try_into().unwrap();
     let top = PrivateKey::from_seed(
-        crate::Context::default(),
+        Context::default(),
         Lms::Sha256M32H10,
         Lmots::Sha256N32W4,
         &i,
@@ -173,7 +166,7 @@ fn rfc8554_test_case_2() {
     let seed = &private[48..80];
     let i: [u8; I_SIZE] = private[80..96].try_into().unwrap();
     let lower = PrivateKey::from_seed(
-        crate::Context::default(),
+        Context::default(),
         Lms::Sha256M32H5,
         Lmots::Sha256N32W8,
         &i,
@@ -181,7 +174,7 @@ fn rfc8554_test_case_2() {
     )
     .unwrap();
     let short = PrivateKey::from_seed(
-        crate::Context::default(),
+        Context::default(),
         Lms::Sha256M32H5,
         Lmots::Sha256N32W8,
         &i,
@@ -196,7 +189,7 @@ fn rfc8554_test_case_2() {
     // And the lower tree's own leaf 4 verifies the message under the
     // printed lower public key, so the tree is the same tree.
     let lower_sig = &signature[4 + top_sig_len + 56..];
-    PublicKey::new(crate::Context::default(), lower_public)
+    PublicKey::new(Context::default(), lower_public)
         .unwrap()
         .verify(&message, lower_sig)
         .unwrap();
@@ -208,8 +201,7 @@ fn rfc8554_test_case_2() {
 fn walk_tree(lms: Lms, ots: Lmots) {
     let mut rng = rng();
     let mut key =
-        PrivateKey::generate(crate::Context::default(), &mut rng, lms, ots)
-            .unwrap();
+        PrivateKey::generate(Context::default(), &mut rng, lms, ots).unwrap();
     let public = key.public_key().clone();
     let leaves = lms.leaves();
     assert_eq!(key.remaining(), leaves);
@@ -230,8 +222,7 @@ fn walk_tree(lms: Lms, ots: Lmots) {
     // Short output does not advance the key either.
     let mut short = std::vec![0u8; sig.len() - 1];
     let mut fresh =
-        PrivateKey::generate(crate::Context::default(), &mut rng, lms, ots)
-            .unwrap();
+        PrivateKey::generate(Context::default(), &mut rng, lms, ots).unwrap();
     assert_eq!(
         fresh.sign(&mut rng, b"m", &mut short).err(),
         Some(Error::OutputTooSmall(sig.len()))
@@ -272,29 +263,22 @@ fn h15_walks_its_tree() {
 fn tree_state_round_trips_through_hss_encoding() {
     let mut rng = rng();
     let sets = [(Lms::Sha256M32H5, Lmots::Sha256N32W2)];
-    let mut key = hss::PrivateKey::<1>::generate(
-        crate::Context::default(),
-        &mut rng,
-        &sets,
-    )
-    .unwrap();
+    let mut key =
+        hss::PrivateKey::<1>::generate(Context::default(), &mut rng, &sets)
+            .unwrap();
     let public = key.public_key();
     let mut sig = [0u8; hss::signature_max(1)];
     let mut der = [0u8; hss::der_max(1)];
     let mut pem = [0u8; hss::pem_max(1)];
     for q in 0..32 {
         let n = key.der_bytes(&mut der).unwrap();
-        let mut copy = hss::PrivateKey::<1>::try_from_der(
-            crate::Context::default(),
-            &der[..n],
-        )
-        .unwrap();
+        let mut copy =
+            hss::PrivateKey::<1>::try_from_der(Context::default(), &der[..n])
+                .unwrap();
         let m = key.pem_bytes(&mut pem).unwrap();
-        let mut copy2 = hss::PrivateKey::<1>::try_from_pem(
-            crate::Context::default(),
-            &pem[..m],
-        )
-        .unwrap();
+        let mut copy2 =
+            hss::PrivateKey::<1>::try_from_pem(Context::default(), &pem[..m])
+                .unwrap();
         assert_eq!(copy.remaining(), 32 - q);
         assert_eq!(hss::levels(&der[..n]), Ok(1));
         assert_eq!(hss::levels_from_pem(&pem[..m]), Ok(1));
@@ -314,11 +298,9 @@ fn tree_state_round_trips_through_hss_encoding() {
     }
     assert_eq!(key.remaining(), 0);
     let n = key.der_bytes(&mut der).unwrap();
-    let mut spent = hss::PrivateKey::<1>::try_from_der(
-        crate::Context::default(),
-        &der[..n],
-    )
-    .unwrap();
+    let mut spent =
+        hss::PrivateKey::<1>::try_from_der(Context::default(), &der[..n])
+            .unwrap();
     assert_eq!(
         spent.sign(&mut rng, b"m", &mut sig).err(),
         Some(Error::SequenceExhausted)
@@ -332,12 +314,9 @@ fn hss_replaces_a_spent_lower_tree() {
         (Lms::Sha256M24H5, Lmots::Sha256N24W1),
         (Lms::Sha256M24H5, Lmots::Sha256N24W2),
     ];
-    let mut key = hss::PrivateKey::<2>::generate(
-        crate::Context::default(),
-        &mut rng,
-        &sets,
-    )
-    .unwrap();
+    let mut key =
+        hss::PrivateKey::<2>::generate(Context::default(), &mut rng, &sets)
+            .unwrap();
     assert_eq!(key.sets(), sets);
     let public = key.public_key();
     assert_eq!(public.levels(), 2);
@@ -374,11 +353,9 @@ fn hss_replaces_a_spent_lower_tree() {
         // The encoding carries the cached signature, so a decoded key
         // signs with the same one while the lower tree lasts.
         let n = key.der_bytes(&mut der).unwrap();
-        let mut copy = hss::PrivateKey::<2>::try_from_der(
-            crate::Context::default(),
-            &der[..n],
-        )
-        .unwrap();
+        let mut copy =
+            hss::PrivateKey::<2>::try_from_der(Context::default(), &der[..n])
+                .unwrap();
         if (i + 1) % 32 != 0 {
             let n = copy.sign(&mut rng, b"m", &mut sig).unwrap();
             public.verify(b"m", &sig[..n]).unwrap();
@@ -391,10 +368,8 @@ fn hss_replaces_a_spent_lower_tree() {
         Some(Error::SequenceExhausted)
     );
     let n = key.der_bytes(&mut der).unwrap();
-    let wrong = hss::PrivateKey::<1>::try_from_der(
-        crate::Context::default(),
-        &der[..n],
-    );
+    let wrong =
+        hss::PrivateKey::<1>::try_from_der(Context::default(), &der[..n]);
     assert_eq!(wrong.err(), Some(Error::WrongAlgorithm));
 }
 
@@ -406,12 +381,9 @@ fn three_levels_sign_and_verify() {
         (Lms::ShakeM32H5, Lmots::ShakeN32W2),
         (Lms::ShakeM32H5, Lmots::ShakeN32W1),
     ];
-    let mut key = hss::PrivateKey::<3>::generate(
-        crate::Context::default(),
-        &mut rng,
-        &sets,
-    )
-    .unwrap();
+    let mut key =
+        hss::PrivateKey::<3>::generate(Context::default(), &mut rng, &sets)
+            .unwrap();
     assert_eq!(key.remaining(), 32 * 32 * 32);
     let public = key.public_key();
     let mut sig = std::vec![0u8; key.signature_len()];
@@ -423,7 +395,7 @@ fn three_levels_sign_and_verify() {
     // A signature of another level count is refused by length and
     // by its count alike.
     let two = hss::PrivateKey::<2>::generate(
-        crate::Context::default(),
+        Context::default(),
         &mut rng,
         &[sets[0], sets[1]],
     )
@@ -441,13 +413,9 @@ fn every_set_pair_verifies() {
     for family in FAMILIES {
         for w in [1, 2, 4, 8] {
             let (lms, ots) = sets(family, 5, w);
-            let mut key = PrivateKey::generate(
-                crate::Context::default(),
-                &mut rng,
-                lms,
-                ots,
-            )
-            .unwrap();
+            let mut key =
+                PrivateKey::generate(Context::default(), &mut rng, lms, ots)
+                    .unwrap();
             let mut sig = std::vec![0u8; key.signature_len()];
             key.sign(&mut rng, b"pair", &mut sig).unwrap();
             key.public_key().verify(b"pair", &sig).unwrap();
@@ -457,7 +425,7 @@ fn every_set_pair_verifies() {
                 let mut bytes = key.public_key().bytes();
                 bytes[..4].copy_from_slice(&tall.typecode().to_be_bytes());
                 let tall_key = PublicKey::new(
-                    crate::Context::default(),
+                    Context::default(),
                     &bytes[..key.public_key().len()],
                 )
                 .unwrap();
@@ -475,12 +443,9 @@ fn tampering_is_refused() {
         (Lms::Sha256M32H5, Lmots::Sha256N32W8),
         (Lms::Sha256M32H5, Lmots::Sha256N32W4),
     ];
-    let mut key = hss::PrivateKey::<2>::generate(
-        crate::Context::default(),
-        &mut rng,
-        &sets,
-    )
-    .unwrap();
+    let mut key =
+        hss::PrivateKey::<2>::generate(Context::default(), &mut rng, &sets)
+            .unwrap();
     let public = key.public_key();
     let mut sig = std::vec![0u8; key.signature_len()];
     key.sign(&mut rng, b"m", &mut sig).unwrap();
@@ -524,12 +489,9 @@ fn tampering_is_refused() {
     bad[4..8].copy_from_slice(&32u32.to_be_bytes());
     assert!(public.verify(b"m", &bad).is_err());
     // Another key of the same sets.
-    let other = hss::PrivateKey::<2>::generate(
-        crate::Context::default(),
-        &mut rng,
-        &sets,
-    )
-    .unwrap();
+    let other =
+        hss::PrivateKey::<2>::generate(Context::default(), &mut rng, &sets)
+            .unwrap();
     assert!(other.public_key().verify(b"m", &sig).is_err());
 }
 
@@ -540,18 +502,14 @@ fn public_keys_round_trip_through_der_and_pem() {
         (Lms::ShakeM24H5, Lmots::ShakeN24W8),
         (Lms::ShakeM24H5, Lmots::ShakeN24W8),
     ];
-    let key = hss::PrivateKey::<2>::generate(
-        crate::Context::default(),
-        &mut rng,
-        &sets,
-    )
-    .unwrap();
+    let key =
+        hss::PrivateKey::<2>::generate(Context::default(), &mut rng, &sets)
+            .unwrap();
     let public = key.public_key();
     let mut der = [0u8; hss::PUBLIC_KEY_DER_MAX];
     let n = public.der_bytes(&mut der).unwrap();
     assert_eq!(
-        hss::PublicKey::try_from_der(crate::Context::default(), &der[..n])
-            .unwrap(),
+        hss::PublicKey::try_from_der(Context::default(), &der[..n]).unwrap(),
         public
     );
     // RFC 9708: the OID, no parameters, the bytes raw in the BIT
@@ -566,36 +524,29 @@ fn public_keys_round_trip_through_der_and_pem() {
     let m = public.pem_bytes(&mut pem).unwrap();
     assert!(pem[..m].starts_with(b"-----BEGIN PUBLIC KEY-----\n"));
     assert_eq!(
-        hss::PublicKey::try_from_pem(crate::Context::default(), &pem[..m])
-            .unwrap(),
+        hss::PublicKey::try_from_pem(Context::default(), &pem[..m]).unwrap(),
         public
     );
     assert_eq!(
-        PublicKey::try_from_der(crate::Context::default(), &der[..n]).err(),
+        PublicKey::try_from_der(Context::default(), &der[..n]).err(),
         Some(Error::WrongAlgorithm)
     );
     assert_eq!(
-        hss::PrivateKey::<2>::try_from_der(
-            crate::Context::default(),
-            &der[..n]
-        )
-        .err(),
+        hss::PrivateKey::<2>::try_from_der(Context::default(), &der[..n]).err(),
         Some(Error::InvalidEncoding)
     );
-    let ed = crate::sig::ed25519::PrivateKey::generate(
-        crate::Context::default(),
-        &mut rng,
-    )
-    .unwrap();
+    let ed =
+        crate::sig::ed25519::PrivateKey::generate(Context::default(), &mut rng)
+            .unwrap();
     let ed_pem = ed.public_key().pem_bytes();
     assert_eq!(
-        hss::PublicKey::try_from_pem(crate::Context::default(), &ed_pem).err(),
+        hss::PublicKey::try_from_pem(Context::default(), &ed_pem).err(),
         Some(Error::WrongAlgorithm)
     );
 
     // A single tree writes the one-level HSS form and reads it back.
     let tree = PrivateKey::generate(
-        crate::Context::default(),
+        Context::default(),
         &mut rng,
         sets[0].0,
         sets[0].1,
@@ -603,17 +554,16 @@ fn public_keys_round_trip_through_der_and_pem() {
     .unwrap();
     let n = tree.public_key().der_bytes(&mut der).unwrap();
     let single =
-        hss::PublicKey::try_from_der(crate::Context::default(), &der[..n])
-            .unwrap();
+        hss::PublicKey::try_from_der(Context::default(), &der[..n]).unwrap();
     assert_eq!(single.levels(), 1);
     assert_eq!(single.top(), tree.public_key());
     assert_eq!(
-        &PublicKey::try_from_der(crate::Context::default(), &der[..n]).unwrap(),
+        &PublicKey::try_from_der(Context::default(), &der[..n]).unwrap(),
         tree.public_key()
     );
     let m = tree.public_key().pem_bytes(&mut pem).unwrap();
     assert_eq!(
-        &PublicKey::try_from_pem(crate::Context::default(), &pem[..m]).unwrap(),
+        &PublicKey::try_from_pem(Context::default(), &pem[..m]).unwrap(),
         tree.public_key()
     );
     assert_eq!(tree.public_key().as_hss(), single);
@@ -623,12 +573,9 @@ fn public_keys_round_trip_through_der_and_pem() {
 fn key_info_names_hss() {
     let mut rng = rng();
     let sets = [(Lms::Sha256M32H5, Lmots::Sha256N32W8)];
-    let key = hss::PrivateKey::<1>::generate(
-        crate::Context::default(),
-        &mut rng,
-        &sets,
-    )
-    .unwrap();
+    let key =
+        hss::PrivateKey::<1>::generate(Context::default(), &mut rng, &sets)
+            .unwrap();
     let mut der = [0u8; hss::der_max(1)];
     let n = key.der_bytes(&mut der).unwrap();
     let info = crate::KeyInfo::try_from_der(&der[..n]).unwrap();
@@ -645,7 +592,7 @@ fn key_info_names_hss() {
 fn debug_hides_secrets() {
     let mut rng = rng();
     let key = PrivateKey::generate(
-        crate::Context::default(),
+        Context::default(),
         &mut rng,
         Lms::Sha256M32H5,
         Lmots::Sha256N32W8,

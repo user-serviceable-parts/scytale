@@ -35,10 +35,10 @@
 //! below take the bare bytes, for code that already has them.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Key;
 //! use scytale::random::CtrDrbg;
 //! use scytale::sig::ed25519::PrivateKey;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -235,11 +235,11 @@ pub fn verify_ctx(
 /// empty; a longer one is [`Error::InvalidLength`].
 ///
 /// ```
+/// use scytale::Context;
 /// use scytale::hash::Hash;
 /// use scytale::hash::sha2::Sha512;
 /// use scytale::random::CtrDrbg;
 /// use scytale::sig::ed25519;
-/// use scytale::Context;
 ///
 /// # fn main() -> Result<(), scytale::Error> {
 /// let ctx = Context::default();
@@ -1452,6 +1452,7 @@ fn load_words(bytes: &[u8; 32]) -> [u64; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Context;
     use crate::random::{CtrDrbg, MIN_SEED};
 
     /// The base point B: y = 4/5, x the even root for it. Signing
@@ -1645,19 +1646,19 @@ mod tests {
         let head = dom2(CTX, b"use").unwrap();
         for dom in [&[][..], &[&head[..], b"use"][..]] {
             let signature = sign_with(
-                crate::Context::default(),
+                Context::default(),
                 &secret,
-                &public_key(crate::Context::default(), &secret),
+                &public_key(Context::default(), &secret),
                 dom,
                 b"m",
                 Some(&z),
             );
-            let h = Sha512::digest(crate::Context::default(), &secret);
-            let mut mixed = Sha512::new(crate::Context::default());
+            let h = Sha512::digest(Context::default(), &secret);
+            let mut mixed = Sha512::new(Context::default());
             mixed.update(&h[32..]);
             mixed.update(&z);
             let mixed = mixed.finalize();
-            let mut nonce = Sha512::new(crate::Context::default());
+            let mut nonce = Sha512::new(Context::default());
             for part in dom {
                 nonce.update(part);
             }
@@ -1673,11 +1674,9 @@ mod tests {
     /// forms still repeat.
     #[test]
     fn hedged_signatures_verify() {
-        let mut rng = CtrDrbg::from_system(crate::Context::default()).unwrap();
-        let key = PrivateKey::new(
-            crate::Context::default(),
-            &Key::from([0x77u8; KEY_SIZE]),
-        );
+        let mut rng = CtrDrbg::from_system(Context::default()).unwrap();
+        let key =
+            PrivateKey::new(Context::default(), &Key::from([0x77u8; KEY_SIZE]));
         let public = key.public_key();
         let a = key.sign(&mut rng, b"m").unwrap();
         let b = key.sign(&mut rng, b"m").unwrap();
@@ -1689,15 +1688,13 @@ mod tests {
         let ctx = key.sign_ctx(&mut rng, b"use", b"m").unwrap();
         public.verify_ctx(b"use", b"m", &ctx).unwrap();
         assert_ne!(ctx, key.sign_ctx_deterministic(b"use", b"m").unwrap());
-        let prehash = Sha512::digest(crate::Context::default(), b"m");
+        let prehash = Sha512::digest(Context::default(), b"m");
         let ph = key.sign_ph(&mut rng, b"", &prehash).unwrap();
         public.verify_ph(b"", &prehash, &ph).unwrap();
         // The free functions hedge the same way.
         let seed = [0x77u8; KEY_SIZE];
-        let free =
-            sign(crate::Context::default(), &seed, &mut rng, b"m").unwrap();
-        verify(crate::Context::default(), &public.bytes(), b"m", &free)
-            .unwrap();
+        let free = sign(Context::default(), &seed, &mut rng, b"m").unwrap();
+        verify(Context::default(), &public.bytes(), b"m", &free).unwrap();
         assert_ne!(free, a);
     }
 
@@ -1707,18 +1704,18 @@ mod tests {
     #[test]
     fn key_types_match_the_functions() {
         let seed = [0x9du8; KEY_SIZE];
-        let key = PrivateKey::new(crate::Context::default(), &Key::from(seed));
+        let key = PrivateKey::new(Context::default(), &Key::from(seed));
         assert_eq!(key.secret_bytes(), seed);
         assert_eq!(
             key.public_key().bytes(),
-            public_key(crate::Context::default(), &seed)
+            public_key(Context::default(), &seed)
         );
 
         let message = b"the message";
         let signature = key.sign_deterministic(message);
         assert_eq!(
             signature,
-            sign_deterministic(crate::Context::default(), &seed, message)
+            sign_deterministic(Context::default(), &seed, message)
         );
         key.public_key()
             .verify(message, &signature)
@@ -1731,13 +1728,13 @@ mod tests {
         // The version 1 encoding carries the public key, and reading
         // it back checks the pair agrees.
         let der = key.der_bytes();
-        let read = PrivateKey::try_from_der(crate::Context::default(), &der)
-            .expect("der");
+        let read =
+            PrivateKey::try_from_der(Context::default(), &der).expect("der");
         assert_eq!(read.secret_bytes(), seed);
         assert_eq!(read.public_key(), key.public_key());
         let pem = key.pem_bytes();
         assert_eq!(
-            PrivateKey::try_from_pem(crate::Context::default(), &pem)
+            PrivateKey::try_from_pem(Context::default(), &pem)
                 .unwrap()
                 .secret_bytes(),
             seed
@@ -1745,29 +1742,21 @@ mod tests {
 
         // The version 0 form still reads, and is the shorter one.
         assert!(secret_der(&seed).len() < der.len());
-        let short = PrivateKey::try_from_der(
-            crate::Context::default(),
-            &secret_der(&seed),
-        )
-        .expect("v0");
+        let short =
+            PrivateKey::try_from_der(Context::default(), &secret_der(&seed))
+                .expect("v0");
         assert_eq!(short.public_key(), key.public_key());
 
         // A public key round-trips through both encodings.
         let public = *key.public_key();
         assert_eq!(
-            PublicKey::try_from_der(
-                crate::Context::default(),
-                &public.der_bytes()
-            )
-            .unwrap(),
+            PublicKey::try_from_der(Context::default(), &public.der_bytes())
+                .unwrap(),
             public
         );
         assert_eq!(
-            PublicKey::try_from_pem(
-                crate::Context::default(),
-                &public.pem_bytes()
-            )
-            .unwrap(),
+            PublicKey::try_from_pem(Context::default(), &public.pem_bytes())
+                .unwrap(),
             public
         );
     }
@@ -1776,15 +1765,15 @@ mod tests {
     #[test]
     fn generate_draws_the_seed() {
         let mut rng = CtrDrbg::from_seed(&[0x33u8; MIN_SEED]).expect("seed");
-        let one = PrivateKey::generate(crate::Context::default(), &mut rng)
-            .expect("one");
-        let two = PrivateKey::generate(crate::Context::default(), &mut rng)
-            .expect("two");
+        let one =
+            PrivateKey::generate(Context::default(), &mut rng).expect("one");
+        let two =
+            PrivateKey::generate(Context::default(), &mut rng).expect("two");
         assert_ne!(one.secret_bytes(), two.secret_bytes());
         assert_ne!(one.public_key(), two.public_key());
         assert_eq!(
             one.public_key().bytes(),
-            public_key(crate::Context::default(), &one.secret_bytes())
+            public_key(Context::default(), &one.secret_bytes())
         );
     }
 
@@ -1798,15 +1787,15 @@ mod tests {
             let expected_sig = unhex64(sig);
 
             assert_eq!(
-                public_key(crate::Context::default(), &secret),
+                public_key(Context::default(), &secret),
                 expected_public
             );
             let signature =
-                sign_deterministic(crate::Context::default(), &secret, message);
+                sign_deterministic(Context::default(), &secret, message);
             assert_eq!(signature, expected_sig);
             assert_eq!(
                 verify(
-                    crate::Context::default(),
+                    Context::default(),
                     &expected_public,
                     message,
                     &signature
@@ -1879,10 +1868,10 @@ mod tests {
             let message = unhex(msg, &mut message_buf);
             let context = unhex(ctx, &mut context_buf);
             let expected = unhex64(sig);
-            assert_eq!(public_key(crate::Context::default(), &secret), public);
+            assert_eq!(public_key(Context::default(), &secret), public);
             assert_eq!(
                 sign_ctx_deterministic(
-                    crate::Context::default(),
+                    Context::default(),
                     &secret,
                     context,
                     message
@@ -1891,7 +1880,7 @@ mod tests {
             );
             assert_eq!(
                 verify_ctx(
-                    crate::Context::default(),
+                    Context::default(),
                     &public,
                     context,
                     message,
@@ -1920,25 +1909,14 @@ mod tests {
              31f85042463c2a355a2003d062adf5aa\
              a10b8c61e636062aaad11c2a26083406",
         );
-        let prehash = Sha512::digest(crate::Context::default(), b"abc");
-        assert_eq!(public_key(crate::Context::default(), &secret), public);
+        let prehash = Sha512::digest(Context::default(), b"abc");
+        assert_eq!(public_key(Context::default(), &secret), public);
         assert_eq!(
-            sign_ph_deterministic(
-                crate::Context::default(),
-                &secret,
-                b"",
-                &prehash
-            ),
+            sign_ph_deterministic(Context::default(), &secret, b"", &prehash),
             Ok(expected)
         );
         assert_eq!(
-            verify_ph(
-                crate::Context::default(),
-                &public,
-                b"",
-                &prehash,
-                &expected
-            ),
+            verify_ph(Context::default(), &public, b"", &prehash, &expected),
             Ok(())
         );
     }
@@ -1948,62 +1926,35 @@ mod tests {
     #[test]
     fn context_lengths() {
         let secret = [0x5au8; KEY_SIZE];
-        let public = public_key(crate::Context::default(), &secret);
+        let public = public_key(Context::default(), &secret);
         let prehash = [0x17u8; PREHASH_SIZE];
         let long = [0x33u8; CONTEXT_MAX + 1];
         let signature = [0u8; SIGNATURE_SIZE];
 
         assert_eq!(
-            sign_ctx_deterministic(
-                crate::Context::default(),
-                &secret,
-                b"",
-                b"m"
-            ),
+            sign_ctx_deterministic(Context::default(), &secret, b"", b"m"),
             Err(Error::InvalidLength(0))
         );
         assert_eq!(
-            verify_ctx(
-                crate::Context::default(),
-                &public,
-                b"",
-                b"m",
-                &signature
-            ),
+            verify_ctx(Context::default(), &public, b"", b"m", &signature),
             Err(Error::InvalidLength(0))
         );
         assert_eq!(
-            sign_ctx_deterministic(
-                crate::Context::default(),
-                &secret,
-                &long,
-                b"m"
-            ),
+            sign_ctx_deterministic(Context::default(), &secret, &long, b"m"),
             Err(Error::InvalidLength(256))
         );
         assert_eq!(
-            sign_ph_deterministic(
-                crate::Context::default(),
-                &secret,
-                &long,
-                &prehash
-            ),
+            sign_ph_deterministic(Context::default(), &secret, &long, &prehash),
             Err(Error::InvalidLength(256))
         );
         assert_eq!(
-            verify_ph(
-                crate::Context::default(),
-                &public,
-                &long,
-                &prehash,
-                &signature
-            ),
+            verify_ph(Context::default(), &public, &long, &prehash, &signature),
             Err(Error::InvalidLength(256))
         );
 
         for context in [&long[..1], &long[..CONTEXT_MAX]] {
             let signature = sign_ctx_deterministic(
-                crate::Context::default(),
+                Context::default(),
                 &secret,
                 context,
                 b"m",
@@ -2011,7 +1962,7 @@ mod tests {
             .unwrap();
             assert_eq!(
                 verify_ctx(
-                    crate::Context::default(),
+                    Context::default(),
                     &public,
                     context,
                     b"m",
@@ -2022,7 +1973,7 @@ mod tests {
         }
         for context in [&long[..0], &long[..CONTEXT_MAX]] {
             let signature = sign_ph_deterministic(
-                crate::Context::default(),
+                Context::default(),
                 &secret,
                 context,
                 &prehash,
@@ -2030,7 +1981,7 @@ mod tests {
             .unwrap();
             assert_eq!(
                 verify_ph(
-                    crate::Context::default(),
+                    Context::default(),
                     &public,
                     context,
                     &prehash,
@@ -2047,101 +1998,52 @@ mod tests {
     #[test]
     fn variants_and_contexts_are_separate() {
         let secret = [0x61u8; KEY_SIZE];
-        let public = public_key(crate::Context::default(), &secret);
+        let public = public_key(Context::default(), &secret);
         let bytes = [0x2cu8; PREHASH_SIZE];
 
-        let plain =
-            sign_deterministic(crate::Context::default(), &secret, &bytes);
-        let ctx = sign_ctx_deterministic(
-            crate::Context::default(),
-            &secret,
-            b"foo",
-            &bytes,
-        )
-        .unwrap();
-        let ph_empty = sign_ph_deterministic(
-            crate::Context::default(),
-            &secret,
-            b"",
-            &bytes,
-        )
-        .unwrap();
-        let ph_foo = sign_ph_deterministic(
-            crate::Context::default(),
-            &secret,
-            b"foo",
-            &bytes,
-        )
-        .unwrap();
+        let plain = sign_deterministic(Context::default(), &secret, &bytes);
+        let ctx =
+            sign_ctx_deterministic(Context::default(), &secret, b"foo", &bytes)
+                .unwrap();
+        let ph_empty =
+            sign_ph_deterministic(Context::default(), &secret, b"", &bytes)
+                .unwrap();
+        let ph_foo =
+            sign_ph_deterministic(Context::default(), &secret, b"foo", &bytes)
+                .unwrap();
 
         let bad = Err(Error::InvalidSignature);
         assert_eq!(
-            verify_ctx(
-                crate::Context::default(),
-                &public,
-                b"foo",
-                &bytes,
-                &plain
-            ),
+            verify_ctx(Context::default(), &public, b"foo", &bytes, &plain),
             bad
         );
         assert_eq!(
-            verify_ph(crate::Context::default(), &public, b"", &bytes, &plain),
+            verify_ph(Context::default(), &public, b"", &bytes, &plain),
+            bad
+        );
+        assert_eq!(verify(Context::default(), &public, &bytes, &ctx), bad);
+        assert_eq!(
+            verify_ctx(Context::default(), &public, b"bar", &bytes, &ctx),
             bad
         );
         assert_eq!(
-            verify(crate::Context::default(), &public, &bytes, &ctx),
+            verify_ph(Context::default(), &public, b"foo", &bytes, &ctx),
+            bad
+        );
+        assert_eq!(verify(Context::default(), &public, &bytes, &ph_empty), bad);
+        assert_eq!(
+            verify_ph(Context::default(), &public, b"foo", &bytes, &ph_empty),
             bad
         );
         assert_eq!(
-            verify_ctx(
-                crate::Context::default(),
-                &public,
-                b"bar",
-                &bytes,
-                &ctx
-            ),
-            bad
-        );
-        assert_eq!(
-            verify_ph(crate::Context::default(), &public, b"foo", &bytes, &ctx),
-            bad
-        );
-        assert_eq!(
-            verify(crate::Context::default(), &public, &bytes, &ph_empty),
-            bad
-        );
-        assert_eq!(
-            verify_ph(
-                crate::Context::default(),
-                &public,
-                b"foo",
-                &bytes,
-                &ph_empty
-            ),
-            bad
-        );
-        assert_eq!(
-            verify_ctx(
-                crate::Context::default(),
-                &public,
-                b"foo",
-                &bytes,
-                &ph_foo
-            ),
+            verify_ctx(Context::default(), &public, b"foo", &bytes, &ph_foo),
             bad
         );
 
         // Ed25519ph signs the digest it is given, not a hash of it.
-        let hashed = Sha512::digest(crate::Context::default(), &bytes);
+        let hashed = Sha512::digest(Context::default(), &bytes);
         assert_eq!(
-            verify_ph(
-                crate::Context::default(),
-                &public,
-                b"",
-                &hashed,
-                &ph_empty
-            ),
+            verify_ph(Context::default(), &public, b"", &hashed, &ph_empty),
             bad
         );
     }
@@ -2151,13 +2053,13 @@ mod tests {
     #[test]
     fn key_types_match_the_variant_functions() {
         let seed = [0x4eu8; KEY_SIZE];
-        let key = PrivateKey::new(crate::Context::default(), &Key::from(seed));
+        let key = PrivateKey::new(Context::default(), &Key::from(seed));
         let prehash = [0x09u8; PREHASH_SIZE];
 
         let ctx = key.sign_ctx_deterministic(b"use", b"message").unwrap();
         assert_eq!(
             sign_ctx_deterministic(
-                crate::Context::default(),
+                Context::default(),
                 &seed,
                 b"use",
                 b"message"
@@ -2175,12 +2077,7 @@ mod tests {
 
         let ph = key.sign_ph_deterministic(b"use", &prehash).unwrap();
         assert_eq!(
-            sign_ph_deterministic(
-                crate::Context::default(),
-                &seed,
-                b"use",
-                &prehash
-            ),
+            sign_ph_deterministic(Context::default(), &seed, b"use", &prehash),
             Ok(ph)
         );
         assert_eq!(key.public_key().verify_ph(b"use", &prehash, &ph), Ok(()));
@@ -2197,16 +2094,16 @@ mod tests {
         let public = unhex32(pk);
         let message = *b"af82 is not this message";
         let signature =
-            sign_deterministic(crate::Context::default(), &secret, &message);
+            sign_deterministic(Context::default(), &secret, &message);
         assert_eq!(
-            verify(crate::Context::default(), &public, &message, &signature),
+            verify(Context::default(), &public, &message, &signature),
             Ok(())
         );
 
         let mut wrong = message;
         wrong[0] ^= 1;
         assert_eq!(
-            verify(crate::Context::default(), &public, &wrong, &signature),
+            verify(Context::default(), &public, &wrong, &signature),
             Err(Error::InvalidSignature),
         );
 
@@ -2214,7 +2111,7 @@ mod tests {
             let mut bad = signature;
             bad[byte] ^= 1;
             assert_eq!(
-                verify(crate::Context::default(), &public, &message, &bad),
+                verify(Context::default(), &public, &message, &bad),
                 Err(Error::InvalidSignature),
             );
         }
@@ -2230,7 +2127,7 @@ mod tests {
         let mut msg_buf = [0u8; 4];
         let message = unhex(msg, &mut msg_buf);
         let mut signature =
-            sign_deterministic(crate::Context::default(), &secret, message);
+            sign_deterministic(Context::default(), &secret, message);
         let l_bytes = {
             let mut out = [0u8; 32];
             for (chunk, word) in out.chunks_exact_mut(8).zip(L) {
@@ -2247,7 +2144,7 @@ mod tests {
         }
         assert_eq!(carry, 0, "s + l still fits 32 bytes");
         assert_eq!(
-            verify(crate::Context::default(), &public, message, &signature),
+            verify(Context::default(), &public, message, &signature),
             Err(Error::InvalidSignature),
         );
     }
@@ -2260,7 +2157,7 @@ mod tests {
         let mut public = [0xffu8; 32];
         public[31] = 0x7f;
         assert_eq!(
-            verify(crate::Context::default(), &public, b"", &signature),
+            verify(Context::default(), &public, b"", &signature),
             Err(Error::InvalidPublicKey),
         );
     }
@@ -2516,7 +2413,7 @@ mod tests {
         let public = b"-----BEGIN PUBLIC KEY-----\n\
             MCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=\n\
             -----END PUBLIC KEY-----\n";
-        let secret = secret_from_pem(crate::Context::default(), v0).unwrap();
+        let secret = secret_from_pem(Context::default(), v0).unwrap();
         assert_eq!(
             secret,
             unhex32(
@@ -2524,9 +2421,9 @@ mod tests {
                  3afe7c28cbf1d4fbe097a88f44755842"
             )
         );
-        assert_eq!(secret_from_pem(crate::Context::default(), v1), Ok(secret));
+        assert_eq!(secret_from_pem(Context::default(), v1), Ok(secret));
         let pk = public_key_from_pem(public).unwrap();
-        assert_eq!(public_key(crate::Context::default(), &secret), pk);
+        assert_eq!(public_key(Context::default(), &secret), pk);
         assert_eq!(secret_pem(&secret)[..], v0[..]);
         assert_eq!(public_key_pem(&pk)[..], public[..]);
 
@@ -2536,7 +2433,7 @@ mod tests {
         let i = wrong.iter().rposition(|&c| c == b'=').unwrap() - 1;
         wrong[i] = if wrong[i] == b'E' { b'F' } else { b'E' };
         assert_eq!(
-            secret_from_pem(crate::Context::default(), &wrong),
+            secret_from_pem(Context::default(), &wrong),
             Err(Error::InvalidEncoding)
         );
     }
@@ -2552,7 +2449,7 @@ mod tests {
         let secret = [0x11u8; 32];
         let v0 = secret_der(&secret);
         assert_eq!(
-            secret_from_der_with_form(crate::Context::default(), &v0),
+            secret_from_der_with_form(Context::default(), &v0),
             Ok((
                 secret,
                 Pkcs8Form {
@@ -2562,10 +2459,9 @@ mod tests {
             ))
         );
         let pair =
-            PrivateKey::new(crate::Context::default(), &Key::from(secret))
-                .der_bytes();
+            PrivateKey::new(Context::default(), &Key::from(secret)).der_bytes();
         assert_eq!(
-            secret_from_der_with_form(crate::Context::default(), &pair)
+            secret_from_der_with_form(Context::default(), &pair)
                 .map(|(_, f)| f),
             Ok(Pkcs8Form {
                 v1: true,
@@ -2576,8 +2472,7 @@ mod tests {
         let mut v1 = v0;
         v1[4] = 1;
         assert_eq!(
-            secret_from_der_with_form(crate::Context::default(), &v1)
-                .map(|(_, f)| f),
+            secret_from_der_with_form(Context::default(), &v1).map(|(_, f)| f),
             Ok(Pkcs8Form {
                 v1: true,
                 public_key: false
@@ -2585,7 +2480,7 @@ mod tests {
         );
         v1[4] = 2;
         assert_eq!(
-            secret_from_der(crate::Context::default(), &v1),
+            secret_from_der(Context::default(), &v1),
             Err(Error::UnsupportedVersion)
         );
 
@@ -2596,7 +2491,7 @@ mod tests {
         ]);
         with_null[18..].copy_from_slice(&secret);
         assert_eq!(
-            secret_from_der(crate::Context::default(), &with_null),
+            secret_from_der(Context::default(), &with_null),
             Err(Error::WrongAlgorithm)
         );
     }
@@ -2618,14 +2513,13 @@ mod tests {
             &mut public_der_buf,
         );
         let secret =
-            secret_from_der(crate::Context::default(), secret_der_bytes)
-                .unwrap();
+            secret_from_der(Context::default(), secret_der_bytes).unwrap();
         let public = public_key_from_der(public_der_bytes).unwrap();
-        assert_eq!(public_key(crate::Context::default(), &secret), public);
+        assert_eq!(public_key(Context::default(), &secret), public);
         assert_eq!(secret_der(&secret)[..], secret_der_bytes[..]);
         assert_eq!(public_key_der(&public)[..], public_der_bytes[..]);
         assert_eq!(
-            secret_from_pem(crate::Context::default(), &secret_pem(&secret)),
+            secret_from_pem(Context::default(), &secret_pem(&secret)),
             Ok(secret)
         );
         assert_eq!(public_key_from_pem(&public_key_pem(&public)), Ok(public));
@@ -2634,7 +2528,7 @@ mod tests {
         let mut x = *secret_der_bytes.first_chunk::<DER_SIZE>().unwrap();
         x[11] = 0x6e;
         assert_eq!(
-            secret_from_der(crate::Context::default(), &x),
+            secret_from_der(Context::default(), &x),
             Err(Error::WrongAlgorithm)
         );
         let mut x = *public_der_bytes

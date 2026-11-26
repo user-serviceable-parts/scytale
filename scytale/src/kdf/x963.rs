@@ -7,9 +7,9 @@
 //! for a new design; this is here for the protocols that name it.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::kdf::x963;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -64,15 +64,10 @@ mod tests {
     #[test]
     fn derive_is_the_definition() {
         let mut out = [0u8; 40];
-        derive::<Sha256>(
-            crate::Context::default(),
-            b"z",
-            &[b"sha", b"red"],
-            &mut out,
-        )
-        .expect("kdf");
+        derive::<Sha256>(Context::default(), b"z", &[b"sha", b"red"], &mut out)
+            .expect("kdf");
         for (i, block) in out.chunks(32).enumerate() {
-            let mut h = Sha256::new(crate::Context::default());
+            let mut h = Sha256::new(Context::default());
             h.update(b"z");
             h.update(&(i as u32 + 1).to_be_bytes());
             h.update(b"shared");
@@ -85,15 +80,10 @@ mod tests {
     fn it_is_not_one_step() {
         let mut ours = [0u8; 32];
         let mut theirs = [0u8; 32];
-        derive::<Sha256>(
-            crate::Context::default(),
-            b"z",
-            &[b"info"],
-            &mut ours,
-        )
-        .expect("kdf");
+        derive::<Sha256>(Context::default(), b"z", &[b"info"], &mut ours)
+            .expect("kdf");
         super::super::one_step::hash::<Sha256>(
-            crate::Context::default(),
+            Context::default(),
             b"z",
             &[b"info"],
             &mut theirs,

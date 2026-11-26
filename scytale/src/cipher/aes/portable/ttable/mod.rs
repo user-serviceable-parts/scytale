@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn trait_construction() {
         let a = <Aes<24> as BlockCipher>::new(
-            crate::Context::default(),
+            Context::default(),
             &Key::from([1; 24]),
         );
         assert_eq!(a.rounds(), 12);

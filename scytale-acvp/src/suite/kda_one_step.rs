@@ -9,7 +9,7 @@
 //! answer whether it is what the inputs derive.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{
     Error, field, hex, hex_value, int, opt_hex, text, unknown_test_type,
 };
@@ -56,12 +56,12 @@ struct Inputs<'a> {
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     match (text(doc, "algorithm")?, text(doc, "mode")?) {
-        ("KDA", "OneStep") => answer_one_step(doc, true, builder),
-        ("KDA", "OneStepNoCounter") => answer_one_step(doc, false, builder),
-        ("kdf-components", "ansix9.63") => answer_x963(doc, builder),
+        ("KDA", "OneStep") => answer_one_step(doc, true, profile),
+        ("KDA", "OneStepNoCounter") => answer_one_step(doc, false, profile),
+        ("kdf-components", "ansix9.63") => answer_x963(doc, profile),
         (alg, mode) => Err(Error::new(format!("{alg} {mode}"))),
     }
 }
@@ -69,7 +69,7 @@ pub fn answer(
 fn answer_one_step(
     doc: &Value,
     counter: bool,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         let validate = match text(group, "testType")? {
@@ -86,7 +86,7 @@ fn answer_one_step(
         }
         let aux = text(cfg, "auxFunction")?;
         answer_tests(group, |t| {
-            let dkm = one_step_case(t, aux, counter, builder)?;
+            let dkm = one_step_case(t, aux, counter, profile)?;
             Ok(if validate {
                 json!({ "testPassed": dkm == hex(t, "dkm")? })
             } else {
@@ -101,7 +101,7 @@ fn one_step_case(
     t: &Value,
     aux: &str,
     counter: bool,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Vec<u8>, Error> {
     let param = field(t, "kdfParameter")?;
     let bits = u32::try_from(int(param, "l")?)
@@ -132,13 +132,13 @@ fn one_step_case(
     };
     // The derivation starts its own hashes or KMAC; the HMAC one
     // keys its own HMAC first.
-    builder.try_build(|ctx| match aux.strip_prefix("HMAC-") {
-        Some(alg) => with_hash!(alg, hmac(ctx, inputs)),
+    match aux.strip_prefix("HMAC-") {
+        Some(alg) => with_hash!(alg, hmac(profile.ctx(), inputs)),
         None => match aux {
-            "KMAC-128" | "KMAC-256" => kmac(ctx, aux, inputs),
-            alg => with_hash!(alg, hash(ctx, inputs)),
+            "KMAC-128" | "KMAC-256" => kmac(profile.ctx(), aux, inputs),
+            alg => with_hash!(alg, hash(profile.ctx(), inputs)),
         },
-    })?;
+    }?;
     Ok(out)
 }
 
@@ -181,7 +181,7 @@ fn kmac(ctx: Context, aux: &str, i: Inputs<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-fn answer_x963(doc: &Value, builder: &Builder) -> Result<Value, Error> {
+fn answer_x963(doc: &Value, profile: &Profile) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         if text(group, "testType")? != "AFT" {
             return Err(unknown_test_type(group));
@@ -194,9 +194,7 @@ fn answer_x963(doc: &Value, builder: &Builder) -> Result<Value, Error> {
         answer_tests(group, |t| {
             let mut out = vec![0u8; bits as usize / 8];
             // The derivation starts its own hashes.
-            builder.try_build(|ctx| {
-                with_hash!(alg, x963_case(ctx, t, &mut out))
-            })?;
+            { with_hash!(alg, x963_case(profile.ctx(), t, &mut out)) }?;
             Ok(json!({ "keyData": hex_value(&out) }))
         })
     })

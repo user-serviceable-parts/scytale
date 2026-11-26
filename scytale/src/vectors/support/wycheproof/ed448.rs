@@ -6,6 +6,7 @@
 //! Each group's key also comes in DER and PEM, which is the external
 //! check that the RFC 8410 public key encoding reads and writes.
 
+use crate::Context;
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
@@ -51,14 +52,9 @@ pub fn run() {
                 continue;
             };
             // Wycheproof signs under the empty context.
-            let accepted = ed448::verify(
-                crate::Context::default(),
-                &public,
-                b"",
-                &message,
-                &sig,
-            )
-            .is_ok();
+            let accepted =
+                ed448::verify(Context::default(), &public, b"", &message, &sig)
+                    .is_ok();
             assert_eq!(accepted, expect_valid, "{tag}");
             if expect_valid {
                 valid += 1;

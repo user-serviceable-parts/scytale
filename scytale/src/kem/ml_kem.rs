@@ -26,9 +26,9 @@
 //! written here, the seed being the form to store.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::kem::ml_kem::ml_kem_768::{PrivateKey, PublicKey};
 //! use scytale::random::CtrDrbg;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -1478,7 +1478,7 @@ pub(crate) mod tests {
     #[test]
     fn matrix_sampling_matches_the_standard() {
         fn standard(rho: &[u8; 32], row: u8, col: u8) -> [u16; N] {
-            let mut xof = Shake128::new(crate::Context::default());
+            let mut xof = Shake128::new(Context::default());
             xof.update(rho);
             xof.update(&[col, row]);
             let mut reader = xof.finalize_xof();
@@ -1504,8 +1504,7 @@ pub(crate) mod tests {
             let rho = [seed; 32];
             for (row, col) in [(0, 0), (1, 2), (3, 3)] {
                 assert_eq!(
-                    Poly::sample_ntt(crate::Context::default(), &rho, row, col)
-                        .0,
+                    Poly::sample_ntt(Context::default(), &rho, row, col).0,
                     standard(&rho, row, col),
                     "{seed} {row} {col}"
                 );
@@ -1522,11 +1521,11 @@ pub(crate) mod tests {
         fn check<const K: usize>() {
             for seed in [0u8, 1, 0x5a, 0xff] {
                 let rho = [seed; 32];
-                let a = sample_matrix::<K>(crate::Context::default(), &rho);
+                let a = sample_matrix::<K>(Context::default(), &rho);
                 for (i, row) in a.iter().enumerate() {
                     for (j, entry) in row.iter().enumerate() {
                         let alone = Poly::sample_ntt(
-                            crate::Context::default(),
+                            Context::default(),
                             &rho,
                             i as u8,
                             j as u8,
@@ -1565,13 +1564,12 @@ pub(crate) mod tests {
             for (poly, (row, col)) in polys.iter().zip(at) {
                 assert_eq!(
                     poly.0,
-                    Poly::sample_ntt(crate::Context::default(), &rho, row, col)
-                        .0
+                    Poly::sample_ntt(Context::default(), &rho, row, col).0
                 );
             }
             // How many blocks each entry needs alone.
             let blocks = at.map(|(row, col)| {
-                let mut xof = Shake128::new(crate::Context::default());
+                let mut xof = Shake128::new(Context::default());
                 xof.update(&rho);
                 xof.update(&[col, row]);
                 let mut reader = xof.finalize_xof();
@@ -1645,14 +1643,12 @@ pub(crate) mod tests {
             ($module:ident) => {{
                 use $module::*;
                 let seed = [0x3cu8; SEED_SIZE];
-                let mut rng = crate::random::CtrDrbg::from_system(
-                    crate::Context::default(),
-                )
-                .unwrap();
+                let mut rng =
+                    crate::random::CtrDrbg::from_system(Context::default())
+                        .unwrap();
                 let key = { PrivateKey::from_seed(under.ctx(), &seed) };
-                let reference = {
-                    PrivateKey::from_seed(crate::Context::portable(), &seed)
-                };
+                let reference =
+                    { PrivateKey::from_seed(Context::portable(), &seed) };
                 assert_eq!(key.key_bytes(), reference.key_bytes());
                 let (c, k) =
                     reference.public_key().encapsulate(&mut rng).unwrap();
@@ -1682,25 +1678,21 @@ pub(crate) mod tests {
         macro_rules! check {
             ($module:ident) => {{
                 use $module::*;
-                let mut rng = crate::random::CtrDrbg::from_system(
-                    crate::Context::default(),
-                )
-                .unwrap();
-                let key =
-                    PrivateKey::generate(crate::Context::default(), &mut rng)
+                let mut rng =
+                    crate::random::CtrDrbg::from_system(Context::default())
                         .unwrap();
+                let key =
+                    PrivateKey::generate(Context::default(), &mut rng).unwrap();
                 let (c, k) = key.public_key().encapsulate(&mut rng).unwrap();
                 assert_eq!(key.decapsulate(&c), k);
                 let again = PrivateKey::from_seed(
-                    crate::Context::default(),
+                    Context::default(),
                     &key.seed_bytes().unwrap(),
                 );
                 assert_eq!(again.key_bytes(), key.key_bytes());
-                let expanded = PrivateKey::try_new(
-                    crate::Context::default(),
-                    &key.key_bytes(),
-                )
-                .unwrap();
+                let expanded =
+                    PrivateKey::try_new(Context::default(), &key.key_bytes())
+                        .unwrap();
                 assert_eq!(expanded.decapsulate(&c), k);
                 assert_eq!(
                     expanded.seed_bytes(),
@@ -1712,7 +1704,7 @@ pub(crate) mod tests {
                 let rejected = key.decapsulate(&bad);
                 assert_ne!(rejected, k);
                 let z = &key.key_bytes()[KEY_SIZE - 32..];
-                assert_eq!(rejected, j(crate::Context::default(), z, &bad));
+                assert_eq!(rejected, j(Context::default(), z, &bad));
 
                 // A public key with a coefficient at the modulus is
                 // refused; a private key with a wrong hash is refused.
@@ -1720,13 +1712,13 @@ pub(crate) mod tests {
                 ek[0] = 0x01;
                 ek[1] = 0x0d;
                 assert_eq!(
-                    PublicKey::try_new(crate::Context::default(), &ek).err(),
+                    PublicKey::try_new(Context::default(), &ek).err(),
                     Some(Error::InvalidPublicKey)
                 );
                 let mut dk = key.key_bytes();
                 dk[KEY_SIZE - 40] ^= 1;
                 assert_eq!(
-                    PrivateKey::try_new(crate::Context::default(), &dk).err(),
+                    PrivateKey::try_new(Context::default(), &dk).err(),
                     Some(Error::InvalidPrivateKey)
                 );
 
@@ -1734,46 +1726,36 @@ pub(crate) mod tests {
                 let mut out = [0u8; 6000];
                 let n = key.der_bytes(&mut out).unwrap();
                 assert_eq!(n, 2 + 3 + 13 + 2 + 2 + 64);
-                let back = PrivateKey::try_from_der(
-                    crate::Context::default(),
-                    &out[..n],
-                )
-                .unwrap();
+                let back =
+                    PrivateKey::try_from_der(Context::default(), &out[..n])
+                        .unwrap();
                 assert_eq!(back.seed_bytes(), key.seed_bytes());
                 let n = expanded.der_bytes(&mut out).unwrap();
                 assert_eq!(n, DER_SIZE);
-                let back = PrivateKey::try_from_der(
-                    crate::Context::default(),
-                    &out[..n],
-                )
-                .unwrap();
+                let back =
+                    PrivateKey::try_from_der(Context::default(), &out[..n])
+                        .unwrap();
                 assert_eq!(back.key_bytes(), key.key_bytes());
                 let n = key.pem_bytes(&mut out).unwrap();
                 assert!(n < PEM_SIZE);
                 assert!(out.starts_with(b"-----BEGIN PRIVATE KEY-----\n"));
-                let back = PrivateKey::try_from_pem(
-                    crate::Context::default(),
-                    &out[..n],
-                )
-                .unwrap();
+                let back =
+                    PrivateKey::try_from_pem(Context::default(), &out[..n])
+                        .unwrap();
                 assert_eq!(back.key_bytes(), key.key_bytes());
                 let n = expanded.pem_bytes(&mut out).unwrap();
                 assert_eq!(n, PEM_SIZE);
                 let n = key.public_key().der_bytes(&mut out).unwrap();
                 assert_eq!(n, PUBLIC_KEY_DER_SIZE);
-                let back = PublicKey::try_from_der(
-                    crate::Context::default(),
-                    &out[..n],
-                )
-                .unwrap();
+                let back =
+                    PublicKey::try_from_der(Context::default(), &out[..n])
+                        .unwrap();
                 assert_eq!(back.bytes(), key.public_key().bytes());
                 let n = key.public_key().pem_bytes(&mut out).unwrap();
                 assert_eq!(n, PUBLIC_KEY_PEM_SIZE);
-                let back = PublicKey::try_from_pem(
-                    crate::Context::default(),
-                    &out[..n],
-                )
-                .unwrap();
+                let back =
+                    PublicKey::try_from_pem(Context::default(), &out[..n])
+                        .unwrap();
                 assert_eq!(back.bytes(), key.public_key().bytes());
             }};
         }
@@ -1786,30 +1768,21 @@ pub(crate) mod tests {
     #[test]
     fn sets_do_not_mix() {
         let mut rng =
-            crate::random::CtrDrbg::from_system(crate::Context::default())
+            crate::random::CtrDrbg::from_system(Context::default()).unwrap();
+        let key =
+            ml_kem_512::PrivateKey::generate(Context::default(), &mut rng)
                 .unwrap();
-        let key = ml_kem_512::PrivateKey::generate(
-            crate::Context::default(),
-            &mut rng,
-        )
-        .unwrap();
         let mut out = [0u8; 2048];
         let n = key.der_bytes(&mut out).unwrap();
         assert_eq!(
-            ml_kem_768::PrivateKey::try_from_der(
-                crate::Context::default(),
-                &out[..n]
-            )
-            .err(),
+            ml_kem_768::PrivateKey::try_from_der(Context::default(), &out[..n])
+                .err(),
             Some(Error::WrongAlgorithm)
         );
         let n = key.public_key().der_bytes(&mut out).unwrap();
         assert_eq!(
-            ml_kem_768::PublicKey::try_from_der(
-                crate::Context::default(),
-                &out[..n]
-            )
-            .err(),
+            ml_kem_768::PublicKey::try_from_der(Context::default(), &out[..n])
+                .err(),
             Some(Error::WrongAlgorithm)
         );
     }
@@ -1821,7 +1794,7 @@ pub(crate) mod tests {
     fn both_forms() {
         use ml_kem_768::*;
         let seed = [7u8; 64];
-        let key = PrivateKey::from_seed(crate::Context::default(), &seed);
+        let key = PrivateKey::from_seed(Context::default(), &seed);
         let expanded = key.key_bytes();
         let mut out = [0u8; 4096];
         let oid = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x04, 0x02];
@@ -1833,7 +1806,7 @@ pub(crate) mod tests {
         })
         .unwrap();
         assert_eq!(
-            PrivateKey::try_from_der(crate::Context::default(), &out[..n])
+            PrivateKey::try_from_der(Context::default(), &out[..n])
                 .unwrap()
                 .key_bytes(),
             expanded
@@ -1841,8 +1814,7 @@ pub(crate) mod tests {
         let pos = out[..n].windows(64).position(|w| w == seed).unwrap();
         out[pos] ^= 1;
         assert_eq!(
-            PrivateKey::try_from_der(crate::Context::default(), &out[..n])
-                .err(),
+            PrivateKey::try_from_der(Context::default(), &out[..n]).err(),
             Some(Error::InvalidEncoding)
         );
     }
@@ -1933,16 +1905,12 @@ pub(crate) mod tests {
         -----END PRIVATE KEY-----\n";
         use ml_kem_512::PrivateKey;
         let seed =
-            PrivateKey::try_from_pem(crate::Context::default(), RFC9935_SEED)
+            PrivateKey::try_from_pem(Context::default(), RFC9935_SEED).unwrap();
+        let expanded =
+            PrivateKey::try_from_pem(Context::default(), RFC9935_EXPANDED)
                 .unwrap();
-        let expanded = PrivateKey::try_from_pem(
-            crate::Context::default(),
-            RFC9935_EXPANDED,
-        )
-        .unwrap();
         let both =
-            PrivateKey::try_from_pem(crate::Context::default(), RFC9935_BOTH)
-                .unwrap();
+            PrivateKey::try_from_pem(Context::default(), RFC9935_BOTH).unwrap();
         assert_eq!(seed.key_bytes(), expanded.key_bytes());
         assert_eq!(seed.key_bytes(), both.key_bytes());
         let mut want = [0u8; 64];

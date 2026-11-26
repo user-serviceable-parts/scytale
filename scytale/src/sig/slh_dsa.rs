@@ -28,9 +28,9 @@
 //! offered.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::random::CtrDrbg;
 //! use scytale::sig::slh_dsa::shake_128f::{PrivateKey, PublicKey};
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -1594,13 +1594,11 @@ mod tests {
         macro_rules! check {
             ($module:ident) => {{
                 use $module::*;
-                let mut rng = crate::random::CtrDrbg::from_system(
-                    crate::Context::default(),
-                )
-                .unwrap();
-                let key =
-                    PrivateKey::generate(crate::Context::default(), &mut rng)
+                let mut rng =
+                    crate::random::CtrDrbg::from_system(Context::default())
                         .unwrap();
+                let key =
+                    PrivateKey::generate(Context::default(), &mut rng).unwrap();
                 let public = key.public_key();
                 let sig = key.sign(&mut rng, b"ctx", b"message").unwrap();
                 public.verify(b"ctx", b"message", &sig).unwrap();
@@ -1616,44 +1614,34 @@ mod tests {
                     key.sign(&mut rng, &[0u8; 256], b"m").err(),
                     Some(Error::InvalidLength(256))
                 );
-                let again = PrivateKey::new(
-                    crate::Context::default(),
-                    &key.key_bytes(),
-                );
+                let again =
+                    PrivateKey::new(Context::default(), &key.key_bytes());
                 assert_eq!(again.public_key().bytes(), public.bytes());
 
                 let mut out = [0u8; 1024];
                 let n = key.der_bytes(&mut out).unwrap();
                 assert_eq!(n, DER_SIZE);
-                let back = PrivateKey::try_from_der(
-                    crate::Context::default(),
-                    &out[..n],
-                )
-                .unwrap();
+                let back =
+                    PrivateKey::try_from_der(Context::default(), &out[..n])
+                        .unwrap();
                 assert_eq!(back.key_bytes(), key.key_bytes());
                 let n = key.pem_bytes(&mut out).unwrap();
                 assert_eq!(n, PEM_SIZE);
-                let back = PrivateKey::try_from_pem(
-                    crate::Context::default(),
-                    &out[..n],
-                )
-                .unwrap();
+                let back =
+                    PrivateKey::try_from_pem(Context::default(), &out[..n])
+                        .unwrap();
                 assert_eq!(back.key_bytes(), key.key_bytes());
                 let n = public.der_bytes(&mut out).unwrap();
                 assert_eq!(n, PUBLIC_KEY_DER_SIZE);
-                let back = PublicKey::try_from_der(
-                    crate::Context::default(),
-                    &out[..n],
-                )
-                .unwrap();
+                let back =
+                    PublicKey::try_from_der(Context::default(), &out[..n])
+                        .unwrap();
                 assert_eq!(back.bytes(), public.bytes());
                 let n = public.pem_bytes(&mut out).unwrap();
                 assert_eq!(n, PUBLIC_KEY_PEM_SIZE);
-                let back = PublicKey::try_from_pem(
-                    crate::Context::default(),
-                    &out[..n],
-                )
-                .unwrap();
+                let back =
+                    PublicKey::try_from_pem(Context::default(), &out[..n])
+                        .unwrap();
                 assert_eq!(back.bytes(), public.bytes());
             }};
         }
@@ -1664,30 +1652,21 @@ mod tests {
     #[test]
     fn sets_do_not_mix() {
         let mut rng =
-            crate::random::CtrDrbg::from_system(crate::Context::default())
+            crate::random::CtrDrbg::from_system(Context::default()).unwrap();
+        let key =
+            shake_128f::PrivateKey::generate(Context::default(), &mut rng)
                 .unwrap();
-        let key = shake_128f::PrivateKey::generate(
-            crate::Context::default(),
-            &mut rng,
-        )
-        .unwrap();
         let mut out = [0u8; 1024];
         let n = key.der_bytes(&mut out).unwrap();
         assert_eq!(
-            sha2_128f::PrivateKey::try_from_der(
-                crate::Context::default(),
-                &out[..n]
-            )
-            .err(),
+            sha2_128f::PrivateKey::try_from_der(Context::default(), &out[..n])
+                .err(),
             Some(Error::WrongAlgorithm)
         );
         let n = key.public_key().der_bytes(&mut out).unwrap();
         assert_eq!(
-            shake_128s::PublicKey::try_from_der(
-                crate::Context::default(),
-                &out[..n]
-            )
-            .err(),
+            shake_128s::PublicKey::try_from_der(Context::default(), &out[..n])
+                .err(),
             Some(Error::WrongAlgorithm)
         );
     }

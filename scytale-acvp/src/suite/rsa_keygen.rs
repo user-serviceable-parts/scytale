@@ -16,7 +16,7 @@
 //! by the live session, where the server judges the keys.
 
 use super::{answer_groups, answer_tests, skip};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{
     Error, Rng, field, hex, hex_value, int, opt_int, opt_text, text,
     unknown_test_type,
@@ -33,7 +33,7 @@ const FIXED_EXPONENT: &str = "010001";
 pub fn answer(
     doc: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     if text(doc, "mode")? != "keyGen" {
         return Err(Error::new(format!("mode {}", doc["mode"])));
@@ -48,9 +48,9 @@ pub fn answer(
         let bits = int(group, "modulo")? as usize;
         let crt = opt_text(group, "keyFormat") == Some("crt");
         answer_tests(group, |_| {
-            let key = builder.try_build(|ctx| {
-                PrivateKey::generate(ctx, &mut Rng(&mut *rng), bits)
-            })?;
+            let key = {
+                PrivateKey::generate(profile.ctx(), &mut Rng(&mut *rng), bits)
+            }?;
             key_fields(&key, crt)
         })
     })
@@ -206,8 +206,8 @@ mod tests {
         });
         let answered = answer(
             &doc,
-            &mut fixed_rng(&Builder::default()).unwrap(),
-            &Builder::default(),
+            &mut fixed_rng(&Profile::default()).unwrap(),
+            &Profile::default(),
         )
         .unwrap();
         let groups = answered["testGroups"].as_array().unwrap();
@@ -234,8 +234,8 @@ mod tests {
         });
         let good = answer(
             &doc,
-            &mut fixed_rng(&Builder::default()).unwrap(),
-            &Builder::default(),
+            &mut fixed_rng(&Profile::default()).unwrap(),
+            &Profile::default(),
         )
         .unwrap();
         let mut theirs = with_prompt(&doc, &good).unwrap();
@@ -259,8 +259,8 @@ mod tests {
         });
         let good = answer(
             &doc,
-            &mut fixed_rng(&Builder::default()).unwrap(),
-            &Builder::default(),
+            &mut fixed_rng(&Profile::default()).unwrap(),
+            &Profile::default(),
         )
         .unwrap();
         let mut bad = good.clone();

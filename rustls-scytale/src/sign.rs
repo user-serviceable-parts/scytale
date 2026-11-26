@@ -576,7 +576,11 @@ mod tests {
         let n = small.der_bytes(&mut der).unwrap();
         assert!(Keys.load_private_key(pkcs8(&der[..n])).is_err());
         // An X25519 key, which signs nothing.
-        let x = scytale::kex::x25519::PrivateKey::generate(&mut rng).unwrap();
+        let x = scytale::kex::x25519::PrivateKey::generate(
+            scytale::Context::default(),
+            &mut rng,
+        )
+        .unwrap();
         assert!(Keys.load_private_key(pkcs8(&x.der_bytes())).is_err());
         // Bytes that are no key at all, in each form.
         assert!(Keys.load_private_key(pkcs8(&[0x30, 0x00])).is_err());

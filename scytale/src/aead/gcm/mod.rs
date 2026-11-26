@@ -55,10 +55,10 @@
 //! # Example
 //!
 //! ```
-//! use scytale::Key;
-//! use scytale::cipher::aes::Aes128;
-//! use scytale::aead::{Aead, Gcm};
 //! use scytale::Context;
+//! use scytale::Key;
+//! use scytale::aead::{Aead, Gcm};
+//! use scytale::cipher::aes::Aes128;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -1094,7 +1094,7 @@ pub(crate) mod tests {
     }
 
     fn gcm() -> Gcm<Aes128> {
-        Gcm::new(crate::Context::default(), &Key::from([0x42u8; 16]))
+        Gcm::new(Context::default(), &Key::from([0x42u8; 16]))
     }
 
     /// Anything altered must be rejected, and the buffer wiped rather
@@ -1271,7 +1271,7 @@ pub(crate) mod tests {
         const MAX: usize = 9 * 16 * BLOCK + 3;
         let key = [0x9du8; 16];
         let generic =
-            { Gcm::<Aes128>::new(crate::Context::portable(), &Key::from(key)) };
+            { Gcm::<Aes128>::new(Context::portable(), &Key::from(key)) };
         let all = [{ Gcm::<Aes128>::new(under.ctx(), &Key::from(key)) }];
         let nonce = [0x33u8; 12];
         let aad = [0x77u8; 21];
@@ -1355,7 +1355,7 @@ pub(crate) mod tests {
         let key = [0x11u8; 16];
         let native = { Gcm::<Aes128>::new(under.ctx(), &Key::from(key)) };
         let generic =
-            { Gcm::<Aes128>::new(crate::Context::portable(), &Key::from(key)) };
+            { Gcm::<Aes128>::new(Context::portable(), &Key::from(key)) };
         for len in [1, 8, 15, 16, 17, 128, 129] {
             let nonce = std::vec![0xa5u8; len];
             let mut a = [7u8; 40];
@@ -1374,19 +1374,19 @@ pub(crate) mod tests {
     fn the_native_engine_is_chosen_where_there_is_one() {
         #[cfg(target_arch = "x86_64")]
         {
-            if features::select(crate::Context::default(), KERNELS)
+            if features::select(Context::default(), KERNELS)
                 == Some(Kernel::Portable)
             {
                 // Nothing to check on a processor without them.
                 return;
             }
             let key = Key::from([0u8; 16]);
-            let gcm = Gcm::<Aes128>::new(crate::Context::default(), &key);
+            let gcm = Gcm::<Aes128>::new(Context::default(), &key);
             assert!(matches!(gcm.engine, Engine::Native(_)));
             // And the portable cipher, whose schedule those
             // instructions cannot read, does not.
             let other = Gcm::<portable::bitsliced::Aes<16>>::new(
-                crate::Context::default(),
+                Context::default(),
                 &key,
             );
             assert!(matches!(other.engine, Engine::Generic(_)));

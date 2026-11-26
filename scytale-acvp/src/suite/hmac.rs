@@ -3,7 +3,7 @@
 //! name chooses the hash.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{Error, hex, hex_value, int, text, unknown_test_type};
 use scytale::BlockType;
 use scytale::Random;
@@ -20,20 +20,20 @@ use serde_json::{Value, json};
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     match text(doc, "algorithm")? {
-        "HMAC-SHA-1" => answer_as::<Sha1>(doc, builder),
-        "HMAC-SHA2-224" => answer_as::<Sha224>(doc, builder),
-        "HMAC-SHA2-256" => answer_as::<Sha256>(doc, builder),
-        "HMAC-SHA2-384" => answer_as::<Sha384>(doc, builder),
-        "HMAC-SHA2-512" => answer_as::<Sha512>(doc, builder),
-        "HMAC-SHA2-512/224" => answer_as::<Sha512_224>(doc, builder),
-        "HMAC-SHA2-512/256" => answer_as::<Sha512_256>(doc, builder),
-        "HMAC-SHA3-224" => answer_as::<Sha3_224>(doc, builder),
-        "HMAC-SHA3-256" => answer_as::<Sha3_256>(doc, builder),
-        "HMAC-SHA3-384" => answer_as::<Sha3_384>(doc, builder),
-        "HMAC-SHA3-512" => answer_as::<Sha3_512>(doc, builder),
+        "HMAC-SHA-1" => answer_as::<Sha1>(doc, profile),
+        "HMAC-SHA2-224" => answer_as::<Sha224>(doc, profile),
+        "HMAC-SHA2-256" => answer_as::<Sha256>(doc, profile),
+        "HMAC-SHA2-384" => answer_as::<Sha384>(doc, profile),
+        "HMAC-SHA2-512" => answer_as::<Sha512>(doc, profile),
+        "HMAC-SHA2-512/224" => answer_as::<Sha512_224>(doc, profile),
+        "HMAC-SHA2-512/256" => answer_as::<Sha512_256>(doc, profile),
+        "HMAC-SHA3-224" => answer_as::<Sha3_224>(doc, profile),
+        "HMAC-SHA3-256" => answer_as::<Sha3_256>(doc, profile),
+        "HMAC-SHA3-384" => answer_as::<Sha3_384>(doc, profile),
+        "HMAC-SHA3-512" => answer_as::<Sha3_512>(doc, profile),
         other => Err(Error::new(format!("algorithm {other}"))),
     }
 }
@@ -43,7 +43,7 @@ pub fn answer(
 /// constructor keys the MAC.
 fn answer_as<H: Hash + Clone + BlockType>(
     doc: &Value,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         if text(group, "testType")? != "AFT" {
@@ -52,7 +52,7 @@ fn answer_as<H: Hash + Clone + BlockType>(
         let mac_bytes = int(group, "macLen")? as usize / 8;
         answer_tests(group, |t| {
             let key = hex(t, "key")?;
-            let mut mac = builder.build(|ctx| Hmac::<H>::new(ctx, &key));
+            let mut mac = Hmac::<H>::new(profile.ctx(), &key);
             let msg = hex(t, "msg")?;
             mac.update(&msg);
             let tag = mac.finalize();

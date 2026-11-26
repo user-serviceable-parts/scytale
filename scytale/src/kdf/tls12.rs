@@ -9,9 +9,9 @@
 //! design wants [`hkdf`](crate::kdf::hkdf).
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::kdf::tls12;
-//! use scytale::Context;
 //! let ctx = Context::default();
 //!
 //! let premaster = [0x5a; 48];
@@ -114,7 +114,7 @@ mod tests {
         let seed = hex::<16>("a0ba9f936cda311827a6f796ffd5198c");
         let mut out = [0u8; 100];
         prf::<Sha256>(
-            crate::Context::default(),
+            Context::default(),
             &secret,
             b"test label",
             &[&seed],
@@ -136,7 +136,7 @@ mod tests {
         let seed = hex::<16>("cd665cf6a8447dd6ff8b27555edb7465");
         let mut out = [0u8; 148];
         prf::<Sha384>(
-            crate::Context::default(),
+            Context::default(),
             &secret,
             b"test label",
             &[&seed],
@@ -155,7 +155,7 @@ mod tests {
         let seed = hex::<16>("d4640e12e4bcdbfb437f03e6ae418ee5");
         let mut out = [0u8; 196];
         prf::<Sha512>(
-            crate::Context::default(),
+            Context::default(),
             &secret,
             b"test label",
             &[&seed],
@@ -179,7 +179,7 @@ mod tests {
         let secret = [7u8; 32];
         let mut whole = [0u8; 70];
         prf::<Sha256>(
-            crate::Context::default(),
+            Context::default(),
             &secret,
             b"l",
             &[b"abcdef"],
@@ -187,7 +187,7 @@ mod tests {
         );
         let mut parts = [0u8; 70];
         prf::<Sha256>(
-            crate::Context::default(),
+            Context::default(),
             &secret,
             b"l",
             &[b"ab", b"", b"cdef"],
@@ -197,7 +197,7 @@ mod tests {
         // A prefix of the output is the same whatever the length asked.
         let mut short = [0u8; 33];
         prf::<Sha256>(
-            crate::Context::default(),
+            Context::default(),
             &secret,
             b"l",
             &[b"abcdef"],
@@ -213,23 +213,11 @@ mod tests {
     fn empty_label_and_output() {
         let secret = [3u8; 48];
         let mut empty = [0u8; 40];
-        prf::<Sha256>(
-            crate::Context::default(),
-            &secret,
-            b"",
-            &[b"abc"],
-            &mut empty,
-        );
+        prf::<Sha256>(Context::default(), &secret, b"", &[b"abc"], &mut empty);
         let mut moved = [0u8; 40];
-        prf::<Sha256>(
-            crate::Context::default(),
-            &secret,
-            b"a",
-            &[b"bc"],
-            &mut moved,
-        );
+        prf::<Sha256>(Context::default(), &secret, b"a", &[b"bc"], &mut moved);
         assert_eq!(empty, moved);
         assert_ne!(empty, [0u8; 40]);
-        prf::<Sha256>(crate::Context::default(), &secret, b"", &[], &mut []);
+        prf::<Sha256>(Context::default(), &secret, b"", &[], &mut []);
     }
 }

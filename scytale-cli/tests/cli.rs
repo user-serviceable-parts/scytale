@@ -1122,8 +1122,12 @@ fn hpke_decrypts_the_rfc9180_vector() {
     .try_into()
     .unwrap();
     let private = d.join("recipient.pem");
-    fs::write(&private, PrivateKey::new(&Key::from(secret)).pem_bytes())
-        .unwrap();
+    fs::write(
+        &private,
+        PrivateKey::new(scytale::Context::default(), &Key::from(secret))
+            .pem_bytes(),
+    )
+    .unwrap();
     let mut sealed = hex_bytes(
         "37fda3567bdbd628e88668c3c8d7e97d1d1253b6d4ea6d44c150f741f1bf4431",
     );

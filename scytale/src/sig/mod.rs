@@ -14,9 +14,9 @@
 //! stored back before the signature is released.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::random::CtrDrbg;
 //! use scytale::sig::ed25519::{PrivateKey, PublicKey};
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();

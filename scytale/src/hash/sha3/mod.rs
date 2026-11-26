@@ -13,9 +13,9 @@
 //! reach, only the feature profiles that tell them apart.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::hash::sha3::{Sha3_256, Shake128};
 //! use scytale::hash::{Hash, Xof, XofReader};
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -616,27 +616,27 @@ pub(crate) mod tests {
         }
         check_matches_portable(
             || Sha3_224::new(under.ctx()),
-            || Sha3_224::new(crate::Context::portable()),
+            || Sha3_224::new(Context::portable()),
             || Shake128::new(under.ctx()),
-            || Shake128::new(crate::Context::portable()),
+            || Shake128::new(Context::portable()),
         );
         check_matches_portable(
             || Sha3_256::new(under.ctx()),
-            || Sha3_256::new(crate::Context::portable()),
+            || Sha3_256::new(Context::portable()),
             || Shake256::new(under.ctx()),
-            || Shake256::new(crate::Context::portable()),
+            || Shake256::new(Context::portable()),
         );
         check_matches_portable(
             || Sha3_384::new(under.ctx()),
-            || Sha3_384::new(crate::Context::portable()),
+            || Sha3_384::new(Context::portable()),
             || Shake128::new(under.ctx()),
-            || Shake128::new(crate::Context::portable()),
+            || Shake128::new(Context::portable()),
         );
         check_matches_portable(
             || Sha3_512::new(under.ctx()),
-            || Sha3_512::new(crate::Context::portable()),
+            || Sha3_512::new(Context::portable()),
             || Shake256::new(under.ctx()),
-            || Shake256::new(crate::Context::portable()),
+            || Shake256::new(Context::portable()),
         );
     }
 
@@ -647,7 +647,7 @@ pub(crate) mod tests {
     /// are shifted down before being passed.
     #[test]
     fn bit_strings() {
-        let mut hash = Sha3_256::new(crate::Context::default());
+        let mut hash = Sha3_256::new(Context::default());
         hash.update(&[0xf1, 0x3d]);
         assert_eq!(
             hash.finalize_bits(0x64 >> 2, 6).unwrap(),
@@ -656,7 +656,7 @@ pub(crate) mod tests {
                  55f6"
             )[..32]
         );
-        let mut hash = Sha3_256::new(crate::Context::default());
+        let mut hash = Sha3_256::new(Context::default());
         hash.update(&[0x26]);
         assert_eq!(
             hash.finalize_bits(0x58 >> 3, 5).unwrap(),
@@ -666,10 +666,10 @@ pub(crate) mod tests {
             )[..32]
         );
         // Bits beyond the count are ignored.
-        let a = Sha3_256::new(crate::Context::default())
+        let a = Sha3_256::new(Context::default())
             .finalize_bits(0x1f, 5)
             .unwrap();
-        let b = Sha3_256::new(crate::Context::default())
+        let b = Sha3_256::new(Context::default())
             .finalize_bits(0xff, 5)
             .unwrap();
         assert_eq!(a, b);
@@ -679,11 +679,11 @@ pub(crate) mod tests {
     fn bit_count_is_checked() {
         for bits in [0, 8, 9] {
             assert_eq!(
-                Sha3_256::new(crate::Context::default()).finalize_bits(0, bits),
+                Sha3_256::new(Context::default()).finalize_bits(0, bits),
                 Err(Error::InvalidBitCount(bits))
             );
             assert!(
-                Shake128::new(crate::Context::default())
+                Shake128::new(Context::default())
                     .finalize_bits_xof(0, bits)
                     .is_err()
             );
@@ -692,9 +692,8 @@ pub(crate) mod tests {
 
     #[test]
     fn squeezing_in_pieces_is_the_same_stream() {
-        let whole =
-            squeeze(b"abc", 64, || Shake128::new(crate::Context::default()));
-        let mut x = Shake128::new(crate::Context::default());
+        let whole = squeeze(b"abc", 64, || Shake128::new(Context::default()));
+        let mut x = Shake128::new(Context::default());
         x.update(b"abc");
         let mut reader = x.finalize_xof();
         let mut out = [0u8; 64];
@@ -706,10 +705,10 @@ pub(crate) mod tests {
         // Well past one rate of output, against a fresh reader.
         let mut long = [0u8; 500];
         let mut again = [0u8; 500];
-        let mut x = Shake128::new(crate::Context::default());
+        let mut x = Shake128::new(Context::default());
         x.update(b"abc");
         x.finalize_xof().squeeze(&mut long);
-        let mut x = Shake128::new(crate::Context::default());
+        let mut x = Shake128::new(Context::default());
         x.update(b"abc");
         let mut reader = x.finalize_xof();
         reader.squeeze(&mut again[..167]);
@@ -735,16 +734,16 @@ pub(crate) mod tests {
             }
             out
         }
-        let bytes128 = stream(Shake128::new(crate::Context::default()), 1);
-        let bytes256 = stream(Shake256::new(crate::Context::default()), 1);
+        let bytes128 = stream(Shake128::new(Context::default()), 1);
+        let bytes256 = stream(Shake256::new(Context::default()), 1);
         for piece in [2, 3, 5, 7, 8, 9, 13, 16, 17, 136, 167, 168, 169, 700] {
             assert_eq!(
-                stream(Shake128::new(crate::Context::default()), piece),
+                stream(Shake128::new(Context::default()), piece),
                 bytes128,
                 "{piece}"
             );
             assert_eq!(
-                stream(Shake256::new(crate::Context::default()), piece),
+                stream(Shake256::new(Context::default()), piece),
                 bytes256,
                 "{piece}"
             );
@@ -754,9 +753,9 @@ pub(crate) mod tests {
     #[test]
     fn splitting_does_not_matter() {
         let data: [u8; 617] = core::array::from_fn(|i| (i * 31) as u8);
-        let expected = Sha3_512::digest(crate::Context::default(), &data);
+        let expected = Sha3_512::digest(Context::default(), &data);
         for chunk in [1, 3, 7, 71, 72, 73, 144, 200] {
-            let mut hash = Sha3_512::new(crate::Context::default());
+            let mut hash = Sha3_512::new(Context::default());
             for piece in data.chunks(chunk) {
                 hash.update(piece);
             }
@@ -766,7 +765,7 @@ pub(crate) mod tests {
 
     #[test]
     fn reset_and_clone() {
-        let mut hash = Sha3_224::new(crate::Context::default());
+        let mut hash = Sha3_224::new(Context::default());
         hash.update(b"not this");
         hash.reset();
         hash.update(b"ab");
@@ -774,11 +773,11 @@ pub(crate) mod tests {
         hash.update(b"c");
         assert_eq!(
             hash.finalize(),
-            Sha3_224::digest(crate::Context::default(), b"abc")
+            Sha3_224::digest(Context::default(), b"abc")
         );
         assert_eq!(
             fork.finalize(),
-            Sha3_224::digest(crate::Context::default(), b"ab")
+            Sha3_224::digest(Context::default(), b"ab")
         );
     }
 
@@ -798,10 +797,9 @@ pub(crate) mod tests {
     #[test]
     fn picks_the_first_kernel_whose_needs_are_met() {
         {
-            let hash =
-                Auto::<variant::Sha3_256>::new(crate::Context::default());
+            let hash = Auto::<variant::Sha3_256>::new(Context::default());
             features::dispatches(KERNELS, Sha3_256::profiles(), hash.kernel());
-            let xof = Auto::<variant::Shake128>::new(crate::Context::default());
+            let xof = Auto::<variant::Shake128>::new(Context::default());
             features::dispatches(KERNELS, Shake128::profiles(), xof.kernel());
         };
     }
@@ -817,7 +815,7 @@ pub(crate) mod tests {
                 Ok(())
             }
         }
-        let mut hash = Sha3_256::new(crate::Context::default());
+        let mut hash = Sha3_256::new(Context::default());
         hash.update(b"secret");
         let mut buffer = Buffer([0; 128], 0);
         core::fmt::write(&mut buffer, format_args!("{hash:?}")).unwrap();

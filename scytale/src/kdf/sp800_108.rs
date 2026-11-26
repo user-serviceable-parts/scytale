@@ -9,9 +9,9 @@
 //! list of parts already encoded, as [`hkdf::expand`] takes its info.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::kdf::sp800_108;
 //! use scytale::mac::hmac::HmacSha256;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -392,7 +392,7 @@ mod tests {
     use crate::{Key, KeyType};
 
     fn prf() -> HmacSha256 {
-        HmacSha256::new(crate::Context::default(), &[0x4b; 32])
+        HmacSha256::new(Context::default(), &[0x4b; 32])
     }
 
     /// The fixed input in parts derives what it derives in one piece,
@@ -530,14 +530,12 @@ mod tests {
     /// CMAC is as good a PRF as HMAC here: any keyed MAC will do.
     #[test]
     fn any_mac_is_a_prf() {
-        let mut cmac = Cmac::<Aes128>::new(
-            crate::Context::default(),
-            &Key::from([9u8; 16]),
-        );
+        let mut cmac =
+            Cmac::<Aes128>::new(Context::default(), &Key::from([9u8; 16]));
         let mut out = [0u8; 40];
         counter(&mut cmac, 8, 0, &[b"x"], &mut out).expect("derive");
         let mut again = Cmac::<Aes128>::new(
-            crate::Context::default(),
+            Context::default(),
             &Cmac::<Aes128>::zero_key(),
         );
         let mut other = [0u8; 40];
@@ -551,20 +549,20 @@ mod tests {
     fn kmac_is_kmac() {
         let mut out = [0u8; 40];
         kmac128(
-            crate::Context::default(),
+            Context::default(),
             b"key material",
             b"label",
             b"context",
             &mut out,
         );
         let mut mac =
-            Kmac128::new(crate::Context::default(), b"key material", b"label");
+            Kmac128::new(Context::default(), b"key material", b"label");
         mac.update(b"context");
         let mut want = [0u8; 40];
         mac.finalize_to(&mut want);
         assert_eq!(out, want);
         kmac256(
-            crate::Context::default(),
+            Context::default(),
             b"key material",
             b"label",
             b"context",

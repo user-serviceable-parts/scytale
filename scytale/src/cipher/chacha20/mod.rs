@@ -9,9 +9,9 @@
 //! that depends on the key.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Key;
 //! use scytale::cipher::chacha20::ChaCha20;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -861,7 +861,7 @@ pub(crate) mod tests {
 
     #[test]
     fn pieces_match_whole() {
-        let cipher = ChaCha20::new(crate::Context::default(), &Key::from(KEY));
+        let cipher = ChaCha20::new(Context::default(), &Key::from(KEY));
         let data: [u8; 517] = core::array::from_fn(|i| (i * 31) as u8);
         let mut whole = data;
         cipher.encrypt(&NONCE, 5, &mut whole).unwrap();
@@ -905,7 +905,7 @@ pub(crate) mod tests {
         let key = Key::from(KEY);
         let nonce = hex::<16>("000000090000004a0000000031415927");
         let subkey = hchacha20(&key, &nonce);
-        let cipher = ChaCha20::new(crate::Context::default(), &key);
+        let cipher = ChaCha20::new(Context::default(), &key);
         let block = cipher.keystream_block(&[0u8; 12], 0);
         assert_ne!(&subkey.array()[..], &block[..32]);
         assert_ne!(&subkey.array()[..], &block[32..]);
@@ -924,7 +924,7 @@ pub(crate) mod tests {
 
     #[test]
     fn refuses_to_wrap_the_counter() {
-        let cipher = ChaCha20::new(crate::Context::default(), &Key::from(KEY));
+        let cipher = ChaCha20::new(Context::default(), &Key::from(KEY));
         let mut data = [0u8; 129];
         // Two blocks and a byte from the last block: the third block
         // does not exist.
@@ -965,7 +965,7 @@ pub(crate) mod tests {
     fn picks_the_first_kernel_whose_needs_are_met() {
         {
             let cipher =
-                ChaCha20::new(crate::Context::default(), &Key::from([0u8; 32]));
+                ChaCha20::new(Context::default(), &Key::from([0u8; 32]));
             features::dispatches(
                 KERNELS,
                 ChaCha20::profiles(),
@@ -986,7 +986,7 @@ pub(crate) mod tests {
             }
         }
         let cipher =
-            ChaCha20::new(crate::Context::default(), &Key::from([0x5au8; 32]));
+            ChaCha20::new(Context::default(), &Key::from([0x5au8; 32]));
         let mut buffer = Buffer([0; 128], 0);
         core::fmt::write(&mut buffer, format_args!("{cipher:?}")).unwrap();
         let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();

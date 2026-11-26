@@ -58,13 +58,13 @@
 //! # Example
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Key;
-//! use scytale::random::CtrDrbg;
-//! use scytale::cipher::aes::Aes128;
-//! use scytale::cipher::Nonces;
 //! use scytale::aead::{Aead, Gcm};
 //! use scytale::cipher::BlockCipher;
-//! use scytale::Context;
+//! use scytale::cipher::Nonces;
+//! use scytale::cipher::aes::Aes128;
+//! use scytale::random::CtrDrbg;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();

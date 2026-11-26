@@ -11,9 +11,9 @@
 //! processor has; the extension costs one extra block a message.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Key;
 //! use scytale::cipher::xchacha20::XChaCha20;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -214,7 +214,7 @@ mod tests {
 
     fn cipher() -> XChaCha20 {
         let key: [u8; 32] = hex(KEY).try_into().unwrap();
-        XChaCha20::new(crate::Context::default(), &Key::from(key))
+        XChaCha20::new(Context::default(), &Key::from(key))
     }
 
     fn nonce() -> [u8; 24] {

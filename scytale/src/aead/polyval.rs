@@ -250,19 +250,18 @@ mod tests {
         }
 
         for len in 0..MAX {
-            let mut want = Polyval::generic(crate::Context::default(), &h);
+            let mut want = Polyval::generic(Context::default(), &h);
             want.update(&data[..len]);
             want.pad();
             let want = want.finish();
 
-            let mut got = Polyval::new(crate::Context::default(), &h, WORTH_IT);
+            let mut got = Polyval::new(Context::default(), &h, WORTH_IT);
             got.update(&data[..len]);
             got.pad();
             assert_eq!(got.finish(), want, "{len} bytes");
 
             for piece in [1, 17, 128, 512, 513] {
-                let mut got =
-                    Polyval::new(crate::Context::default(), &h, WORTH_IT);
+                let mut got = Polyval::new(Context::default(), &h, WORTH_IT);
                 for part in data[..len].chunks(piece) {
                     got.update(part);
                 }
@@ -284,12 +283,8 @@ mod tests {
         use crate::features;
         use crate::kernel::Kernel;
         {
-            let p = Polyval::new(
-                crate::Context::default(),
-                &hex::<16>(H),
-                WORTH_IT,
-            );
-            let row = features::select(crate::Context::default(), KERNELS);
+            let p = Polyval::new(Context::default(), &hex::<16>(H), WORTH_IT);
+            let row = features::select(Context::default(), KERNELS);
             assert_eq!(
                 matches!(p.inner, Inner::Native(_)),
                 matches!(row, Some(Kernel::Aesni | Kernel::Vaes))
@@ -317,8 +312,7 @@ mod tests {
     /// what pins the byte order and the subkey conversion.
     #[test]
     fn matches_rfc8452_example() {
-        let mut p =
-            Polyval::new(crate::Context::default(), &hex::<16>(H), WORTH_IT);
+        let mut p = Polyval::new(Context::default(), &hex::<16>(H), WORTH_IT);
         p.update(&hex::<16>("4f4f95668c83dfb6401762bb2d01a262"));
         p.update(&hex::<16>("d1a24ddd2721d006bbe45f20d3c9f362"));
         assert_eq!(p.finish(), hex::<16>("f7a3b47b846119fae5b7866cf5e5b77e"));
@@ -328,8 +322,7 @@ mod tests {
     /// not quietly absorb a block of zeros instead.
     #[test]
     fn empty_input_hashes_to_zero() {
-        let mut p =
-            Polyval::new(crate::Context::default(), &hex::<16>(H), WORTH_IT);
+        let mut p = Polyval::new(Context::default(), &hex::<16>(H), WORTH_IT);
         p.pad();
         assert_eq!(p.finish(), [0; BLOCK]);
     }
@@ -343,15 +336,13 @@ mod tests {
         let data: [u8; 5 * BLOCK] = core::array::from_fn(|i| (i * 7 + 3) as u8);
 
         for len in 0..=data.len() {
-            let mut whole =
-                Polyval::new(crate::Context::default(), &h, WORTH_IT);
+            let mut whole = Polyval::new(Context::default(), &h, WORTH_IT);
             whole.update(&data[..len]);
             whole.pad();
             let want = whole.finish();
 
             for piece in [1, 3, 7, 16, 17, 31] {
-                let mut p =
-                    Polyval::new(crate::Context::default(), &h, WORTH_IT);
+                let mut p = Polyval::new(Context::default(), &h, WORTH_IT);
                 for part in data[..len].chunks(piece) {
                     p.update(part);
                 }
@@ -376,7 +367,7 @@ mod tests {
         const LEN: usize = (2 * BATCH + 3) * BLOCK + 5;
         let data: [u8; LEN] = core::array::from_fn(|i| (i * 11 + 1) as u8);
 
-        let mut whole = Polyval::new(crate::Context::default(), &h, WORTH_IT);
+        let mut whole = Polyval::new(Context::default(), &h, WORTH_IT);
         whole.update(&data);
         whole.pad();
         let want = whole.finish();
@@ -384,7 +375,7 @@ mod tests {
         // Sizes that land inside a batch, on its boundary and just
         // past it, and one that is a whole batch itself.
         for piece in [BLOCK, BATCH * BLOCK - 1, BATCH * BLOCK, 129] {
-            let mut p = Polyval::new(crate::Context::default(), &h, WORTH_IT);
+            let mut p = Polyval::new(Context::default(), &h, WORTH_IT);
             for part in data.chunks(piece) {
                 p.update(part);
             }
@@ -402,11 +393,11 @@ mod tests {
         let mut filled = [0u8; BLOCK];
         filled[..short.len()].copy_from_slice(&short);
 
-        let mut a = Polyval::new(crate::Context::default(), &h, WORTH_IT);
+        let mut a = Polyval::new(Context::default(), &h, WORTH_IT);
         a.update(&short);
         a.pad();
 
-        let mut b = Polyval::new(crate::Context::default(), &h, WORTH_IT);
+        let mut b = Polyval::new(Context::default(), &h, WORTH_IT);
         b.update(&filled);
         b.pad();
 
@@ -420,11 +411,11 @@ mod tests {
         let h = hex::<16>(H);
         let data = [0x5a; BLOCK];
 
-        let mut once = Polyval::new(crate::Context::default(), &h, WORTH_IT);
+        let mut once = Polyval::new(Context::default(), &h, WORTH_IT);
         once.update(&data);
         let want = once.finish();
 
-        let mut twice = Polyval::new(crate::Context::default(), &h, WORTH_IT);
+        let mut twice = Polyval::new(Context::default(), &h, WORTH_IT);
         twice.update(&data);
         twice.pad();
         twice.pad();
@@ -441,14 +432,14 @@ mod tests {
         let aad = [0x11; 20];
         let text = [0x22; 37];
 
-        let mut want = Polyval::new(crate::Context::default(), &h, WORTH_IT);
+        let mut want = Polyval::new(Context::default(), &h, WORTH_IT);
         want.update(&aad);
         want.pad();
         want.update(&text);
         want.pad();
         let want = want.finish();
 
-        let mut p = Polyval::new(crate::Context::default(), &h, WORTH_IT);
+        let mut p = Polyval::new(Context::default(), &h, WORTH_IT);
         for part in aad.chunks(6) {
             p.update(part);
         }

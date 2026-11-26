@@ -40,10 +40,10 @@
 //! # Example
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Ff1;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -428,7 +428,7 @@ mod tests {
 
     fn ff1(radix: u32) -> Ff1<Aes128> {
         let key: [u8; 16] = unhex("2b7e151628aed2a6abf7158809cf4f3c");
-        Ff1::try_new(crate::Context::default(), &Key::from(key), radix).unwrap()
+        Ff1::try_new(Context::default(), &Key::from(key), radix).unwrap()
     }
 
     /// NIST's published sample for FF1 with AES-128, decimal digits
@@ -515,7 +515,7 @@ mod tests {
         for radix in [0u32, 1, 65537, 100_000] {
             assert_eq!(
                 Ff1::<Aes128>::try_new(
-                    crate::Context::default(),
+                    Context::default(),
                     &Key::from(key),
                     radix
                 )

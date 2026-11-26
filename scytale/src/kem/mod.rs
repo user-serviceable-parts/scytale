@@ -17,9 +17,9 @@
 //! context or combine it with another.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::kem::ml_kem::ml_kem_768::PrivateKey;
 //! use scytale::random::CtrDrbg;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();

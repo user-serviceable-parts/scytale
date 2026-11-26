@@ -8,7 +8,7 @@
 //! expanded form alike.
 
 use super::{answer_groups, answer_tests, skip};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{Error, flag, hex, hex_value, text};
 use scytale::Context;
 use scytale::Random;
@@ -137,24 +137,23 @@ fn pure_external(group: &Value) -> bool {
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
     answer_groups(doc, |group| match text(group, "parameterSet")? {
-        Set44::NAME => answer_group::<Set44>(mode, group, builder),
-        Set65::NAME => answer_group::<Set65>(mode, group, builder),
-        Set87::NAME => answer_group::<Set87>(mode, group, builder),
+        Set44::NAME => answer_group::<Set44>(mode, group, profile),
+        Set65::NAME => answer_group::<Set65>(mode, group, profile),
+        Set87::NAME => answer_group::<Set87>(mode, group, profile),
         other => Err(Error::new(format!("parameter set {other}"))),
     })
 }
 
-/// Every case builds its key from the case's bytes and runs it once,
-/// and every call hashes as it runs, starting hashes of its own: each
-/// case runs whole under `builder`.
+/// Every case builds its key from the case's bytes, with the
+/// profile's context, and runs it once.
 fn answer_group<S: Set>(
     mode: &str,
     group: &Value,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Option<Value>, Error> {
     let each = |answer: &dyn Fn(&Value) -> Result<Value, Error>| {
         answer_tests(group, answer)
@@ -163,13 +162,13 @@ fn answer_group<S: Set>(
         return skip(group, "only the pure external interface is offered");
     }
     match mode {
-        "keyGen" => each(&|t| key_gen::<S>(builder.ctx(), t)),
+        "keyGen" => each(&|t| key_gen::<S>(profile.ctx(), t)),
         "sigGen" => {
             let deterministic = flag(group, "deterministic")?;
             let seed = text(group, "keyFormat")? == "seed";
-            each(&|t| sig_gen::<S>(builder.ctx(), t, deterministic, seed))
+            each(&|t| sig_gen::<S>(profile.ctx(), t, deterministic, seed))
         }
-        "sigVer" => each(&|t| sig_ver::<S>(builder.ctx(), t)),
+        "sigVer" => each(&|t| sig_ver::<S>(profile.ctx(), t)),
         other => Err(Error::new(format!("mode {other}"))),
     }
 }

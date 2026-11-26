@@ -12,10 +12,10 @@
 //! for it by name.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::pke::rsa::PrivateKey;
 //! use scytale::random::CtrDrbg;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();

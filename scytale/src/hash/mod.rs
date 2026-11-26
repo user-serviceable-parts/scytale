@@ -251,20 +251,20 @@ mod tests {
             hash.update(b"c");
             hash.finalize()
         }
-        let mut sha256 = Sha256::new(crate::Context::default());
-        let mut sha512_256 = Sha512_256::new(crate::Context::default());
-        let mut sha3_256 = Sha3_256::new(crate::Context::default());
+        let mut sha256 = Sha256::new(Context::default());
+        let mut sha512_256 = Sha512_256::new(Context::default());
+        let mut sha3_256 = Sha3_256::new(Context::default());
         assert_eq!(
             feed(&mut sha256),
-            Sha256::digest(crate::Context::default(), b"abc")
+            Sha256::digest(Context::default(), b"abc")
         );
         assert_eq!(
             feed(&mut sha512_256),
-            Sha512_256::digest(crate::Context::default(), b"abc")
+            Sha512_256::digest(Context::default(), b"abc")
         );
         assert_eq!(
             feed(&mut sha3_256),
-            Sha3_256::digest(crate::Context::default(), b"abc")
+            Sha3_256::digest(Context::default(), b"abc")
         );
 
         fn squeeze(
@@ -275,8 +275,8 @@ mod tests {
             xof.finalize_xof().squeeze(&mut out);
             out
         }
-        let mut shake = Shake128::new(crate::Context::default());
-        let mut fresh = Shake128::new(crate::Context::default());
+        let mut shake = Shake128::new(Context::default());
+        let mut fresh = Shake128::new(Context::default());
         fresh.update(b"abc");
         let mut expected = [0u8; 40];
         fresh.finalize_xof().squeeze(&mut expected);
@@ -290,10 +290,8 @@ mod tests {
             xof.finalize_xof().squeeze(&mut out);
             out
         }
-        let mut custom =
-            CShake128::new(crate::Context::default(), b"", b"label");
-        let mut fresh =
-            CShake128::new(crate::Context::default(), b"", b"label");
+        let mut custom = CShake128::new(Context::default(), b"", b"label");
+        let mut fresh = CShake128::new(Context::default(), b"", b"label");
         fresh.update(b"abc");
         fresh.finalize_xof().squeeze(&mut expected);
         assert_eq!(squeeze_c(&mut custom), expected);
@@ -303,13 +301,13 @@ mod tests {
     #[test]
     fn finalize_resets() {
         fn check<H: Hash>() {
-            let mut hash = H::new(crate::Context::default());
+            let mut hash = H::new(Context::default());
             hash.update(b"garbage");
             let _ = hash.finalize();
             hash.update(b"abc");
             assert_eq!(
                 hash.finalize().as_ref(),
-                H::digest(crate::Context::default(), b"abc").as_ref()
+                H::digest(Context::default(), b"abc").as_ref()
             );
         }
         check::<Sha1>();
@@ -321,13 +319,13 @@ mod tests {
     #[test]
     fn xof_finalize_resets() {
         fn check<X: Xof>() {
-            let mut xof = X::new(crate::Context::default());
+            let mut xof = X::new(Context::default());
             xof.update(b"garbage");
             let _ = xof.finalize_xof();
             xof.update(b"abc");
             let mut again = [0u8; 40];
             xof.finalize_xof().squeeze(&mut again);
-            let mut fresh = X::new(crate::Context::default());
+            let mut fresh = X::new(Context::default());
             fresh.update(b"abc");
             let mut expected = [0u8; 40];
             fresh.finalize_xof().squeeze(&mut expected);

@@ -12,9 +12,9 @@
 //! reaches every row the processor can run, and a vector set answered
 //! under each of them must come out the same.
 //!
-//! A profile is carried as a [`Builder`], which is a context and
-//! nothing more: profiles share nothing, so any number of threads
-//! answer under any number of them at once.
+//! A profile is a [`Profile`], which is a context and nothing more:
+//! profiles share nothing, so any number of threads answer under any
+//! number of them at once.
 
 use crate::suite::Suite;
 use crate::support::{Error, FixedEntropy};
@@ -59,84 +59,39 @@ impl Seed {
         Ok(seed)
     }
 
-    /// A generator over the seed, built by `builder`. Its own source
+    /// A generator over the seed, built by `profile`. Its own source
     /// is deterministic too, so even a reseed does not part two runs.
     pub fn rng(
         &self,
-        builder: &Builder,
+        profile: &Profile,
     ) -> Result<CtrDrbg<FixedEntropy>, Error> {
-        builder.try_build(|ctx| {
-            CtrDrbg::try_new_seeded(ctx, &self.0, FixedEntropy::default())
-        })
+        let rng = FixedEntropy::default();
+        Ok(CtrDrbg::try_new_seeded(profile.ctx(), &self.0, rng)?)
     }
 }
 
-/// Where the drivers build the library's objects: the context of one
-/// feature profile, or the default context, the processor's own set,
-/// as a program that never names a set would build them.
+/// One feature profile, as the context the drivers build the
+/// library's objects with; the default is the processor's own set, as
+/// a program that never names one would build them.
 ///
 /// An object chooses its kernel from its context when it is built,
 /// and so does everything it builds as it runs: the GHASH a GCM
 /// message starts, the cipher and POLYVAL of a GCM-SIV message, the
 /// hashes of a signature, a KDF or a DRBG. So a driver hands the
-/// context to the constructors it calls and nothing else, and runs
-/// the objects wherever it likes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Builder {
-    profile: Option<Features>,
-    ctx: Context,
-}
+/// context to the constructors it calls and nothing else.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Profile(Context);
 
-impl Default for Builder {
-    /// The default context: the set detected.
-    fn default() -> Self {
-        Builder {
-            profile: None,
-            ctx: Context::default(),
-        }
-    }
-}
-
-impl Builder {
-    /// A builder under `profile`, or the error the context gives when
-    /// the processor lacks some of it.
-    pub fn try_new(profile: Features) -> Result<Self, Error> {
-        Ok(Builder {
-            profile: Some(profile),
-            ctx: Context::try_new(profile)?,
-        })
-    }
-
-    /// The profile this builder builds under, or `None` for the set
-    /// detected.
-    pub fn profile(&self) -> Option<Features> {
-        self.profile
-    }
-
-    /// The set this builder builds under.
-    pub fn set(&self) -> Features {
-        self.ctx.features()
+impl Profile {
+    /// The profile of `features`, or the error the context gives when
+    /// the processor lacks some of them.
+    pub fn try_new(features: Features) -> Result<Self, Error> {
+        Ok(Profile(Context::try_new(features)?))
     }
 
     /// The context the objects are built with.
     pub fn ctx(&self) -> Context {
-        self.ctx
-    }
-
-    /// Runs `build` with this builder's context.
-    pub fn build<T>(&self, build: impl FnOnce(Context) -> T) -> T {
-        build(self.ctx)
-    }
-
-    /// As [`build`](Self::build), for a build that may fail.
-    pub fn try_build<T, E>(
-        &self,
-        build: impl FnOnce(Context) -> Result<T, E>,
-    ) -> Result<T, Error>
-    where
-        Error: From<E>,
-    {
-        Ok(build(self.ctx)?)
+        self.0
     }
 }
 
@@ -211,7 +166,7 @@ pub fn walk() -> (Vec<Features>, Vec<Features>) {
     let mut runnable = Vec::new();
     let mut refused = Vec::new();
     for profile in candidates() {
-        match Builder::try_new(profile) {
+        match Profile::try_new(profile) {
             Ok(_) => runnable.push(profile),
             Err(_) => refused.push(profile),
         }
@@ -230,9 +185,9 @@ pub fn answer_under(
 ) -> Result<Value, Error> {
     let mut first: Option<(Features, Value)> = None;
     for &profile in profiles {
-        let answered = Builder::try_new(profile).and_then(|builder| {
-            let mut rng = seed.rng(&builder)?;
-            (suite.answer)(doc, &mut rng, &builder)
+        let answered = Profile::try_new(profile).and_then(|profile| {
+            let mut rng = seed.rng(&profile)?;
+            (suite.answer)(doc, &mut rng, &profile)
         });
         let answered = answered
             .map_err(|e| Error::new(format!("under {profile}: {e}")))?;
@@ -314,11 +269,11 @@ mod tests {
     #[test]
     fn same_seed_same_bytes() {
         let seed = Seed::fixed();
-        let builder = Builder::default();
+        let profile = Profile::default();
         let mut x = [0u8; 32];
         let mut y = [0u8; 32];
-        seed.rng(&builder).unwrap().fill(&mut x).unwrap();
-        seed.rng(&builder).unwrap().fill(&mut y).unwrap();
+        seed.rng(&profile).unwrap().fill(&mut x).unwrap();
+        seed.rng(&profile).unwrap().fill(&mut y).unwrap();
         assert_eq!(x, y);
         assert_ne!(x, [0u8; 32]);
     }

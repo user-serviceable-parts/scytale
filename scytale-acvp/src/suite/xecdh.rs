@@ -14,7 +14,7 @@
 //! as extra keyGen coverage either.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{Error, hex, hex_value, opt_hex, text, unknown_test_type};
 use scytale::Random;
 use scytale::kex::{x448, x25519};
@@ -39,7 +39,7 @@ const X448: Curve<{ x448::KEY_SIZE }> = Curve {
 pub fn answer(
     doc: &Value,
     rng: &mut dyn Random,
-    _: &Builder,
+    _: &Profile,
 ) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
     answer_groups(doc, |group| match text(group, "curve")? {
@@ -120,8 +120,8 @@ mod tests {
         });
         let answered = answer(
             &doc,
-            &mut fixed_rng(&Builder::default()).unwrap(),
-            &Builder::default(),
+            &mut fixed_rng(&Profile::default()).unwrap(),
+            &Profile::default(),
         )
         .unwrap();
         let t = &answered["testGroups"][0]["tests"][0];

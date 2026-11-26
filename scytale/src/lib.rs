@@ -30,15 +30,15 @@
 //! # Example
 //!
 //! ```
-//! use scytale::hash::sha2::Sha256;
+//! use scytale::Context;
+//! use scytale::KeyType;
+//! use scytale::aead::{Aead, Gcm};
+//! use scytale::cipher::Nonces;
+//! use scytale::cipher::aes::Aes128;
 //! use scytale::hash::Hash;
+//! use scytale::hash::sha2::Sha256;
 //! use scytale::kdf::hkdf;
 //! use scytale::mac::hmac::{Hmac, HmacSha256};
-//! use scytale::KeyType;
-//! use scytale::cipher::aes::Aes128;
-//! use scytale::cipher::Nonces;
-//! use scytale::aead::{Aead, Gcm};
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();

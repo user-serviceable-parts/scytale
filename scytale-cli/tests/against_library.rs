@@ -1146,11 +1146,19 @@ fn library_public(name: &str, pem: &[u8]) -> Vec<u8> {
             return key.public_key().pem_bytes().to_vec();
         }
         "x25519" => {
-            let key = x25519::PrivateKey::try_from_pem(pem).unwrap();
+            let key = x25519::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )
+            .unwrap();
             return key.public_key().pem_bytes().to_vec();
         }
         "x448" => {
-            let key = x448::PrivateKey::try_from_pem(pem).unwrap();
+            let key = x448::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )
+            .unwrap();
             return key.public_key().pem_bytes().to_vec();
         }
         "ecdsa-p256" | "ecdh-p256" => ecdsa::p256::PrivateKey::try_from_pem(
@@ -1395,16 +1403,33 @@ fn agreements(keys: &Keys) {
             unhex(ok(&["kex", "agree", name, "-k", &sk, "-p", &peer_pub], b""));
         let (sk, pk) = (keys.read(&sk), fs::read(&peer_pub).unwrap());
         let theirs = match name {
-            "x25519" => x25519::PrivateKey::try_from_pem(&sk)
-                .unwrap()
-                .shared_secret(&x25519::PublicKey::try_from_pem(&pk).unwrap())
-                .unwrap()
-                .to_vec(),
-            "x448" => x448::PrivateKey::try_from_pem(&sk)
-                .unwrap()
-                .shared_secret(&x448::PublicKey::try_from_pem(&pk).unwrap())
-                .unwrap()
-                .to_vec(),
+            "x25519" => x25519::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                &sk,
+            )
+            .unwrap()
+            .shared_secret(
+                &x25519::PublicKey::try_from_pem(
+                    scytale::Context::default(),
+                    &pk,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .to_vec(),
+            "x448" => {
+                x448::PrivateKey::try_from_pem(scytale::Context::default(), &sk)
+                    .unwrap()
+                    .shared_secret(
+                        &x448::PublicKey::try_from_pem(
+                            scytale::Context::default(),
+                            &pk,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap()
+                    .to_vec()
+            }
             "ecdh-p256" => ecdh::p256::PrivateKey::try_from_pem(
                 scytale::Context::default(),
                 &sk,
@@ -1609,8 +1634,10 @@ fn encryptions(keys: &Keys) {
             // as the HPKE module takes them.
             macro_rules! xdh {
                 ($m:ident) => {{
-                    let sk = $m::PrivateKey::try_from_pem(&sk_pem).unwrap();
-                    let pk = $m::PublicKey::try_from_pem(&pk_pem).unwrap();
+                    let ctx = scytale::Context::default();
+                    let sk =
+                        $m::PrivateKey::try_from_pem(ctx, &sk_pem).unwrap();
+                    let pk = $m::PublicKey::try_from_pem(ctx, &pk_pem).unwrap();
                     let secret = Key::from(sk.secret_bytes());
                     check!(
                         hpke::$m::PrivateKey::new(Context::default(), &secret),

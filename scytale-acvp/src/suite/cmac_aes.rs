@@ -7,7 +7,7 @@
 //! tag that must be refused.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{
     Error, hex, hex_value, int, key_of, text, unknown_test_type,
 };
@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         let generate = match text(group, "direction")? {
@@ -35,7 +35,7 @@ pub fn answer(
                 let key = hex(t, "key")?;
                 aes_width!(key, C => {
                     let k = key_of::<C>(&key)?;
-                    let mac = builder.build(|ctx| Cmac::<C>::new(ctx, &k));
+                    let mac = Cmac::<C>::new(profile.ctx(), &k);
                     aft(mac, t, generate, mac_len)
                 })
             }),

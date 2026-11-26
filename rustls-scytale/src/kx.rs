@@ -90,8 +90,9 @@ struct X25519Group;
 impl SupportedKxGroup for X25519Group {
     fn start(&self) -> Result<StartedKeyExchange, Error> {
         let mut rng = generator().map_err(|_| Error::FailedToGetRandomBytes)?;
-        let key = x25519::PrivateKey::generate(&mut rng)
-            .map_err(|_| Error::FailedToGetRandomBytes)?;
+        let key =
+            x25519::PrivateKey::generate(scytale::Context::default(), &mut rng)
+                .map_err(|_| Error::FailedToGetRandomBytes)?;
         let public = key.public_key().bytes();
         Ok(StartedKeyExchange::Single(Box::new(X25519Active {
             key,
@@ -117,7 +118,10 @@ impl ActiveKeyExchange for X25519Active {
         // refuses (RFC 7748 section 6.1, RFC 8446 section 7.4.2).
         let secret = self
             .key
-            .shared_secret(&x25519::PublicKey::new(peer))
+            .shared_secret(&x25519::PublicKey::new(
+                scytale::Context::default(),
+                peer,
+            ))
             .map_err(|_| invalid_share())?;
         Ok(shared(secret))
     }

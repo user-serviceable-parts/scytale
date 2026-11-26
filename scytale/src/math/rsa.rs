@@ -1460,7 +1460,7 @@ pub(crate) mod tests {
         let got = run(under.ctx());
         assert_eq!(got.2, em, "the public operation undoes the private");
         assert_eq!(got.3, got.1, "with and without the pieces");
-        assert_eq!(got, run(crate::Context::portable()));
+        assert_eq!(got, run(Context::portable()));
     }
 
     /// The layout's parts are disjoint, in order, and end where the

@@ -9,7 +9,7 @@
 
 use super::sha::{Family, Message};
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{Error, hex, hex_value, int, text, unknown_test_type};
 use scytale::Context;
 use scytale::Random;
@@ -23,11 +23,11 @@ type Start<X> = fn(Context, &[u8], &[u8]) -> X;
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     match text(doc, "algorithm")? {
-        "cSHAKE-128" => answer_as(doc, CShake128::new, builder),
-        "cSHAKE-256" => answer_as(doc, CShake256::new, builder),
+        "cSHAKE-128" => answer_as(doc, CShake128::new, profile),
+        "cSHAKE-256" => answer_as(doc, CShake256::new, profile),
         other => Err(Error::new(format!("algorithm {other}"))),
     }
 }
@@ -35,7 +35,7 @@ pub fn answer(
 fn answer_as<X: BitXof>(
     doc: &Value,
     start: Start<X>,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| match text(group, "testType")? {
         "AFT" => answer_tests(group, |t| {
@@ -43,14 +43,14 @@ fn answer_as<X: BitXof>(
             let name = text(t, "functionName")?.as_bytes();
             let custom = customization(group, t)?;
             let message = Message::of(t)?;
-            let xof = builder.build(|ctx| start(ctx, name, &custom));
+            let xof = start(profile.ctx(), name, &custom);
             let out = squeeze(xof, &message, bits)?;
             Ok(json!({ "md": hex_value(&out), "outLen": bits }))
         }),
         "MCT" => {
             let lengths = Lengths::of(group)?;
             let steps = mct_steps(doc);
-            answer_tests(group, |t| mct(t, &lengths, steps, start, builder))
+            answer_tests(group, |t| mct(t, &lengths, steps, start, profile))
         }
         _ => Err(unknown_test_type(group)),
     })
@@ -146,7 +146,7 @@ fn mct<X: BitXof>(
     lengths: &Lengths,
     steps: usize,
     start: Start<X>,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     // The seed's lengths are strings in this group, and it is always
     // whole bytes, so only the bytes are read.
@@ -165,7 +165,7 @@ fn mct<X: BitXof>(
             };
             // The customization changes every round, so each round
             // builds its own.
-            let xof = builder.build(|ctx| start(ctx, b"", &custom));
+            let xof = start(profile.ctx(), b"", &custom);
             output = squeeze(xof, &message, out_bits)?;
             last_bits = out_bits;
             let right = rightmost_16(&output, out_bits);

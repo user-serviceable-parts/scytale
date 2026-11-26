@@ -7,9 +7,9 @@
 //! SHA-2 or SHA-3 function. Argon2 is built on it.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::hash::Hash;
 //! use scytale::hash::blake2::{Blake2b256, Blake2b512};
-//! use scytale::Context;
 //! let ctx = Context::default();
 //!
 //! let digest = Blake2b512::digest(ctx, b"abc");
@@ -315,10 +315,7 @@ mod tests {
             0x45, 0x33, 0xcc, 0x95, 0x18, 0xd3, 0x8a, 0xa8, 0xdb, 0xf1, 0x92,
             0x5a, 0xb9, 0x23, 0x86, 0xed, 0xd4, 0x00, 0x99, 0x23,
         ];
-        assert_eq!(
-            Blake2b512::digest(crate::Context::default(), b"abc"),
-            expected
-        );
+        assert_eq!(Blake2b512::digest(Context::default(), b"abc"), expected);
     }
 
     /// RFC 7693 appendix E's deterministic input.
@@ -343,7 +340,7 @@ mod tests {
             0xc6, 0x1e, 0x29, 0xda, 0x56, 0x03, 0xd7, 0x63, 0xb8, 0xbb, 0xad,
             0x2e, 0x73, 0x7f, 0x5e, 0x76, 0x5a, 0x7b, 0xcc, 0xd4, 0x75,
         ];
-        let mut grand = Blake2b256::new(crate::Context::default());
+        let mut grand = Blake2b256::new(Context::default());
         let mut input = [0u8; 1024];
         let mut key = [0u8; 64];
         for out_len in [20usize, 32, 48, 64] {
@@ -368,20 +365,20 @@ mod tests {
         for len in [0usize, 1, 127, 128, 129, 256, 300] {
             let data = &input[..len];
             assert_eq!(
-                Blake2b256::digest(crate::Context::default(), data)[..],
+                Blake2b256::digest(Context::default(), data)[..],
                 engine(32, &[], data)[..32]
             );
             assert_eq!(
-                Blake2b512::digest(crate::Context::default(), data),
+                Blake2b512::digest(Context::default(), data),
                 engine(64, &[], data)
             );
-            let mut hash = Blake2b512::new(crate::Context::default());
+            let mut hash = Blake2b512::new(Context::default());
             for byte in data {
                 hash.update(core::slice::from_ref(byte));
             }
             assert_eq!(
                 hash.finalize(),
-                Blake2b512::digest(crate::Context::default(), data)
+                Blake2b512::digest(Context::default(), data)
             );
         }
     }
@@ -389,13 +386,13 @@ mod tests {
     /// `finalize` leaves a new hash behind.
     #[test]
     fn finalize_resets() {
-        let mut hash = Blake2b512::new(crate::Context::default());
+        let mut hash = Blake2b512::new(Context::default());
         hash.update(b"something else");
         let _ = hash.finalize();
         hash.update(b"abc");
         assert_eq!(
             hash.finalize(),
-            Blake2b512::digest(crate::Context::default(), b"abc")
+            Blake2b512::digest(Context::default(), b"abc")
         );
     }
 
@@ -407,13 +404,13 @@ mod tests {
         let message = b"Hi There";
         let mut padded = [0u8; BLOCK];
         padded[..key.len()].copy_from_slice(&key);
-        let mut inner = Blake2b512::new(crate::Context::default());
+        let mut inner = Blake2b512::new(Context::default());
         inner.update(&padded.map(|b| b ^ 0x36));
         inner.update(message);
-        let mut outer = Blake2b512::new(crate::Context::default());
+        let mut outer = Blake2b512::new(Context::default());
         outer.update(&padded.map(|b| b ^ 0x5c));
         outer.update(&inner.finalize());
-        let mut mac = Hmac::<Blake2b512>::new(crate::Context::default(), &key);
+        let mut mac = Hmac::<Blake2b512>::new(Context::default(), &key);
         mac.update(message);
         assert_eq!(mac.finalize(), outer.finalize());
     }

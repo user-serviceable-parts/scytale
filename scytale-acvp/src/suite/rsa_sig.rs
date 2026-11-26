@@ -20,7 +20,7 @@
 //! skipped, that encoding not being implemented.
 
 use super::{answer_groups, answer_tests, skip};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{
     Error, Rng, field, hex, hex_value, int, opt_text, text, unknown_test_type,
 };
@@ -99,7 +99,7 @@ enum Padding {
 pub fn answer(
     doc: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     let generate = match text(doc, "mode")? {
         "sigGen" => true,
@@ -116,10 +116,10 @@ pub fn answer(
         let alg = text(group, "hashAlg")?;
         let padding = padding(group)?;
         if generate {
-            with_hash!(alg, H => sig_gen::<H>(group, padding, rng, builder))
+            with_hash!(alg, H => sig_gen::<H>(group, padding, rng, profile))
         } else {
             answer_tests(group, |t| {
-                let key = builder.try_build(|ctx| public_key(ctx, group))?;
+                let key = public_key(profile.ctx(), group)?;
                 let message = hex(t, "message")?;
                 let sig = hex(t, "signature")?;
                 let ok = with_hash!(alg, H => {
@@ -194,12 +194,11 @@ fn sig_gen<H: DigestInfo>(
     group: &Value,
     padding: Padding,
     rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Option<Value>, Error> {
     let bits = int(group, "modulo")? as usize;
-    let key = builder.try_build(|ctx| {
-        PrivateKey::generate(ctx, &mut Rng(&mut *rng), bits)
-    })?;
+    let key =
+        { PrivateKey::generate(profile.ctx(), &mut Rng(&mut *rng), bits) }?;
     let public = key.public_key();
     let mut n = vec![0u8; public.modulus_len()];
     let len = public.modulus_bytes(&mut n)?;

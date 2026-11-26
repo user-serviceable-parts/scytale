@@ -37,9 +37,8 @@ fn asked() -> &'static Asked {
 }
 
 /// One suite's check. The harness runs as many at once as it runs
-/// any tests: each builds through its kernels' builders, which take
-/// turns only while something is built or run under another set, so
-/// suites need not take turns themselves.
+/// any tests: each builds with its kernels' contexts, which share
+/// nothing.
 fn check(name: &str, directory: &str) {
     let asked = asked();
     let kernels = asked.kernels.as_deref();

@@ -14,11 +14,11 @@
 //! carries.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Cbc;
 //! use scytale::cipher::padding::pkcs7;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();

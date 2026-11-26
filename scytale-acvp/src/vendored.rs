@@ -23,7 +23,7 @@
 //! signing do. A unit is answered under each kernel that tests it,
 //! and the units of every kernel of the suite go to one pool: one
 //! worker per core takes the next, heaviest first, and answers it
-//! through its kernel's [`Builder`], so that kernels and suites run
+//! through its kernel's [`Profile`], so that kernels and suites run
 //! side by side and only wait for one another while something is
 //! being built under another set; see there.
 
@@ -43,7 +43,7 @@ use scytale::kem::ml_kem::ml_kem_768;
 use scytale::sig::{ecdsa, rsa};
 use serde_json::{Map, Value};
 
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::suite::{SUITES, Suite, compare, fixed_rng, vendored};
 use crate::support::Error;
 
@@ -311,14 +311,14 @@ pub fn units(suite: usize, doc: &Value) -> Vec<Unit> {
     out
 }
 
-/// Answers `unit` of `doc` under `builder` with a fresh fixed
+/// Answers `unit` of `doc` under `profile` with a fresh fixed
 /// generator and compares the answer with `doc`; returns the cases
 /// compared, or `None` for a group the driver skipped.
 pub fn answer_unit(
     suite: &Suite,
     doc: &Value,
     unit: &Unit,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Option<usize>, Error> {
     // Copied field by field, leaving out what the unit does not hold:
     // a unit is often a single case of thousands, and copying them all
@@ -345,8 +345,8 @@ pub fn answer_unit(
         Value::Array(vec![Value::Object(group)]),
     );
     let cut = Value::Object(cut);
-    let mut rng = fixed_rng(builder)?;
-    let answered = (suite.answer)(&cut, &mut rng, builder)?;
+    let mut rng = fixed_rng(profile)?;
+    let answered = (suite.answer)(&cut, &mut rng, profile)?;
     if answered["testGroups"].as_array().is_some_and(Vec::is_empty) {
         return Ok(None);
     }
@@ -431,8 +431,8 @@ struct Task {
     unit: usize,
 }
 
-/// Answers `tasks`, each a unit of `all` under its kernel's builder
-/// in `builders`, one worker per core taking the next, heaviest
+/// Answers `tasks`, each a unit of `all` under its kernel's profile
+/// in `profiles`, one worker per core taking the next, heaviest
 /// first, and returns each task with its outcome. A panicking driver
 /// is one task's failure, not the end of the run. `name` heads the
 /// lines of progress.
@@ -441,7 +441,7 @@ fn answer_all(
     suite: &Suite,
     doc: &Value,
     all: &[Unit],
-    builders: &[Builder],
+    profiles: &[Profile],
     tasks: &[Task],
 ) -> Vec<(Task, Outcome)> {
     let mut order = tasks.to_vec();
@@ -469,9 +469,9 @@ fn answer_all(
         while let Some(&task) = order.get(next.fetch_add(1, Ordering::Relaxed))
         {
             let unit = &all[task.unit];
-            let builder = &builders[task.kernel];
+            let profile = &profiles[task.kernel];
             let outcome = match catch_unwind(AssertUnwindSafe(|| {
-                answer_unit(suite, doc, unit, builder)
+                answer_unit(suite, doc, unit, profile)
             })) {
                 Ok(Ok(count)) => Ok(count),
                 Ok(Err(e)) => Err(e.message),
@@ -536,7 +536,7 @@ fn answer_all(
 /// kernel measured nearly twice as slow there as on the scalar one.
 ///
 /// The kernels run at once, each unit building through its kernel's
-/// [`Builder`], so suites may be checked from several threads at
+/// [`Profile`], so suites may be checked from several threads at
 /// once too.
 pub fn check(
     name: &str,
@@ -554,10 +554,10 @@ pub fn check(
     let all = units(s, &doc);
     let hardware = features::detected();
     let kernels = kernels(&types, &doc, &all);
-    // Each kernel's name, and its builder if it is to run or else
+    // Each kernel's name, and its profile if it is to run or else
     // why not; the processor's refusals are found here, once.
     let mut names = Vec::with_capacity(kernels.len());
-    let mut builders = Vec::with_capacity(kernels.len());
+    let mut profiles = Vec::with_capacity(kernels.len());
     let mut states = Vec::with_capacity(kernels.len());
     let mut tasks = Vec::new();
     for (k, (profile, list)) in kernels.iter().enumerate() {
@@ -575,30 +575,30 @@ pub fn check(
             Err("not selected".to_string())
         } else if types.is_empty() {
             Ok(match default {
-                Some(set) => Builder::try_new(set).map_err(|e| {
+                Some(set) => Profile::try_new(set).map_err(|e| {
                     Error::new(format!("the default set {set}: {e}"))
                 })?,
-                None => Builder::default(),
+                None => Profile::default(),
             })
         } else {
-            Builder::try_new(*profile)
+            Profile::try_new(*profile)
                 .map_err(|_| format!("not run: needs {}", short_name(missing)))
         };
         match built {
-            Ok(builder) => {
+            Ok(profile) => {
                 tasks.extend(list.iter().map(|&unit| Task { kernel: k, unit }));
-                builders.push(builder);
+                profiles.push(profile);
                 states.push(None);
             }
             Err(state) => {
                 // Holds the kernel's place; no task names it.
-                builders.push(Builder::default());
+                profiles.push(Profile::default());
                 states.push(Some(state));
             }
         }
         names.push(kernel);
     }
-    let mut outcomes = answer_all(name, suite, &doc, &all, &builders, &tasks);
+    let mut outcomes = answer_all(name, suite, &doc, &all, &profiles, &tasks);
     // In kernel order, so that a unit's cases are counted as the
     // first kernel to answer it found them, whatever order the
     // workers finished in.

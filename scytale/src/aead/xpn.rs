@@ -35,10 +35,10 @@
 //! # Example
 //!
 //! ```
-//! use scytale::Key;
-//! use scytale::cipher::aes::Aes128;
-//! use scytale::aead::Xpn;
 //! use scytale::Context;
+//! use scytale::Key;
+//! use scytale::aead::Xpn;
+//! use scytale::cipher::aes::Aes128;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -187,7 +187,7 @@ mod tests {
     use crate::cipher::aes::Aes128;
 
     fn xpn() -> Xpn<Aes128> {
-        Xpn::new(crate::Context::default(), &Key::from([0x42u8; 16]))
+        Xpn::new(Context::default(), &Key::from([0x42u8; 16]))
     }
 
     /// It must agree with plain GCM under the combined nonce, which
@@ -208,10 +208,8 @@ mod tests {
             .encrypt(&salt, &frame, b"head", &mut by_xpn, &mut xpn_tag)
             .expect("encrypt");
 
-        let gcm = Gcm::<Aes128>::new(
-            crate::Context::default(),
-            &Key::from([0x42; 16]),
-        );
+        let gcm =
+            Gcm::<Aes128>::new(Context::default(), &Key::from([0x42; 16]));
         let mut by_gcm = plain;
         let mut gcm_tag = [0u8; 16];
         gcm.encrypt(&combined, b"head", &mut by_gcm, &mut gcm_tag)

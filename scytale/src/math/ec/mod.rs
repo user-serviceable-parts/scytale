@@ -2407,6 +2407,22 @@ pub(crate) fn signature_from_der(
     Ok(())
 }
 
+/// What a key keeps of the context it was made under: all of it, for
+/// a key whose operations start hashes, or nothing.
+pub(crate) trait Kept: Copy {
+    fn keep(ctx: Context) -> Self;
+}
+
+impl Kept for Context {
+    fn keep(ctx: Context) -> Self {
+        ctx
+    }
+}
+
+impl Kept for () {
+    fn keep(_: Context) -> Self {}
+}
+
 /// The key types of one curve for one scheme: the constants, the
 /// two structs, and everything on them that is not the scheme's own
 /// operation. Invoked inside a module per curve by `sig::ecdsa` and
@@ -2416,7 +2432,7 @@ pub(crate) fn signature_from_der(
 macro_rules! key_types {
     (
         $constants:expr, $limbs:literal, $curve:literal, $job:literal,
-        der $der:literal, public der $public_der:literal
+        der $der:literal, public der $public_der:literal, keeps $kept:ty
     ) => {
         use crate::Error;
         use crate::Random;
@@ -2465,10 +2481,11 @@ macro_rules! key_types {
             // private key's operations take from its public half.
             choice: crate::math::Choice,
             // What the key was made under, for the hashes its
-            // operations start. ECDH's keys start none, so on them
-            // it goes unread.
+            // operations start: the context for a signing key, and
+            // nothing for an agreement key, which starts none and so
+            // never reads its `()`.
             #[allow(dead_code)]
-            ctx: crate::Context,
+            ctx: $kept,
         }
 
         impl PrivateKey {
@@ -2483,7 +2500,7 @@ macro_rules! key_types {
                     public: PublicKey {
                         point: public,
                         choice,
-                        ctx,
+                        ctx: <$kept as crate::math::ec::Kept>::keep(ctx),
                     },
                 }
             }
@@ -2630,7 +2647,7 @@ macro_rules! key_types {
                     Ok(PublicKey {
                         point: Public::try_from_sec1(&e, sec1)?,
                         choice,
-                        ctx,
+                        ctx: <$kept as crate::math::ec::Kept>::keep(ctx),
                     })
                 })
             }
@@ -2656,7 +2673,7 @@ macro_rules! key_types {
                     Ok(PublicKey {
                         point: Public::from_spki(&e, der)?,
                         choice,
-                        ctx,
+                        ctx: <$kept as crate::math::ec::Kept>::keep(ctx),
                     })
                 })
             }
@@ -2681,7 +2698,7 @@ macro_rules! key_types {
                     Ok(PublicKey {
                         point: Public::from_pem(&e, pem)?,
                         choice,
-                        ctx,
+                        ctx: <$kept as crate::math::ec::Kept>::keep(ctx),
                     })
                 })
             }
@@ -2799,7 +2816,7 @@ pub(crate) mod tests {
         };
         let got = p256(under.ctx());
         assert!(got.2, "P-256 verifies");
-        assert_eq!(got, p256(crate::Context::portable()), "P-256");
+        assert_eq!(got, p256(Context::portable()), "P-256");
 
         let p384 = |ctx: crate::Context| {
             let ours = ecdsa::p384::PrivateKey::try_new(ctx, &[0x42; 48])
@@ -2821,7 +2838,7 @@ pub(crate) mod tests {
         };
         let got = p384(under.ctx());
         assert!(got.2, "P-384 verifies");
-        assert_eq!(got, p384(crate::Context::portable()), "P-384");
+        assert_eq!(got, p384(Context::portable()), "P-384");
     }
 
     /// Both field primes are the ones the Montgomery reduction has
@@ -2845,7 +2862,7 @@ pub(crate) mod tests {
             with_engine!(
                 fixed_base,
                 curve,
-                curve.choose(crate::Context::default()),
+                curve.choose(Context::default()),
                 |e| {
                     let g = generator(&e);
                     Public::try_from_affine(&e, curve.gx, curve.gy).unwrap();
@@ -2885,7 +2902,7 @@ pub(crate) mod tests {
             with_engine!(
                 fixed_base,
                 curve,
-                curve.choose(crate::Context::default()),
+                curve.choose(Context::default()),
                 |e| {
                     let g = generator(&e);
                     let mut p = e.identity();
@@ -3157,34 +3174,28 @@ pub(crate) mod tests {
     /// stands for, as the comb check below says of the combs.
     #[test]
     fn base_windows_are_multiples_of_g() {
-        with_engine!(
-            fixed_base,
-            &P256,
-            P256.choose(crate::Context::default()),
-            |e| {
-                let wanted = window_entries(&e);
-                assert_eq!(P256.windows.len(), wanted.len() * BASE_ENTRIES);
-                let tables = P256.windows.chunks_exact(BASE_ENTRIES);
-                for (w, (table, multiples)) in tables.zip(&wanted).enumerate() {
-                    for (j, (entry, point)) in
-                        table.iter().zip(multiples).enumerate()
-                    {
-                        let (x, y) =
-                            e.to_affine(point).expect("a multiple of G");
-                        assert_eq!(
-                            e.field.to_mont(e.arith, &x).0,
-                            entry[0],
-                            "{w} {j} x"
-                        );
-                        assert_eq!(
-                            e.field.to_mont(e.arith, &y).0,
-                            entry[1],
-                            "{w} {j} y"
-                        );
-                    }
+        with_engine!(fixed_base, &P256, P256.choose(Context::default()), |e| {
+            let wanted = window_entries(&e);
+            assert_eq!(P256.windows.len(), wanted.len() * BASE_ENTRIES);
+            let tables = P256.windows.chunks_exact(BASE_ENTRIES);
+            for (w, (table, multiples)) in tables.zip(&wanted).enumerate() {
+                for (j, (entry, point)) in
+                    table.iter().zip(multiples).enumerate()
+                {
+                    let (x, y) = e.to_affine(point).expect("a multiple of G");
+                    assert_eq!(
+                        e.field.to_mont(e.arith, &x).0,
+                        entry[0],
+                        "{w} {j} x"
+                    );
+                    assert_eq!(
+                        e.field.to_mont(e.arith, &y).0,
+                        entry[1],
+                        "{w} {j} y"
+                    );
                 }
             }
-        )
+        })
     }
 
     /// Every entry of every comb table is the multiple of `G` it
@@ -3197,7 +3208,7 @@ pub(crate) mod tests {
             with_engine!(
                 fixed_base,
                 curve,
-                curve.choose(crate::Context::default()),
+                curve.choose(Context::default()),
                 |e| {
                     let bases = comb_bases(&e);
                     assert_eq!(curve.base.len(), TABLES * ENTRIES);
@@ -3240,7 +3251,7 @@ pub(crate) mod tests {
             with_engine!(
                 fixed_base,
                 curve,
-                curve.choose(crate::Context::default()),
+                curve.choose(Context::default()),
                 |e| {
                     let g = generator(&e);
                     let (order_less_one, _) = curve.n.sub_borrow(&Uint::one());
@@ -3294,7 +3305,7 @@ pub(crate) mod tests {
             with_engine!(
                 fixed_base,
                 curve,
-                curve.choose(crate::Context::default()),
+                curve.choose(Context::default()),
                 |e| {
                     let g = generator(&e);
                     let q = e.point_mul(&g, &Uint::from_limbs(&[7]));
@@ -3347,7 +3358,7 @@ pub(crate) mod tests {
             with_engine!(
                 fixed_base,
                 curve,
-                curve.choose(crate::Context::default()),
+                curve.choose(Context::default()),
                 |e| {
                     let g = generator(&e);
                     let (top, _) = curve.n.sub_borrow(&Uint::one());
@@ -3376,69 +3387,59 @@ pub(crate) mod tests {
     #[test]
     fn public_keys_match_nist() {
         let mut buf = [0u8; 48];
-        with_engine!(
-            fixed_base,
-            &P256,
-            P256.choose(crate::Context::default()),
-            |e| {
-                let d = Secret::try_new(
-                    &e,
-                    unhex(
-                        "bf049d775057f1199612f4bd6ab0af69\
-                     5a78fb488453e261ca3c277ad57e55db",
-                        &mut buf,
-                    ),
-                )
-                .unwrap();
-                let public = d.public(&e);
-                let mut sec1 = [0u8; 65];
-                public.sec1(&e, &mut sec1);
-                let mut expected = [0u8; 65];
+        with_engine!(fixed_base, &P256, P256.choose(Context::default()), |e| {
+            let d = Secret::try_new(
+                &e,
                 unhex(
-                    "04c6e20135457dc6f738e60cf6999d2416f31d7c12afea248434a547a\
+                    "bf049d775057f1199612f4bd6ab0af69\
+                     5a78fb488453e261ca3c277ad57e55db",
+                    &mut buf,
+                ),
+            )
+            .unwrap();
+            let public = d.public(&e);
+            let mut sec1 = [0u8; 65];
+            public.sec1(&e, &mut sec1);
+            let mut expected = [0u8; 65];
+            unhex(
+                "04c6e20135457dc6f738e60cf6999d2416f31d7c12afea248434a547a\
                     9aa\
                  8a34b06e5610c1cfc091ad58aa43f2b8a96d9561ee80594c5bc5dc4cb08b\
                  e679aa45ff",
-                    &mut expected,
-                );
-                assert_eq!(sec1, expected);
-                assert_eq!(
-                    Public::try_from_sec1(&e, &expected).unwrap().x.0,
-                    public.x.0
-                );
-            }
-        );
+                &mut expected,
+            );
+            assert_eq!(sec1, expected);
+            assert_eq!(
+                Public::try_from_sec1(&e, &expected).unwrap().x.0,
+                public.x.0
+            );
+        });
 
-        with_engine!(
-            fixed_base,
-            &P384,
-            P384.choose(crate::Context::default()),
-            |e| {
-                let d = Secret::try_new(
-                    &e,
-                    unhex(
-                        "958baeccb7bb953aa92fce3a136a7b8a\
+        with_engine!(fixed_base, &P384, P384.choose(Context::default()), |e| {
+            let d = Secret::try_new(
+                &e,
+                unhex(
+                    "958baeccb7bb953aa92fce3a136a7b8a\
                      68001c4ed00cf7da6fcf83c0f552636d\
                      0063e7c8a511cc45534f1a7f0f7dd959",
-                        &mut buf,
-                    ),
-                )
-                .unwrap();
-                let public = d.public(&e);
-                let mut sec1 = [0u8; 97];
-                public.sec1(&e, &mut sec1);
-                let mut expected = [0u8; 97];
-                unhex(
-                    "0419f324cf1cbc7d17c1284f1d887eecafb1e11f4c9709566b3094fe3\
+                    &mut buf,
+                ),
+            )
+            .unwrap();
+            let public = d.public(&e);
+            let mut sec1 = [0u8; 97];
+            public.sec1(&e, &mut sec1);
+            let mut expected = [0u8; 97];
+            unhex(
+                "0419f324cf1cbc7d17c1284f1d887eecafb1e11f4c9709566b3094fe3\
                     152\
                  f63fdbc937018f93918b80a84d4a9ffb8e132c75a66d983f39cca1dddebb\
                  881969adeabe03b8c84b16e9e8b1de4b79ba3c41701145762eb90cc59c5f\
                  61f568d0601c08",
-                    &mut expected,
-                );
-                assert_eq!(sec1, expected);
-            }
-        )
+                &mut expected,
+            );
+            assert_eq!(sec1, expected);
+        })
     }
 
     /// Compressed points decompress to the same key, with either
@@ -3449,12 +3450,11 @@ pub(crate) mod tests {
             with_engine!(
                 fixed_base,
                 curve,
-                curve.choose(crate::Context::default()),
+                curve.choose(Context::default()),
                 |e| {
-                    let mut rng = crate::random::CtrDrbg::from_system(
-                        crate::Context::default(),
-                    )
-                    .unwrap();
+                    let mut rng =
+                        crate::random::CtrDrbg::from_system(Context::default())
+                            .unwrap();
                     let mut sec1 = [0u8; 133];
                     let w = curve.width();
                     for _ in 0..4 {
@@ -3527,7 +3527,7 @@ pub(crate) mod tests {
             with_engine!(
                 fixed_base,
                 curve,
-                curve.choose(crate::Context::default()),
+                curve.choose(Context::default()),
                 |e| {
                     let g = generator(&e);
                     for j in 1..=64u64 {
@@ -3579,39 +3579,30 @@ pub(crate) mod tests {
                 }
                 data.extend_from_slice(&key);
                 data.extend_from_slice(h);
-                k = Hmac::<H>::mac(crate::Context::default(), &k, &data)
+                k = Hmac::<H>::mac(Context::default(), &k, &data)
                     .as_ref()
                     .to_vec();
-                v = Hmac::<H>::mac(crate::Context::default(), &k, &v)
+                v = Hmac::<H>::mac(Context::default(), &k, &v)
                     .as_ref()
                     .to_vec();
             }
             (k, v)
         }
         let (x, h, z) = ([7u8; 32], [9u8; 32], [3u8; 32]);
-        let nonce = Nonce::<Sha256>::try_new(
-            crate::Context::default(),
-            &x,
-            &h,
-            Some(&z),
-        )
-        .unwrap();
+        let nonce =
+            Nonce::<Sha256>::try_new(Context::default(), &x, &h, Some(&z))
+                .unwrap();
         let (k, v) = by_hand::<Sha256>(&x, &h, &z);
         assert_eq!((nonce.k.as_ref(), nonce.v.as_ref()), (&k[..], &v[..]));
         let (x, h, z) = ([7u8; 66], [9u8; 66], [3u8; 66]);
-        let nonce = Nonce::<Sha512>::try_new(
-            crate::Context::default(),
-            &x,
-            &h,
-            Some(&z),
-        )
-        .unwrap();
+        let nonce =
+            Nonce::<Sha512>::try_new(Context::default(), &x, &h, Some(&z))
+                .unwrap();
         let (k, v) = by_hand::<Sha512>(&x, &h, &z);
         assert_eq!((nonce.k.as_ref(), nonce.v.as_ref()), (&k[..], &v[..]));
         // Without noise it is RFC 6979's seeding, which differs.
         let plain =
-            Nonce::<Sha512>::try_new(crate::Context::default(), &x, &h, None)
-                .unwrap();
+            Nonce::<Sha512>::try_new(Context::default(), &x, &h, None).unwrap();
         assert_ne!(plain.k.as_ref(), &k[..]);
     }
 
@@ -3620,66 +3611,50 @@ pub(crate) mod tests {
     #[test]
     fn hedged_signatures_verify() {
         let mut buf = [0u8; 48];
-        with_engine!(
-            fixed_base,
-            &P256,
-            P256.choose(crate::Context::default()),
-            |e| {
-                let d = Secret::try_new(&e, unhex(&"42".repeat(32), &mut buf))
+        with_engine!(fixed_base, &P256, P256.choose(Context::default()), |e| {
+            let d =
+                Secret::try_new(&e, unhex(&"42".repeat(32), &mut buf)).unwrap();
+            let mut plain = [0u8; 64];
+            d.sign::<Sha256>(Context::default(), &e, b"m", None, &mut plain)
+                .unwrap();
+            let mut a = [0u8; 64];
+            d.sign::<Sha256>(
+                Context::default(),
+                &e,
+                b"m",
+                Some(&[1; 32]),
+                &mut a,
+            )
+            .unwrap();
+            let mut b = [0u8; 64];
+            d.sign::<Sha256>(
+                Context::default(),
+                &e,
+                b"m",
+                Some(&[2; 32]),
+                &mut b,
+            )
+            .unwrap();
+            for sig in [&plain, &a, &b] {
+                d.public(&e)
+                    .verify::<Sha256>(Context::default(), &e, b"m", sig)
                     .unwrap();
-                let mut plain = [0u8; 64];
-                d.sign::<Sha256>(
-                    crate::Context::default(),
-                    &e,
-                    b"m",
-                    None,
-                    &mut plain,
-                )
-                .unwrap();
-                let mut a = [0u8; 64];
-                d.sign::<Sha256>(
-                    crate::Context::default(),
-                    &e,
-                    b"m",
-                    Some(&[1; 32]),
-                    &mut a,
-                )
-                .unwrap();
-                let mut b = [0u8; 64];
-                d.sign::<Sha256>(
-                    crate::Context::default(),
-                    &e,
-                    b"m",
-                    Some(&[2; 32]),
-                    &mut b,
-                )
-                .unwrap();
-                for sig in [&plain, &a, &b] {
-                    d.public(&e)
-                        .verify::<Sha256>(
-                            crate::Context::default(),
-                            &e,
-                            b"m",
-                            sig,
-                        )
-                        .unwrap();
-                }
-                assert_ne!(a, plain);
-                assert_ne!(a, b);
-                // The same noise gives the same signature: the randomness is
-                // the only thing that varies.
-                let mut again = [0u8; 64];
-                d.sign::<Sha256>(
-                    crate::Context::default(),
-                    &e,
-                    b"m",
-                    Some(&[1; 32]),
-                    &mut again,
-                )
-                .unwrap();
-                assert_eq!(a, again);
             }
-        )
+            assert_ne!(a, plain);
+            assert_ne!(a, b);
+            // The same noise gives the same signature: the randomness is
+            // the only thing that varies.
+            let mut again = [0u8; 64];
+            d.sign::<Sha256>(
+                Context::default(),
+                &e,
+                b"m",
+                Some(&[1; 32]),
+                &mut again,
+            )
+            .unwrap();
+            assert_eq!(a, again);
+        })
     }
 
     /// RFC 6979 appendix A.2.5 and A.2.6: deterministic signatures
@@ -3687,237 +3662,167 @@ pub(crate) mod tests {
     #[test]
     fn rfc6979_vectors() {
         let mut buf = [0u8; 48];
-        with_engine!(
-            fixed_base,
-            &P256,
-            P256.choose(crate::Context::default()),
-            |e| {
-                let d = Secret::try_new(
-                    &e,
-                    unhex(
-                        "c9afa9d845ba75166b5c215767b1d693\
-                     4e50c3db36e89b127b8a622b120f6721",
-                        &mut buf,
-                    ),
-                )
-                .unwrap();
-                let mut sig = [0u8; 64];
-                d.sign::<Sha256>(
-                    crate::Context::default(),
-                    &e,
-                    b"sample",
-                    None,
-                    &mut sig,
-                )
-                .unwrap();
-                let mut expected = [0u8; 64];
+        with_engine!(fixed_base, &P256, P256.choose(Context::default()), |e| {
+            let d = Secret::try_new(
+                &e,
                 unhex(
-                    "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84\
+                    "c9afa9d845ba75166b5c215767b1d693\
+                     4e50c3db36e89b127b8a622b120f6721",
+                    &mut buf,
+                ),
+            )
+            .unwrap();
+            let mut sig = [0u8; 64];
+            d.sign::<Sha256>(Context::default(), &e, b"sample", None, &mut sig)
+                .unwrap();
+            let mut expected = [0u8; 64];
+            unhex(
+                "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84\
                     eaf\
                  3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f\
                  843acda8",
-                    &mut expected,
-                );
-                assert_eq!(sig, expected);
-                d.public(&e)
-                    .verify::<Sha256>(
-                        crate::Context::default(),
-                        &e,
-                        b"sample",
-                        &sig,
-                    )
-                    .unwrap();
-                d.sign::<Sha256>(
-                    crate::Context::default(),
-                    &e,
-                    b"test",
-                    None,
-                    &mut sig,
-                )
+                &mut expected,
+            );
+            assert_eq!(sig, expected);
+            d.public(&e)
+                .verify::<Sha256>(Context::default(), &e, b"sample", &sig)
                 .unwrap();
-                unhex(
-                    "f1abb023518351cd71d881567b1ea663ed3efcf6c5132b354f28d3b0b\
+            d.sign::<Sha256>(Context::default(), &e, b"test", None, &mut sig)
+                .unwrap();
+            unhex(
+                "f1abb023518351cd71d881567b1ea663ed3efcf6c5132b354f28d3b0b\
                     7d3\
                  8367019f4113742a2b14bd25926b49c649155f267e60d3814b4c0cc84250\
                  e46f0083",
-                    &mut expected,
-                );
-                assert_eq!(sig, expected);
-            }
-        );
+                &mut expected,
+            );
+            assert_eq!(sig, expected);
+        });
 
-        with_engine!(
-            fixed_base,
-            &P384,
-            P384.choose(crate::Context::default()),
-            |e| {
-                let d = Secret::try_new(
-                    &e,
-                    unhex(
-                        "6b9d3dad2e1b8c1c05b19875b6659f4d\
+        with_engine!(fixed_base, &P384, P384.choose(Context::default()), |e| {
+            let d = Secret::try_new(
+                &e,
+                unhex(
+                    "6b9d3dad2e1b8c1c05b19875b6659f4d\
                      e23c3b667bf297ba9aa47740787137d8\
                      96d5724e4c70a825f872c9ea60d2edf5",
-                        &mut buf,
-                    ),
-                )
+                    &mut buf,
+                ),
+            )
+            .unwrap();
+            let mut sig = [0u8; 96];
+            d.sign::<Sha384>(Context::default(), &e, b"sample", None, &mut sig)
                 .unwrap();
-                let mut sig = [0u8; 96];
-                d.sign::<Sha384>(
-                    crate::Context::default(),
-                    &e,
-                    b"sample",
-                    None,
-                    &mut sig,
-                )
-                .unwrap();
-                let mut expected = [0u8; 96];
-                unhex(
-                    "94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea9\
+            let mut expected = [0u8; 96];
+            unhex(
+                "94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea9\
                     5ad\
                  133c81a648152e44acf96e36dd1e80fabe4699ef4aeb15f178cea1fe40db\
                  2603138f130e740a19624526203b6351d0a3a94fa329c145786e679e7b82\
                  c71a38628ac8",
-                    &mut expected,
-                );
-                assert_eq!(sig, expected);
-                d.public(&e)
-                    .verify::<Sha384>(
-                        crate::Context::default(),
-                        &e,
-                        b"sample",
-                        &sig,
-                    )
-                    .unwrap();
-            }
-        )
+                &mut expected,
+            );
+            assert_eq!(sig, expected);
+            d.public(&e)
+                .verify::<Sha384>(Context::default(), &e, b"sample", &sig)
+                .unwrap();
+        })
     }
 
     /// Verification refuses what it should: a changed message, a
     /// changed signature, zero or out-of-range parts, another key.
     #[test]
     fn verify_refusals() {
-        with_engine!(
-            fixed_base,
-            &P256,
-            P256.choose(crate::Context::default()),
-            |e| {
-                let mut rng = crate::random::CtrDrbg::from_system(
-                    crate::Context::default(),
-                )
-                .unwrap();
-                let d = Secret::generate(&e, &mut rng).unwrap();
-                let public = d.public(&e);
-                let mut sig = [0u8; 64];
-                d.sign::<Sha256>(
-                    crate::Context::default(),
-                    &e,
-                    b"message",
-                    None,
-                    &mut sig,
-                )
-                .unwrap();
-                public
-                    .verify::<Sha256>(
-                        crate::Context::default(),
-                        &e,
-                        b"message",
-                        &sig,
-                    )
+        with_engine!(fixed_base, &P256, P256.choose(Context::default()), |e| {
+            let mut rng =
+                crate::random::CtrDrbg::from_system(Context::default())
                     .unwrap();
-                let bad = |s: &[u8], m: &[u8]| {
-                    assert_eq!(
-                        public.verify::<Sha256>(
-                            crate::Context::default(),
-                            &e,
-                            m,
-                            s
-                        ),
-                        Err(Error::InvalidSignature)
-                    );
-                };
-                bad(&sig, b"messagf");
-                let mut t = sig;
-                t[0] ^= 1;
-                bad(&t, b"message");
-                t = sig;
-                t[63] ^= 1;
-                bad(&t, b"message");
-                t = sig;
-                t[..32].fill(0);
-                bad(&t, b"message");
-                t = sig;
-                t[32..].fill(0xff);
-                bad(&t, b"message");
-                bad(&sig[..63], b"message");
-                let other = Secret::generate(&e, &mut rng).unwrap().public(&e);
-                assert!(
-                    other
-                        .verify::<Sha256>(
-                            crate::Context::default(),
-                            &e,
-                            b"message",
-                            &sig
-                        )
-                        .is_err()
+            let d = Secret::generate(&e, &mut rng).unwrap();
+            let public = d.public(&e);
+            let mut sig = [0u8; 64];
+            d.sign::<Sha256>(
+                Context::default(),
+                &e,
+                b"message",
+                None,
+                &mut sig,
+            )
+            .unwrap();
+            public
+                .verify::<Sha256>(Context::default(), &e, b"message", &sig)
+                .unwrap();
+            let bad = |s: &[u8], m: &[u8]| {
+                assert_eq!(
+                    public.verify::<Sha256>(Context::default(), &e, m, s),
+                    Err(Error::InvalidSignature)
                 );
-            }
-        )
+            };
+            bad(&sig, b"messagf");
+            let mut t = sig;
+            t[0] ^= 1;
+            bad(&t, b"message");
+            t = sig;
+            t[63] ^= 1;
+            bad(&t, b"message");
+            t = sig;
+            t[..32].fill(0);
+            bad(&t, b"message");
+            t = sig;
+            t[32..].fill(0xff);
+            bad(&t, b"message");
+            bad(&sig[..63], b"message");
+            let other = Secret::generate(&e, &mut rng).unwrap().public(&e);
+            assert!(
+                other
+                    .verify::<Sha256>(Context::default(), &e, b"message", &sig)
+                    .is_err()
+            );
+        })
     }
 
     /// Both sides of an agreement land on the same secret, and a
     /// key of the other curve or an off-curve point is refused.
     #[test]
     fn agreement() {
-        with_engine!(
-            fixed_base,
-            &P384,
-            P384.choose(crate::Context::default()),
-            |e| {
-                let mut rng = crate::random::CtrDrbg::from_system(
-                    crate::Context::default(),
-                )
-                .unwrap();
-                let a = Secret::generate(&e, &mut rng).unwrap();
-                let b = Secret::generate(&e, &mut rng).unwrap();
-                let mut ab = [0u8; 48];
-                let mut ba = [0u8; 48];
-                a.shared_secret(&e, &b.public(&e), &mut ab);
-                b.shared_secret(&e, &a.public(&e), &mut ba);
-                assert_eq!(ab, ba);
-                assert_ne!(ab, [0u8; 48]);
-            }
-        )
+        with_engine!(fixed_base, &P384, P384.choose(Context::default()), |e| {
+            let mut rng =
+                crate::random::CtrDrbg::from_system(Context::default())
+                    .unwrap();
+            let a = Secret::generate(&e, &mut rng).unwrap();
+            let b = Secret::generate(&e, &mut rng).unwrap();
+            let mut ab = [0u8; 48];
+            let mut ba = [0u8; 48];
+            a.shared_secret(&e, &b.public(&e), &mut ab);
+            b.shared_secret(&e, &a.public(&e), &mut ba);
+            assert_eq!(ab, ba);
+            assert_ne!(ab, [0u8; 48]);
+        })
     }
 
     /// Scalars out of range are not keys.
     #[test]
     fn scalar_range() {
-        with_engine!(
-            fixed_base,
-            &P256,
-            P256.choose(crate::Context::default()),
-            |e| {
-                let mut buf = [0u8; 32];
-                assert_eq!(
-                    Secret::try_new(&e, &buf).err(),
-                    Some(Error::InvalidPrivateKey)
-                );
-                P256.n.to_be_bytes(&mut buf);
-                assert_eq!(
-                    Secret::try_new(&e, &buf).err(),
-                    Some(Error::InvalidPrivateKey)
-                );
-                buf[31] -= 1;
-                assert!(Secret::try_new(&e, &buf).is_ok());
-                assert_eq!(
-                    Secret::try_new(&e, &buf[..31]).err(),
-                    Some(Error::InvalidKeyLength(31))
-                );
-                assert_eq!(
-                    Secret::try_new(&e, &[1u8; 48]).err(),
-                    Some(Error::InvalidKeyLength(48))
-                );
-            }
-        )
+        with_engine!(fixed_base, &P256, P256.choose(Context::default()), |e| {
+            let mut buf = [0u8; 32];
+            assert_eq!(
+                Secret::try_new(&e, &buf).err(),
+                Some(Error::InvalidPrivateKey)
+            );
+            P256.n.to_be_bytes(&mut buf);
+            assert_eq!(
+                Secret::try_new(&e, &buf).err(),
+                Some(Error::InvalidPrivateKey)
+            );
+            buf[31] -= 1;
+            assert!(Secret::try_new(&e, &buf).is_ok());
+            assert_eq!(
+                Secret::try_new(&e, &buf[..31]).err(),
+                Some(Error::InvalidKeyLength(31))
+            );
+            assert_eq!(
+                Secret::try_new(&e, &[1u8; 48]).err(),
+                Some(Error::InvalidKeyLength(48))
+            );
+        })
     }
 }
