@@ -246,7 +246,10 @@ fn sender<H: Kdf, A: Cipher>(
 ) -> Result<(Vec<u8>, Context<H, A>)> {
     Ok(match algorithm {
         Algorithm::X25519 => {
-            let public = x25519::PublicKey::try_from_pem(pem)?;
+            let public = x25519::PublicKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )?;
             let public = hpke::x25519::PublicKey::new(
                 scytale::Context::default(),
                 &public.bytes(),
@@ -255,7 +258,10 @@ fn sender<H: Kdf, A: Cipher>(
             (enc.to_vec(), context)
         }
         Algorithm::X448 => {
-            let public = x448::PublicKey::try_from_pem(pem)?;
+            let public = x448::PublicKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )?;
             let public = hpke::x448::PublicKey::new(
                 scytale::Context::default(),
                 &public.bytes(),
@@ -325,7 +331,10 @@ fn recipient<H: Kdf, A: Cipher>(
     let bad = scytale::Error::InvalidPublicKey;
     Ok(match algorithm {
         Algorithm::X25519 => {
-            let private = x25519::PrivateKey::try_from_pem(pem)?;
+            let private = x25519::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )?;
             let secret = Key::from(private.secret_bytes());
             let private = hpke::x25519::PrivateKey::new(
                 scytale::Context::default(),
@@ -336,7 +345,10 @@ fn recipient<H: Kdf, A: Cipher>(
                 .and_then(|enc| private.recipient(enc, info))
         }
         Algorithm::X448 => {
-            let private = x448::PrivateKey::try_from_pem(pem)?;
+            let private = x448::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )?;
             let secret = Key::from(private.secret_bytes());
             let private = hpke::x448::PrivateKey::new(
                 scytale::Context::default(),

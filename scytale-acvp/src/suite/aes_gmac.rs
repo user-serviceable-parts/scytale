@@ -4,7 +4,7 @@
 //! and longer nonces, with cases that must be rejected.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{
     Error, hex, hex_value, int, key_of, text, unknown_test_type,
 };
@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         let encrypt = match text(group, "direction")? {
@@ -30,12 +30,8 @@ pub fn answer(
                 let key = hex(t, "key")?;
                 aes_width!(key, C => {
                     let k = key_of::<C>(&key)?;
-                    // A message over a cipher with no kernel of GCM's
-                    // own starts a GHASH of its own, which chooses its
-                    // multiply then: the message is built too.
-                    builder.try_build(|ctx| {
-                        aft(&Gcm::<C>::new(ctx, &k), t, encrypt, tag_len)
-                    })
+                    let mode = Gcm::<C>::new(profile.ctx(), &k);
+                    aft(&mode, t, encrypt, tag_len)
                 })
             }),
             _ => Err(unknown_test_type(group)),

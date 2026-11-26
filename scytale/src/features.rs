@@ -1179,6 +1179,7 @@ pub(crate) mod sealed {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Context;
     use std::string::ToString;
     use std::vec::Vec;
 
@@ -1280,7 +1281,7 @@ mod tests {
         assert!(rows_are_reachable(&kernels));
         assert_eq!(select::<&str>(Context::default(), &[]), None);
         // Isolated is never detected, so the walk passes it.
-        assert_eq!(select(crate::Context::default(), &kernels), Some("none"));
+        assert_eq!(select(Context::default(), &kernels), Some("none"));
         let profiles: [Features; 2] = profiles_of(&kernels);
         assert_eq!(profiles, [isolated, Features::new()]);
     }
@@ -1301,6 +1302,7 @@ mod tests {
     /// Dispatch itself: what each context's set selects.
     mod dispatch {
         use super::*;
+        use crate::Context;
         use crate::Key;
         use crate::aead::{Ccm, Gcm, GcmSiv, ccm, gcm, gcm_siv};
         use crate::cipher::aes::{self, Aes, Aes128};

@@ -4,7 +4,7 @@
 
 use super::sha::{Family, Message};
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{Error, hex_value, int, text, unknown_test_type};
 use scytale::Random;
 use scytale::hash::sha3::{Shake128, Shake256};
@@ -14,25 +14,25 @@ use serde_json::{Value, json};
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     match text(doc, "algorithm")? {
-        "SHAKE-128" => answer_as::<Shake128>(doc, builder),
-        "SHAKE-256" => answer_as::<Shake256>(doc, builder),
+        "SHAKE-128" => answer_as::<Shake128>(doc, profile),
+        "SHAKE-256" => answer_as::<Shake256>(doc, profile),
         other => Err(Error::new(format!("algorithm {other}"))),
     }
 }
 
 fn answer_as<X: BitXof + Clone>(
     doc: &Value,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         match text(group, "testType")? {
             "AFT" | "VOT" => answer_tests(group, |t| {
                 let bits = int(t, "outLen")? as usize;
                 let mut out = vec![0u8; bits.div_ceil(8)];
-                let xof = builder.build(X::new);
+                let xof = X::new(profile.ctx());
                 squeeze(xof, &Message::of(t)?, &mut out)?;
                 // A length that is not whole bytes keeps the last byte's
                 // low bits, numbered as FIPS 202 numbers them, and the
@@ -51,7 +51,7 @@ fn answer_as<X: BitXof + Clone>(
                     return Err(Error::new("output lengths out of range"));
                 }
                 answer_tests(group, |t| {
-                    mct::<X>(t, min_bits, max_bits, builder)
+                    mct::<X>(t, min_bits, max_bits, profile)
                 })
             }
             _ => Err(unknown_test_type(group)),
@@ -84,11 +84,11 @@ fn mct<X: BitXof + Clone>(
     t: &Value,
     min_bits: usize,
     max_bits: usize,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     // Built once and copied for each of the hundred thousand calls: a
     // copy keeps the kernel it was built with.
-    let fresh = builder.build(X::new);
+    let fresh = X::new(profile.ctx());
     let range = (max_bits - min_bits) / 8 + 1;
     let seed = Message::of(t)?;
     if seed.bits % 8 != 0 {

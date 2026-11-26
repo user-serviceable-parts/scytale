@@ -21,10 +21,10 @@
 //! # Example
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Cbc;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -459,7 +459,7 @@ pub(crate) mod tests {
     }
 
     fn cbc<const K: usize>(key: &[u8; K]) -> Cbc<Aes<K>> {
-        Cbc::new(crate::Context::default(), &Key::from(*key))
+        Cbc::new(Context::default(), &Key::from(*key))
     }
 
     /// Fills `buf` with something that is not all one byte.
@@ -520,7 +520,7 @@ pub(crate) mod tests {
 
         // The portable one last, as the reference.
         let all = [Cbc::<Aes128>::new(under.ctx(), &key), {
-            Cbc::<Aes128>::new(crate::Context::portable(), &key)
+            Cbc::<Aes128>::new(Context::portable(), &key)
         }];
 
         for len in (0..MAX).step_by(16) {

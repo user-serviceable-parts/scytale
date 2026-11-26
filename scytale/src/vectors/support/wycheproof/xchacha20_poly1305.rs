@@ -9,6 +9,7 @@
 //! file reaches one kernel at a time; what this construction adds is
 //! the one HChaCha20 block, which is portable code on every processor.
 
+use crate::Context;
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
@@ -42,7 +43,7 @@ pub fn run() {
         for t in group["tests"].as_array().expect("tests") {
             let tag = format!("tcId {}: {}", t["tcId"], t["comment"]);
             let key = Key::try_from(&hex(&t["key"])[..]).expect("key");
-            let aead = XChaCha20Poly1305::new(crate::Context::default(), &key);
+            let aead = XChaCha20Poly1305::new(Context::default(), &key);
             let nonce: [u8; 24] = hex(&t["iv"]).try_into().expect("nonce");
             let aad = hex(&t["aad"]);
             let msg = hex(&t["msg"]);

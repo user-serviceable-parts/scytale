@@ -15,10 +15,10 @@
 //! message and compute the digest of the extension, key unseen.
 //!
 //! ```
-//! use scytale::mac::hmac::HmacSha256;
-//! use scytale::mac::Mac;
-//! use scytale::KeyType;
 //! use scytale::Context;
+//! use scytale::KeyType;
+//! use scytale::mac::Mac;
+//! use scytale::mac::hmac::HmacSha256;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -127,10 +127,10 @@ mod tests {
             mac.update(b"message");
             mac.finalize()
         }
-        let mut mac = HmacSha256::new(crate::Context::default(), b"key");
+        let mut mac = HmacSha256::new(Context::default(), b"key");
         assert_eq!(
             tag(&mut mac),
-            HmacSha256::mac(crate::Context::default(), b"key", b"message")
+            HmacSha256::mac(Context::default(), b"key", b"message")
         );
 
         fn tag16(
@@ -140,19 +140,17 @@ mod tests {
             mac.finalize()
         }
         let key = [7u8; 32];
-        let mut fresh =
-            Poly1305::new(crate::Context::default(), &Key::from(key));
+        let mut fresh = Poly1305::new(Context::default(), &Key::from(key));
         fresh.update(b"message");
         let expected = fresh.finalize();
-        let mut poly =
-            Poly1305::new(crate::Context::default(), &Key::from(key));
+        let mut poly = Poly1305::new(Context::default(), &Key::from(key));
         assert_eq!(tag16(&mut poly), expected);
 
         let key = Key::from([7u8; 32]);
-        let mut cmac = Cmac::<Aes256>::new(crate::Context::default(), &key);
+        let mut cmac = Cmac::<Aes256>::new(Context::default(), &key);
         assert_eq!(
             tag16(&mut cmac),
-            Cmac::<Aes256>::mac(crate::Context::default(), &key, b"message")
+            Cmac::<Aes256>::mac(Context::default(), &key, b"message")
         );
 
         fn tag32(
@@ -161,12 +159,9 @@ mod tests {
             mac.update(b"message");
             mac.finalize()
         }
-        let mut kmac = <Kmac128 as Mac>::new(
-            crate::Context::default(),
-            &Key::from([7u8; 32]),
-        );
-        let mut direct =
-            Kmac128::new(crate::Context::default(), &[7u8; 32], b"");
+        let mut kmac =
+            <Kmac128 as Mac>::new(Context::default(), &Key::from([7u8; 32]));
+        let mut direct = Kmac128::new(Context::default(), &[7u8; 32], b"");
         direct.update(b"message");
         let mut expected = [0u8; 32];
         direct.finalize_to(&mut expected);
@@ -178,12 +173,12 @@ mod tests {
     #[test]
     fn finalize_resets() {
         fn check<M: Mac>(key: &M::Key) {
-            let mut mac = M::new(crate::Context::default(), key);
+            let mut mac = M::new(Context::default(), key);
             mac.update(b"garbage");
             let _ = mac.finalize();
             mac.update(b"abc");
             let tag = mac.finalize();
-            let mut fresh = M::new(crate::Context::default(), key);
+            let mut fresh = M::new(Context::default(), key);
             fresh.update(b"abc");
             assert_eq!(tag.as_ref(), fresh.finalize().as_ref());
             mac.update(b"abc");

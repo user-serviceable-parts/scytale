@@ -28,11 +28,11 @@
 //! [`shared_secret`]: p256::PrivateKey::shared_secret
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::kdf::hkdf;
 //! use scytale::kex::ecdh::p256::PrivateKey;
 //! use scytale::random::CtrDrbg;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -64,7 +64,7 @@ macro_rules! ecdh_curve {
     ) => {
         crate::math::ec::key_types!(
             $constants, $limbs, $curve, "key agreement",
-            der $der, public der $public_der
+            der $der, public der $public_der, keeps ()
         );
 
         impl crate::features::sealed::Sealed for PrivateKey {}
@@ -122,6 +122,7 @@ pub mod p521 {
 #[cfg(test)]
 mod tests {
     use super::{p256, p384, p521};
+    use crate::Context;
     use crate::Error;
 
     fn unhex<'a>(hex: &str, buf: &'a mut [u8]) -> &'a [u8] {
@@ -157,11 +158,9 @@ mod tests {
             &mut buf,
         );
         let key =
-            p256::PrivateKey::try_new(crate::Context::default(), &private)
-                .unwrap();
+            p256::PrivateKey::try_new(Context::default(), &private).unwrap();
         let peer =
-            p256::PublicKey::try_from_der(crate::Context::default(), peer)
-                .unwrap();
+            p256::PublicKey::try_from_der(Context::default(), peer).unwrap();
         assert_eq!(key.shared_secret(&peer)[..], shared[..]);
     }
 
@@ -194,11 +193,9 @@ mod tests {
             &mut buf,
         );
         let key =
-            p521::PrivateKey::try_new(crate::Context::default(), &private)
-                .unwrap();
-        let peer =
-            p521::PublicKey::try_from_pem(crate::Context::default(), PEER_PEM)
-                .unwrap();
+            p521::PrivateKey::try_new(Context::default(), &private).unwrap();
+        let peer = p521::PublicKey::try_from_pem(Context::default(), PEER_PEM)
+            .unwrap();
         assert_eq!(key.shared_secret(&peer)[..], shared[..]);
     }
 
@@ -207,70 +204,62 @@ mod tests {
     #[test]
     fn agreement_through_formats() {
         let mut rng =
-            crate::random::CtrDrbg::from_system(crate::Context::default())
-                .unwrap();
-        let a = p384::PrivateKey::generate(crate::Context::default(), &mut rng)
-            .unwrap();
-        let b = p384::PrivateKey::generate(crate::Context::default(), &mut rng)
-            .unwrap();
+            crate::random::CtrDrbg::from_system(Context::default()).unwrap();
+        let a =
+            p384::PrivateKey::generate(Context::default(), &mut rng).unwrap();
+        let b =
+            p384::PrivateKey::generate(Context::default(), &mut rng).unwrap();
         let shared = a.shared_secret(b.public_key());
         let mut out = [0u8; 512];
         let n = b.public_key().der_bytes(&mut out).unwrap();
         assert_eq!(n, p384::PUBLIC_KEY_DER_SIZE);
         let via_der =
-            p384::PublicKey::try_from_der(crate::Context::default(), &out[..n])
+            p384::PublicKey::try_from_der(Context::default(), &out[..n])
                 .unwrap();
         assert_eq!(a.shared_secret(&via_der), shared);
         let n = b.public_key().pem_bytes(&mut out).unwrap();
         let via_pem =
-            p384::PublicKey::try_from_pem(crate::Context::default(), &out[..n])
+            p384::PublicKey::try_from_pem(Context::default(), &out[..n])
                 .unwrap();
         assert_eq!(a.shared_secret(&via_pem), shared);
         let n = a.der_bytes(&mut out).unwrap();
         assert_eq!(n, p384::DER_SIZE);
-        let a2 = p384::PrivateKey::try_from_der(
-            crate::Context::default(),
-            &out[..n],
-        )
-        .unwrap();
+        let a2 = p384::PrivateKey::try_from_der(Context::default(), &out[..n])
+            .unwrap();
         assert_eq!(b.shared_secret(a2.public_key()), shared);
 
         // The same round trip on P-521, whose encodings carry a
         // 66-byte scalar and 133-byte point.
-        let a = p521::PrivateKey::generate(crate::Context::default(), &mut rng)
-            .unwrap();
-        let b = p521::PrivateKey::generate(crate::Context::default(), &mut rng)
-            .unwrap();
+        let a =
+            p521::PrivateKey::generate(Context::default(), &mut rng).unwrap();
+        let b =
+            p521::PrivateKey::generate(Context::default(), &mut rng).unwrap();
         let shared = a.shared_secret(b.public_key());
         let n = b.public_key().der_bytes(&mut out).unwrap();
         assert_eq!(n, p521::PUBLIC_KEY_DER_SIZE);
         let via_der =
-            p521::PublicKey::try_from_der(crate::Context::default(), &out[..n])
+            p521::PublicKey::try_from_der(Context::default(), &out[..n])
                 .unwrap();
         assert_eq!(a.shared_secret(&via_der), shared);
         let n = a.der_bytes(&mut out).unwrap();
         assert_eq!(n, p521::DER_SIZE);
-        let a2 = p521::PrivateKey::try_from_der(
-            crate::Context::default(),
-            &out[..n],
-        )
-        .unwrap();
+        let a2 = p521::PrivateKey::try_from_der(Context::default(), &out[..n])
+            .unwrap();
         assert_eq!(b.shared_secret(a2.public_key()), shared);
         assert_eq!(p521::PUBLIC_KEY_SIZE, 133);
         assert_eq!(p521::KEY_SIZE, 66);
 
         // A P-256 point is not a P-384 key, however presented.
-        let c = p256::PrivateKey::generate(crate::Context::default(), &mut rng)
-            .unwrap();
+        let c =
+            p256::PrivateKey::generate(Context::default(), &mut rng).unwrap();
         let n = c.public_key().der_bytes(&mut out).unwrap();
         assert_eq!(
-            p384::PublicKey::try_from_der(crate::Context::default(), &out[..n])
-                .err(),
+            p384::PublicKey::try_from_der(Context::default(), &out[..n]).err(),
             Some(Error::WrongAlgorithm)
         );
         assert_eq!(
             p384::PublicKey::try_from_sec1(
-                crate::Context::default(),
+                Context::default(),
                 &c.public_key().sec1_bytes()
             )
             .err(),

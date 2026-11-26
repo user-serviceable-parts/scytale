@@ -438,7 +438,7 @@ pub(crate) mod tests {
     #[test]
     fn dispatches() {
         {
-            let aead = Aegis256::new(crate::Context::default(), &Key::zeroed());
+            let aead = Aegis256::new(Context::default(), &Key::zeroed());
             features::dispatches(KERNELS, Aegis256::profiles(), aead.kernel());
         };
     }
@@ -623,7 +623,7 @@ pub(crate) mod tests {
 
     #[test]
     fn aad_after_message_is_out_of_order() {
-        let aead = Aegis256::new(crate::Context::default(), &Key::zeroed());
+        let aead = Aegis256::new(Context::default(), &Key::zeroed());
         let mut e = aead.encryptor(&[0u8; 32]);
         e.update(&mut [0u8; 3]).unwrap();
         assert_eq!(e.aad(b"late"), Err(Error::OutOfOrder));
@@ -636,8 +636,7 @@ pub(crate) mod tests {
     fn wipes_and_hides_the_key() {
         fn wipes<T: ZeroizeOnDrop>() {}
         wipes::<Aegis256>();
-        let aead =
-            Aegis256::new(crate::Context::default(), &Key::from([0x5au8; 32]));
+        let aead = Aegis256::new(Context::default(), &Key::from([0x5au8; 32]));
         let text = std::format!("{aead:?}");
         assert!(!text.contains("5a"), "{text}");
         let text = std::format!("{:?}", aead.decryptor(&[0x5au8; 32]));

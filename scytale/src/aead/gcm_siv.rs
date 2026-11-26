@@ -32,10 +32,10 @@
 //! # Example
 //!
 //! ```
-//! use scytale::Key;
-//! use scytale::cipher::aes::Aes128;
-//! use scytale::aead::{Aead, GcmSiv};
 //! use scytale::Context;
+//! use scytale::Key;
+//! use scytale::aead::{Aead, GcmSiv};
+//! use scytale::cipher::aes::Aes128;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -84,10 +84,10 @@ const MAX_FIELD: u64 = 1 << 36;
 /// derivation to follow, so AES-192 is not a GCM-SIV cipher and
 /// `GcmSiv<Aes192>` does not compile.
 /// ```
-/// use scytale::Key;
-/// use scytale::cipher::aes::{Aes128, Aes256};
-/// use scytale::aead::{Aead, GcmSiv};
 /// use scytale::Context;
+/// use scytale::Key;
+/// use scytale::aead::{Aead, GcmSiv};
+/// use scytale::cipher::aes::{Aes128, Aes256};
 /// let ctx = Context::default();
 /// let _ = GcmSiv::<Aes128>::new(ctx, &Key::from([0u8; 16]));
 /// let _ = GcmSiv::<Aes256>::new(ctx, &Key::from([0u8; 32]));
@@ -673,8 +673,7 @@ pub(crate) mod tests {
         Key<[u8; K]>: SivKey,
     {
         let key: &[u8; K] = key.try_into().unwrap();
-        let siv =
-            GcmSiv::<Aes<K>>::new(crate::Context::default(), &Key::from(*key));
+        let siv = GcmSiv::<Aes<K>>::new(Context::default(), &Key::from(*key));
         let mut data = [0u8; MAX];
         let data = &mut data[..plain.len()];
         data.copy_from_slice(plain);
@@ -689,7 +688,7 @@ pub(crate) mod tests {
     }
 
     fn siv() -> GcmSiv<Aes128> {
-        GcmSiv::<Aes128>::new(crate::Context::default(), &Key::from([0x42; 16]))
+        GcmSiv::<Aes128>::new(Context::default(), &Key::from([0x42; 16]))
     }
 
     /// The point of the mode: a repeated nonce must not be a
@@ -767,8 +766,7 @@ pub(crate) mod tests {
             *b = (i * 9 + 4) as u8;
         }
 
-        let generic =
-            { GcmSiv::<Aes128>::new(crate::Context::portable(), &key) };
+        let generic = { GcmSiv::<Aes128>::new(Context::portable(), &key) };
         let siv = GcmSiv::<Aes128>::new(under.ctx(), &key);
         for len in 0..MAX {
             let mut want = [0u8; MAX];
@@ -794,10 +792,8 @@ pub(crate) mod tests {
 
     #[test]
     fn round_trips_at_many_lengths() {
-        let siv = GcmSiv::<Aes256>::new(
-            crate::Context::default(),
-            &Key::from([0x5a; 32]),
-        );
+        let siv =
+            GcmSiv::<Aes256>::new(Context::default(), &Key::from([0x5a; 32]));
         let nonce = [0x77u8; 12];
         let mut plain = [0u8; 70];
         for (i, b) in plain.iter_mut().enumerate() {
@@ -833,7 +829,7 @@ pub(crate) mod tests {
             format_args!(
                 "{:?}",
                 GcmSiv::<Aes256>::new(
-                    crate::Context::default(),
+                    Context::default(),
                     &Key::from([0x5a; 32])
                 )
             ),

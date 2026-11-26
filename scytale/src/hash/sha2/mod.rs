@@ -9,9 +9,9 @@
 //! makes, and the implementations are not names a caller can reach.
 //!
 //! ```
-//! use scytale::hash::sha2::Sha256;
-//! use scytale::hash::Hash;
 //! use scytale::Context;
+//! use scytale::hash::Hash;
+//! use scytale::hash::sha2::Sha256;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -618,11 +618,11 @@ pub(crate) mod tests {
         }
         check_matches_portable(
             || Sha224::new(under.ctx()),
-            || Sha224::new(crate::Context::portable()),
+            || Sha224::new(Context::portable()),
         );
         check_matches_portable(
             || Sha256::new(under.ctx()),
-            || Sha256::new(crate::Context::portable()),
+            || Sha256::new(Context::portable()),
         );
     }
 
@@ -637,19 +637,19 @@ pub(crate) mod tests {
         }
         check_matches_portable(
             || Sha384::new(under.ctx()),
-            || Sha384::new(crate::Context::portable()),
+            || Sha384::new(Context::portable()),
         );
         check_matches_portable(
             || Sha512::new(under.ctx()),
-            || Sha512::new(crate::Context::portable()),
+            || Sha512::new(Context::portable()),
         );
         check_matches_portable(
             || Sha512_224::new(under.ctx()),
-            || Sha512_224::new(crate::Context::portable()),
+            || Sha512_224::new(Context::portable()),
         );
         check_matches_portable(
             || Sha512_256::new(under.ctx()),
-            || Sha512_256::new(crate::Context::portable()),
+            || Sha512_256::new(Context::portable()),
         );
     }
 
@@ -673,24 +673,24 @@ pub(crate) mod tests {
     #[test]
     fn sha512_t_known_answers() {
         assert_eq!(
-            Sha512_224::digest(crate::Context::default(), b"abc"),
+            Sha512_224::digest(Context::default(), b"abc"),
             hex("4634270f707b6a54daae7530460842e20e37ed265ceee9a43e8924aa")
                 [..28]
         );
         assert_eq!(
-            Sha512_256::digest(crate::Context::default(), b"abc"),
+            Sha512_256::digest(Context::default(), b"abc"),
             hex(
                 "53048e2681941ef99b2e29b76b4c7dabe4c2d0c634fc6d46e0e2f13107e7\
                  af23"
             )[..32]
         );
         assert_eq!(
-            Sha512_224::digest(crate::Context::default(), b""),
+            Sha512_224::digest(Context::default(), b""),
             hex("6ed0dd02806fa89e25de060c19d3ac86cabb87d6a0ddd05c333b84f4")
                 [..28]
         );
         assert_eq!(
-            Sha512_256::digest(crate::Context::default(), b""),
+            Sha512_256::digest(Context::default(), b""),
             hex(
                 "c672b8d1ef56ed28ab87c3622c5114069bdd3ad7b8f9737498d0c01ecef0\
                  967a"
@@ -701,9 +701,9 @@ pub(crate) mod tests {
     #[test]
     fn splitting_does_not_matter() {
         let data: [u8; 517] = core::array::from_fn(|i| (i * 31) as u8);
-        let expected = Sha256::digest(crate::Context::default(), &data);
+        let expected = Sha256::digest(Context::default(), &data);
         for chunk in [1, 3, 7, 63, 64, 65, 128, 200] {
-            let mut hash = Sha256::new(crate::Context::default());
+            let mut hash = Sha256::new(Context::default());
             for piece in data.chunks(chunk) {
                 hash.update(piece);
             }
@@ -713,37 +713,28 @@ pub(crate) mod tests {
 
     #[test]
     fn reset_starts_over() {
-        let mut hash = Sha512::new(crate::Context::default());
+        let mut hash = Sha512::new(Context::default());
         hash.update(b"not this");
         hash.reset();
         hash.update(b"abc");
-        assert_eq!(
-            hash.finalize(),
-            Sha512::digest(crate::Context::default(), b"abc")
-        );
+        assert_eq!(hash.finalize(), Sha512::digest(Context::default(), b"abc"));
     }
 
     #[test]
     fn clone_forks_the_state() {
-        let mut hash = Sha256::new(crate::Context::default());
+        let mut hash = Sha256::new(Context::default());
         hash.update(b"ab");
         let mut fork = hash.clone();
         hash.update(b"c");
-        assert_eq!(
-            hash.finalize(),
-            Sha256::digest(crate::Context::default(), b"abc")
-        );
-        assert_eq!(
-            fork.finalize(),
-            Sha256::digest(crate::Context::default(), b"ab")
-        );
+        assert_eq!(hash.finalize(), Sha256::digest(Context::default(), b"abc"));
+        assert_eq!(fork.finalize(), Sha256::digest(Context::default(), b"ab"));
     }
 
     /// The SHAVS bit-oriented vectors: the one-bit message 0, and the
     /// seven-bit message 1110 010.
     #[test]
     fn bit_strings() {
-        let mut hash = Sha256::new(crate::Context::default());
+        let mut hash = Sha256::new(Context::default());
         assert_eq!(
             hash.finalize_bits(0x00, 1).unwrap(),
             hex(
@@ -752,7 +743,7 @@ pub(crate) mod tests {
             )[..32]
         );
         // Bits beyond the count are ignored.
-        let mut hash = Sha256::new(crate::Context::default());
+        let mut hash = Sha256::new(Context::default());
         hash.update(b"abc");
         let with_junk = hash.clone().finalize_bits(0xff, 1).unwrap();
         assert_eq!(hash.finalize_bits(0x80, 1).unwrap(), with_junk);
@@ -762,7 +753,7 @@ pub(crate) mod tests {
     fn bit_count_is_checked() {
         for bits in [0, 8, 9, 100] {
             assert_eq!(
-                Sha256::new(crate::Context::default()).finalize_bits(0, bits),
+                Sha256::new(Context::default()).finalize_bits(0, bits),
                 Err(Error::InvalidBitCount(bits))
             );
         }
@@ -774,16 +765,16 @@ pub(crate) mod tests {
     fn bit_strings_across_the_padding_boundary() {
         for len in [54usize, 55, 56, 63, 64, 111, 112, 127, 128] {
             let data = [0x5au8; 128];
-            let mut hash = Sha384::new(crate::Context::default());
+            let mut hash = Sha384::new(Context::default());
             hash.update(&data[..len]);
             let bits = hash.finalize_bits(0xa0, 3).unwrap();
             // The same bit string, hashed by the portable code with
             // the bits fed the same way, must agree; and it must
             // differ from the message without them.
-            let mut p = { Sha384::new(crate::Context::portable()) };
+            let mut p = { Sha384::new(Context::portable()) };
             p.update(&data[..len]);
             assert_eq!(p.finalize_bits(0xa0, 3).unwrap(), bits);
-            let mut whole = Sha384::new(crate::Context::default());
+            let mut whole = Sha384::new(Context::default());
             whole.update(&data[..len]);
             assert_ne!(whole.finalize(), bits);
         }
@@ -791,15 +782,12 @@ pub(crate) mod tests {
 
     #[test]
     fn digest_is_the_same_as_update_then_finalize() {
-        let mut hash = Sha224::new(crate::Context::default());
+        let mut hash = Sha224::new(Context::default());
         hash.update(b"abc");
+        assert_eq!(hash.finalize(), Sha224::digest(Context::default(), b"abc"));
         assert_eq!(
-            hash.finalize(),
-            Sha224::digest(crate::Context::default(), b"abc")
-        );
-        assert_eq!(
-            <Sha224 as Hash>::digest(crate::Context::default(), b"abc"),
-            Sha224::digest(crate::Context::default(), b"abc")
+            <Sha224 as Hash>::digest(Context::default(), b"abc"),
+            Sha224::digest(Context::default(), b"abc")
         );
     }
 
@@ -843,15 +831,13 @@ pub(crate) mod tests {
     #[test]
     fn picks_the_first_kernel_whose_needs_are_met() {
         {
-            let sha256 =
-                Auto32::<variant::Sha256>::new(crate::Context::default());
+            let sha256 = Auto32::<variant::Sha256>::new(Context::default());
             features::dispatches(
                 KERNELS32,
                 Sha256::profiles(),
                 sha256.kernel(),
             );
-            let sha512 =
-                Auto64::<variant::Sha512>::new(crate::Context::default());
+            let sha512 = Auto64::<variant::Sha512>::new(Context::default());
             features::dispatches(
                 KERNELS64,
                 Sha512::profiles(),
@@ -864,7 +850,7 @@ pub(crate) mod tests {
 
     #[test]
     fn debug_omits_the_message() {
-        let mut hash = Sha256::new(crate::Context::default());
+        let mut hash = Sha256::new(Context::default());
         hash.update(b"secret");
         // No allocator in a `no_std` test, so format into a buffer.
         struct Buffer([u8; 128], usize);

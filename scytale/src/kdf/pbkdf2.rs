@@ -14,9 +14,9 @@
 //! memory-hard [`argon2`](super::argon2).
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::kdf::pbkdf2::pbkdf2;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -162,14 +162,8 @@ mod tests {
     #[test]
     fn sha256_one_iteration() {
         let mut key = [0u8; 32];
-        pbkdf2::<Sha256>(
-            crate::Context::default(),
-            b"password",
-            b"salt",
-            1,
-            &mut key,
-        )
-        .unwrap();
+        pbkdf2::<Sha256>(Context::default(), b"password", b"salt", 1, &mut key)
+            .unwrap();
         assert_eq!(
             key,
             hex::<32>(
@@ -182,14 +176,8 @@ mod tests {
     #[test]
     fn sha256_two_iterations() {
         let mut key = [0u8; 32];
-        pbkdf2::<Sha256>(
-            crate::Context::default(),
-            b"password",
-            b"salt",
-            2,
-            &mut key,
-        )
-        .unwrap();
+        pbkdf2::<Sha256>(Context::default(), b"password", b"salt", 2, &mut key)
+            .unwrap();
         assert_eq!(
             key,
             hex::<32>(
@@ -203,7 +191,7 @@ mod tests {
     fn sha256_4096_iterations() {
         let mut key = [0u8; 32];
         pbkdf2::<Sha256>(
-            crate::Context::default(),
+            Context::default(),
             b"password",
             b"salt",
             4096,
@@ -224,27 +212,15 @@ mod tests {
     #[test]
     fn verify_agrees_with_derivation() {
         let mut key = [0u8; 40];
-        pbkdf2::<Sha256>(
-            crate::Context::default(),
-            b"password",
-            b"salt",
-            3,
-            &mut key,
-        )
-        .unwrap();
+        pbkdf2::<Sha256>(Context::default(), b"password", b"salt", 3, &mut key)
+            .unwrap();
         assert_eq!(
-            verify::<Sha256>(
-                crate::Context::default(),
-                b"password",
-                b"salt",
-                3,
-                &key
-            ),
+            verify::<Sha256>(Context::default(), b"password", b"salt", 3, &key),
             Ok(())
         );
         assert_eq!(
             verify::<Sha256>(
-                crate::Context::default(),
+                Context::default(),
                 b"password",
                 b"salt",
                 3,
@@ -257,7 +233,7 @@ mod tests {
             wrong[i] ^= 1;
             assert_eq!(
                 verify::<Sha256>(
-                    crate::Context::default(),
+                    Context::default(),
                     b"password",
                     b"salt",
                     3,
@@ -268,33 +244,15 @@ mod tests {
             );
         }
         assert_eq!(
-            verify::<Sha256>(
-                crate::Context::default(),
-                b"password",
-                b"salt",
-                2,
-                &key
-            ),
+            verify::<Sha256>(Context::default(), b"password", b"salt", 2, &key),
             Err(Error::AuthenticationFailed)
         );
         assert_eq!(
-            verify::<Sha256>(
-                crate::Context::default(),
-                b"password",
-                b"salt",
-                3,
-                &[]
-            ),
+            verify::<Sha256>(Context::default(), b"password", b"salt", 3, &[]),
             Err(Error::InvalidLength(0))
         );
         assert_eq!(
-            verify::<Sha256>(
-                crate::Context::default(),
-                b"password",
-                b"salt",
-                0,
-                &key
-            ),
+            verify::<Sha256>(Context::default(), b"password", b"salt", 0, &key),
             Err(Error::InvalidIterations)
         );
     }
@@ -304,7 +262,7 @@ mod tests {
     fn sha256_long_output() {
         let mut key = [0u8; 40];
         pbkdf2::<Sha256>(
-            crate::Context::default(),
+            Context::default(),
             b"passwordPASSWORDpassword",
             b"saltSALTsaltSALTsaltSALTsaltSALTsalt",
             4096,
@@ -323,14 +281,8 @@ mod tests {
     #[test]
     fn sha512_one_iteration() {
         let mut key = [0u8; 64];
-        pbkdf2::<Sha512>(
-            crate::Context::default(),
-            b"password",
-            b"salt",
-            1,
-            &mut key,
-        )
-        .unwrap();
+        pbkdf2::<Sha512>(Context::default(), b"password", b"salt", 1, &mut key)
+            .unwrap();
         assert_eq!(
             key,
             hex::<64>(
@@ -345,13 +297,7 @@ mod tests {
     fn zero_iterations_is_refused() {
         let mut key = [0u8; 16];
         assert_eq!(
-            pbkdf2::<Sha256>(
-                crate::Context::default(),
-                b"p",
-                b"s",
-                0,
-                &mut key
-            ),
+            pbkdf2::<Sha256>(Context::default(), b"p", b"s", 0, &mut key),
             Err(Error::InvalidIterations)
         );
     }
@@ -360,9 +306,8 @@ mod tests {
     fn a_prefix_is_a_prefix() {
         let mut long = [0u8; 40];
         let mut short = [0u8; 35];
-        pbkdf2::<Sha256>(crate::Context::default(), b"p", b"s", 3, &mut long)
-            .unwrap();
-        pbkdf2::<Sha256>(crate::Context::default(), b"p", b"s", 3, &mut short)
+        pbkdf2::<Sha256>(Context::default(), b"p", b"s", 3, &mut long).unwrap();
+        pbkdf2::<Sha256>(Context::default(), b"p", b"s", 3, &mut short)
             .unwrap();
         assert_eq!(long[..35], short);
     }

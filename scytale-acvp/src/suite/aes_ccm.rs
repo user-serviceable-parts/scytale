@@ -6,7 +6,7 @@
 //! the tag on its end, both in the prompt and in the answer.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{
     Error, hex, hex_value, int, key_of, text, unknown_test_type,
 };
@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         let encrypt = match text(group, "direction")? {
@@ -32,7 +32,7 @@ pub fn answer(
                 let key = hex(t, "key")?;
                 aes_width!(key, C => {
                     let k = key_of::<C>(&key)?;
-                    let ccm = builder.build(|ctx| Ccm::<C>::new(ctx, &k));
+                    let ccm = Ccm::<C>::new(profile.ctx(), &k);
                     aft(&ccm, t, encrypt, tag_len)
                 })
             }),

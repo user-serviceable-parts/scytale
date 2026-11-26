@@ -8,8 +8,8 @@
 //! starts from the state it left.
 //!
 //! ```
-//! use scytale::mac::kmac::Kmac128;
 //! use scytale::Context;
+//! use scytale::mac::kmac::Kmac128;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -423,14 +423,14 @@ mod tests {
     #[test]
     fn nist_kmac_samples() {
         let kmac128 = |data: &[u8], s: &[u8]| {
-            let mut mac = Kmac128::new(crate::Context::default(), &KEY, s);
+            let mut mac = Kmac128::new(Context::default(), &KEY, s);
             mac.update(data);
             let mut out = vec![0u8; 32];
             mac.finalize_to(&mut out);
             out
         };
         let kmac256 = |data: &[u8], s: &[u8]| {
-            let mut mac = Kmac256::new(crate::Context::default(), &KEY, s);
+            let mut mac = Kmac256::new(Context::default(), &KEY, s);
             mac.update(data);
             let mut out = vec![0u8; 64];
             mac.finalize_to(&mut out);
@@ -490,14 +490,14 @@ mod tests {
     #[test]
     fn nist_kmacxof_samples() {
         let xof128 = |data: &[u8], s: &[u8]| {
-            let mut mac = Kmac128::new(crate::Context::default(), &KEY, s);
+            let mut mac = Kmac128::new(Context::default(), &KEY, s);
             mac.update(data);
             let mut out = vec![0u8; 32];
             mac.finalize_xof().squeeze(&mut out);
             out
         };
         let xof256 = |data: &[u8], s: &[u8]| {
-            let mut mac = Kmac256::new(crate::Context::default(), &KEY, s);
+            let mut mac = Kmac256::new(Context::default(), &KEY, s);
             mac.update(data);
             let mut out = vec![0u8; 64];
             mac.finalize_xof().squeeze(&mut out);
@@ -565,7 +565,7 @@ mod tests {
     #[test]
     fn pieces_and_reset() {
         let data = long();
-        let mut mac = Kmac128::new(crate::Context::default(), &KEY, TAGGED);
+        let mut mac = Kmac128::new(Context::default(), &KEY, TAGGED);
         let expected = tag(&mut mac, &data, 32);
         for split in [0, 1, 100, 167, 168, 199] {
             mac.update(b"garbage");
@@ -581,11 +581,11 @@ mod tests {
     /// ways of cutting one.
     #[test]
     fn length_and_customization_change_everything() {
-        let mut mac = Kmac128::new(crate::Context::default(), &KEY, b"");
+        let mut mac = Kmac128::new(Context::default(), &KEY, b"");
         let full = tag(&mut mac, b"m", 32);
         let half = tag(&mut mac, b"m", 16);
         assert_ne!(full[..16], half[..]);
-        let mut other = Kmac128::new(crate::Context::default(), &KEY, b"x");
+        let mut other = Kmac128::new(Context::default(), &KEY, b"x");
         assert_ne!(tag(&mut other, b"m", 32), full);
         let mut xof = [0u8; 32];
         mac.update(b"m");
@@ -597,7 +597,7 @@ mod tests {
     /// and leave the MAC ready for the next message either way.
     #[test]
     fn verify() {
-        let mut mac = Kmac256::new(crate::Context::default(), &KEY, TAGGED);
+        let mut mac = Kmac256::new(Context::default(), &KEY, TAGGED);
         mac.update(b"message");
         let mut good = [0u8; 100];
         mac.finalize_to(&mut good);
@@ -629,7 +629,7 @@ mod tests {
     /// authenticate under every key.
     #[test]
     fn an_empty_tag_never_verifies() {
-        let mut mac = Kmac256::new(crate::Context::default(), &KEY, TAGGED);
+        let mut mac = Kmac256::new(Context::default(), &KEY, TAGGED);
         mac.update(b"message");
         assert_eq!(mac.verify_tag(&[]), Err(Error::AuthenticationFailed));
 
@@ -642,7 +642,7 @@ mod tests {
         // The key and message are beside the point: nothing about
         // them can make an empty tag right.
         let mut other =
-            Kmac128::new(crate::Context::default(), b"a different key", TAGGED);
+            Kmac128::new(Context::default(), b"a different key", TAGGED);
         other.update(b"another message");
         assert_eq!(other.verify_tag(&[]), Err(Error::AuthenticationFailed));
     }
@@ -651,9 +651,9 @@ mod tests {
     #[test]
     fn whole_bytes_through_the_bit_calls() {
         let key: Vec<u8> = (0..45).collect();
-        let mut bytes = Kmac128::new(crate::Context::default(), &key, TAGGED);
+        let mut bytes = Kmac128::new(Context::default(), &key, TAGGED);
         let mut bits =
-            Kmac128::try_new_bits(crate::Context::default(), &key, 360, TAGGED)
+            Kmac128::try_new_bits(Context::default(), &key, 360, TAGGED)
                 .expect("key bits");
         let mut a = [0u8; 40];
         let mut b = [0u8; 40];
@@ -674,7 +674,7 @@ mod tests {
     /// bits of `last` beyond the count are ignored.
     #[test]
     fn message_bits() {
-        let mut mac = Kmac128::new(crate::Context::default(), &KEY, b"");
+        let mut mac = Kmac128::new(Context::default(), &KEY, b"");
         let mut out = [0u8; 32];
         let mut tags = Vec::new();
         for bits in 0..8u32 {
@@ -701,7 +701,7 @@ mod tests {
     /// byte one, and verifies whatever the bits below are.
     #[test]
     fn output_bits() {
-        let mut mac = Kmac128::new(crate::Context::default(), &KEY, b"");
+        let mut mac = Kmac128::new(Context::default(), &KEY, b"");
         let mut whole = [0u8; 32];
         mac.update(b"m");
         mac.finalize_to(&mut whole);
@@ -731,13 +731,12 @@ mod tests {
         let mut clean = whole;
         clean[19] = 0xe0;
         let mut from_clean =
-            Kmac128::try_new_bits(crate::Context::default(), &clean, 155, b"")
+            Kmac128::try_new_bits(Context::default(), &clean, 155, b"")
                 .expect("key");
         let mut from_noisy =
-            Kmac128::try_new_bits(crate::Context::default(), &noisy, 155, b"")
+            Kmac128::try_new_bits(Context::default(), &noisy, 155, b"")
                 .expect("key");
-        let mut from_whole =
-            Kmac128::new(crate::Context::default(), &whole, b"");
+        let mut from_whole = Kmac128::new(Context::default(), &whole, b"");
         let expected = tag(&mut from_clean, b"m", 32);
         assert_eq!(tag(&mut from_noisy, b"m", 32), expected);
         assert_ne!(tag(&mut from_whole, b"m", 32), expected);
@@ -748,26 +747,14 @@ mod tests {
     #[test]
     fn refuses_bad_lengths() {
         assert_eq!(
-            Kmac128::try_new_bits(
-                crate::Context::default(),
-                &[0u8; 3],
-                25,
-                b""
-            )
-            .err(),
+            Kmac128::try_new_bits(Context::default(), &[0u8; 3], 25, b"").err(),
             Some(Error::InvalidLength(3))
         );
         assert_eq!(
-            Kmac128::try_new_bits(
-                crate::Context::default(),
-                &[0u8; 3],
-                16,
-                b""
-            )
-            .err(),
+            Kmac128::try_new_bits(Context::default(), &[0u8; 3], 16, b"").err(),
             Some(Error::InvalidLength(3))
         );
-        let mut mac = Kmac128::new(crate::Context::default(), &KEY, b"");
+        let mut mac = Kmac128::new(Context::default(), &KEY, b"");
         let mut expected = [0u8; 32];
         mac.update(b"kept");
         let mut probe = mac.clone();
@@ -793,7 +780,7 @@ mod tests {
 
     #[test]
     fn debug_omits_the_key() {
-        let mac = Kmac128::new(crate::Context::default(), &KEY, b"");
+        let mac = Kmac128::new(Context::default(), &KEY, b"");
         let text = std::format!("{mac:?}");
         assert_eq!(text, "Kmac128 { .. }");
     }

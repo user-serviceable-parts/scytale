@@ -6,6 +6,7 @@
 //! cases of the arithmetic, which must all come out as an error and
 //! never as a secret.
 
+use crate::Context;
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
@@ -53,20 +54,15 @@ macro_rules! curve {
                 asn: bool,
             ) -> Option<Vec<u8>> {
                 let private: [u8; $width] = private.try_into().ok()?;
-                let key = $module::PrivateKey::try_new(
-                    crate::Context::default(),
-                    &private,
-                )
-                .ok()?;
+                let key =
+                    $module::PrivateKey::try_new(Context::default(), &private)
+                        .ok()?;
                 let peer = if asn {
-                    $module::PublicKey::try_from_der(
-                        crate::Context::default(),
-                        public,
-                    )
-                    .ok()?
+                    $module::PublicKey::try_from_der(Context::default(), public)
+                        .ok()?
                 } else {
                     $module::PublicKey::try_from_sec1(
-                        crate::Context::default(),
+                        Context::default(),
                         public,
                     )
                     .ok()?

@@ -6,6 +6,7 @@
 //! Each group's key also comes in DER and PEM, which is the external
 //! check that the RFC 8410 public key encoding reads and writes.
 
+use crate::Context;
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
@@ -49,13 +50,9 @@ pub fn run() {
                 invalid += 1;
                 continue;
             };
-            let accepted = ed25519::verify(
-                crate::Context::default(),
-                &public,
-                &message,
-                &sig,
-            )
-            .is_ok();
+            let accepted =
+                ed25519::verify(Context::default(), &public, &message, &sig)
+                    .is_ok();
             assert_eq!(accepted, expect_valid, "{tag}");
             if expect_valid {
                 valid += 1;

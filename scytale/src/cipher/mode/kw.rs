@@ -41,11 +41,11 @@
 //! # Example
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Key;
+//! use scytale::cipher::BlockCipher;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Kw;
-//! use scytale::cipher::BlockCipher;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -276,7 +276,7 @@ mod tests {
             cipher: &str,
         ) {
             let kw = Kw::<Aes<K>>::new(
-                crate::Context::default(),
+                Context::default(),
                 &Key::from(unhex::<K>(key)),
             );
             let plain: [u8; P] = unhex(plain);
@@ -312,8 +312,7 @@ mod tests {
     /// accepts within a reasonable span.
     #[test]
     fn round_trips_at_many_lengths() {
-        let kw =
-            Kw::<Aes128>::new(crate::Context::default(), &Key::from([3u8; 16]));
+        let kw = Kw::<Aes128>::new(Context::default(), &Key::from([3u8; 16]));
         let plain: [u8; 128] = core::array::from_fn(|i| (i * 5) as u8);
         let mut wrapped = [0u8; 136];
         let mut back = [0u8; 128];
@@ -330,8 +329,7 @@ mod tests {
     /// rather than holding something that failed its check.
     #[test]
     fn rejects_and_wipes() {
-        let kw =
-            Kw::<Aes128>::new(crate::Context::default(), &Key::from([3u8; 16]));
+        let kw = Kw::<Aes128>::new(Context::default(), &Key::from([3u8; 16]));
         let plain = [9u8; 32];
         let mut wrapped = [0u8; 40];
         kw.wrap(&plain, &mut wrapped).unwrap();
@@ -354,12 +352,9 @@ mod tests {
     #[test]
     fn the_directions_are_not_interchangeable() {
         let key = [5u8; 16];
-        let forward =
-            Kw::<Aes128>::new(crate::Context::default(), &Key::from(key));
-        let inverse = Kw::<Aes128>::new_inverse(
-            crate::Context::default(),
-            &Key::from(key),
-        );
+        let forward = Kw::<Aes128>::new(Context::default(), &Key::from(key));
+        let inverse =
+            Kw::<Aes128>::new_inverse(Context::default(), &Key::from(key));
         let plain = [1u8; 16];
 
         let mut one = [0u8; 24];
@@ -381,8 +376,7 @@ mod tests {
     /// not fit, are refused rather than truncated.
     #[test]
     fn rejects_bad_lengths() {
-        let kw =
-            Kw::<Aes128>::new(crate::Context::default(), &Key::from([3u8; 16]));
+        let kw = Kw::<Aes128>::new(Context::default(), &Key::from([3u8; 16]));
         let mut out = [0u8; 64];
         // Not a whole number of units, and too short.
         for len in [0usize, 4, 8, 12, 20] {
@@ -435,10 +429,7 @@ mod tests {
             &mut buffer,
             format_args!(
                 "{:?}",
-                Kw::<Aes128>::new(
-                    crate::Context::default(),
-                    &Key::from([3u8; 16])
-                )
+                Kw::<Aes128>::new(Context::default(), &Key::from([3u8; 16]))
             ),
         )
         .unwrap();

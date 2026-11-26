@@ -17,7 +17,7 @@
 //! scheme is not offered, so those groups are skipped.
 
 use super::{answer_groups, answer_tests, skip};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{
     Error, Rng, hex, hex_value, opt_hex, opt_text, text, unknown_test_type,
 };
@@ -209,24 +209,24 @@ macro_rules! with_hash {
 pub fn answer(
     doc: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
     match (text(doc, "algorithm")?, mode) {
         ("ECDSA", "keyGen") => answer_groups(doc, |group| {
             aft(group)?;
-            with_curve!(group, C => key_gen::<C>(group, rng, builder);
+            with_curve!(group, C => key_gen::<C>(group, rng, profile);
                 why => skip(group, why))
         }),
         ("ECDSA", "keyVer") => answer_groups(doc, |group| {
             aft(group)?;
-            with_curve!(group, C => key_ver::<C>(group, builder);
+            with_curve!(group, C => key_ver::<C>(group, profile);
                 why => skip(group, why))
         }),
         ("ECDSA", "sigVer") => answer_groups(doc, |group| {
             aft(group)?;
             with_curve!(group, C => with_hash!(group,
-                H => sig_ver::<C, H>(group, builder);
+                H => sig_ver::<C, H>(group, profile);
                 why => skip(group, why)); why => skip(group, why))
         }),
         (algorithm @ ("ECDSA" | "DetECDSA"), "sigGen") => {
@@ -237,7 +237,7 @@ pub fn answer(
                     return skip(group, "SP 800-106 hashing is not offered");
                 }
                 with_curve!(group, C => with_hash!(group,
-                    H => sig_gen::<C, H>(group, rng, exact, builder);
+                    H => sig_gen::<C, H>(group, rng, exact, profile);
                     why => skip(group, why)); why => skip(group, why))
             })
         }
@@ -326,10 +326,10 @@ fn public_fields<C: Curve>(key: &C::Private) -> (Value, Value) {
 fn key_gen<C: Curve>(
     group: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Option<Value>, Error> {
     answer_tests(group, |t| {
-        let key = builder.try_build(|ctx| key::<C>(ctx, t, rng))?;
+        let key = key::<C>(profile.ctx(), t, rng)?;
         let (qx, qy) = public_fields::<C>(&key);
         Ok(json!({ "d": hex_value(&C::secret_of(&key)), "qx": qx, "qy": qy }))
     })
@@ -337,12 +337,12 @@ fn key_gen<C: Curve>(
 
 fn key_ver<C: Curve>(
     group: &Value,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Option<Value>, Error> {
     answer_tests(group, |t| {
         // A coordinate wider than the field cannot be presented at all.
         let passed = match sec1(t, C::WIDTH)? {
-            Some(q) => builder.build(|ctx| C::public(ctx, &q).is_ok()),
+            Some(q) => C::public(profile.ctx(), &q).is_ok(),
             None => false,
         };
         Ok(json!({ "testPassed": passed }))
@@ -351,13 +351,13 @@ fn key_ver<C: Curve>(
 
 fn sig_ver<C: Curve, H: SigHash>(
     group: &Value,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Option<Value>, Error> {
     answer_tests(group, |t| {
         let message = hex(t, "message")?;
         let passed = match (sec1(t, C::WIDTH)?, signature(t, C::WIDTH)?) {
             (Some(q), Some(sig)) => {
-                match builder.build(|ctx| C::public(ctx, &q)) {
+                match C::public(profile.ctx(), &q) {
                     // Verifying starts a hash of the message.
                     Ok(key) => C::verify::<H>(&key, &message, &sig),
                     Err(_) => false,
@@ -375,9 +375,9 @@ fn sig_gen<C: Curve, H: SigHash>(
     group: &Value,
     rng: &mut dyn Random,
     exact: bool,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Option<Value>, Error> {
-    let key = builder.try_build(|ctx| key::<C>(ctx, group, rng))?;
+    let key = key::<C>(profile.ctx(), group, rng)?;
     let answered = answer_tests(group, |t| {
         let message = hex(t, "message")?;
         let sig = if exact {
@@ -462,8 +462,8 @@ mod tests {
         let doc = super::super::vendored(suite);
         let answered = answer(
             &doc,
-            &mut fixed_rng(&Builder::default()).unwrap(),
-            &Builder::default(),
+            &mut fixed_rng(&Profile::default()).unwrap(),
+            &Profile::default(),
         )
         .unwrap();
         let mut cases = 0;
@@ -506,8 +506,8 @@ mod tests {
         );
         let answered = answer(
             &key_gen,
-            &mut fixed_rng(&Builder::default()).unwrap(),
-            &Builder::default(),
+            &mut fixed_rng(&Profile::default()).unwrap(),
+            &Profile::default(),
         )
         .unwrap();
         let t = &answered["testGroups"][0]["tests"][0];
@@ -522,8 +522,8 @@ mod tests {
         );
         let answered = answer(
             &sig_gen,
-            &mut fixed_rng(&Builder::default()).unwrap(),
-            &Builder::default(),
+            &mut fixed_rng(&Profile::default()).unwrap(),
+            &Profile::default(),
         )
         .unwrap();
         let g = &answered["testGroups"][0];
@@ -541,8 +541,8 @@ mod tests {
         let doc = super::super::vendored(suite);
         let answered = answer(
             &doc,
-            &mut fixed_rng(&Builder::default()).unwrap(),
-            &Builder::default(),
+            &mut fixed_rng(&Profile::default()).unwrap(),
+            &Profile::default(),
         )
         .unwrap();
         let group = &list(&answered, "testGroups").unwrap()[0];
@@ -577,8 +577,8 @@ mod tests {
         }
         let answered = answer(
             &prompt,
-            &mut fixed_rng(&Builder::default()).unwrap(),
-            &Builder::default(),
+            &mut fixed_rng(&Profile::default()).unwrap(),
+            &Profile::default(),
         )
         .unwrap();
         let group = &list(&answered, "testGroups").unwrap()[0];

@@ -12,9 +12,9 @@
 //! repeat in any number of messages a key will see.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Key;
 //! use scytale::aead::{Aead, XChaCha20Poly1305};
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -291,10 +291,7 @@ mod tests {
     const TAG_HEX: &str = "c0875924c1c7987947deafd8780acf49";
 
     fn aead() -> XChaCha20Poly1305 {
-        XChaCha20Poly1305::new(
-            crate::Context::default(),
-            &Key::from(hex::<32>(KEY)),
-        )
+        XChaCha20Poly1305::new(Context::default(), &Key::from(hex::<32>(KEY)))
     }
 
     #[test]
@@ -320,11 +317,9 @@ mod tests {
         let subkey = hchacha20(&key, nonce[..16].try_into().unwrap());
         let mut short = [0u8; 12];
         short[4..].copy_from_slice(&nonce[16..]);
-        let block = crate::cipher::chacha20::ChaCha20::new(
-            crate::Context::default(),
-            &subkey,
-        )
-        .keystream_block(&short, 0);
+        let block =
+            crate::cipher::chacha20::ChaCha20::new(Context::default(), &subkey)
+                .keystream_block(&short, 0);
         assert_eq!(block[..32], hex::<32>(POLY_KEY));
     }
 
@@ -342,7 +337,7 @@ mod tests {
         let mut tag_a = [0u8; 16];
         let mut tag_b = [0u8; 16];
         aead().encrypt(&nonce, b"hdr", &mut a, &mut tag_a).unwrap();
-        ChaCha20Poly1305::new(crate::Context::default(), &subkey)
+        ChaCha20Poly1305::new(Context::default(), &subkey)
             .encrypt(&short, b"hdr", &mut b, &mut tag_b)
             .unwrap();
         assert_eq!(a, b);

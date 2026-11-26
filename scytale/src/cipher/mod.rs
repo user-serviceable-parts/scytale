@@ -16,11 +16,11 @@
 //! # Example
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Key;
+//! use scytale::cipher::BlockCipher;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Ctr;
-//! use scytale::cipher::BlockCipher;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -160,7 +160,7 @@ mod tests {
             block[0]
         }
         let key = [0x5au8; 32];
-        let best = Aes256::new(crate::Context::default(), &Key::from(key));
+        let best = Aes256::new(Context::default(), &Key::from(key));
         let named = portable::ttable::Aes::<32>::new(&key);
         assert_eq!(once(&best), once(&named));
         assert_ne!(once(&best), [7u8; 16]);
@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn zero_key_and_block() {
         fn round_trip<C: BlockCipher>() {
-            let cipher = C::new(crate::Context::default(), &C::zero_key());
+            let cipher = C::new(Context::default(), &C::zero_key());
             let mut block = C::zero_block();
             cipher.encrypt_one(&mut block);
             assert_ne!(block.as_ref(), C::zero_block().as_ref());

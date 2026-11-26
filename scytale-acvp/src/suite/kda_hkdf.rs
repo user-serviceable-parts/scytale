@@ -12,7 +12,7 @@
 //! what the inputs derive.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{
     Error, decode_hex, field, hex, hex_value, list, opt_hex, text,
     unknown_test_type,
@@ -49,7 +49,7 @@ macro_rules! with_hash {
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         let validate = match text(group, "testType")? {
@@ -72,8 +72,8 @@ pub fn answer(
                 let alg = text(cfg, "hmacAlg")?;
                 answer_tests(group, |t| {
                     // The derivation keys its own HMACs.
-                    let dkm = builder
-                        .try_build(|ctx| with_hash!(alg, single(ctx, t)))?;
+                    let ctx = profile.ctx();
+                    let dkm = with_hash!(alg, single(ctx, t))?;
                     Ok(if validate {
                         json!({ "testPassed": dkm == hex(t, "dkm")? })
                     } else {
@@ -88,8 +88,8 @@ pub fn answer(
                 }
                 let alg = text(cfg, "hmacAlg")?;
                 answer_tests(group, |t| {
-                    let dkms = builder
-                        .try_build(|ctx| with_hash!(alg, multi(ctx, t)))?;
+                    let ctx = profile.ctx();
+                    let dkms = with_hash!(alg, multi(ctx, t))?;
                     if validate {
                         let mut want = Vec::new();
                         for v in list(t, "dkms")? {

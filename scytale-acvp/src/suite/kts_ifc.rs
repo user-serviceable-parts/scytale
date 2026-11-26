@@ -23,7 +23,7 @@
 //! identifier, then the responder's, then the label from the case.
 
 use super::{answer_groups, answer_tests, skip};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{
     Error, Rng, field, hex, hex_value, int, opt_hex, opt_text, text,
     unknown_test_type,
@@ -48,7 +48,7 @@ const MODULUS_LEN: usize = 256;
 pub fn answer(
     doc: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         if text(group, "testType")? != "AFT" {
@@ -62,17 +62,12 @@ pub fn answer(
             "initiator" => false,
             other => return Err(Error::new(format!("kasRole {other}"))),
         };
-        // Built whole: past the key, each case is decryption or
-        // encryption under OAEP, whose hashes and mask start with each
-        // call, and a MAC keyed by the transported key.
         answer_tests(group, |t| {
-            builder.try_build(|ctx| {
-                if responder {
-                    respond(ctx, group, t)
-                } else {
-                    initiate(ctx, group, t, rng)
-                }
-            })
+            if responder {
+                respond(profile.ctx(), group, t)
+            } else {
+                initiate(profile.ctx(), group, t, rng)
+            }
         })
     })
 }
@@ -408,8 +403,8 @@ mod tests {
         }
         let answered = answer(
             &doc,
-            &mut fixed_rng(&Builder::default()).unwrap(),
-            &Builder::default(),
+            &mut fixed_rng(&Profile::default()).unwrap(),
+            &Profile::default(),
         )
         .unwrap();
         let mut initiated = 0;
@@ -464,8 +459,8 @@ mod tests {
         }
         let answered = answer(
             &doc,
-            &mut fixed_rng(&Builder::default()).unwrap(),
-            &Builder::default(),
+            &mut fixed_rng(&Profile::default()).unwrap(),
+            &Profile::default(),
         )
         .unwrap();
         let mut initiated = 0;
@@ -509,8 +504,8 @@ mod tests {
         assert_eq!(skip_reason(&doc["testGroups"][0]).unwrap(), None);
         let answered = answer(
             &doc,
-            &mut fixed_rng(&Builder::default()).unwrap(),
-            &Builder::default(),
+            &mut fixed_rng(&Profile::default()).unwrap(),
+            &Profile::default(),
         )
         .unwrap();
         assert!(answered["testGroups"][0]["tests"][0].get("dkm").is_some());

@@ -2,7 +2,7 @@
 //! `hmacAlg` names.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{Error, hex, hex_value, int, text, unknown_test_type};
 use scytale::Context;
 use scytale::Random;
@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         if text(group, "testType")? != "AFT" {
@@ -37,7 +37,7 @@ pub fn answer(
             "SHA3-512" => pbkdf2::<Sha3_512>,
             other => return Err(Error::new(format!("hmacAlg {other}"))),
         };
-        answer_tests(group, |t| derived(t, derive, builder))
+        answer_tests(group, |t| derived(t, derive, profile))
     })
 }
 
@@ -48,7 +48,7 @@ type Derive =
 fn derived(
     t: &Value,
     derive: Derive,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     let password = text(t, "password")?;
     let salt = hex(t, "salt")?;
@@ -61,7 +61,7 @@ fn derived(
     let mut key = vec![0u8; bits / 8];
     // The derivation keys its own HMAC.
     derive(
-        builder.ctx(),
+        profile.ctx(),
         password.as_bytes(),
         &salt,
         iterations,

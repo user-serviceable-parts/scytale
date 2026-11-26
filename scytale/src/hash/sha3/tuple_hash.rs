@@ -8,8 +8,8 @@
 //! length absorbed last.
 //!
 //! ```
-//! use scytale::hash::sha3::TupleHash128;
 //! use scytale::Context;
+//! use scytale::hash::sha3::TupleHash128;
 //! let ctx = Context::default();
 //!
 //! let mut hash = TupleHash128::new(ctx, b"My Tuple App");
@@ -156,7 +156,7 @@ mod tests {
     }
 
     fn hash128(n: usize, s: &[u8], xof: bool) -> Vec<u8> {
-        let mut h = TupleHash128::new(crate::Context::default(), s);
+        let mut h = TupleHash128::new(Context::default(), s);
         strings(n).iter().for_each(|e| h.push(e));
         let mut out = vec![0u8; 32];
         if xof {
@@ -168,7 +168,7 @@ mod tests {
     }
 
     fn hash256(n: usize, s: &[u8], xof: bool) -> Vec<u8> {
-        let mut h = TupleHash256::new(crate::Context::default(), s);
+        let mut h = TupleHash256::new(Context::default(), s);
         strings(n).iter().for_each(|e| h.push(e));
         let mut out = vec![0u8; 64];
         if xof {
@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn boundaries_count() {
         let hash = |parts: &[&[u8]]| {
-            let mut h = TupleHash128::new(crate::Context::default(), b"");
+            let mut h = TupleHash128::new(Context::default(), b"");
             parts.iter().for_each(|p| h.push(p));
             let mut out = [0u8; 32];
             h.finalize_to(&mut out);
@@ -304,7 +304,7 @@ mod tests {
     /// resetting starts the next sequence afresh.
     #[test]
     fn length_finalize_and_reset() {
-        let mut h = TupleHash256::new(crate::Context::default(), APP);
+        let mut h = TupleHash256::new(Context::default(), APP);
         let mut short = [0u8; 16];
         let mut long = [0u8; 32];
         h.push(b"x");
@@ -324,7 +324,7 @@ mod tests {
     /// The state stays out of the debug output.
     #[test]
     fn debug_omits_the_state() {
-        let h = TupleHash128::new(crate::Context::default(), b"secret label");
+        let h = TupleHash128::new(Context::default(), b"secret label");
         assert_eq!(format!("{h:?}"), "TupleHash128 { .. }");
     }
 }

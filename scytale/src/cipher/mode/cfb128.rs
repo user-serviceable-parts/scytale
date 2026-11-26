@@ -20,10 +20,10 @@
 //! # Example
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Cfb128;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -218,7 +218,7 @@ mod tests {
     }
 
     fn cfb<const K: usize>(key: &[u8; K]) -> Cfb128<Aes<K>> {
-        Cfb128::new(crate::Context::default(), &Key::from(*key))
+        Cfb128::new(Context::default(), &Key::from(*key))
     }
 
     /// NIST SP 800-38A F.3.13 and F.3.14, AES-128.

@@ -31,10 +31,10 @@
 //! in. The free functions below take the bare bytes.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Key;
 //! use scytale::random::CtrDrbg;
 //! use scytale::sig::ed448::PrivateKey;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();

@@ -264,7 +264,7 @@ where
     /// A generator seeded from `seed`, the entropy, nonce and
     /// personalization as one run, at least [`MIN_SEED`] bytes.
     pub(crate) fn from_seed(seed: &[u8]) -> Result<Self, Error> {
-        Self::instantiate(crate::Context::default(), seed, entropy::External)
+        Self::instantiate(Context::default(), seed, entropy::External)
     }
 }
 
@@ -403,8 +403,7 @@ mod tests {
     /// A generator with a source of its own reseeds itself.
     #[test]
     fn a_generator_with_a_source_reseeds_itself() {
-        let Ok(mut rng) =
-            HmacDrbg::<Sha256>::from_system(crate::Context::default())
+        let Ok(mut rng) = HmacDrbg::<Sha256>::from_system(Context::default())
         else {
             return;
         };

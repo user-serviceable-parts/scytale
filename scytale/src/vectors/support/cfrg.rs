@@ -5,6 +5,7 @@
 //! order, and exports. Base mode only, and the KEMs, KDFs and AEADs
 //! the module has: the export-only AEAD is skipped.
 
+use crate::Context;
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
@@ -74,10 +75,10 @@ macro_rules! case {
             v["kem_id"], v["kdf_id"], v["aead_id"]
         );
         let recipient =
-            PrivateKey::from_seed(crate::Context::default(), &hex(&v["ikmR"]))
+            PrivateKey::from_seed(Context::default(), &hex(&v["ikmR"]))
                 .expect("ikmR");
         let ephemeral =
-            PrivateKey::from_seed(crate::Context::default(), &hex(&v["ikmE"]))
+            PrivateKey::from_seed(Context::default(), &hex(&v["ikmE"]))
                 .expect("ikmE");
         assert_eq!(recipient.secret_bytes()[..], hex(&v["skRm"])[..], "{tag}");
         assert_eq!(

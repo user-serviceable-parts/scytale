@@ -43,10 +43,10 @@
 //! whole number of bytes while the byte methods run as before.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Xts;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -543,7 +543,7 @@ pub(crate) mod tests {
         ));
         let (data, tweak) = key.split_at(16);
         Xts::try_new(
-            crate::Context::default(),
+            Context::default(),
             &Key::try_from(data).unwrap(),
             &Key::try_from(tweak).unwrap(),
         )
@@ -616,7 +616,7 @@ pub(crate) mod tests {
         let build = |ctx: crate::Context| {
             Xts::<Aes128>::try_new(ctx, &data, &tweak).expect("distinct")
         };
-        let all = [build(under.ctx()), build(crate::Context::portable())];
+        let all = [build(under.ctx()), build(Context::portable())];
 
         for len in BLOCK..MAX {
             let mut want = [0u8; MAX];
@@ -674,7 +674,7 @@ pub(crate) mod tests {
         // The two keys must differ.
         assert_eq!(
             Xts::<Aes128>::try_new(
-                crate::Context::default(),
+                Context::default(),
                 &Key::from([0x11; 16]),
                 &Key::from([0x11; 16])
             )

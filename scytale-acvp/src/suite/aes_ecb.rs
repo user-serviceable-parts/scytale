@@ -1,7 +1,7 @@
 //! ACVP-AES-ECB 1.0, through the [`BlockCipher`] trait.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{Error, hex, hex_value, key_of, text, unknown_test_type};
 use scytale::Random;
 use scytale::cipher::BlockCipher;
@@ -15,7 +15,7 @@ const MCT_ITERATIONS: usize = 1000;
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         let encrypt = match text(group, "direction")? {
@@ -24,8 +24,8 @@ pub fn answer(
             other => return Err(Error::new(format!("direction {other}"))),
         };
         match text(group, "testType")? {
-            "AFT" => answer_tests(group, |t| aft(t, encrypt, builder)),
-            "MCT" => answer_tests(group, |t| mct(t, encrypt, builder)),
+            "AFT" => answer_tests(group, |t| aft(t, encrypt, profile)),
+            "MCT" => answer_tests(group, |t| mct(t, encrypt, profile)),
             _ => Err(unknown_test_type(group)),
         }
     })
@@ -49,13 +49,13 @@ fn apply<C: BlockCipher<Block = [u8; 16]>>(
 }
 
 /// Algorithm Functional Test: one-shot, possibly several blocks.
-fn aft(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
+fn aft(t: &Value, encrypt: bool, profile: &Profile) -> Result<Value, Error> {
     let key = hex(t, "key")?;
     let (input, output) = if encrypt { ("pt", "ct") } else { ("ct", "pt") };
     let mut data = hex(t, input)?;
     aes_width!(key, C => {
         let k = key_of::<C>(&key)?;
-        let cipher = builder.build(|ctx| C::new(ctx, &k));
+        let cipher = C::new(profile.ctx(), &k);
         apply(&cipher, encrypt, &mut data)?;
     });
     Ok(json!({ output: hex_value(&data) }))
@@ -65,7 +65,7 @@ fn aft(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
 /// runs 1000 chained cipher calls, then derives the next key from the
 /// last outputs. The answer gives the key and input of each step, and
 /// the output of its final call.
-fn mct(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
+fn mct(t: &Value, encrypt: bool, profile: &Profile) -> Result<Value, Error> {
     let (input, output) = if encrypt { ("pt", "ct") } else { ("ct", "pt") };
     let mut key = hex(t, "key")?;
     let mut data = hex(t, input)?;
@@ -76,7 +76,7 @@ fn mct(t: &Value, encrypt: bool, builder: &Builder) -> Result<Value, Error> {
         let mut previous = data.clone();
         aes_width!(key, C => {
             let k = key_of::<C>(&key)?;
-        let cipher = builder.build(|ctx| C::new(ctx, &k));
+        let cipher = C::new(profile.ctx(), &k);
             for _ in 0..MCT_ITERATIONS {
                 previous.copy_from_slice(&data);
                 apply(&cipher, encrypt, &mut data)?;

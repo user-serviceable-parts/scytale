@@ -5,7 +5,7 @@
 //! with another label and seed.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{Error, hex, hex_value, int, text, unknown_test_type};
 use scytale::hash::Hash;
 use scytale::hash::sha2::{Sha256, Sha384, Sha512};
@@ -19,7 +19,7 @@ const MASTER_SECRET_LEN: usize = 48;
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         if text(group, "testType")? != "AFT" {
@@ -33,9 +33,9 @@ pub fn answer(
         let key_block_len = int(group, "keyBlockLength")? as usize / 8;
         let alg = text(group, "hashAlg")?;
         answer_tests(group, |t| match alg {
-            "SHA2-256" => case::<Sha256>(t, key_block_len, builder),
-            "SHA2-384" => case::<Sha384>(t, key_block_len, builder),
-            "SHA2-512" => case::<Sha512>(t, key_block_len, builder),
+            "SHA2-256" => case::<Sha256>(t, key_block_len, profile),
+            "SHA2-384" => case::<Sha384>(t, key_block_len, profile),
+            "SHA2-512" => case::<Sha512>(t, key_block_len, profile),
             other => Err(Error::new(format!("hashAlg {other}"))),
         })
     })
@@ -44,34 +44,29 @@ pub fn answer(
 fn case<H: Hash + Clone + BlockType>(
     t: &Value,
     key_block_len: usize,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     let premaster = hex(t, "preMasterSecret")?;
     let session_hash = hex(t, "sessionHash")?;
     let mut master = vec![0u8; MASTER_SECRET_LEN];
-    // The PRF keys its own HMAC at each call.
-    builder.build(|ctx| {
-        tls12::prf::<H>(
-            ctx,
-            &premaster,
-            b"extended master secret",
-            &[&session_hash],
-            &mut master,
-        )
-    });
+    tls12::prf::<H>(
+        profile.ctx(),
+        &premaster,
+        b"extended master secret",
+        &[&session_hash],
+        &mut master,
+    );
 
     let server_random = hex(t, "serverRandom")?;
     let client_random = hex(t, "clientRandom")?;
     let mut key_block = vec![0u8; key_block_len];
-    builder.build(|ctx| {
-        tls12::prf::<H>(
-            ctx,
-            &master,
-            b"key expansion",
-            &[&server_random, &client_random],
-            &mut key_block,
-        )
-    });
+    tls12::prf::<H>(
+        profile.ctx(),
+        &master,
+        b"key expansion",
+        &[&server_random, &client_random],
+        &mut key_block,
+    );
     Ok(json!({
         "masterSecret": hex_value(&master),
         "keyBlock": hex_value(&key_block),

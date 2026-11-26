@@ -6,6 +6,7 @@
 //! not match, and keys and ciphertexts of the wrong length, every
 //! one of which must be refused before any secret comes out.
 
+use crate::Context;
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
@@ -69,37 +70,29 @@ macro_rules! set {
         impl Set for $name {
             fn key_gen(seed: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
                 let seed: [u8; 64] = seed.try_into().ok()?;
-                let key = $module::PrivateKey::from_seed(
-                    crate::Context::default(),
-                    &seed,
-                );
+                let key =
+                    $module::PrivateKey::from_seed(Context::default(), &seed);
                 let ek = key.public_key().bytes().to_vec();
                 Some((ek, key.key_bytes().to_vec()))
             }
             fn encapsulate(ek: &[u8], m: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
                 let ek: [u8; $module::PUBLIC_KEY_SIZE] = ek.try_into().ok()?;
-                let key =
-                    $module::PublicKey::try_new(crate::Context::default(), &ek)
-                        .ok()?;
+                let key = $module::PublicKey::try_new(Context::default(), &ek)
+                    .ok()?;
                 let (c, k) = key.encapsulate(&mut Fixed(m.to_vec())).ok()?;
                 Some((c.to_vec(), k.to_vec()))
             }
             fn decapsulate(dk: &[u8], c: &[u8]) -> Option<Vec<u8>> {
                 let dk: [u8; $module::KEY_SIZE] = dk.try_into().ok()?;
-                let key = $module::PrivateKey::try_new(
-                    crate::Context::default(),
-                    &dk,
-                )
-                .ok()?;
+                let key = $module::PrivateKey::try_new(Context::default(), &dk)
+                    .ok()?;
                 let c: [u8; $module::CIPHERTEXT_SIZE] = c.try_into().ok()?;
                 Some(key.decapsulate(&c).to_vec())
             }
             fn decapsulate_seed(seed: &[u8], c: &[u8]) -> Option<Vec<u8>> {
                 let seed: [u8; 64] = seed.try_into().ok()?;
-                let key = $module::PrivateKey::from_seed(
-                    crate::Context::default(),
-                    &seed,
-                );
+                let key =
+                    $module::PrivateKey::from_seed(Context::default(), &seed);
                 let c: [u8; $module::CIPHERTEXT_SIZE] = c.try_into().ok()?;
                 Some(key.decapsulate(&c).to_vec())
             }

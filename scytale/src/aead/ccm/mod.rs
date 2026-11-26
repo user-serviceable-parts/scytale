@@ -47,10 +47,10 @@
 //! # Example
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Key;
 //! use scytale::aead::Ccm;
 //! use scytale::cipher::aes::Aes128;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -627,10 +627,7 @@ pub(crate) mod tests {
     /// anything is written.
     #[test]
     fn refuses_bad_lengths() {
-        let ccm = Ccm::<Aes128>::new(
-            crate::Context::default(),
-            &Key::from([0u8; 16]),
-        );
+        let ccm = Ccm::<Aes128>::new(Context::default(), &Key::from([0u8; 16]));
         let mut data = *b"data";
         for n in [0, 6, 14, 16] {
             let nonce = vec![0u8; n];
@@ -657,10 +654,7 @@ pub(crate) mod tests {
     /// bytes is the longest message and one more is refused.
     #[test]
     fn message_limit_follows_the_nonce() {
-        let ccm = Ccm::<Aes128>::new(
-            crate::Context::default(),
-            &Key::from([0u8; 16]),
-        );
+        let ccm = Ccm::<Aes128>::new(Context::default(), &Key::from([0u8; 16]));
         let mut tag = [0u8; 8];
         let mut data = vec![0u8; 1 << 16];
         assert_eq!(
@@ -678,10 +672,7 @@ pub(crate) mod tests {
     /// unauthenticated plaintext.
     #[test]
     fn rejects_tampering() {
-        let ccm = Ccm::<Aes256>::new(
-            crate::Context::default(),
-            &Key::from([7u8; 32]),
-        );
+        let ccm = Ccm::<Aes256>::new(Context::default(), &Key::from([7u8; 32]));
         let nonce = [9u8; 13];
         let mut sealed = *b"a message longer than a block";
         let mut tag = [0u8; 12];
@@ -717,7 +708,7 @@ pub(crate) mod tests {
     fn kernels_agree(under: &crate::features::Under) {
         let key = [0x33u8; 16];
         let reference =
-            { Ccm::<Aes128>::new(crate::Context::portable(), &Key::from(key)) };
+            { Ccm::<Aes128>::new(Context::portable(), &Key::from(key)) };
         let aad = counting(1, 37);
         for len in [0, 1, 15, 16, 17, 255, 256, 257, 1000] {
             let pt = counting(5, len);

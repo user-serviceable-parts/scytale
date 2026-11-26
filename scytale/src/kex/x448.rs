@@ -20,10 +20,12 @@
 //! ```
 //! use scytale::Key;
 //! use scytale::kex::x448::PrivateKey;
+//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let alice = PrivateKey::new(&Key::from([0x11u8; 56]));
-//! let bob = PrivateKey::new(&Key::from([0x22u8; 56]));
+//! let ctx = Context::default();
+//! let alice = PrivateKey::new(ctx, &Key::from([0x11u8; 56]));
+//! let bob = PrivateKey::new(ctx, &Key::from([0x22u8; 56]));
 //!
 //! let ours = alice.shared_secret(bob.public_key())?;
 //! let theirs = bob.shared_secret(alice.public_key())?;
@@ -56,7 +58,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::Error;
 use crate::der;
 use crate::math::fe448::Fe;
-use crate::{Key, Random};
+use crate::{Context, Key, Random};
 
 /// The length of a secret key, a public key, and the shared secret.
 pub const KEY_SIZE: usize = 56;
@@ -307,14 +309,19 @@ impl fmt::Debug for PublicKey {
 
 impl PrivateKey {
     /// A key drawn from `rng`. Any 56 bytes are a secret key.
-    pub fn generate<R: Random>(rng: &mut R) -> Result<Self, Error> {
+    pub fn generate<R: Random>(
+        ctx: Context,
+        rng: &mut R,
+    ) -> Result<Self, Error> {
         let mut secret = Key::zeroed();
         rng.fill(secret.as_mut())?;
-        Ok(Self::new(&secret))
+        Ok(Self::new(ctx, &secret))
     }
 
     /// The key `secret` is.
-    pub fn new(secret: &Key<[u8; KEY_SIZE]>) -> Self {
+    pub fn new(ctx: Context, secret: &Key<[u8; KEY_SIZE]>) -> Self {
+        // One implementation, so `ctx` has nothing to choose yet.
+        let _ = ctx;
         let public = PublicKey {
             bytes: public_key(secret.array()),
         };
@@ -346,9 +353,9 @@ impl PrivateKey {
     /// A key from its DER `PrivateKeyInfo`, of either version; a
     /// version 1 structure's public key is checked against the
     /// secret's own, as [`secret_from_der`] describes.
-    pub fn try_from_der(bytes: &[u8]) -> Result<Self, Error> {
+    pub fn try_from_der(ctx: Context, bytes: &[u8]) -> Result<Self, Error> {
         let mut secret = Key::from(secret_from_der(bytes)?);
-        let key = Self::new(&secret);
+        let key = Self::new(ctx, &secret);
         secret.zeroize();
         Ok(key)
     }
@@ -366,9 +373,9 @@ impl PrivateKey {
 
     /// A key from a `PRIVATE KEY` PEM block, read as
     /// [`secret_from_pem`] reads one.
-    pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
+    pub fn try_from_pem(ctx: Context, pem: &[u8]) -> Result<Self, Error> {
         let mut secret = Key::from(secret_from_pem(pem)?);
-        let key = Self::new(&secret);
+        let key = Self::new(ctx, &secret);
         secret.zeroize();
         Ok(key)
     }
@@ -385,7 +392,8 @@ impl PublicKey {
     /// The key those bytes are. Every 56 bytes name a u-coordinate;
     /// the ones that are useless are refused where they are used, by
     /// [`PrivateKey::shared_secret`].
-    pub fn new(bytes: &[u8; KEY_SIZE]) -> Self {
+    pub fn new(ctx: Context, bytes: &[u8; KEY_SIZE]) -> Self {
+        let _ = ctx;
         PublicKey { bytes: *bytes }
     }
 
@@ -395,7 +403,8 @@ impl PublicKey {
     }
 
     /// A key from its DER `SubjectPublicKeyInfo`.
-    pub fn try_from_der(bytes: &[u8]) -> Result<Self, Error> {
+    pub fn try_from_der(ctx: Context, bytes: &[u8]) -> Result<Self, Error> {
+        let _ = ctx;
         Ok(PublicKey {
             bytes: public_key_from_der(bytes)?,
         })
@@ -407,7 +416,8 @@ impl PublicKey {
     }
 
     /// A key from a `PUBLIC KEY` PEM block.
-    pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
+    pub fn try_from_pem(ctx: Context, pem: &[u8]) -> Result<Self, Error> {
+        let _ = ctx;
         Ok(PublicKey {
             bytes: public_key_from_pem(pem)?,
         })
@@ -477,8 +487,10 @@ mod tests {
     /// and the pair encoding must read back as what it wrote.
     #[test]
     fn key_types_match_the_functions() {
-        let alice = PrivateKey::new(&Key::from([0x11u8; KEY_SIZE]));
-        let bob = PrivateKey::new(&Key::from([0x22u8; KEY_SIZE]));
+        let alice =
+            PrivateKey::new(Context::default(), &Key::from([0x11u8; KEY_SIZE]));
+        let bob =
+            PrivateKey::new(Context::default(), &Key::from([0x22u8; KEY_SIZE]));
         assert_eq!(alice.public_key().bytes(), public_key(&[0x11; KEY_SIZE]));
 
         let one = alice.shared_secret(bob.public_key()).expect("shared");
@@ -490,33 +502,43 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
-            alice.shared_secret(&PublicKey::new(&[0u8; KEY_SIZE])),
+            alice.shared_secret(&PublicKey::new(
+                Context::default(),
+                &[0u8; KEY_SIZE]
+            )),
             Err(Error::InvalidPublicKey)
         );
 
         let der = alice.der_bytes();
-        let read = PrivateKey::try_from_der(&der).expect("der");
+        let read =
+            PrivateKey::try_from_der(Context::default(), &der).expect("der");
         assert_eq!(read.secret_bytes(), alice.secret_bytes());
         assert_eq!(read.public_key(), alice.public_key());
         let pem = alice.pem_bytes();
         assert_eq!(
-            PrivateKey::try_from_pem(&pem).unwrap().secret_bytes(),
+            PrivateKey::try_from_pem(Context::default(), &pem)
+                .unwrap()
+                .secret_bytes(),
             alice.secret_bytes()
         );
         let short = secret_der(&alice.secret_bytes());
         assert!(short.len() < der.len());
         assert_eq!(
-            PrivateKey::try_from_der(&short).unwrap().public_key(),
+            PrivateKey::try_from_der(Context::default(), &short)
+                .unwrap()
+                .public_key(),
             alice.public_key()
         );
 
         let public = *alice.public_key();
         assert_eq!(
-            PublicKey::try_from_der(&public.der_bytes()).unwrap(),
+            PublicKey::try_from_der(Context::default(), &public.der_bytes())
+                .unwrap(),
             public
         );
         assert_eq!(
-            PublicKey::try_from_pem(&public.pem_bytes()).unwrap(),
+            PublicKey::try_from_pem(Context::default(), &public.pem_bytes())
+                .unwrap(),
             public
         );
     }
@@ -525,8 +547,10 @@ mod tests {
     #[test]
     fn generate_draws_the_secret() {
         let mut rng = CtrDrbg::from_seed(&[0x77u8; MIN_SEED]).expect("seed");
-        let one = PrivateKey::generate(&mut rng).expect("one");
-        let two = PrivateKey::generate(&mut rng).expect("two");
+        let one =
+            PrivateKey::generate(Context::default(), &mut rng).expect("one");
+        let two =
+            PrivateKey::generate(Context::default(), &mut rng).expect("two");
         assert_ne!(one.secret_bytes(), two.secret_bytes());
         assert_ne!(one.public_key(), two.public_key());
     }
@@ -729,7 +753,12 @@ mod tests {
         v1[73..76].copy_from_slice(&[0x81, 0x39, 0x00]);
         v1[76..].copy_from_slice(&public);
         assert_eq!(secret_from_der(&v1), Ok(secret));
-        assert_eq!(PrivateKey::try_from_der(&v1).unwrap().der_bytes(), v1);
+        assert_eq!(
+            PrivateKey::try_from_der(Context::default(), &v1)
+                .unwrap()
+                .der_bytes(),
+            v1
+        );
         v1[PAIR_DER_SIZE - 1] ^= 1;
         assert_eq!(secret_from_der(&v1), Err(Error::InconsistentKey));
     }

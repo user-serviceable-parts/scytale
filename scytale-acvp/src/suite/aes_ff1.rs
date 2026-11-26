@@ -6,7 +6,7 @@
 //! back again.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{Error, hex, int, key_of, text, unknown_test_type};
 use scytale::Random;
 use scytale::cipher::mode::Ff1;
@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         let encrypt = match text(group, "direction")? {
@@ -28,7 +28,7 @@ pub fn answer(
             .map_err(|_| Error::new("field radix is too large"))?;
         match text(group, "testType")? {
             "AFT" => answer_tests(group, |t| {
-                aft(t, encrypt, &alphabet, radix, builder)
+                aft(t, encrypt, &alphabet, radix, profile)
             }),
             _ => Err(unknown_test_type(group)),
         }
@@ -67,7 +67,7 @@ fn aft(
     encrypt: bool,
     alphabet: &[char],
     radix: u32,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     let key = hex(t, "key")?;
     let tweak = hex(t, "tweak")?;
@@ -75,7 +75,7 @@ fn aft(
     let mut data = symbols(text(t, input)?, alphabet)?;
     aes_width!(key, C => {
         let k = key_of::<C>(&key)?;
-        let ff1 = builder.try_build(|ctx| Ff1::<C>::try_new(ctx, &k, radix))?;
+        let ff1 = Ff1::<C>::try_new(profile.ctx(), &k, radix)?;
         if encrypt {
             ff1.encrypt(&tweak, &mut data)?;
         } else {

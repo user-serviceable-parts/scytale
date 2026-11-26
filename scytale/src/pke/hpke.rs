@@ -15,12 +15,12 @@
 //! `Gcm<Aes128>`, `Gcm<Aes256>` and [`ChaCha20Poly1305`].
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::aead::{ChaCha20Poly1305, Gcm};
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::pke::hpke::x25519::PrivateKey;
 //! use scytale::random::CtrDrbg;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -436,7 +436,7 @@ macro_rules! xdh_kem {
                     ctx: crate::Context,
                     rng: &mut R,
                 ) -> Result<Self, Error> {
-                    Ok(Self::from_dh(ctx, dh::PrivateKey::generate(rng)?))
+                    Ok(Self::from_dh(ctx, dh::PrivateKey::generate(ctx, rng)?))
                 }
 
                 /// The key `DeriveKeyPair` makes from `ikm` (RFC 9180 section
@@ -468,7 +468,7 @@ macro_rules! xdh_kem {
                     );
                     prk.zeroize();
                     expanded?;
-                    Ok(Self::from_dh(ctx, dh::PrivateKey::new(&sk)))
+                    Ok(Self::from_dh(ctx, dh::PrivateKey::new(ctx, &sk)))
                 }
 
                 /// A key from its serialized form, the bytes of RFC 7748.
@@ -476,7 +476,7 @@ macro_rules! xdh_kem {
                     ctx: crate::Context,
                     secret: &Key<[u8; KEY_SIZE]>,
                 ) -> Self {
-                    Self::from_dh(ctx, dh::PrivateKey::new(secret))
+                    Self::from_dh(ctx, dh::PrivateKey::new(ctx, secret))
                 }
 
                 /// The serialized key. A secret, to be wiped.
@@ -498,7 +498,7 @@ macro_rules! xdh_kem {
                     enc: &[u8; ENCAPSULATED_SIZE],
                     info: &[u8],
                 ) -> Result<Context<H, A>, Error> {
-                    let peer = dh::PublicKey::new(enc);
+                    let peer = dh::PublicKey::new(self.ctx, enc);
                     let mut dh = self.key.shared_secret(&peer)?;
                     let mut shared = [0u8; SECRET_SIZE];
                     let result = extract_and_expand::<$hash>(self.ctx,
@@ -525,7 +525,7 @@ macro_rules! xdh_kem {
                 ) -> Self {
                     PublicKey {
                         ctx,
-                        key: dh::PublicKey::new(bytes),
+                        key: dh::PublicKey::new(ctx, bytes),
                     }
                 }
 
@@ -853,6 +853,7 @@ nist_kem!(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Context;
     use crate::random::CtrDrbg;
 
     /// Every KEM with every KDF and AEAD round-trips, including
@@ -861,13 +862,10 @@ mod tests {
     fn every_suite_round_trips() {
         macro_rules! suite {
             ($kem:ident, $h:ty, $a:ty) => {{
-                let mut rng =
-                    CtrDrbg::from_system(crate::Context::default()).unwrap();
-                let key = $kem::PrivateKey::generate(
-                    crate::Context::default(),
-                    &mut rng,
-                )
-                .unwrap();
+                let mut rng = CtrDrbg::from_system(Context::default()).unwrap();
+                let key =
+                    $kem::PrivateKey::generate(Context::default(), &mut rng)
+                        .unwrap();
                 let (enc, mut s) = key
                     .public_key()
                     .sender::<$h, $a, _>(&mut rng, b"info")
@@ -904,10 +902,9 @@ mod tests {
     /// fails; a failure does not use up the message's number.
     #[test]
     fn mismatches_fail() {
-        let mut rng = CtrDrbg::from_system(crate::Context::default()).unwrap();
+        let mut rng = CtrDrbg::from_system(Context::default()).unwrap();
         let key =
-            p384::PrivateKey::generate(crate::Context::default(), &mut rng)
-                .unwrap();
+            p384::PrivateKey::generate(Context::default(), &mut rng).unwrap();
         let (enc, mut s) = key
             .public_key()
             .sender::<Sha384, Gcm<Aes256>, _>(&mut rng, b"info")
@@ -942,53 +939,46 @@ mod tests {
     #[test]
     fn bad_keys_are_refused() {
         // A compressed point is not RFC 9180's serialization.
-        let mut rng = CtrDrbg::from_system(crate::Context::default()).unwrap();
+        let mut rng = CtrDrbg::from_system(Context::default()).unwrap();
         let key =
-            p256::PrivateKey::generate(crate::Context::default(), &mut rng)
-                .unwrap();
+            p256::PrivateKey::generate(Context::default(), &mut rng).unwrap();
         let mut point = key.public_key().bytes();
         point[0] = 0x02;
         assert_eq!(
-            p256::PublicKey::try_new(crate::Context::default(), &point).err(),
+            p256::PublicKey::try_new(Context::default(), &point).err(),
             Some(Error::InvalidPublicKey)
         );
         assert!(key.recipient::<Sha256, Gcm<Aes128>>(&point, b"").is_err());
         // An X25519 or X448 encapsulation of the low-order point zero,
         // whose shared secret is zero.
         let key =
-            x25519::PrivateKey::generate(crate::Context::default(), &mut rng)
-                .unwrap();
+            x25519::PrivateKey::generate(Context::default(), &mut rng).unwrap();
         assert_eq!(
             key.recipient::<Sha256, Gcm<Aes128>>(&[0; 32], b"").err(),
             Some(Error::InvalidPublicKey)
         );
         let key =
-            x448::PrivateKey::generate(crate::Context::default(), &mut rng)
-                .unwrap();
+            x448::PrivateKey::generate(Context::default(), &mut rng).unwrap();
         assert_eq!(
             key.recipient::<Sha512, Gcm<Aes256>>(&[0; 56], b"").err(),
             Some(Error::InvalidPublicKey)
         );
         // Seeds shorter than a key.
         assert_eq!(
-            x25519::PrivateKey::from_seed(crate::Context::default(), &[1; 31])
-                .err(),
+            x25519::PrivateKey::from_seed(Context::default(), &[1; 31]).err(),
             Some(Error::InvalidSeedLength(31))
         );
         assert_eq!(
-            x448::PrivateKey::from_seed(crate::Context::default(), &[1; 55])
-                .err(),
+            x448::PrivateKey::from_seed(Context::default(), &[1; 55]).err(),
             Some(Error::InvalidSeedLength(55))
         );
         assert_eq!(
-            p521::PrivateKey::from_seed(crate::Context::default(), &[1; 65])
-                .err(),
+            p521::PrivateKey::from_seed(Context::default(), &[1; 65]).err(),
             Some(Error::InvalidSeedLength(65))
         );
         // A scalar at zero.
         assert!(
-            p384::PrivateKey::try_new(crate::Context::default(), &[0; 48])
-                .is_err()
+            p384::PrivateKey::try_new(Context::default(), &[0; 48]).is_err()
         );
     }
 
@@ -996,10 +986,9 @@ mod tests {
     /// an export past HKDF's bound is refused.
     #[test]
     fn limits() {
-        let mut rng = CtrDrbg::from_system(crate::Context::default()).unwrap();
+        let mut rng = CtrDrbg::from_system(Context::default()).unwrap();
         let key =
-            x25519::PrivateKey::generate(crate::Context::default(), &mut rng)
-                .unwrap();
+            x25519::PrivateKey::generate(Context::default(), &mut rng).unwrap();
         let (_, mut s) = key
             .public_key()
             .sender::<Sha256, ChaCha20Poly1305, _>(&mut rng, b"")

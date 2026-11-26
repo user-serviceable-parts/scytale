@@ -6,7 +6,7 @@
 //! randomness the same way, so both reproduce the expected bytes.
 
 use super::{answer_groups, answer_tests, skip};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{Error, flag, hex, hex_value, text};
 use scytale::Context;
 use scytale::Random;
@@ -133,33 +133,32 @@ fn pure_external(group: &Value) -> bool {
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
     answer_groups(doc, |group| match text(group, "parameterSet")? {
-        Sha2_128s::NAME => answer_group::<Sha2_128s>(mode, group, builder),
-        Sha2_128f::NAME => answer_group::<Sha2_128f>(mode, group, builder),
-        Sha2_192s::NAME => answer_group::<Sha2_192s>(mode, group, builder),
-        Sha2_192f::NAME => answer_group::<Sha2_192f>(mode, group, builder),
-        Sha2_256s::NAME => answer_group::<Sha2_256s>(mode, group, builder),
-        Sha2_256f::NAME => answer_group::<Sha2_256f>(mode, group, builder),
-        Shake128s::NAME => answer_group::<Shake128s>(mode, group, builder),
-        Shake128f::NAME => answer_group::<Shake128f>(mode, group, builder),
-        Shake192s::NAME => answer_group::<Shake192s>(mode, group, builder),
-        Shake192f::NAME => answer_group::<Shake192f>(mode, group, builder),
-        Shake256s::NAME => answer_group::<Shake256s>(mode, group, builder),
-        Shake256f::NAME => answer_group::<Shake256f>(mode, group, builder),
+        Sha2_128s::NAME => answer_group::<Sha2_128s>(mode, group, profile),
+        Sha2_128f::NAME => answer_group::<Sha2_128f>(mode, group, profile),
+        Sha2_192s::NAME => answer_group::<Sha2_192s>(mode, group, profile),
+        Sha2_192f::NAME => answer_group::<Sha2_192f>(mode, group, profile),
+        Sha2_256s::NAME => answer_group::<Sha2_256s>(mode, group, profile),
+        Sha2_256f::NAME => answer_group::<Sha2_256f>(mode, group, profile),
+        Shake128s::NAME => answer_group::<Shake128s>(mode, group, profile),
+        Shake128f::NAME => answer_group::<Shake128f>(mode, group, profile),
+        Shake192s::NAME => answer_group::<Shake192s>(mode, group, profile),
+        Shake192f::NAME => answer_group::<Shake192f>(mode, group, profile),
+        Shake256s::NAME => answer_group::<Shake256s>(mode, group, profile),
+        Shake256f::NAME => answer_group::<Shake256f>(mode, group, profile),
         other => Err(Error::new(format!("parameter set {other}"))),
     })
 }
 
-/// Every case builds its key from the case's bytes and runs it once,
-/// and every call hashes as it runs, starting hashes of its own: each
-/// case runs whole under `builder`.
+/// Every case builds its key from the case's bytes, with the
+/// profile's context, and runs it once.
 fn answer_group<S: Set>(
     mode: &str,
     group: &Value,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Option<Value>, Error> {
     let each = |answer: &dyn Fn(&Value) -> Result<Value, Error>| {
         answer_tests(group, answer)
@@ -168,12 +167,12 @@ fn answer_group<S: Set>(
         return skip(group, "only the pure external interface is offered");
     }
     match mode {
-        "keyGen" => each(&|t| key_gen::<S>(builder.ctx(), t)),
+        "keyGen" => each(&|t| key_gen::<S>(profile.ctx(), t)),
         "sigGen" => {
             let deterministic = flag(group, "deterministic")?;
-            each(&|t| sig_gen::<S>(builder.ctx(), t, deterministic))
+            each(&|t| sig_gen::<S>(profile.ctx(), t, deterministic))
         }
-        "sigVer" => each(&|t| sig_ver::<S>(builder.ctx(), t)),
+        "sigVer" => each(&|t| sig_ver::<S>(profile.ctx(), t)),
         other => Err(Error::new(format!("mode {other}"))),
     }
 }

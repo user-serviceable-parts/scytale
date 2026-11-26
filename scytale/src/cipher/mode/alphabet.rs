@@ -9,11 +9,11 @@
 //! number a string of them.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
-//! use scytale::cipher::mode::{Alphabet, Ff1};
 //! use scytale::cipher::mode::alphabet::DIGITS;
-//! use scytale::Context;
+//! use scytale::cipher::mode::{Alphabet, Ff1};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();

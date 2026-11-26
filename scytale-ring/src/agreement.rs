@@ -114,7 +114,10 @@ impl EphemeralPrivateKey {
             Curve::Curve25519 => {
                 let mut key = Key::from([0u8; x25519::KEY_SIZE]);
                 rng.fill(key.as_mut())?;
-                Private::X25519(x25519::PrivateKey::new(&key))
+                Private::X25519(x25519::PrivateKey::new(
+                    scytale::Context::default(),
+                    &key,
+                ))
             }
             Curve::P256 => Private::P256(draw(rng, |k| {
                 p256::PrivateKey::try_new(scytale::Context::default(), k)
@@ -267,7 +270,10 @@ pub fn agree_ephemeral<B: AsRef<[u8]>, R>(
         Private::X25519(k) => {
             let peer: &[u8; x25519::KEY_SIZE] = peer.try_into()?;
             let secret = k
-                .shared_secret(&x25519::PublicKey::new(peer))
+                .shared_secret(&x25519::PublicKey::new(
+                    scytale::Context::default(),
+                    peer,
+                ))
                 .map_err(error::erase)?;
             put_secret(&mut shared, secret)
         }

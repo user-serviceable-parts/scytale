@@ -25,9 +25,9 @@
 //! volume, and the instructions are there to be used.
 //!
 //! ```
-//! use scytale::hash::sha1::Sha1;
-//! use scytale::hash::Hash;
 //! use scytale::Context;
+//! use scytale::hash::Hash;
+//! use scytale::hash::sha1::Sha1;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -409,7 +409,7 @@ pub(crate) mod tests {
         );
         let data: [u8; 600] = core::array::from_fn(|i| (i * 31 + 5) as u8);
         for len in 0..data.len() {
-            let mut reference = { Sha1::new(crate::Context::portable()) };
+            let mut reference = { Sha1::new(Context::portable()) };
             reference.update(&data[..len]);
             let want = reference.finalize();
             assert_eq!(digest(&data[..len]), want, "len {len}");
@@ -424,8 +424,7 @@ pub(crate) mod tests {
     #[test]
     fn picks_the_first_kernel_whose_needs_are_met() {
         {
-            let kernel =
-                Sha1::new(crate::Context::default()).compressor.kernel();
+            let kernel = Sha1::new(Context::default()).compressor.kernel();
             features::dispatches(KERNELS, Sha1::profiles(), kernel);
         };
     }
@@ -434,21 +433,21 @@ pub(crate) mod tests {
     #[test]
     fn known_answers() {
         assert_eq!(
-            Sha1::digest(crate::Context::default(), b""),
+            Sha1::digest(Context::default(), b""),
             unhex("da39a3ee5e6b4b0d3255bfef95601890afd80709")
         );
         assert_eq!(
-            Sha1::digest(crate::Context::default(), b"abc"),
+            Sha1::digest(Context::default(), b"abc"),
             unhex("a9993e364706816aba3e25717850c26c9cd0d89d")
         );
         assert_eq!(
             Sha1::digest(
-                crate::Context::default(),
+                Context::default(),
                 b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
             ),
             unhex("84983e441c3bd26ebaae4aa1f95129e5e54670f1")
         );
-        let mut hash = Sha1::new(crate::Context::default());
+        let mut hash = Sha1::new(Context::default());
         for _ in 0..1000 {
             hash.update(&[b'a'; 1000]);
         }
@@ -464,9 +463,9 @@ pub(crate) mod tests {
     fn pieces_agree_with_one_call() {
         let data: [u8; 200] = core::array::from_fn(|i| (i * 7) as u8);
         for len in [0usize, 1, 55, 56, 57, 63, 64, 65, 119, 120, 128, 200] {
-            let whole = Sha1::digest(crate::Context::default(), &data[..len]);
+            let whole = Sha1::digest(Context::default(), &data[..len]);
             for piece in [1usize, 3, 16, 63, 64, 65] {
-                let mut hash = Sha1::new(crate::Context::default());
+                let mut hash = Sha1::new(Context::default());
                 for chunk in data[..len].chunks(piece) {
                     hash.update(chunk);
                 }
@@ -483,7 +482,7 @@ pub(crate) mod tests {
     fn nothing_is_left_behind() {
         let data: [u8; 200] = core::array::from_fn(|i| (i as u8) | 1);
         for len in [1usize, 5, 55, 56, 63, 64, 65, 130, 200] {
-            let mut hash = Sha1::new(crate::Context::default());
+            let mut hash = Sha1::new(Context::default());
             for chunk in data[..len].chunks(37) {
                 hash.update(chunk);
             }
@@ -504,25 +503,25 @@ pub(crate) mod tests {
     /// over bit strings.
     #[test]
     fn bit_string() {
-        let digest = Sha1::new(crate::Context::default())
+        let digest = Sha1::new(Context::default())
             .finalize_bits(0b0110_0000, 5)
             .unwrap();
         assert_eq!(digest, unhex("80c0e3041a384f9edd3a4b03cc351af075b9069e"));
         assert_eq!(
-            Sha1::new(crate::Context::default()).finalize_bits(0, 8),
+            Sha1::new(Context::default()).finalize_bits(0, 8),
             Err(Error::InvalidBitCount(8))
         );
     }
 
     #[test]
     fn reset_and_debug() {
-        let mut hash = Sha1::new(crate::Context::default());
+        let mut hash = Sha1::new(Context::default());
         hash.update(b"garbage");
         hash.reset();
         hash.update(b"abc");
         assert_eq!(
             hash.clone().finalize(),
-            Sha1::digest(crate::Context::default(), b"abc")
+            Sha1::digest(Context::default(), b"abc")
         );
         extern crate std;
         assert_eq!(std::format!("{hash:?}"), "Sha1 { bytes: 3 }");

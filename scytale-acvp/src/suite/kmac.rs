@@ -10,7 +10,7 @@
 
 use super::cshake::{customization, to_top};
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{
     Error, flag, hex, hex_value, int, text, unknown_test_type,
 };
@@ -104,16 +104,16 @@ width!(Kmac256);
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     match text(doc, "algorithm")? {
-        "KMAC-128" => answer_as::<Kmac128>(doc, builder),
-        "KMAC-256" => answer_as::<Kmac256>(doc, builder),
+        "KMAC-128" => answer_as::<Kmac128>(doc, profile),
+        "KMAC-256" => answer_as::<Kmac256>(doc, profile),
         other => Err(Error::new(format!("algorithm {other}"))),
     }
 }
 
-fn answer_as<K: Width>(doc: &Value, builder: &Builder) -> Result<Value, Error> {
+fn answer_as<K: Width>(doc: &Value, profile: &Profile) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         let xof = flag(group, "xof")?;
         let verify = match text(group, "testType")? {
@@ -130,9 +130,8 @@ fn answer_as<K: Width>(doc: &Value, builder: &Builder) -> Result<Value, Error> {
             let msg = from_top(hex(t, "msg")?, msg_bits)?;
             let (whole, last, extra) = split(&msg, msg_bits);
 
-            let mut kmac = builder.try_build(|ctx| {
-                K::try_new_bits(ctx, &key, key_bits, &custom)
-            })?;
+            let mut kmac =
+                { K::try_new_bits(profile.ctx(), &key, key_bits, &custom) }?;
             kmac.update(whole);
             let mut out = vec![0u8; mac_bits.div_ceil(8)];
             if !verify {

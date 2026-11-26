@@ -28,7 +28,7 @@
 //! since the library offers only AES-256.
 
 use super::{answer_groups, answer_tests, skip};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{
     Error, NoEntropy, flag, hex, hex_value, int, list, opt_text, text,
     unknown_test_type,
@@ -41,7 +41,7 @@ use serde_json::{Value, json};
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         if text(group, "testType")? != "AFT" {
@@ -52,11 +52,7 @@ pub fn answer(
         }
         let bits = int(group, "returnedBitsLen")? as usize;
         let derivation = flag(group, "derFunc")?;
-        answer_tests(group, |t| {
-            // Built whole: every request and reseed rekeys the
-            // generator's cipher.
-            builder.try_build(|ctx| aft(ctx, t, bits, derivation))
-        })
+        answer_tests(group, |t| aft(profile.ctx(), t, bits, derivation))
     })
 }
 

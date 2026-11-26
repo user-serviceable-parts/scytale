@@ -5,6 +5,7 @@
 //! Each group's key also comes in DER and PEM, which checks the
 //! curve key formats against an external writer.
 
+use crate::Context;
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
@@ -68,19 +69,17 @@ macro_rules! curve {
             fn public(group: &Value) -> Self::Public {
                 let sec1 = hex(&group["publicKey"]["uncompressed"]);
                 let key = $module::PublicKey::try_from_sec1(
-                    crate::Context::default(),
+                    Context::default(),
                     &sec1,
                 )
                 .expect("key");
                 let der = hex(&group["publicKeyDer"]);
                 let pem = group["publicKeyPem"].as_str().expect("pem");
-                let from_der = $module::PublicKey::try_from_der(
-                    crate::Context::default(),
-                    &der,
-                )
-                .expect("der");
+                let from_der =
+                    $module::PublicKey::try_from_der(Context::default(), &der)
+                        .expect("der");
                 let from_pem = $module::PublicKey::try_from_pem(
-                    crate::Context::default(),
+                    Context::default(),
                     pem.as_bytes(),
                 )
                 .expect("pem");

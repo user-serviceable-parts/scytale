@@ -45,10 +45,10 @@
 //! [`signature_from_der`](p256::signature_from_der) convert.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::random::CtrDrbg;
 //! use scytale::sig::ecdsa::p256::{PrivateKey, PublicKey};
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -86,7 +86,7 @@ macro_rules! ecdsa_curve {
     ) => {
         crate::math::ec::key_types!(
             $constants, $limbs, $curve, "signing",
-            der $der, public der $public_der
+            der $der, public der $public_der, keeps crate::Context
         );
 
         impl crate::features::sealed::Sealed for PrivateKey {}
@@ -228,6 +228,7 @@ mod tests {
     use super::p256;
     use super::p384;
     use super::p521;
+    use crate::Context;
     use crate::Error;
     use crate::hash::sha2::{Sha256, Sha384, Sha512};
     use crate::random::CtrDrbg;
@@ -321,22 +322,17 @@ mod tests {
 
     #[test]
     fn openssl_p256() {
-        let key =
-            p256::PrivateKey::try_from_pem(crate::Context::default(), P256_PEM)
-                .unwrap();
+        let key = p256::PrivateKey::try_from_pem(Context::default(), P256_PEM)
+            .unwrap();
         let mut buf = [0u8; 32];
         assert_eq!(key.secret_bytes()[..], *unhex(P256_SECRET, &mut buf));
-        let public = p256::PublicKey::try_from_pem(
-            crate::Context::default(),
-            P256_PUBLIC_PEM,
-        )
-        .unwrap();
+        let public =
+            p256::PublicKey::try_from_pem(Context::default(), P256_PUBLIC_PEM)
+                .unwrap();
         assert_eq!(public.sec1_bytes(), key.public_key().sec1_bytes());
-        let sec1 = p256::PrivateKey::try_from_pem(
-            crate::Context::default(),
-            P256_SEC1_PEM,
-        )
-        .unwrap();
+        let sec1 =
+            p256::PrivateKey::try_from_pem(Context::default(), P256_SEC1_PEM)
+                .unwrap();
         assert_eq!(sec1.secret_bytes(), key.secret_bytes());
 
         // The bare ECPrivateKey DER loads directly; its parameters
@@ -345,26 +341,18 @@ mod tests {
         let mut der = [0u8; 512];
         let (_, n) =
             crate::codec::pem::decode(P256_SEC1_PEM, &mut der).unwrap();
-        let sec1 = p256::PrivateKey::try_from_sec1_der(
-            crate::Context::default(),
-            &der[..n],
-        )
-        .unwrap();
+        let sec1 =
+            p256::PrivateKey::try_from_sec1_der(Context::default(), &der[..n])
+                .unwrap();
         assert_eq!(sec1.secret_bytes(), key.secret_bytes());
         assert_eq!(sec1.public_key().sec1_bytes(), public.sec1_bytes());
         assert!(matches!(
-            p384::PrivateKey::try_from_sec1_der(
-                crate::Context::default(),
-                &der[..n]
-            ),
+            p384::PrivateKey::try_from_sec1_der(Context::default(), &der[..n]),
             Err(Error::WrongAlgorithm)
         ));
         let (_, n) = crate::codec::pem::decode(P256_PEM, &mut der).unwrap();
         assert!(matches!(
-            p256::PrivateKey::try_from_sec1_der(
-                crate::Context::default(),
-                &der[..n]
-            ),
+            p256::PrivateKey::try_from_sec1_der(Context::default(), &der[..n]),
             Err(Error::InvalidEncoding)
         ));
 
@@ -380,18 +368,15 @@ mod tests {
         let n = key.der_bytes(&mut out).unwrap();
         assert_eq!(n, p256::DER_SIZE);
         assert_eq!(
-            p256::PrivateKey::try_from_der(
-                crate::Context::default(),
-                &out[..n]
-            )
-            .unwrap()
-            .secret_bytes(),
+            p256::PrivateKey::try_from_der(Context::default(), &out[..n])
+                .unwrap()
+                .secret_bytes(),
             key.secret_bytes()
         );
         let n = public.der_bytes(&mut out).unwrap();
         assert_eq!(n, p256::PUBLIC_KEY_DER_SIZE);
         assert_eq!(
-            p256::PublicKey::try_from_der(crate::Context::default(), &out[..n])
+            p256::PublicKey::try_from_der(Context::default(), &out[..n])
                 .unwrap()
                 .sec1_bytes(),
             public.sec1_bytes()
@@ -411,14 +396,11 @@ mod tests {
 
     #[test]
     fn openssl_p384() {
-        let key =
-            p384::PrivateKey::try_from_pem(crate::Context::default(), P384_PEM)
+        let key = p384::PrivateKey::try_from_pem(Context::default(), P384_PEM)
+            .unwrap();
+        let public =
+            p384::PublicKey::try_from_pem(Context::default(), P384_PUBLIC_PEM)
                 .unwrap();
-        let public = p384::PublicKey::try_from_pem(
-            crate::Context::default(),
-            P384_PUBLIC_PEM,
-        )
-        .unwrap();
         assert_eq!(public.sec1_bytes(), key.public_key().sec1_bytes());
         let mut out = [0u8; 512];
         assert_eq!(key.pem_bytes(&mut out), Ok(p384::PEM_SIZE));
@@ -439,22 +421,17 @@ mod tests {
 
     #[test]
     fn openssl_p521() {
-        let key =
-            p521::PrivateKey::try_from_pem(crate::Context::default(), P521_PEM)
-                .unwrap();
+        let key = p521::PrivateKey::try_from_pem(Context::default(), P521_PEM)
+            .unwrap();
         let mut buf = [0u8; 66];
         assert_eq!(key.secret_bytes()[..], *unhex(P521_SECRET, &mut buf));
-        let public = p521::PublicKey::try_from_pem(
-            crate::Context::default(),
-            P521_PUBLIC_PEM,
-        )
-        .unwrap();
+        let public =
+            p521::PublicKey::try_from_pem(Context::default(), P521_PUBLIC_PEM)
+                .unwrap();
         assert_eq!(public.sec1_bytes(), key.public_key().sec1_bytes());
-        let sec1 = p521::PrivateKey::try_from_pem(
-            crate::Context::default(),
-            P521_SEC1_PEM,
-        )
-        .unwrap();
+        let sec1 =
+            p521::PrivateKey::try_from_pem(Context::default(), P521_SEC1_PEM)
+                .unwrap();
         assert_eq!(sec1.secret_bytes(), key.secret_bytes());
         let mut out = [0u8; 512];
         assert_eq!(key.pem_bytes(&mut out), Ok(p521::PEM_SIZE));
@@ -481,7 +458,7 @@ mod tests {
             ours,
             key.sign_deterministic::<Sha512>(b"the message").unwrap()
         );
-        let mut rng = CtrDrbg::from_system(crate::Context::default()).unwrap();
+        let mut rng = CtrDrbg::from_system(Context::default()).unwrap();
         let hedged = key.sign::<Sha512, _>(&mut rng, b"the message").unwrap();
         public.verify::<Sha512>(b"the message", &hedged).unwrap();
         assert_ne!(hedged, ours);
@@ -497,16 +474,15 @@ mod tests {
     #[test]
     fn a_carried_point_is_reported_and_checked() {
         let mut rng =
-            crate::random::CtrDrbg::from_system(crate::Context::default())
-                .unwrap();
-        let a = p256::PrivateKey::generate(crate::Context::default(), &mut rng)
-            .unwrap();
-        let b = p256::PrivateKey::generate(crate::Context::default(), &mut rng)
-            .unwrap();
+            crate::random::CtrDrbg::from_system(Context::default()).unwrap();
+        let a =
+            p256::PrivateKey::generate(Context::default(), &mut rng).unwrap();
+        let b =
+            p256::PrivateKey::generate(Context::default(), &mut rng).unwrap();
         let mut der = [0u8; p256::DER_SIZE];
         let n = a.der_bytes(&mut der).unwrap();
         let (back, form) = p256::PrivateKey::try_from_der_with_form(
-            crate::Context::default(),
+            Context::default(),
             &der[..n],
         )
         .unwrap();
@@ -523,11 +499,7 @@ mod tests {
         assert_eq!(point, &a.public_key().sec1_bytes());
         point.copy_from_slice(&b.public_key().sec1_bytes());
         assert_eq!(
-            p256::PrivateKey::try_from_der(
-                crate::Context::default(),
-                &der[..n]
-            )
-            .err(),
+            p256::PrivateKey::try_from_der(Context::default(), &der[..n]).err(),
             Some(Error::InconsistentKey)
         );
     }
@@ -536,29 +508,21 @@ mod tests {
     #[test]
     fn curves_do_not_mix() {
         assert_eq!(
-            p256::PrivateKey::try_from_pem(crate::Context::default(), P384_PEM)
+            p256::PrivateKey::try_from_pem(Context::default(), P384_PEM).err(),
+            Some(Error::WrongAlgorithm)
+        );
+        assert_eq!(
+            p384::PrivateKey::try_from_pem(Context::default(), P256_PEM).err(),
+            Some(Error::WrongAlgorithm)
+        );
+        assert_eq!(
+            p256::PublicKey::try_from_pem(Context::default(), P384_PUBLIC_PEM)
                 .err(),
             Some(Error::WrongAlgorithm)
         );
         assert_eq!(
-            p384::PrivateKey::try_from_pem(crate::Context::default(), P256_PEM)
+            p384::PrivateKey::try_from_pem(Context::default(), P256_SEC1_PEM)
                 .err(),
-            Some(Error::WrongAlgorithm)
-        );
-        assert_eq!(
-            p256::PublicKey::try_from_pem(
-                crate::Context::default(),
-                P384_PUBLIC_PEM
-            )
-            .err(),
-            Some(Error::WrongAlgorithm)
-        );
-        assert_eq!(
-            p384::PrivateKey::try_from_pem(
-                crate::Context::default(),
-                P256_SEC1_PEM
-            )
-            .err(),
             Some(Error::WrongAlgorithm)
         );
         let mut der = [0u8; 112];
@@ -574,16 +538,12 @@ mod tests {
     #[test]
     fn round_trips() {
         let mut rng =
-            crate::random::CtrDrbg::from_system(crate::Context::default())
-                .unwrap();
+            crate::random::CtrDrbg::from_system(Context::default()).unwrap();
         let key =
-            p384::PrivateKey::generate(crate::Context::default(), &mut rng)
+            p384::PrivateKey::generate(Context::default(), &mut rng).unwrap();
+        let again =
+            p384::PrivateKey::try_new(Context::default(), &key.secret_bytes())
                 .unwrap();
-        let again = p384::PrivateKey::try_new(
-            crate::Context::default(),
-            &key.secret_bytes(),
-        )
-        .unwrap();
         assert_eq!(
             again.public_key().sec1_bytes(),
             key.public_key().sec1_bytes()
@@ -592,18 +552,14 @@ mod tests {
         assert_eq!(again.sign_deterministic::<Sha384>(b"x").unwrap(), sig);
         let mut out = [0u8; 512];
         let n = key.der_bytes(&mut out).unwrap();
-        let back = p384::PrivateKey::try_from_der(
-            crate::Context::default(),
-            &out[..n],
-        )
-        .unwrap();
+        let back =
+            p384::PrivateKey::try_from_der(Context::default(), &out[..n])
+                .unwrap();
         assert_eq!(back.secret_bytes(), key.secret_bytes());
         let n = key.pem_bytes(&mut out).unwrap();
-        let back = p384::PrivateKey::try_from_pem(
-            crate::Context::default(),
-            &out[..n],
-        )
-        .unwrap();
+        let back =
+            p384::PrivateKey::try_from_pem(Context::default(), &out[..n])
+                .unwrap();
         assert_eq!(back.secret_bytes(), key.secret_bytes());
         back.public_key().verify::<Sha384>(b"x", &sig).unwrap();
 
@@ -622,8 +578,7 @@ mod tests {
             Some(true)
         );
         assert_eq!(
-            p256::PrivateKey::try_new(crate::Context::default(), &[0u8; 32])
-                .err(),
+            p256::PrivateKey::try_new(Context::default(), &[0u8; 32]).err(),
             Some(Error::InvalidPrivateKey)
         );
     }

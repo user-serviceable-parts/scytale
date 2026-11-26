@@ -9,7 +9,7 @@
 //! since the vendored signatures were made with NIST's own key.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{Error, Rng, hex, hex_value, text};
 use scytale::Context;
 use scytale::Random;
@@ -28,22 +28,19 @@ fn sets(group: &Value) -> Result<(Lms, Lmots), Error> {
 pub fn answer(
     doc: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
-    // Every LMS call hashes as it runs, starting hashes of its own, so
-    // each runs under `builder`: the tree, each signature and each
-    // verification apart.
     answer_groups(doc, |group| {
         let (lms, ots) = sets(group)?;
         match mode {
-            "keyGen" => answer_tests(group, |t| {
-                builder.try_build(|ctx| key_gen(ctx, lms, ots, t))
-            }),
+            "keyGen" => {
+                answer_tests(group, |t| key_gen(profile.ctx(), lms, ots, t))
+            }
             "sigGen" => {
-                let mut key = builder.try_build(|ctx| {
-                    PrivateKey::generate(ctx, &mut Rng(rng), lms, ots)
-                })?;
+                let mut key = {
+                    PrivateKey::generate(profile.ctx(), &mut Rng(rng), lms, ots)
+                }?;
                 let public = key.public_key().clone();
                 let answered =
                     answer_tests(group, |t| sig_gen(&mut key, rng, t))?;
@@ -55,8 +52,7 @@ pub fn answer(
             }
             "sigVer" => {
                 let public = hex(group, "publicKey")?;
-                let public =
-                    builder.try_build(|ctx| PublicKey::new(ctx, &public))?;
+                let public = PublicKey::new(profile.ctx(), &public)?;
                 answer_tests(group, |t| sig_ver(&public, t))
             }
             other => Err(Error::new(format!("mode {other}"))),

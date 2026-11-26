@@ -57,10 +57,10 @@
 //! the signature module, which lays this out in full.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::pke::rsa::PrivateKey;
 //! use scytale::random::CtrDrbg;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -1224,7 +1224,7 @@ mod tests {
 
     fn key2048() -> PrivateKey {
         PrivateKey::try_new(
-            crate::Context::default(),
+            Context::default(),
             &unhex::<256>(N2048),
             E,
             &unhex::<256>(D2048),
@@ -1234,7 +1234,7 @@ mod tests {
 
     fn key1024() -> PrivateKey {
         PrivateKey::try_new(
-            crate::Context::default(),
+            Context::default(),
             &unhex::<128>(N1024),
             E,
             &unhex::<128>(D1024),
@@ -1353,7 +1353,7 @@ mod tests {
     #[test]
     fn oaep_round_trips() {
         use crate::random::CtrDrbg;
-        let mut rng = CtrDrbg::from_system(crate::Context::default()).unwrap();
+        let mut rng = CtrDrbg::from_system(Context::default()).unwrap();
         let key = key1024();
         let public = key.public_key();
         let mut out = [0u8; 128];
@@ -1379,10 +1379,9 @@ mod tests {
     #[test]
     fn generated_key_round_trips() {
         use crate::random::CtrDrbg;
-        let mut rng = CtrDrbg::from_system(crate::Context::default()).unwrap();
+        let mut rng = CtrDrbg::from_system(Context::default()).unwrap();
         let key =
-            PrivateKey::generate(crate::Context::default(), &mut rng, 1200)
-                .unwrap();
+            PrivateKey::generate(Context::default(), &mut rng, 1200).unwrap();
         assert_eq!(key.bits(), 1200);
         assert_eq!(key.modulus_len(), 150);
         let mut out = [0u8; 150];
@@ -1405,7 +1404,7 @@ mod tests {
         let [p, q, dp, dq, qinv] = &mut parts;
         key.crt_bytes(p, q, dp, dq, qinv).unwrap();
         let again = PrivateKey::try_new_crt(
-            crate::Context::default(),
+            Context::default(),
             &nb,
             &e,
             &d,
@@ -1534,11 +1533,9 @@ mod tests {
     #[test]
     fn formats_round_trip() {
         let mut rng =
-            crate::random::CtrDrbg::from_system(crate::Context::default())
-                .unwrap();
+            crate::random::CtrDrbg::from_system(Context::default()).unwrap();
         let key =
-            PrivateKey::generate(crate::Context::default(), &mut rng, 1024)
-                .unwrap();
+            PrivateKey::generate(Context::default(), &mut rng, 1024).unwrap();
         let sealed = key
             .public_key()
             .encrypt_oaep::<Sha256, _>(&mut rng, b"", b"session key")
@@ -1550,22 +1547,19 @@ mod tests {
 
         let n = key.der_bytes(&mut out).unwrap();
         let backs = [
-            PrivateKey::try_from_der(crate::Context::default(), &out[..n])
-                .unwrap(),
+            PrivateKey::try_from_der(Context::default(), &out[..n]).unwrap(),
             {
                 let n = key.pkcs1_bytes(&mut out).unwrap();
-                PrivateKey::try_from_pkcs1(crate::Context::default(), &out[..n])
+                PrivateKey::try_from_pkcs1(Context::default(), &out[..n])
                     .unwrap()
             },
             {
                 let n = key.pem_bytes(&mut out).unwrap();
-                PrivateKey::try_from_pem(crate::Context::default(), &out[..n])
-                    .unwrap()
+                PrivateKey::try_from_pem(Context::default(), &out[..n]).unwrap()
             },
             {
                 let n = key.pkcs1_pem_bytes(&mut out).unwrap();
-                PrivateKey::try_from_pem(crate::Context::default(), &out[..n])
-                    .unwrap()
+                PrivateKey::try_from_pem(Context::default(), &out[..n]).unwrap()
             },
         ];
         for back in &backs {
@@ -1581,22 +1575,19 @@ mod tests {
         let public = key.public_key();
         let n = public.der_bytes(&mut out).unwrap();
         let backs = [
-            PublicKey::try_from_der(crate::Context::default(), &out[..n])
-                .unwrap(),
+            PublicKey::try_from_der(Context::default(), &out[..n]).unwrap(),
             {
                 let n = public.pkcs1_bytes(&mut out).unwrap();
-                PublicKey::try_from_pkcs1(crate::Context::default(), &out[..n])
+                PublicKey::try_from_pkcs1(Context::default(), &out[..n])
                     .unwrap()
             },
             {
                 let n = public.pem_bytes(&mut out).unwrap();
-                PublicKey::try_from_pem(crate::Context::default(), &out[..n])
-                    .unwrap()
+                PublicKey::try_from_pem(Context::default(), &out[..n]).unwrap()
             },
             {
                 let n = public.pkcs1_pem_bytes(&mut out).unwrap();
-                PublicKey::try_from_pem(crate::Context::default(), &out[..n])
-                    .unwrap()
+                PublicKey::try_from_pem(Context::default(), &out[..n]).unwrap()
             },
         ];
         for back in &backs {
@@ -1616,11 +1607,9 @@ mod tests {
     #[test]
     fn pss_keys_and_plain_keys_are_refused() {
         let mut rng =
-            crate::random::CtrDrbg::from_system(crate::Context::default())
-                .unwrap();
+            crate::random::CtrDrbg::from_system(Context::default()).unwrap();
         let key =
-            PrivateKey::generate(crate::Context::default(), &mut rng, 1024)
-                .unwrap();
+            PrivateKey::generate(Context::default(), &mut rng, 1024).unwrap();
         let mut out = [0u8; 8 * 128];
         let n = key.der_bytes(&mut out).unwrap();
         let oid_end = out[..n]
@@ -1630,8 +1619,7 @@ mod tests {
             + 8;
         out[oid_end] = 0x0a;
         assert_eq!(
-            PrivateKey::try_from_der(crate::Context::default(), &out[..n])
-                .err(),
+            PrivateKey::try_from_der(Context::default(), &out[..n]).err(),
             Some(Error::WrongAlgorithm)
         );
         let n = key.public_key().der_bytes(&mut out).unwrap();
@@ -1642,7 +1630,7 @@ mod tests {
             + 8;
         out[oid_end] = 0x0a;
         assert_eq!(
-            PublicKey::try_from_der(crate::Context::default(), &out[..n]).err(),
+            PublicKey::try_from_der(Context::default(), &out[..n]).err(),
             Some(Error::WrongAlgorithm)
         );
 
@@ -1671,8 +1659,7 @@ mod tests {
             &mut storage,
         )
         .unwrap();
-        let key =
-            PrivateKeyRef::new(crate::Context::default(), &storage).unwrap();
+        let key = PrivateKeyRef::new(Context::default(), &storage).unwrap();
         let got = key
             .public_key()
             .oaep_encode::<Sha256>(&seed, b"", b"hello", &mut scratch)

@@ -31,9 +31,9 @@
 //! the form to store.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::random::CtrDrbg;
 //! use scytale::sig::ml_dsa::ml_dsa_65::{PrivateKey, PublicKey};
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -1462,13 +1462,11 @@ mod tests {
         macro_rules! check {
             ($module:ident) => {{
                 use $module::*;
-                let mut rng = crate::random::CtrDrbg::from_system(
-                    crate::Context::default(),
-                )
-                .unwrap();
-                let key =
-                    PrivateKey::generate(crate::Context::default(), &mut rng)
+                let mut rng =
+                    crate::random::CtrDrbg::from_system(Context::default())
                         .unwrap();
+                let key =
+                    PrivateKey::generate(Context::default(), &mut rng).unwrap();
                 let public = key.public_key();
                 let sig = key.sign(&mut rng, b"ctx", b"message").unwrap();
                 public.verify(b"ctx", b"message", &sig).unwrap();
@@ -1489,15 +1487,13 @@ mod tests {
                 );
 
                 let again = PrivateKey::from_seed(
-                    crate::Context::default(),
+                    Context::default(),
                     &key.seed_bytes().unwrap(),
                 );
                 assert_eq!(again.key_bytes(), key.key_bytes());
-                let expanded = PrivateKey::try_new(
-                    crate::Context::default(),
-                    &key.key_bytes(),
-                )
-                .unwrap();
+                let expanded =
+                    PrivateKey::try_new(Context::default(), &key.key_bytes())
+                        .unwrap();
                 assert_eq!(expanded.public_key().bytes(), public.bytes());
                 assert_eq!(
                     expanded.sign_deterministic(b"", b"m").unwrap(),
@@ -1506,59 +1502,47 @@ mod tests {
                 let mut broken = key.key_bytes();
                 broken[64] ^= 1;
                 assert_eq!(
-                    PrivateKey::try_new(crate::Context::default(), &broken)
-                        .err(),
+                    PrivateKey::try_new(Context::default(), &broken).err(),
                     Some(Error::InvalidPrivateKey)
                 );
                 broken = key.key_bytes();
                 broken[KEY_SIZE - 1] ^= 1;
                 assert_eq!(
-                    PrivateKey::try_new(crate::Context::default(), &broken)
-                        .err(),
+                    PrivateKey::try_new(Context::default(), &broken).err(),
                     Some(Error::InvalidPrivateKey)
                 );
 
                 let mut out = [0u8; 8192];
                 let n = key.der_bytes(&mut out).unwrap();
-                let back = PrivateKey::try_from_der(
-                    crate::Context::default(),
-                    &out[..n],
-                )
-                .unwrap();
+                let back =
+                    PrivateKey::try_from_der(Context::default(), &out[..n])
+                        .unwrap();
                 assert_eq!(back.seed_bytes(), key.seed_bytes());
                 let n = expanded.der_bytes(&mut out).unwrap();
                 assert_eq!(n, DER_SIZE);
-                let back = PrivateKey::try_from_der(
-                    crate::Context::default(),
-                    &out[..n],
-                )
-                .unwrap();
+                let back =
+                    PrivateKey::try_from_der(Context::default(), &out[..n])
+                        .unwrap();
                 assert_eq!(back.key_bytes(), key.key_bytes());
                 let n = key.pem_bytes(&mut out).unwrap();
                 assert!(n < PEM_SIZE);
-                let back = PrivateKey::try_from_pem(
-                    crate::Context::default(),
-                    &out[..n],
-                )
-                .unwrap();
+                let back =
+                    PrivateKey::try_from_pem(Context::default(), &out[..n])
+                        .unwrap();
                 assert_eq!(back.key_bytes(), key.key_bytes());
                 let n = expanded.pem_bytes(&mut out).unwrap();
                 assert_eq!(n, PEM_SIZE);
                 let n = public.der_bytes(&mut out).unwrap();
                 assert_eq!(n, PUBLIC_KEY_DER_SIZE);
-                let back = PublicKey::try_from_der(
-                    crate::Context::default(),
-                    &out[..n],
-                )
-                .unwrap();
+                let back =
+                    PublicKey::try_from_der(Context::default(), &out[..n])
+                        .unwrap();
                 assert_eq!(back.bytes(), public.bytes());
                 let n = public.pem_bytes(&mut out).unwrap();
                 assert_eq!(n, PUBLIC_KEY_PEM_SIZE);
-                let back = PublicKey::try_from_pem(
-                    crate::Context::default(),
-                    &out[..n],
-                )
-                .unwrap();
+                let back =
+                    PublicKey::try_from_pem(Context::default(), &out[..n])
+                        .unwrap();
                 assert_eq!(back.bytes(), public.bytes());
             }};
         }
@@ -1569,27 +1553,19 @@ mod tests {
 
     #[test]
     fn sets_do_not_mix() {
-        let key = ml_dsa_44::PrivateKey::from_seed(
-            crate::Context::default(),
-            &[1u8; 32],
-        );
+        let key =
+            ml_dsa_44::PrivateKey::from_seed(Context::default(), &[1u8; 32]);
         let mut out = [0u8; 8192];
         let n = key.der_bytes(&mut out).unwrap();
         assert_eq!(
-            ml_dsa_65::PrivateKey::try_from_der(
-                crate::Context::default(),
-                &out[..n]
-            )
-            .err(),
+            ml_dsa_65::PrivateKey::try_from_der(Context::default(), &out[..n])
+                .err(),
             Some(Error::WrongAlgorithm)
         );
         let n = key.public_key().der_bytes(&mut out).unwrap();
         assert_eq!(
-            ml_dsa_65::PublicKey::try_from_der(
-                crate::Context::default(),
-                &out[..n]
-            )
-            .err(),
+            ml_dsa_65::PublicKey::try_from_der(Context::default(), &out[..n])
+                .err(),
             Some(Error::WrongAlgorithm)
         );
     }
@@ -1718,17 +1694,17 @@ mod tests {
         4e+J0lwnLxGpUJXFh9cTcyKE3p29PHIXsGieIdjrD/aWaA==\n\
         -----END PRIVATE KEY-----\n";
         let seed = ml_dsa_44::PrivateKey::try_from_pem(
-            crate::Context::default(),
+            Context::default(),
             RFC9881_SEED,
         )
         .unwrap();
         let expanded = ml_dsa_44::PrivateKey::try_from_pem(
-            crate::Context::default(),
+            Context::default(),
             RFC9881_EXPANDED,
         )
         .unwrap();
         let both = ml_dsa_44::PrivateKey::try_from_pem(
-            crate::Context::default(),
+            Context::default(),
             RFC9881_BOTH,
         )
         .unwrap();
@@ -1753,11 +1729,8 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            ml_dsa_44::PrivateKey::try_from_der(
-                crate::Context::default(),
-                &out[..n]
-            )
-            .err(),
+            ml_dsa_44::PrivateKey::try_from_der(Context::default(), &out[..n])
+                .err(),
             Some(Error::InvalidEncoding)
         );
     }

@@ -16,7 +16,7 @@
 //! simply taken.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{
     Error, flag, hex, hex_value, opt_hex, opt_int, text, unknown_test_type,
 };
@@ -112,7 +112,7 @@ fn array<const N: usize>(bytes: &[u8]) -> [u8; N] {
 pub fn answer(
     doc: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     let mode = text(doc, "mode")?;
     answer_groups(doc, |group| {
@@ -124,10 +124,10 @@ pub fn answer(
             }
         };
         match (mode, text(group, "testType")?) {
-            ("keyGen", "AFT") => key_gen(curve, group, rng, builder),
-            ("keyVer", "AFT") => key_ver(curve, group, builder),
-            ("sigGen", "AFT" | "BFT") => sig_gen(curve, group, rng, builder),
-            ("sigVer", "AFT") => sig_ver(curve, group, builder),
+            ("keyGen", "AFT") => key_gen(curve, group, rng, profile),
+            ("keyVer", "AFT") => key_ver(curve, group, profile),
+            ("sigGen", "AFT" | "BFT") => sig_gen(curve, group, rng, profile),
+            ("sigVer", "AFT") => sig_ver(curve, group, profile),
             _ => Err(unknown_test_type(group)),
         }
     })
@@ -164,20 +164,20 @@ fn context(t: &Value) -> Result<Vec<u8>, Error> {
 }
 
 /// Every EdDSA function of the crate hashes as it runs, a key's
-/// public half included, so each case runs under `builder`, as each
+/// public half included, so each takes the profile's context, as each
 /// of the functions below does.
 fn key_gen(
     curve: &Curve,
     group: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Option<Value>, Error> {
     answer_tests(group, |t| {
-        let (d, q) = builder.try_build(|ctx| {
+        let (d, q) = {
             let d = secret(curve, t, rng)?;
-            let q = (curve.public_key)(ctx, &d);
+            let q = (curve.public_key)(profile.ctx(), &d);
             Ok::<_, Error>((d, q))
-        })?;
+        }?;
         Ok(json!({ "d": hex_value(&d), "q": hex_value(&q) }))
     })
 }
@@ -192,7 +192,7 @@ fn key_gen(
 fn key_ver(
     curve: &Curve,
     group: &Value,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Option<Value>, Error> {
     answer_tests(group, |t| {
         let q = hex(t, "q")?;
@@ -200,9 +200,7 @@ fn key_ver(
         // A key of another length is not a key at all.
         let passed = q.len() == curve.key
             && !matches!(
-                builder.build(|ctx| (curve.verify)(
-                    ctx, &q, false, b"", b"", &dummy
-                )),
+                (curve.verify)(profile.ctx(), &q, false, b"", b"", &dummy),
                 Err(scytale::Error::InvalidPublicKey)
             );
         Ok(json!({ "testPassed": passed }))
@@ -213,24 +211,32 @@ fn sig_gen(
     curve: &Curve,
     group: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Option<Value>, Error> {
     let prehash = flag(group, "preHash")?;
-    let (d, q) = builder.try_build(|ctx| {
+    let (d, q) = {
         let d = secret(curve, group, rng)?;
-        let q = (curve.public_key)(ctx, &d);
+        let q = (curve.public_key)(profile.ctx(), &d);
         Ok::<_, Error>((d, q))
-    })?;
+    }?;
     let answered = answer_tests(group, |t| {
         let message = hex(t, "message")?;
         let context = context(t)?;
-        let signature = builder.try_build(|ctx| {
-            let signature = (curve.sign)(ctx, &d, prehash, &context, &message)?;
+        let signature = {
+            let signature =
+                (curve.sign)(profile.ctx(), &d, prehash, &context, &message)?;
             // A signature this crate cannot itself verify is a fault
             // worth stopping on before the server sees it.
-            (curve.verify)(ctx, &q, prehash, &context, &message, &signature)?;
+            (curve.verify)(
+                profile.ctx(),
+                &q,
+                prehash,
+                &context,
+                &message,
+                &signature,
+            )?;
             Ok::<_, Error>(signature)
-        })?;
+        }?;
         Ok(json!({ "signature": hex_value(&signature) }))
     })?;
     let Some(mut answered) = answered else {
@@ -245,7 +251,7 @@ fn sig_gen(
 fn sig_ver(
     curve: &Curve,
     group: &Value,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Option<Value>, Error> {
     let prehash = flag(group, "preHash")?;
     answer_tests(group, |t| {
@@ -253,12 +259,18 @@ fn sig_ver(
         let context = context(t)?;
         let (q, signature) = (hex(t, "q")?, hex(t, "signature")?);
         // A key or signature of another length cannot verify.
-        let passed = q.len() == curve.key
-            && signature.len() == curve.signature
-            && builder.build(|ctx| {
-                (curve.verify)(ctx, &q, prehash, &context, &message, &signature)
-                    .is_ok()
-            });
+        let passed =
+            q.len() == curve.key && signature.len() == curve.signature && {
+                (curve.verify)(
+                    profile.ctx(),
+                    &q,
+                    prehash,
+                    &context,
+                    &message,
+                    &signature,
+                )
+                .is_ok()
+            };
         Ok(json!({ "testPassed": passed }))
     })
 }
@@ -287,8 +299,8 @@ mod tests {
             );
             let answered = answer(
                 &key_gen,
-                &mut fixed_rng(&Builder::default()).unwrap(),
-                &Builder::default(),
+                &mut fixed_rng(&Profile::default()).unwrap(),
+                &Profile::default(),
             )
             .unwrap();
             let t = &answered["testGroups"][0]["tests"][0];
@@ -305,8 +317,8 @@ mod tests {
                 );
                 let answered = answer(
                     &sig_gen,
-                    &mut fixed_rng(&Builder::default()).unwrap(),
-                    &Builder::default(),
+                    &mut fixed_rng(&Profile::default()).unwrap(),
+                    &Profile::default(),
                 )
                 .unwrap();
                 let g = &answered["testGroups"][0];

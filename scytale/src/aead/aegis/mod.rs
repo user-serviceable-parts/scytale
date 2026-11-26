@@ -37,9 +37,9 @@
 //! lanes.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Key;
 //! use scytale::aead::{Aead, Aegis128L};
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();

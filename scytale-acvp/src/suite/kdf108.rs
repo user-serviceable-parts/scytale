@@ -16,7 +16,7 @@
 //! bytes is the bytes it needs with the bits past its end cleared.
 
 use super::{answer_groups, answer_tests, skip};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{
     Error, hex, hex_value, int, key_of, opt_hex, opt_int, text,
     unknown_test_type,
@@ -42,11 +42,11 @@ const FIXED_DATA_LEN: usize = 32;
 pub fn answer(
     doc: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     match doc.get("mode").and_then(Value::as_str) {
-        None => answer_kdf(doc, rng, builder),
-        Some("KMAC") => answer_kmac(doc, builder),
+        None => answer_kdf(doc, rng, profile),
+        Some("KMAC") => answer_kmac(doc, profile),
         Some(other) => Err(Error::new(format!("mode {other}"))),
     }
 }
@@ -54,7 +54,7 @@ pub fn answer(
 fn answer_kdf(
     doc: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         if text(group, "testType")? != "AFT" {
@@ -67,31 +67,31 @@ fn answer_kdf(
         answer_tests(group, |t| {
             let key = hex(t, "keyIn")?;
             match mac {
-                "CMAC-AES128" => cmac::<Aes128>(&key, group, t, rng, builder),
-                "CMAC-AES192" => cmac::<Aes192>(&key, group, t, rng, builder),
-                "CMAC-AES256" => cmac::<Aes256>(&key, group, t, rng, builder),
-                "HMAC-SHA-1" => hmac::<Sha1>(&key, group, t, rng, builder),
-                "HMAC-SHA2-224" => hmac::<Sha224>(&key, group, t, rng, builder),
-                "HMAC-SHA2-256" => hmac::<Sha256>(&key, group, t, rng, builder),
-                "HMAC-SHA2-384" => hmac::<Sha384>(&key, group, t, rng, builder),
-                "HMAC-SHA2-512" => hmac::<Sha512>(&key, group, t, rng, builder),
+                "CMAC-AES128" => cmac::<Aes128>(&key, group, t, rng, profile),
+                "CMAC-AES192" => cmac::<Aes192>(&key, group, t, rng, profile),
+                "CMAC-AES256" => cmac::<Aes256>(&key, group, t, rng, profile),
+                "HMAC-SHA-1" => hmac::<Sha1>(&key, group, t, rng, profile),
+                "HMAC-SHA2-224" => hmac::<Sha224>(&key, group, t, rng, profile),
+                "HMAC-SHA2-256" => hmac::<Sha256>(&key, group, t, rng, profile),
+                "HMAC-SHA2-384" => hmac::<Sha384>(&key, group, t, rng, profile),
+                "HMAC-SHA2-512" => hmac::<Sha512>(&key, group, t, rng, profile),
                 "HMAC-SHA2-512/224" => {
-                    hmac::<Sha512_224>(&key, group, t, rng, builder)
+                    hmac::<Sha512_224>(&key, group, t, rng, profile)
                 }
                 "HMAC-SHA2-512/256" => {
-                    hmac::<Sha512_256>(&key, group, t, rng, builder)
+                    hmac::<Sha512_256>(&key, group, t, rng, profile)
                 }
                 "HMAC-SHA3-224" => {
-                    hmac::<Sha3_224>(&key, group, t, rng, builder)
+                    hmac::<Sha3_224>(&key, group, t, rng, profile)
                 }
                 "HMAC-SHA3-256" => {
-                    hmac::<Sha3_256>(&key, group, t, rng, builder)
+                    hmac::<Sha3_256>(&key, group, t, rng, profile)
                 }
                 "HMAC-SHA3-384" => {
-                    hmac::<Sha3_384>(&key, group, t, rng, builder)
+                    hmac::<Sha3_384>(&key, group, t, rng, profile)
                 }
                 "HMAC-SHA3-512" => {
-                    hmac::<Sha3_512>(&key, group, t, rng, builder)
+                    hmac::<Sha3_512>(&key, group, t, rng, profile)
                 }
                 other => Err(Error::new(format!("macMode {other}"))),
             }
@@ -104,12 +104,12 @@ fn hmac<H>(
     group: &Value,
     t: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error>
 where
     H: Hash + Clone + BlockType,
 {
-    let mut prf = builder.build(|ctx| Hmac::<H>::new(ctx, key));
+    let mut prf = Hmac::<H>::new(profile.ctx(), key);
     case(&mut prf, group, t, rng)
 }
 
@@ -118,19 +118,19 @@ fn cmac<C>(
     group: &Value,
     t: &Value,
     rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error>
 where
     C: BlockCipher<Block = [u8; 16]>,
 {
     let key = key_of::<Cmac<C>>(key)?;
-    let mut prf = builder.build(|ctx| Cmac::<C>::new(ctx, &key));
+    let mut prf = Cmac::<C>::new(profile.ctx(), &key);
     case(&mut prf, group, t, rng)
 }
 
 /// One derivation: the output, the fixed data, and for a counter in
 /// the middle of the fixed data, where it went. The derivation only
-/// runs `prf`, built already, so it runs outside `builder`.
+/// runs `prf`, built already, so it runs outside `profile`.
 fn case<M: Mac>(
     prf: &mut M,
     group: &Value,
@@ -208,7 +208,7 @@ fn case<M: Mac>(
     Ok(answer)
 }
 
-fn answer_kmac(doc: &Value, builder: &Builder) -> Result<Value, Error> {
+fn answer_kmac(doc: &Value, profile: &Profile) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         if text(group, "testType")? != "AFT" {
             return Err(unknown_test_type(group));
@@ -227,7 +227,7 @@ fn answer_kmac(doc: &Value, builder: &Builder) -> Result<Value, Error> {
             let (key, label) = (hex(t, "keyDerivationKey")?, hex(t, "label")?);
             let context = hex(t, "context")?;
             // The derivation starts its own KMAC.
-            builder.build(|ctx| kdf(ctx, &key, &label, &context, &mut out));
+            kdf(profile.ctx(), &key, &label, &context, &mut out);
             Ok(json!({ "derivedKey": hex_value(&out) }))
         })
     })
@@ -235,7 +235,7 @@ fn answer_kmac(doc: &Value, builder: &Builder) -> Result<Value, Error> {
 
 #[cfg(test)]
 mod tests {
-    use crate::profile::Builder;
+    use crate::profile::Profile;
     use serde_json::json;
 
     /// A live prompt gives only the key: the made-up fixed data and
@@ -251,8 +251,8 @@ mod tests {
                 "tests": [{"tcId": 1, "keyIn": "000102030405060708090A0B"}]
             }]
         });
-        let mut rng = super::super::fixed_rng(&Builder::default()).unwrap();
-        let live = super::answer(&doc, &mut rng, &Builder::default()).unwrap();
+        let mut rng = super::super::fixed_rng(&Profile::default()).unwrap();
+        let live = super::answer(&doc, &mut rng, &Profile::default()).unwrap();
         let answered = &live["testGroups"][0]["tests"][0];
         assert_eq!(answered["fixedData"].as_str().unwrap().len(), 64);
         assert_eq!(answered["breakLocation"], 128);
@@ -260,8 +260,8 @@ mod tests {
         let test = &mut doc["testGroups"][0]["tests"][0];
         test["fixedData"] = answered["fixedData"].clone();
         test["breakLocation"] = json!(128);
-        let mut rng = super::super::fixed_rng(&Builder::default()).unwrap();
-        let again = super::answer(&doc, &mut rng, &Builder::default()).unwrap();
+        let mut rng = super::super::fixed_rng(&Profile::default()).unwrap();
+        let again = super::answer(&doc, &mut rng, &Profile::default()).unwrap();
         assert_eq!(again["testGroups"][0]["tests"][0], *answered);
     }
 
@@ -281,9 +281,9 @@ mod tests {
                 }]
             }]
         });
-        let mut rng = super::super::fixed_rng(&Builder::default()).unwrap();
+        let mut rng = super::super::fixed_rng(&Profile::default()).unwrap();
         let answered =
-            super::answer(&doc, &mut rng, &Builder::default()).unwrap();
+            super::answer(&doc, &mut rng, &Profile::default()).unwrap();
         let key = &answered["testGroups"][0]["tests"][0]["keyOut"];
         assert_eq!(key.as_str().unwrap().len(), 2);
     }

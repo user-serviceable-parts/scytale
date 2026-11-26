@@ -10,9 +10,9 @@
 //! caller's own label.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::hash::sha3::CShake128;
 //! use scytale::hash::{Xof, XofReader};
-//! use scytale::Context;
 //! let ctx = Context::default();
 //!
 //! let mut xof = CShake128::new(ctx, b"", b"Email Signature");
@@ -368,7 +368,7 @@ mod tests {
         let s = b"Email Signature";
         assert_eq!(
             squeeze(
-                &mut CShake128::new(crate::Context::default(), b"", s),
+                &mut CShake128::new(Context::default(), b"", s),
                 &short,
                 32
             ),
@@ -378,11 +378,7 @@ mod tests {
             )
         );
         assert_eq!(
-            squeeze(
-                &mut CShake128::new(crate::Context::default(), b"", s),
-                &long,
-                32
-            ),
+            squeeze(&mut CShake128::new(Context::default(), b"", s), &long, 32),
             unhex(
                 "C5221D50E4F822D96A2E8881A961420F
                  294B7B24FE3D2094BAED2C6524CC166B"
@@ -390,7 +386,7 @@ mod tests {
         );
         assert_eq!(
             squeeze(
-                &mut CShake256::new(crate::Context::default(), b"", s),
+                &mut CShake256::new(Context::default(), b"", s),
                 &short,
                 64
             ),
@@ -402,11 +398,7 @@ mod tests {
             )
         );
         assert_eq!(
-            squeeze(
-                &mut CShake256::new(crate::Context::default(), b"", s),
-                &long,
-                64
-            ),
+            squeeze(&mut CShake256::new(Context::default(), b"", s), &long, 64),
             unhex(
                 "07DC27B11E51FBAC75BC7B3C1D983E8B
                  4B85FB1DEFAF218912AC864302730917
@@ -422,28 +414,28 @@ mod tests {
         let message = b"abc";
         assert_eq!(
             squeeze(
-                &mut CShake128::new(crate::Context::default(), b"", b""),
+                &mut CShake128::new(Context::default(), b"", b""),
                 message,
                 40
             ),
-            squeeze(&mut Shake128::new(crate::Context::default()), message, 40)
+            squeeze(&mut Shake128::new(Context::default()), message, 40)
         );
         assert_eq!(
             squeeze(
-                &mut CShake256::new(crate::Context::default(), b"", b""),
+                &mut CShake256::new(Context::default(), b"", b""),
                 message,
                 40
             ),
-            squeeze(&mut Shake256::new(crate::Context::default()), message, 40)
+            squeeze(&mut Shake256::new(Context::default()), message, 40)
         );
         // A name alone is customization enough.
         assert_ne!(
             squeeze(
-                &mut CShake128::new(crate::Context::default(), b"N", b""),
+                &mut CShake128::new(Context::default(), b"N", b""),
                 message,
                 40
             ),
-            squeeze(&mut Shake128::new(crate::Context::default()), message, 40)
+            squeeze(&mut Shake128::new(Context::default()), message, 40)
         );
     }
 
@@ -452,12 +444,10 @@ mod tests {
     #[test]
     fn pieces_reset_and_clone() {
         let data: Vec<u8> = (0..500u32).map(|i| (i * 7) as u8).collect();
-        let mut whole =
-            CShake128::new(crate::Context::default(), b"fn", b"label");
+        let mut whole = CShake128::new(Context::default(), b"fn", b"label");
         let expected = squeeze(&mut whole, &data, 64);
         for split in [0, 1, 167, 168, 169, 336, 499] {
-            let mut xof =
-                CShake128::new(crate::Context::default(), b"fn", b"label");
+            let mut xof = CShake128::new(Context::default(), b"fn", b"label");
             xof.update(b"garbage");
             xof.reset();
             xof.update(&data[..split]);
@@ -483,10 +473,9 @@ mod tests {
         let custom = [0x62u8; 200];
         for len in [0usize, 1, 135, 136, 137, 400] {
             let message: Vec<u8> = (0..len).map(|i| i as u8).collect();
-            let mut auto =
-                CShake256::new(crate::Context::default(), &name, &custom);
+            let mut auto = CShake256::new(Context::default(), &name, &custom);
             let mut portable =
-                CShake256::new(crate::Context::portable(), &name, &custom);
+                CShake256::new(Context::portable(), &name, &custom);
             portable.update(&message);
             let mut want = [0u8; 50];
             portable.finalize_xof().squeeze(&mut want);
@@ -498,7 +487,7 @@ mod tests {
     /// refused call leaves the message as it was.
     #[test]
     fn bit_counts() {
-        let mut xof = CShake128::new(crate::Context::default(), b"", b"S");
+        let mut xof = CShake128::new(Context::default(), b"", b"S");
         xof.update(b"ab");
         assert_eq!(
             xof.finalize_bits_xof(0, 0).err(),
@@ -513,7 +502,7 @@ mod tests {
             .expect("bits")
             .squeeze(&mut out);
 
-        let mut fresh = CShake128::new(crate::Context::default(), b"", b"S");
+        let mut fresh = CShake128::new(Context::default(), b"", b"S");
         fresh.update(b"ab");
         let mut again = [0u8; 16];
         fresh

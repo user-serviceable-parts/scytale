@@ -19,10 +19,10 @@
 //! vectors exercise directly.
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::random::CtrDrbg;
 //! use scytale::sig::lms::hss::PrivateKey;
 //! use scytale::sig::lms::{Lmots, Lms};
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();

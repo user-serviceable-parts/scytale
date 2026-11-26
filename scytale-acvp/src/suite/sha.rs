@@ -4,7 +4,7 @@
 //! bit-string message sit in their byte and the Monte Carlo chaining.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{
     Error, hex, hex_value, int, opt_text, text, unknown_test_type,
 };
@@ -26,30 +26,29 @@ pub enum Family {
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     match text(doc, "algorithm")? {
-        "SHA2-224" => answer_as::<Sha224>(doc, Family::Sha2, builder),
-        "SHA2-256" => answer_as::<Sha256>(doc, Family::Sha2, builder),
-        "SHA2-384" => answer_as::<Sha384>(doc, Family::Sha2, builder),
-        "SHA2-512" => answer_as::<Sha512>(doc, Family::Sha2, builder),
-        "SHA2-512/224" => answer_as::<Sha512_224>(doc, Family::Sha2, builder),
-        "SHA2-512/256" => answer_as::<Sha512_256>(doc, Family::Sha2, builder),
-        "SHA3-224" => answer_as::<Sha3_224>(doc, Family::Sha3, builder),
-        "SHA3-256" => answer_as::<Sha3_256>(doc, Family::Sha3, builder),
-        "SHA3-384" => answer_as::<Sha3_384>(doc, Family::Sha3, builder),
-        "SHA3-512" => answer_as::<Sha3_512>(doc, Family::Sha3, builder),
+        "SHA2-224" => answer_as::<Sha224>(doc, Family::Sha2, profile),
+        "SHA2-256" => answer_as::<Sha256>(doc, Family::Sha2, profile),
+        "SHA2-384" => answer_as::<Sha384>(doc, Family::Sha2, profile),
+        "SHA2-512" => answer_as::<Sha512>(doc, Family::Sha2, profile),
+        "SHA2-512/224" => answer_as::<Sha512_224>(doc, Family::Sha2, profile),
+        "SHA2-512/256" => answer_as::<Sha512_256>(doc, Family::Sha2, profile),
+        "SHA3-224" => answer_as::<Sha3_224>(doc, Family::Sha3, profile),
+        "SHA3-256" => answer_as::<Sha3_256>(doc, Family::Sha3, profile),
+        "SHA3-384" => answer_as::<Sha3_384>(doc, Family::Sha3, profile),
+        "SHA3-512" => answer_as::<Sha3_512>(doc, Family::Sha3, profile),
         other => Err(Error::new(format!("algorithm {other}"))),
     }
 }
 
-/// Every case only builds its hash under `builder` and feeds it
-/// outside, where another kernel's builds need not wait for it: a
-/// hash keeps the kernel it was built with.
+/// Every case builds its hash with the profile's context and feeds
+/// it: a hash keeps the kernel it was built with.
 fn answer_as<H: BitHash>(
     doc: &Value,
     family: Family,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error>
 where
     H::Output: AsRef<[u8]>,
@@ -57,7 +56,7 @@ where
     answer_groups(doc, |group| match text(group, "testType")? {
         "AFT" => answer_tests(group, |t| {
             let message = Message::of(t)?;
-            let digest = message.digest(builder.build(H::new), family);
+            let digest = message.digest(H::new(profile.ctx()), family);
             Ok(json!({ "md": hex_value(digest.as_ref()) }))
         }),
         "MCT" => {
@@ -68,9 +67,9 @@ where
                     return Err(Error::new(format!("mctVersion {other}")));
                 }
             };
-            answer_tests(group, |t| mct::<H>(t, family, alternate, builder))
+            answer_tests(group, |t| mct::<H>(t, family, alternate, profile))
         }
-        "LDT" => answer_tests(group, |t| ldt::<H>(t, builder)),
+        "LDT" => answer_tests(group, |t| ldt::<H>(t, profile)),
         _ => Err(unknown_test_type(group)),
     })
 }
@@ -135,7 +134,7 @@ fn mct<H: BitHash>(
     t: &Value,
     family: Family,
     alternate: bool,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error>
 where
     H::Output: AsRef<[u8]>,
@@ -145,7 +144,7 @@ where
         return Err(Error::new("bit-length seed"));
     }
     let seed = seed.bytes;
-    let mut hash = builder.build(H::new);
+    let mut hash = H::new(profile.ctx());
     let mut md: Vec<u8> = seed.clone();
     let mut steps = Vec::with_capacity(100);
     for _ in 0..100 {
@@ -204,7 +203,7 @@ where
 
 /// Large Data Test: a short piece repeated to gigabytes, hashed as
 /// it is generated.
-fn ldt<H: Hash>(t: &Value, builder: &Builder) -> Result<Value, Error>
+fn ldt<H: Hash>(t: &Value, profile: &Profile) -> Result<Value, Error>
 where
     H::Output: AsRef<[u8]>,
 {
@@ -222,7 +221,7 @@ where
     // Feed in chunks of many pieces to keep the call count sane.
     let per_chunk = (1 << 20) / piece.len().max(1);
     let chunk: Vec<u8> = piece.repeat(per_chunk);
-    let mut hash = builder.build(H::new);
+    let mut hash = H::new(profile.ctx());
     let mut left = repeats;
     while left > 0 {
         let n = left.min(per_chunk as u64) as usize;

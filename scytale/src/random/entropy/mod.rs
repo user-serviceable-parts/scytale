@@ -30,9 +30,9 @@
 //! # Example
 //!
 //! ```
-//! use scytale::{Error, Random};
-//! use scytale::random::{CtrDrbg, Entropy, entropy};
 //! use scytale::Context;
+//! use scytale::random::{CtrDrbg, Entropy, entropy};
+//! use scytale::{Error, Random};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();

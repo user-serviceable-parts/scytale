@@ -7,7 +7,7 @@
 //! `testPassed` false.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{Error, hex, hex_value, key_of, text, unknown_test_type};
 use scytale::Random;
 use scytale::cipher::mode::Kw;
@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         let encrypt = match text(group, "direction")? {
@@ -32,7 +32,7 @@ pub fn answer(
             other => return Err(Error::new(format!("kwCipher {other}"))),
         };
         match text(group, "testType")? {
-            "AFT" => answer_tests(group, |t| aft(t, encrypt, forward, builder)),
+            "AFT" => answer_tests(group, |t| aft(t, encrypt, forward, profile)),
             _ => Err(unknown_test_type(group)),
         }
     })
@@ -42,18 +42,18 @@ fn aft(
     t: &Value,
     encrypt: bool,
     forward: bool,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     let key = hex(t, "key")?;
     aes_width!(key, C => {
         let key = key_of::<C>(&key)?;
-        let kw = builder.build(|ctx| {
+        let kw = {
             if forward {
-                Kw::<C>::new(ctx, &key)
+                Kw::<C>::new(profile.ctx(), &key)
             } else {
-                Kw::<C>::new_inverse(ctx, &key)
+                Kw::<C>::new_inverse(profile.ctx(), &key)
             }
-        });
+        };
         if encrypt {
             let plain = hex(t, "pt")?;
             let mut out = vec![0u8; plain.len() + 8];

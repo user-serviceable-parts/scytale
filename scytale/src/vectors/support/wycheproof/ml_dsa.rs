@@ -85,11 +85,8 @@ macro_rules! set {
                 message: &[u8],
             ) -> Option<Vec<u8>> {
                 let sk: [u8; $module::KEY_SIZE] = sk.try_into().ok()?;
-                let key = $module::PrivateKey::try_new(
-                    crate::Context::default(),
-                    &sk,
-                )
-                .ok()?;
+                let key = $module::PrivateKey::try_new(Context::default(), &sk)
+                    .ok()?;
                 sign_with(&key, rnd, context, message)
             }
             fn sign_seed(
@@ -100,15 +97,13 @@ macro_rules! set {
                 message: &[u8],
             ) -> Option<Vec<u8>> {
                 let seed: [u8; 32] = seed.try_into().ok()?;
-                let key = $module::PrivateKey::from_seed(
-                    crate::Context::default(),
-                    &seed,
-                );
+                let key =
+                    $module::PrivateKey::from_seed(Context::default(), &seed);
                 // The PKCS#8, where the group has one, names the same
                 // key, and the key writes it back byte for byte.
                 if let Some(pkcs8) = pkcs8 {
                     let from_der = $module::PrivateKey::try_from_der(
-                        crate::Context::default(),
+                        Context::default(),
                         pkcs8,
                     )
                     .expect("privateKeyPkcs8");
@@ -130,13 +125,10 @@ macro_rules! set {
                 else {
                     return false;
                 };
-                let key =
-                    $module::PublicKey::new(crate::Context::default(), &pk);
-                let from_der = $module::PublicKey::try_from_der(
-                    crate::Context::default(),
-                    der,
-                )
-                .expect("publicKeyDer");
+                let key = $module::PublicKey::new(Context::default(), &pk);
+                let from_der =
+                    $module::PublicKey::try_from_der(Context::default(), der)
+                        .expect("publicKeyDer");
                 assert_eq!(from_der.bytes(), pk);
                 let mut out = [0u8; 8192];
                 let n = key.der_bytes(&mut out).expect("der");
@@ -168,14 +160,18 @@ macro_rules! set {
 
 mod s44 {
     use super::*;
+
+    use crate::Context;
     set!(Set44, ml_dsa_44);
 }
 mod s65 {
     use super::*;
+    use crate::Context;
     set!(Set65, ml_dsa_65);
 }
 mod s87 {
     use super::*;
+    use crate::Context;
     set!(Set87, ml_dsa_87);
 }
 use s44::Set44;

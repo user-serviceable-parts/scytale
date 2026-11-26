@@ -73,11 +73,11 @@
 //! # Example
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Key;
 //! use scytale::aead::{Aead, Gcm};
 //! use scytale::cipher::Nonces;
 //! use scytale::cipher::aes::Aes128;
-//! use scytale::Context;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let ctx = Context::default();
@@ -235,9 +235,9 @@ mod tests {
         }
 
         let key = Key::from([0x42u8; 16]);
-        let gcm = Gcm::<Aes128>::new(crate::Context::default(), &key);
-        let siv = GcmSiv::<Aes128>::new(crate::Context::default(), &key);
-        let ccm = Ccm::<Aes128>::new(crate::Context::default(), &key);
+        let gcm = Gcm::<Aes128>::new(Context::default(), &key);
+        let siv = GcmSiv::<Aes128>::new(Context::default(), &key);
+        let ccm = Ccm::<Aes128>::new(Context::default(), &key);
         let sealed = [round_trip(&gcm), round_trip(&siv), round_trip(&ccm)];
         assert_ne!(sealed[0], sealed[1]);
         assert_ne!(sealed[0], sealed[2]);
@@ -252,7 +252,7 @@ mod tests {
             key: &A::Key,
             nonce: &A::Nonce,
         ) -> [u8; 16] {
-            let aead = A::new(crate::Context::default(), key);
+            let aead = A::new(Context::default(), key);
             let mut tag = [0u8; 16];
             aead.encrypt(nonce, b"", &mut [], &mut tag)
                 .expect("encrypt");

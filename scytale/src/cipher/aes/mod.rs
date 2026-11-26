@@ -13,10 +13,10 @@
 //! The expanded key is wiped on drop.
 //!
 //! ```
-//! use scytale::Key;
-//! use scytale::cipher::aes::Aes128;
-//! use scytale::cipher::BlockCipher;
 //! use scytale::Context;
+//! use scytale::Key;
+//! use scytale::cipher::BlockCipher;
+//! use scytale::cipher::aes::Aes128;
 //! let ctx = Context::default();
 //!
 //! let aes = Aes128::new(ctx, &Key::from([0u8; 16]));
@@ -648,8 +648,7 @@ mod tests {
     #[test]
     fn picks_the_first_kernel_whose_needs_are_met() {
         let built = {
-            let built =
-                Aes::<16>::new(crate::Context::default(), &[0; 16]).kernel();
+            let built = Aes::<16>::new(Context::default(), &[0; 16]).kernel();
             features::dispatches(KERNELS, Aes128::profiles(), built);
             built
         };
@@ -743,7 +742,7 @@ mod tests {
         const MAX: usize = 41;
         let key = Key::from(core::array::from_fn(|i| (i * 37 + K) as u8));
         let aes = C::new(under.ctx(), &key);
-        let reference = { C::new(crate::Context::portable(), &key) };
+        let reference = { C::new(Context::portable(), &key) };
         let mut data = [[0u8; BLOCK_SIZE]; MAX];
         for (i, b) in data.as_flattened_mut().iter_mut().enumerate() {
             *b = (i * 13 + K) as u8;
@@ -771,7 +770,7 @@ mod tests {
         where
             W: BlockCipher<Block = [u8; BLOCK_SIZE], Key = Key<[u8; K]>>,
         {
-            let generic = Aes::<K>::new(crate::Context::default(), &key);
+            let generic = Aes::<K>::new(Context::default(), &key);
             // Enough blocks to pass through a group loop and leave a
             // tail, which is where the two could differ.
             let mut mine = [[0u8; BLOCK_SIZE]; 19];
@@ -793,31 +792,28 @@ mod tests {
         }
 
         same(
-            Aes128::new(crate::Context::default(), &Key::from([9u8; 16])),
+            Aes128::new(Context::default(), &Key::from([9u8; 16])),
             [9u8; 16],
         );
         same(
-            Aes192::new(crate::Context::default(), &Key::from([9u8; 24])),
+            Aes192::new(Context::default(), &Key::from([9u8; 24])),
             [9u8; 24],
         );
         same(
-            Aes256::new(crate::Context::default(), &Key::from([9u8; 32])),
+            Aes256::new(Context::default(), &Key::from([9u8; 32])),
             [9u8; 32],
         );
 
         assert_eq!(
-            Aes128::new(crate::Context::default(), &Key::from([0u8; 16]))
-                .rounds(),
+            Aes128::new(Context::default(), &Key::from([0u8; 16])).rounds(),
             10
         );
         assert_eq!(
-            Aes192::new(crate::Context::default(), &Key::from([0u8; 24]))
-                .rounds(),
+            Aes192::new(Context::default(), &Key::from([0u8; 24])).rounds(),
             12
         );
         assert_eq!(
-            Aes256::new(crate::Context::default(), &Key::from([0u8; 32]))
-                .rounds(),
+            Aes256::new(Context::default(), &Key::from([0u8; 32])).rounds(),
             14
         );
     }

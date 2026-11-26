@@ -402,11 +402,17 @@ fn generate(name: &str) -> Result<Zeroizing<Vec<u8>>> {
             Ok(Zeroizing::new(key.pem_bytes().to_vec()))
         }
         "x25519" => {
-            let key = scytale::kex::x25519::PrivateKey::generate(&mut rng)?;
+            let key = scytale::kex::x25519::PrivateKey::generate(
+                scytale::Context::default(),
+                &mut rng,
+            )?;
             Ok(Zeroizing::new(key.pem_bytes().to_vec()))
         }
         "x448" => {
-            let key = scytale::kex::x448::PrivateKey::generate(&mut rng)?;
+            let key = scytale::kex::x448::PrivateKey::generate(
+                scytale::Context::default(),
+                &mut rng,
+            )?;
             Ok(Zeroizing::new(key.pem_bytes().to_vec()))
         }
         "ecdsa-p256" | "ecdh-p256" => {
@@ -467,11 +473,17 @@ fn public(algorithm: Algorithm, pem: &[u8]) -> Result<Vec<u8>> {
             Ok(key.public_key().pem_bytes().to_vec())
         }
         Algorithm::X25519 => {
-            let key = scytale::kex::x25519::PrivateKey::try_from_pem(pem)?;
+            let key = scytale::kex::x25519::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )?;
             Ok(key.public_key().pem_bytes().to_vec())
         }
         Algorithm::X448 => {
-            let key = scytale::kex::x448::PrivateKey::try_from_pem(pem)?;
+            let key = scytale::kex::x448::PrivateKey::try_from_pem(
+                scytale::Context::default(),
+                pem,
+            )?;
             Ok(key.public_key().pem_bytes().to_vec())
         }
         Algorithm::P256 => {

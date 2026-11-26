@@ -5,7 +5,7 @@
 //! must be rejected.
 
 use super::{answer_groups, answer_tests};
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{Error, hex, hex_value, key_of, text, unknown_test_type};
 use scytale::Context;
 use scytale::Random;
@@ -20,7 +20,7 @@ const TAG: usize = 16;
 pub fn answer(
     doc: &Value,
     _rng: &mut dyn Random,
-    builder: &Builder,
+    profile: &Profile,
 ) -> Result<Value, Error> {
     answer_groups(doc, |group| {
         let encrypt = match text(group, "direction")? {
@@ -32,14 +32,11 @@ pub fn answer(
             // Not `aes_width!`: GCM-SIV is not defined over AES-192.
             "AFT" => answer_tests(group, |t| {
                 let key = hex(t, "key")?;
-                // Every message derives its own keys and builds its
-                // own cipher and POLYVAL from them: the message is
-                // built too.
-                builder.try_build(|ctx| match key.len() {
-                    16 => aft::<Aes128>(ctx, &key, t, encrypt),
-                    32 => aft::<Aes256>(ctx, &key, t, encrypt),
+                match key.len() {
+                    16 => aft::<Aes128>(profile.ctx(), &key, t, encrypt),
+                    32 => aft::<Aes256>(profile.ctx(), &key, t, encrypt),
                     n => Err(Error::new(format!("key of {n} bytes"))),
-                })
+                }
             }),
             _ => Err(unknown_test_type(group)),
         }

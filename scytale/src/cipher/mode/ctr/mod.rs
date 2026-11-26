@@ -37,10 +37,10 @@
 //! # Example
 //!
 //! ```
+//! use scytale::Context;
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Ctr;
-//! use scytale::Context;
 //! let ctx = Context::default();
 //!
 //! let ctr = Ctr::<Aes128>::new(ctx, &Key::from([0u8; 16]));
@@ -559,7 +559,7 @@ pub(crate) mod tests {
     }
 
     fn ctr<const K: usize>(key: &[u8; K]) -> Ctr<Aes<K>> {
-        Ctr::new(crate::Context::default(), &Key::from(*key))
+        Ctr::new(Context::default(), &Key::from(*key))
     }
 
     /// Every length across the bulk group, the tail widths under it
@@ -574,7 +574,7 @@ pub(crate) mod tests {
         const N: usize = 2 * 16 * 16 + 5 * 16 + 7;
         let key = [0x5au8; 16];
         let start = [0x77u8; 16];
-        let aes = Aes::<16>::new(crate::Context::default(), &key);
+        let aes = Aes::<16>::new(Context::default(), &key);
 
         let mut want = [0u8; N];
         let mut counter = start;
@@ -600,7 +600,7 @@ pub(crate) mod tests {
         const N: usize = 3 * 16 * 16 + 5 * 16 + 7;
         let key = [0x5au8; 16];
         let start = [0x77u8; 16];
-        let aes = { Aes::<16>::new(crate::Context::portable(), &key) };
+        let aes = { Aes::<16>::new(Context::portable(), &key) };
 
         let mut want = [0u8; N];
         let mut counter = start;
@@ -633,7 +633,7 @@ pub(crate) mod tests {
         // Three times round the 256 blocks that byte counts.
         const N: usize = 3 * 256 * 16 + 32;
         let key = [0x11u8; 16];
-        let aes = Aes::<16>::new(crate::Context::default(), &key);
+        let aes = Aes::<16>::new(Context::default(), &key);
 
         for last in [0u8, 1, 15, 16, 127, 239, 240, 241, 254, 255] {
             let mut start = [0x42u8; 16];
@@ -681,7 +681,7 @@ pub(crate) mod tests {
 
         // The keystream as counter mode defines it: a block at a
         // time, counting in the whole block.
-        let aes = Aes::<16>::new(crate::Context::default(), &key);
+        let aes = Aes::<16>::new(Context::default(), &key);
         let mut want = [0u8; N * 16];
         let mut counter = start;
         for chunk in want.chunks_mut(16) {

@@ -281,7 +281,7 @@ impl<H: Hash> HashDrbg<H, entropy::External> {
     /// A generator seeded from `seed`, the entropy, nonce and
     /// personalization as one run, at least [`MIN_SEED`] bytes.
     pub(crate) fn from_seed(seed: &[u8]) -> Result<Self, Error> {
-        Self::instantiate(crate::Context::default(), seed, entropy::External)
+        Self::instantiate(Context::default(), seed, entropy::External)
     }
 }
 
@@ -382,9 +382,9 @@ mod tests {
         let whole = [0x44u8; 70];
         let mut joined = [0u8; 55];
         let mut split = [0u8; 55];
-        derive::<Sha256>(crate::Context::default(), &[&whole], &mut joined);
+        derive::<Sha256>(Context::default(), &[&whole], &mut joined);
         derive::<Sha256>(
-            crate::Context::default(),
+            Context::default(),
             &[&whole[..17], &whole[17..], &[]],
             &mut split,
         );
@@ -488,8 +488,7 @@ mod tests {
     /// A generator with a source of its own reseeds itself.
     #[test]
     fn a_generator_with_a_source_reseeds_itself() {
-        let Ok(mut rng) =
-            HashDrbg::<Sha256>::from_system(crate::Context::default())
+        let Ok(mut rng) = HashDrbg::<Sha256>::from_system(Context::default())
         else {
             return;
         };

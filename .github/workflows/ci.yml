@@ -333,9 +333,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - part: lms keygen
+          # The session's tree, one case of some twenty-five minutes
+          # on one core, beside the light suites, which the other
+          # three cores finish within it.
+          - part: lms keygen, sha3-224, sha2-224, kdf, the rest
             filter: >-
-              --exact acvp_samples::lms_keygen_session_788050
+              --exact --skip acvp_samples::lms_keygen
+              --skip acvp_samples::lms_siggen --skip
+              acvp_samples::lms_siggen_session_788050 --skip
+              acvp_samples::lms_sigver --skip
+              acvp_samples::lms_sigver_session_788050 --skip
+              acvp_samples::sha2_384 --skip acvp_samples::sha2_512
+              --skip acvp_samples::sha3_512 --skip
+              acvp_samples::sha3_384 --skip acvp_samples::sha3_256
+              --skip acvp_samples::sha2_256 --skip
+              acvp_samples::sha2_512_224 --skip
+              acvp_samples::sha2_512_256 --skip
+              acvp_samples::slh_dsa_siggen
+          # The session's signing, one unit of some thirty minutes on
+          # one core, since its cases share the key the group makes.
           - part: lms, sha2-384, sha2-512
             filter: >-
               --exact acvp_samples::lms_keygen acvp_samples::lms_siggen
@@ -347,30 +363,10 @@ jobs:
             filter: >-
               --exact acvp_samples::sha3_512 acvp_samples::sha3_384
               acvp_samples::sha3_256
-          - part: sha3-224, sha2-224, kdf
-            filter: >-
-              --exact acvp_samples::sha3_224 acvp_samples::sha2_224
-              acvp_samples::kdf
           - part: sha2-256, sha2-512/t, slh-dsa signing
             filter: >-
               --exact acvp_samples::sha2_256 acvp_samples::sha2_512_224
               acvp_samples::sha2_512_256 acvp_samples::slh_dsa_siggen
-          - part: the rest
-            filter: >-
-              --exact --skip acvp_samples::lms_keygen_session_788050
-              --skip acvp_samples::lms_keygen --skip
-              acvp_samples::lms_siggen --skip
-              acvp_samples::lms_siggen_session_788050 --skip
-              acvp_samples::lms_sigver --skip
-              acvp_samples::lms_sigver_session_788050 --skip
-              acvp_samples::sha2_384 --skip acvp_samples::sha2_512
-              --skip acvp_samples::sha3_512 --skip
-              acvp_samples::sha3_384 --skip acvp_samples::sha3_256
-              --skip acvp_samples::sha3_224 --skip
-              acvp_samples::sha2_224 --skip acvp_samples::kdf --skip
-              acvp_samples::sha2_256 --skip acvp_samples::sha2_512_224
-              --skip acvp_samples::sha2_512_256 --skip
-              acvp_samples::slh_dsa_siggen
     steps:
       - uses: actions/checkout@v7
 

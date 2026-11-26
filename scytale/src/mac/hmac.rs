@@ -306,17 +306,16 @@ mod tests {
             let key = &bytes[..len];
             let mut block = HmacSha256::zero_key();
             if len > 64 {
-                let digest = Sha256::digest(crate::Context::default(), key);
+                let digest = Sha256::digest(Context::default(), key);
                 block.as_mut()[..32].copy_from_slice(&digest);
             } else {
                 block.as_mut()[..len].copy_from_slice(key);
             }
-            let mut mac =
-                <HmacSha256 as Mac>::new(crate::Context::default(), &block);
+            let mut mac = <HmacSha256 as Mac>::new(Context::default(), &block);
             mac.update(b"message");
             assert_eq!(
                 mac.finalize(),
-                HmacSha256::mac(crate::Context::default(), key, b"message"),
+                HmacSha256::mac(Context::default(), key, b"message"),
                 "{len}"
             );
         }
@@ -434,7 +433,7 @@ mod tests {
 
     fn check<H: Hash + Clone + BlockType>(case: &Case, expected: &str) {
         let (tag, len) = hex(expected);
-        let mut mac = Hmac::<H>::new(crate::Context::default(), case.key);
+        let mut mac = Hmac::<H>::new(Context::default(), case.key);
         mac.update(case.data);
         assert_eq!(mac.clone().finalize().as_ref()[..len], tag[..len]);
         // The truncated case cannot verify against a full tag, which
@@ -457,10 +456,10 @@ mod tests {
 
     #[test]
     fn one_shot_matches_streaming() {
-        let mut mac = HmacSha256::new(crate::Context::default(), b"key");
+        let mut mac = HmacSha256::new(Context::default(), b"key");
         mac.update(b"data");
         assert_eq!(
-            HmacSha256::mac(crate::Context::default(), b"key", b"data"),
+            HmacSha256::mac(Context::default(), b"key", b"data"),
             mac.finalize()
         );
     }
@@ -474,14 +473,14 @@ mod tests {
              c5ad",
         );
         assert_eq!(
-            HmacSha256::new(crate::Context::default(), b"").finalize(),
+            HmacSha256::new(Context::default(), b"").finalize(),
             tag[..32]
         );
     }
 
     #[test]
     fn verify_rejects_wrong_and_short_tags() {
-        let mut mac = HmacSha256::new(crate::Context::default(), b"key");
+        let mut mac = HmacSha256::new(Context::default(), b"key");
         mac.update(b"message");
         let tag = mac.clone().finalize();
         assert_eq!(mac.clone().verify(&tag), Ok(()));
@@ -500,21 +499,21 @@ mod tests {
 
     #[test]
     fn reset_reuses_the_key() {
-        let mut mac = HmacSha512::new(crate::Context::default(), b"key");
+        let mut mac = HmacSha512::new(Context::default(), b"key");
         mac.update(b"not this");
         mac.reset();
         mac.update(b"message");
-        let mut fresh = HmacSha512::new(crate::Context::default(), b"key");
+        let mut fresh = HmacSha512::new(Context::default(), b"key");
         fresh.update(b"message");
         assert_eq!(mac.finalize(), fresh.finalize());
     }
 
     #[test]
     fn splitting_does_not_matter() {
-        let mut one = HmacSha384::new(crate::Context::default(), b"key");
+        let mut one = HmacSha384::new(Context::default(), b"key");
         one.update(b"mess");
         one.update(b"age");
-        let mut whole = HmacSha384::new(crate::Context::default(), b"key");
+        let mut whole = HmacSha384::new(Context::default(), b"key");
         whole.update(b"message");
         assert_eq!(one.finalize(), whole.finalize());
     }

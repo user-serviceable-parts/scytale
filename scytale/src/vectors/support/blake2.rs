@@ -3,6 +3,7 @@
 //! a 64-byte key, with 64-byte digests. The file also holds BLAKE2s
 //! and the tree and XOF variants, which the crate does not have.
 
+use crate::Context;
 #[allow(unused_imports)]
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
@@ -33,10 +34,10 @@ pub fn run() {
             // The public type too, whole and a byte at a time, which
             // crosses the block boundary at every offset in turn.
             assert_eq!(
-                Blake2b512::digest(crate::Context::default(), &input)[..],
+                Blake2b512::digest(Context::default(), &input)[..],
                 out[..]
             );
-            let mut hash = Blake2b512::new(crate::Context::default());
+            let mut hash = Blake2b512::new(Context::default());
             for byte in &input {
                 hash.update(core::slice::from_ref(byte));
             }

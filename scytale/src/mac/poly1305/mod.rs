@@ -444,8 +444,7 @@ pub(crate) mod tests {
 
     /// The tag under the kernel this processor dispatches to.
     fn plain_tag(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
-        let mut mac =
-            Poly1305::new(crate::Context::default(), &Key::from(*key));
+        let mut mac = Poly1305::new(Context::default(), &Key::from(*key));
         mac.update(message);
         mac.finalize()
     }
@@ -667,15 +666,13 @@ pub(crate) mod tests {
         let message: [u8; 101] = core::array::from_fn(|i| (i * 13) as u8);
         let expected = plain_tag(key, &message);
         for chunk in [1, 3, 15, 16, 17, 40] {
-            let mut mac =
-                Poly1305::new(crate::Context::default(), &Key::from(*key));
+            let mut mac = Poly1305::new(Context::default(), &Key::from(*key));
             for piece in message.chunks(chunk) {
                 mac.update(piece);
             }
             assert_eq!(mac.finalize(), expected, "chunk {chunk}");
         }
-        let mut mac =
-            Poly1305::new(crate::Context::default(), &Key::from(*key));
+        let mut mac = Poly1305::new(Context::default(), &Key::from(*key));
         mac.update(b"not this");
         mac.reset();
         mac.update(&message);
@@ -689,7 +686,7 @@ pub(crate) mod tests {
         let key = [0x3cu8; KEY_SIZE];
         let message: [u8; 101] = core::array::from_fn(|i| (i * 5) as u8);
         let expected = plain_tag(&key, &message);
-        let mut mac = Poly1305::new(crate::Context::default(), &Key::from(key));
+        let mut mac = Poly1305::new(Context::default(), &Key::from(key));
         mac.update(&[0xa5; 3 * BUFFER + 9]);
         mac.reset();
         mac.update(&message);
@@ -702,7 +699,7 @@ pub(crate) mod tests {
     fn verify_accepts_and_rejects() {
         let key = [7u8; 32];
         let tag = plain_tag(&key, b"message");
-        let mut mac = Poly1305::new(crate::Context::default(), &Key::from(key));
+        let mut mac = Poly1305::new(Context::default(), &Key::from(key));
         mac.update(b"message");
         assert_eq!(mac.clone().verify(&tag), Ok(()));
         let mut wrong = tag;
@@ -726,7 +723,7 @@ pub(crate) mod tests {
             }
         }
         let key = [0x5a; 32];
-        let mut mac = Poly1305::new(crate::Context::default(), &Key::from(key));
+        let mut mac = Poly1305::new(Context::default(), &Key::from(key));
         mac.update(b"abc");
         let mut buffer = Buffer([0; 128], 0);
         fmt::write(&mut buffer, format_args!("{mac:?}")).unwrap();

@@ -10,7 +10,7 @@
 //! server then fails its cases, and the offline check counts what
 //! was answered against the suite's minimum.
 //!
-//! A driver builds everything inside the [`Builder`] it is given, and
+//! A driver builds everything inside the [`Profile`] it is given, and
 //! makes inside it every call that builds as it runs, so that all a
 //! case builds does so under the kernel being checked, whatever other
 //! threads are checking; see there. It answers each case from the
@@ -18,14 +18,14 @@
 //! generates for the group, so that the offline check can answer the
 //! cases apart.
 
-use crate::profile::Builder;
+use crate::profile::Profile;
 use crate::support::{Error, FixedEntropy, list, load, object};
 use scytale::Random;
 use scytale::random::CtrDrbg;
 use serde_json::{Map, Value, json};
 
-/// Answers one vector set, building with the builder's context.
-pub type Answer = fn(&Value, &mut dyn Random, &Builder) -> Result<Value, Error>;
+/// Answers one vector set, building with the profile's context.
+pub type Answer = fn(&Value, &mut dyn Random, &Profile) -> Result<Value, Error>;
 
 /// Checks one answered test against the vendored one, for a suite
 /// whose stored answers came from NIST's own randomness and cannot
@@ -785,9 +785,9 @@ pub fn vendored(suite: &Suite) -> Value {
 
 /// A generator whose output is a function of nothing but the order
 /// of the calls, so two runs of one suite answer alike; built by
-/// `builder`.
-pub fn fixed_rng(builder: &Builder) -> Result<CtrDrbg<FixedEntropy>, Error> {
-    builder.try_build(|ctx| CtrDrbg::try_new(ctx, FixedEntropy::default()))
+/// `profile`.
+pub fn fixed_rng(profile: &Profile) -> Result<CtrDrbg<FixedEntropy>, Error> {
+    Ok(CtrDrbg::try_new(profile.ctx(), FixedEntropy::default())?)
 }
 
 /// The server's `/expected` for the vector set `prompt`, with each
