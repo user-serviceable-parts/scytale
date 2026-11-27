@@ -47,6 +47,13 @@ impl<const K: usize> fmt::Debug for Aes<K> {
 impl<const K: usize> Aes<K> {
     /// Expands `key` where the kernel list chose this kernel, and
     /// `None` for any other choice.
+    ///
+    /// Inlined, with [`new_unchecked`](Self::new_unchecked), so that
+    /// the schedule is built where the dispatching type keeps it.
+    /// Out of line, rustc 1.100 copies the 480 bytes once more on the
+    /// way through the `Option`, a twentieth of a short CTR-DRBG
+    /// request, which builds a key for every one.
+    #[inline(always)]
     pub(crate) fn new(
         key: &[u8; K],
         chosen: Chosen<super::super::Kernel>,
@@ -62,6 +69,8 @@ impl<const K: usize> Aes<K> {
     /// # Safety
     /// The caller must have confirmed that VAES, AVX2 and operating
     /// system support for 256-bit registers are available.
+    // Inlined for the reason `new` is.
+    #[inline(always)]
     pub(crate) unsafe fn new_unchecked(key: &[u8; K]) -> Self {
         unsafe {
             let size = KeySize::for_key(key);

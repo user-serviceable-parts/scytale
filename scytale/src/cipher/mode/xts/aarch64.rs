@@ -54,12 +54,18 @@ impl Tweaks {
     }
 }
 
-/// Writes the next `take` tweaks, leaving `value` on the one after.
-fn fill(tweaks: &mut Tweaks, take: usize, value: &mut u128) {
+/// Writes the next `take` tweaks and returns the value of the one
+/// after.
+///
+/// By value rather than through a `&mut u128`, as on x86-64, where
+/// rustc 1.100 kept the value in a stack slot between groups and
+/// rebuilt it a byte at a time on the chain's critical path.
+fn fill(tweaks: &mut Tweaks, take: usize, mut value: u128) -> u128 {
     for tweak in tweaks.0[..take].iter_mut() {
         *tweak = value.to_le_bytes();
-        *value = super::alpha(*value);
+        value = super::alpha(value);
     }
+    value
 }
 
 /// XTS written out, and how to reach the key it runs under.
@@ -134,11 +140,11 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
         let base = data.as_mut_ptr();
         let mut done = 0;
         let mut take = blocks.min(GROUP);
-        fill(&mut buf[slot], take, &mut value);
+        value = fill(&mut buf[slot], take, value);
         while done < blocks {
             let next = (blocks - done - take).min(GROUP);
             if next > 0 {
-                fill(&mut buf[1 - slot], next, &mut value);
+                value = fill(&mut buf[1 - slot], next, value);
             }
             // SAFETY: the instructions were confirmed when the mode
             // was built, the schedule holds `rounds + 1` round keys,
