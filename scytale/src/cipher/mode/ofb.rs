@@ -125,6 +125,17 @@ impl<C: BlockCipher> Stream<'_, C> {
     /// so this cannot use the cipher's bulk path.
     pub fn update(&mut self, mut data: &mut [u8]) {
         let size = size_of::<C::Block>();
+        // Whole blocks, once the last one is spent, xor at a fixed
+        // length and offset; the general loop below works both out
+        // a piece at a time.
+        if self.used == size {
+            let mut blocks = data.chunks_exact_mut(size);
+            for block in &mut blocks {
+                self.cipher.encrypt_one(&mut self.register);
+                xor(block, self.register.as_ref());
+            }
+            data = blocks.into_remainder();
+        }
         while !data.is_empty() {
             if self.used == size {
                 self.cipher.encrypt_one(&mut self.register);
