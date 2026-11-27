@@ -783,9 +783,13 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
         lengths[8..].copy_from_slice(&message_bits.to_be_bytes());
         self.engine.hash(&lengths);
 
-        let mut tag = self.engine.finish();
-        xor(&mut tag, &self.mask);
-        tag
+        // One 128-bit xor rather than the byte loop: after the
+        // hash's own byte swaps rustc 1.100 splits the loop into
+        // sixteen byte xors and reassembles them, a twentieth of a
+        // short message's encryption or decryption.
+        let tag = u128::from_ne_bytes(self.engine.finish())
+            ^ u128::from_ne_bytes(self.mask);
+        tag.to_ne_bytes()
     }
 }
 

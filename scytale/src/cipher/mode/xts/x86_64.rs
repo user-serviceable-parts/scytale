@@ -64,11 +64,18 @@ impl Tweaks {
 /// of dependent shifts. Four shorter chains run together were tried
 /// and came out slower: the bounds checks that picking among them
 /// needs cost more than the waiting they save.
-fn fill(tweaks: &mut Tweaks, take: usize, value: &mut u128) {
+///
+/// The value goes in and comes out by value. Through a `&mut u128`,
+/// rustc 1.100 keeps it in a stack slot between groups and rebuilds it
+/// there a byte at a time after every fill, on the chain's critical
+/// path: some twenty cycles a group, a fifth of the wide loop's rate
+/// and a third of the narrow one's.
+fn fill(tweaks: &mut Tweaks, take: usize, mut value: u128) -> u128 {
     for tweak in tweaks.0[..take].iter_mut() {
         *tweak = value.to_le_bytes();
-        *value = super::alpha(*value);
+        value = super::alpha(value);
     }
+    value
 }
 
 /// XTS written out, and how to reach the key it runs under.
@@ -163,11 +170,11 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
         let base = data.as_mut_ptr();
         let mut done = 0;
         let mut take = span(blocks);
-        fill(&mut buf[slot], take, &mut value);
+        value = fill(&mut buf[slot], take, value);
         while done < blocks {
             let next = span(blocks - done - take);
             if next > 0 {
-                fill(&mut buf[1 - slot], next, &mut value);
+                value = fill(&mut buf[1 - slot], next, value);
             }
             let body = if take == WIDE_GROUP {
                 bodies.wide
