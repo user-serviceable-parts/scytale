@@ -385,6 +385,95 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
             Kernel::Aesni
         }
     }
+
+    /// Starts a message under a 96-bit nonce: the tag mask, which is
+    /// the first counter block encrypted, and the counter the message
+    /// itself begins at. `false`, with nothing written, where `cipher`
+    /// is not one whose round keys these instructions can read.
+    ///
+    /// The block is built and encrypted in a register and each result
+    /// goes out in one store. Assembled in memory, a byte or a word at
+    /// a time as the compiler likes, it is read back as one block
+    /// before those stores can be forwarded, and the processor waits
+    /// for them: about a third of a short message's whole cost.
+    pub(crate) fn start(
+        &self,
+        cipher: &C,
+        nonce: &[u8; 12],
+        mask: &mut [u8; BLOCK],
+        counter: &mut [u8; BLOCK],
+    ) -> bool {
+        let Some(schedule) = (self.keys)(cipher) else {
+            return false;
+        };
+        let [a, b, c, d, e, f, g, h, i, j, k, l] = *nonce;
+        let low = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
+        let high = u64::from_le_bytes([i, j, k, l, 0, 0, 0, 0]);
+        // SAFETY: an engine exists only where the list chose one of
+        // this file's rows, whose features include AES-NI.
+        unsafe { start_blocks(schedule, low, high, mask, counter) };
+        true
+    }
+}
+
+/// The work of [`Engine::start`]: `low` and `high` are the nonce's
+/// first eight bytes and its last four, as little-endian words.
+///
+/// Legacy SSE encodings, as the AES-NI cipher's own: they need
+/// nothing past AES-NI, and asm rather than intrinsics, because a
+/// target without SSE in its baseline, such as `x86_64-unknown-none`,
+/// refuses a function that enables it.
+///
+/// # Safety
+///
+/// The processor must have AES-NI.
+unsafe fn start_blocks(
+    schedule: Schedule<'_>,
+    low: u64,
+    high: u64,
+    mask: &mut [u8; BLOCK],
+    counter: &mut [u8; BLOCK],
+) {
+    // The counter field is big-endian, so its low byte is the block's
+    // last, the top byte of the high word.
+    let one = high | 1 << 56;
+    let two = high | 2 << 56;
+    // SAFETY: the caller vouches for AES-NI; the schedule holds
+    // `rounds + 1` round keys, sixteen bytes each, with `rounds` at
+    // least ten, and both outputs are a block.
+    unsafe {
+        core::arch::asm!(
+            "movq xmm0, {low}",
+            "movq xmm1, {two}",
+            "punpcklqdq xmm0, xmm1",
+            "movdqu [{counter}], xmm0",
+            "movq xmm0, {low}",
+            "movq xmm1, {one}",
+            "punpcklqdq xmm0, xmm1",
+            // Round keys through a register: a legacy encoding wants
+            // its memory operand aligned, and they need not be.
+            "movdqu xmm1, [{rk}]",
+            "pxor xmm0, xmm1",
+            "2:",
+            "add {rk}, 16",
+            "movdqu xmm1, [{rk}]",
+            "aesenc xmm0, xmm1",
+            "dec {n}",
+            "jnz 2b",
+            "movdqu xmm1, [{rk} + 16]",
+            "aesenclast xmm0, xmm1",
+            "movdqu [{mask}], xmm0",
+            low = in(reg) low,
+            one = in(reg) one,
+            two = in(reg) two,
+            counter = in(reg) counter.as_mut_ptr(),
+            mask = in(reg) mask.as_mut_ptr(),
+            rk = inout(reg) schedule.keys() => _,
+            n = inout(reg) schedule.rounds() - 1 => _,
+            out("xmm0") _, out("xmm1") _,
+            options(nostack),
+        );
+    }
 }
 
 /// By hand rather than derived: nothing here is a cipher, only a
