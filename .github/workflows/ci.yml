@@ -433,10 +433,12 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install QEMU and the C library
+        # And GCC's runtime, which the binary links for unwinding;
+        # the build job had it through the cross compiler.
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-              qemu-user libc6-riscv64-cross
+              qemu-user libc6-riscv64-cross libgcc-s1-riscv64-cross
 
       - uses: actions/download-artifact@v8
         with:
@@ -820,11 +822,14 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install QEMU and the C library
+        # And GCC's runtime, which the binaries link for unwinding;
+        # the build job had it through the cross compiler.
         run: |
           case ${{ matrix.arch }} in
               x86_64) libc= ;;
-              aarch64) libc=libc6-arm64-cross ;;
-              riscv64) libc=libc6-riscv64-cross ;;
+              aarch64) libc="libc6-arm64-cross libgcc-s1-arm64-cross" ;;
+              riscv64)
+                  libc="libc6-riscv64-cross libgcc-s1-riscv64-cross" ;;
           esac
           apt-get update
           apt-get install -y --no-install-recommends qemu-user $libc
