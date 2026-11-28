@@ -321,12 +321,74 @@ jobs:
   # job is done no earlier than its longest case, and the tallest LMS
   # tree is one case of some twenty-five minutes on one core.
   #
-  # The container is for its QEMU, as below. The arm64 runners are
-  # an experiment: on the x86-64 pool two or three jobs a run took
-  # three times as long as the same jobs in other runs, every suite
-  # and the compile alike, which the steps around the test measure.
+  # The binary is built once, in the job before, and every part runs
+  # that one. The container is for its QEMU, as below, and the build
+  # is in the same container so that the binary's paths to the
+  # vectors and its C library are the ones the parts have. The arm64
+  # runners are an experiment: on the x86-64 pool two or three jobs a
+  # run took three times as long as the same jobs in other runs,
+  # every suite and the compile alike, which the steps around the
+  # test measure.
+  acvp-samples-emulated-build:
+    name: build (riscv64, acvp samples)
+    runs-on: ubuntu-24.04-arm
+    container: debian:trixie
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust and the cross linker
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+              ca-certificates curl gcc libc6-dev zstd \
+              gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal \
+                    --default-toolchain stable \
+                    --target riscv64gc-unknown-linux-gnu
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/cache/restore@v6
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: >-
+            acvp-samples-riscv64-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        # Without the session, which would want the target's TLS
+        # library.
+        run: |
+          sh scripts/pack-tests --release -p scytale-acvp \
+              --no-default-features --test acvp_samples \
+              --target riscv64gc-unknown-linux-gnu
+        env:
+          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER:
+            riscv64-linux-gnu-gcc
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tests-acvp-samples-riscv64
+          path: tests.tar
+          retention-days: 1
+
+      - uses: actions/cache/save@v6
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
   acvp-samples-emulated:
     name: test (riscv64, max, acvp samples, ${{ matrix.part }})
+    needs: acvp-samples-emulated-build
     runs-on: ubuntu-24.04-arm
     container: debian:trixie
     strategy:
@@ -370,28 +432,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Rust, QEMU and the cross linker
+      - name: Install QEMU and the C library
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-              ca-certificates curl gcc libc6-dev qemu-user zstd \
-              gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-              | sh -s -- -y --profile minimal \
-                    --default-toolchain stable \
-                    --target riscv64gc-unknown-linux-gnu
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+              qemu-user libc6-riscv64-cross
 
-      - uses: actions/cache/restore@v6
-        id: cache
+      - uses: actions/download-artifact@v8
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: >-
-            acvp-samples-riscv64-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+          name: tests-acvp-samples-riscv64
 
       - name: Measure the machine
         # The processor, the cores, the kernel's cpu counters (steal
@@ -405,20 +454,15 @@ jobs:
           time (head -c 1G /dev/zero | sha256sum)
 
       - name: Test as max, ${{ matrix.part }}
-        # Without the session, which would want the target's TLS
-        # library. Every kernel must run: `max` has every extension.
+        # Every kernel must run: `max` has every extension.
         shell: bash
         run: |
           set -o pipefail
-          cargo test --release -p scytale-acvp --no-default-features \
-              --test acvp_samples --target riscv64gc-unknown-linux-gnu \
-              -- --nocapture ${{ matrix.filter }} | tee samples.log
+          sh scripts/run-tests acvp_samples --nocapture ${{ matrix.filter }} \
+              | tee samples.log
           ! grep -E ' not run' samples.log
         env:
-          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER:
-            riscv64-linux-gnu-gcc
-          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER:
-            qemu-riscv64 -cpu max -L /usr/riscv64-linux-gnu
+          TEST_RUNNER: qemu-riscv64 -cpu max -L /usr/riscv64-linux-gnu
           # The suites with no kernel of their own test none, so they
           # build on the scalar extensions alone: QEMU runs the vector
           # ones through helpers, and SHA-256 measured nearly twice as
@@ -435,17 +479,6 @@ jobs:
           head -1 /proc/stat
           time (head -c 1G /dev/zero | sha256sum)
 
-      - uses: actions/cache/save@v6
-        # Saved once per key, by one job of those that share it.
-        if: ${{ matrix.part == 'lms keygen' && steps.cache.outputs.cache-hit != 'true' }}
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ steps.cache.outputs.cache-primary-key }}
-
   # Thirty-two bits. Every other target tested here has a sixty-four
   # bit `usize`, and a length or a counter held in one behaves
   # differently at half the width: the counter mode's room before its
@@ -460,25 +493,8 @@ jobs:
   # at the same width, so it is built, in other-targets below, and
   # not tested again.
   narrow:
-    name: test (${{ matrix.name }})
+    name: test (x86, 32-bit)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # One row for the library's tests and the lints and, apart
-          # from it, the check against the ACVP sample vectors in two
-          # parts by test name, which carry nothing else.
-          - name: x86, 32-bit
-            target: i686-unknown-linux-musl
-          - name: x86, 32-bit, acvp samples, heavy
-            target: i686-unknown-linux-musl
-            filter: acvp_samples::lms acvp_samples::slh_dsa acvp_samples::ml_dsa
-          - name: x86, 32-bit, acvp samples, the rest
-            target: i686-unknown-linux-musl
-            filter: >-
-              --skip acvp_samples::lms --skip acvp_samples::slh_dsa
-              --skip acvp_samples::ml_dsa
     env:
       CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
     steps:
@@ -489,7 +505,7 @@ jobs:
           rustup update --no-self-update stable
           rustup default stable
           rustup component add clippy
-          rustup target add ${{ matrix.target }}
+          rustup target add i686-unknown-linux-musl
 
       - uses: actions/cache/restore@v6
         id: cache
@@ -500,52 +516,39 @@ jobs:
             ~/.cargo/git/db
             target
           key: >-
-            narrow-${{ matrix.target }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+            narrow-i686-unknown-linux-musl-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Test
         # As the native job, for a target: the kernel tests apart, so
         # that their tables, portable rows though they all are, are in
         # the log.
-        if: ${{ !matrix.filter }}
         run: |
           cargo test --release --workspace --exclude scytale-acvp \
-              --target ${{ matrix.target }} -- --skip kernels::
-          cargo test --release -p scytale --lib --target ${{ matrix.target }} \
-              kernels:: -- --nocapture
+              --target i686-unknown-linux-musl -- --skip kernels::
+          cargo test --release -p scytale --lib \
+              --target i686-unknown-linux-musl kernels:: -- --nocapture
         env:
           # Per target, because a plain RUSTFLAGS would replace these
           # rather than add to them and the linker flag would be lost.
           CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS:
             -D warnings -C linker-flavor=ld.lld
 
-      - name: Test the ACVP sample vectors, ${{ matrix.name }}
-        # This row's suites, and nothing else.
-        if: ${{ matrix.filter }}
-        run: |
-          cargo test --release -p scytale-acvp --no-default-features \
-              --test acvp_samples --target ${{ matrix.target }} \
-              -- --nocapture ${{ matrix.filter }}
-        env:
-          CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS:
-            -D warnings -C linker-flavor=ld.lld
-
       - name: Clippy
         # Some code is built only where there is no hardware backend,
         # and the targets above never show it to the lints.
-        if: ${{ !matrix.filter }}
         run: |
           cargo clippy --workspace --exclude scytale-acvp --all-targets \
-              --release --target ${{ matrix.target }} -- -D warnings
+              --release --target i686-unknown-linux-musl -- -D warnings
           cargo clippy -p scytale-acvp --no-default-features \
-              --all-targets --release --target ${{ matrix.target }} \
+              --all-targets --release --target i686-unknown-linux-musl \
               -- -D warnings
         env:
           CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS:
             -C linker-flavor=ld.lld
 
       - uses: actions/cache/save@v6
-        # Saved once per key, by the library row.
-        if: ${{ !matrix.filter && steps.cache.outputs.cache-hit != 'true' }}
+        # Saved once per key, by this job; the ACVP build restores it.
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         with:
           path: |
             ~/.cargo/registry/index
@@ -553,6 +556,73 @@ jobs:
             ~/.cargo/git/db
             target
           key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  # The check against the ACVP sample vectors at thirty-two bits, in
+  # two parts by test name that carry nothing else. The binary is
+  # built once and both parts run it; the runner's processor runs a
+  # static 32-bit binary itself, so they need no Rust at all.
+  narrow-acvp-build:
+    name: build (x86, 32-bit, acvp samples)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+          rustup target add i686-unknown-linux-musl
+
+      - uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: >-
+            narrow-i686-unknown-linux-musl-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: |
+          sh scripts/pack-tests --release -p scytale-acvp \
+              --no-default-features --test acvp_samples \
+              --target i686-unknown-linux-musl
+        env:
+          CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS:
+            -D warnings -C linker-flavor=ld.lld
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tests-acvp-samples-i686
+          path: tests.tar
+          retention-days: 1
+
+  narrow-acvp:
+    name: test (x86, 32-bit, acvp samples, ${{ matrix.part }})
+    needs: narrow-acvp-build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: heavy
+            filter: acvp_samples::lms acvp_samples::slh_dsa acvp_samples::ml_dsa
+          - part: the rest
+            filter: >-
+              --skip acvp_samples::lms --skip acvp_samples::slh_dsa
+              --skip acvp_samples::ml_dsa
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: tests-acvp-samples-i686
+
+      - name: Test the ACVP sample vectors, ${{ matrix.part }}
+        run: sh scripts/run-tests acvp_samples --nocapture ${{ matrix.filter }}
 
   # Every runner here and every machine anyone develops on is a recent
   # processor, so which loop a lesser one is given is decided by code
@@ -585,8 +655,105 @@ jobs:
   # The container is for its QEMU: the runner's own is too old to
   # report the RISC-V cryptography extensions, and it lacks some of
   # the x86-64 ones.
+  #
+  # The rows of an architecture run the same binaries on different
+  # processors, so those are built once, in the job before, in the
+  # same container, so that their paths to the vectors and their C
+  # library are the ones the rows have.
+  emulated-build:
+    name: build (${{ matrix.arch }}, emulated)
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            packages: -p scytale
+          - arch: aarch64
+            packages: -p scytale
+          # The whole workspace's library tests too, for the row
+          # that is RISC-V's one run of them.
+          - arch: riscv64
+            packages: --workspace --exclude scytale-acvp
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust and the cross linker
+        run: |
+          # Debian names the architecture one way in the compiler's
+          # package and another in the C library's.
+          case ${{ matrix.arch }} in
+              x86_64) target=x86_64-unknown-linux-gnu; cross= ;;
+              aarch64)
+                  target=aarch64-unknown-linux-gnu
+                  cross="gcc-aarch64-linux-gnu libc6-dev-arm64-cross" ;;
+              riscv64)
+                  target=riscv64gc-unknown-linux-gnu
+                  cross="gcc-riscv64-linux-gnu libc6-dev-riscv64-cross" ;;
+          esac
+          apt-get update
+          apt-get install -y --no-install-recommends \
+              ca-certificates curl gcc libc6-dev zstd $cross
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal \
+                    --default-toolchain stable --target "$target" \
+                    --component clippy
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "TARGET=$target" >> "$GITHUB_ENV"
+          if [ -n "$cross" ]; then
+              name=$(echo "$target" | tr 'a-z-' 'A-Z_')
+              echo "CARGO_TARGET_${name}_LINKER=${{ matrix.arch }}-linux-gnu-gcc" \
+                  >> "$GITHUB_ENV"
+          fi
+
+      - uses: actions/cache/restore@v6
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: >-
+            emulated-${{ matrix.arch }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: |
+          sh scripts/pack-tests --release ${{ matrix.packages }} --lib \
+              --target "$TARGET"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tests-emulated-${{ matrix.arch }}
+          path: tests.tar
+          retention-days: 1
+
+      - name: Clippy
+        # The lints for the target, which the native runner used to
+        # run; once per architecture is enough, and only RISC-V has
+        # no native job to run them.
+        if: matrix.arch == 'riscv64'
+        run: |
+          cargo clippy --workspace --exclude scytale-acvp --all-targets \
+              --release --target "$TARGET" -- -D warnings
+          cargo clippy -p scytale-acvp --no-default-features \
+              --all-targets --release --target "$TARGET" \
+              -- -D warnings
+
+      - uses: actions/cache/save@v6
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
   emulated:
     name: test (${{ matrix.arch }}, ${{ matrix.cpu }})
+    needs: emulated-build
     runs-on: ubuntu-latest
     container: debian:trixie
     strategy:
@@ -652,92 +819,41 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Rust, QEMU and the cross linker
+      - name: Install QEMU and the C library
         run: |
-          # Debian names the architecture one way in the compiler's
-          # package and another in the C library's.
           case ${{ matrix.arch }} in
-              x86_64) target=x86_64-unknown-linux-gnu; cross= ;;
-              aarch64)
-                  target=aarch64-unknown-linux-gnu
-                  cross="gcc-aarch64-linux-gnu libc6-dev-arm64-cross" ;;
-              riscv64)
-                  target=riscv64gc-unknown-linux-gnu
-                  cross="gcc-riscv64-linux-gnu libc6-dev-riscv64-cross" ;;
+              x86_64) libc= ;;
+              aarch64) libc=libc6-arm64-cross ;;
+              riscv64) libc=libc6-riscv64-cross ;;
           esac
           apt-get update
-          apt-get install -y --no-install-recommends \
-              ca-certificates curl gcc libc6-dev qemu-user zstd $cross
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-              | sh -s -- -y --profile minimal \
-                    --default-toolchain stable --target "$target" \
-                    --component clippy
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          echo "TARGET=$target" >> "$GITHUB_ENV"
+          apt-get install -y --no-install-recommends qemu-user $libc
 
-      # The rows of an architecture build the same thing and differ
-      # only in the processor they run on, so they share one key.
-      - uses: actions/cache/restore@v6
-        id: cache
+      - uses: actions/download-artifact@v8
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: >-
-            emulated-${{ matrix.arch }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          name: tests-emulated-${{ matrix.arch }}
 
       - name: Test as ${{ matrix.cpu }}
-        # Cargo reads the linker and the runner from variables named
-        # for the target. The kernel tests, with their tables in the
-        # log, and the detection tests; or on the `whole` row the
-        # library's tests.
+        # The kernel tests, with their tables in the log, and the
+        # detection tests; or on the `whole` row the library's tests.
         shell: bash
         run: |
           set -o pipefail
           arch=${{ matrix.arch }}
-          name=$(echo "$TARGET" | tr 'a-z-' 'A-Z_')
-          runner="qemu-$arch -cpu ${{ matrix.cpu }}"
+          TEST_RUNNER="qemu-$arch -cpu ${{ matrix.cpu }}"
           if [ "$arch" != x86_64 ]; then
-              runner="$runner -L /usr/$arch-linux-gnu"
-              export "CARGO_TARGET_${name}_LINKER=$arch-linux-gnu-gcc"
+              TEST_RUNNER="$TEST_RUNNER -L /usr/$arch-linux-gnu"
           fi
-          export "CARGO_TARGET_${name}_RUNNER=$runner"
-          cargo test --release -p scytale --lib --target "$TARGET" \
-              kernels:: -- --nocapture | tee kernels.log
+          export TEST_RUNNER
+          sh scripts/run-tests scytale kernels:: --nocapture | tee kernels.log
           if [ -n "${{ matrix.whole }}" ]; then
-              cargo test --release --workspace --exclude scytale-acvp \
-                  --lib --target "$TARGET" -- --skip kernels::
+              sh scripts/run-tests all --skip kernels::
           else
-              cargo test --release -p scytale --lib --target "$TARGET" \
-                  -- arch:: features::
+              sh scripts/run-tests scytale arch:: features::
           fi
           if [ -n "${{ matrix.expect_all }}" ]; then
               ! grep -E ' not run' kernels.log
           fi
-
-      - name: Clippy
-        # The lints for the target, which the native runner used to
-        # run; once per architecture is enough.
-        if: matrix.arch == 'riscv64' && matrix.cpu == 'max'
-        run: |
-          cargo clippy --workspace --exclude scytale-acvp --all-targets \
-              --release --target "$TARGET" -- -D warnings
-          cargo clippy -p scytale-acvp --no-default-features \
-              --all-targets --release --target "$TARGET" \
-              -- -D warnings
-
-      - uses: actions/cache/save@v6
-        # Saved once per key, by one job of those that share it.
-        if: ${{ (matrix.cpu == 'max' || matrix.cpu == 'neoverse-v1') && steps.cache.outputs.cache-hit != 'true' }}
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ steps.cache.outputs.cache-primary-key }}
 
   # Targets the jobs above do not build. wasm32 is an architecture
   # with no loops written out for it, which is a different shape of

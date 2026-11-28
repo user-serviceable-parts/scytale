@@ -1,0 +1,36 @@
+#!/bin/sh
+# Runs test binaries that scripts/pack-tests packed into tests.tar,
+# from the directory of each one's package as cargo would, under
+# $TEST_RUNNER if it is set (an emulator and its arguments, split on
+# spaces as cargo splits its runner). Fails if any binary fails.
+#
+# Usage: scripts/run-tests NAME TEST-ARGS...
+#
+# NAME picks the binaries by test target name, `scytale` for the
+# library's or `acvp_samples`; `all` runs every one packed.
+
+set -eu
+cd "$(dirname "$0")/.."
+top=$(pwd)
+want=$1
+shift
+
+tar -xf tests.tar
+status=0
+ran=0
+while read -r name dir exe; do
+    if [ "$want" != all ] && [ "$name" != "$want" ]; then
+        continue
+    fi
+    ran=$((ran + 1))
+    # Its input from nowhere: the loop reads the manifest on its
+    # standard input, and an emulator may read its own.
+    # shellcheck disable=SC2086
+    (cd "$dir" && ${TEST_RUNNER:-} "$top/$exe" "$@") < /dev/null \
+        || status=1
+done < manifest
+if [ "$ran" = 0 ]; then
+    echo "run-tests: no binary named $want in tests.tar" >&2
+    exit 1
+fi
+exit $status

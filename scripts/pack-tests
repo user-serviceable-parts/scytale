@@ -1,0 +1,42 @@
+#!/bin/sh
+# Builds the test binaries that `cargo test ARGS` would run and packs
+# them into tests.tar, for CI jobs that run the same binaries on
+# several processors: built once here rather than once by each of
+# them. Run the packed binaries with scripts/run-tests.
+#
+# The archive holds a manifest, a line per binary: its test target's
+# name, the directory of the package it belongs to and the binary,
+# both relative to the workspace. cargo runs a test from its
+# package's directory, and run-tests does the same. A test finds its
+# vectors through the path its package had where it was built, so
+# the binaries run only in a checkout at that same path.
+#
+# Usage: scripts/pack-tests CARGO-TEST-ARGS...
+
+set -eu
+cd "$(dirname "$0")/.."
+top=$(pwd)
+
+mkdir -p target
+cargo test --no-run --message-format=json "$@" > target/pack-tests.json
+: > target/manifest
+# A test binary's line is the one artifact message with a path in
+# `executable`; the rest have null there. No field of `target` holds
+# a brace, so its name is the first `name` after it.
+grep '"executable":"' target/pack-tests.json | while read -r line; do
+    exe=$(echo "$line" | sed -E 's/.*"executable":"([^"]*)".*/\1/')
+    manifest=$(echo "$line" | sed -E 's/.*"manifest_path":"([^"]*)".*/\1/')
+    name=$(echo "$line" \
+        | sed -E 's/.*"target":\{[^}]*"name":"([^"]*)".*/\1/')
+    dir=$(dirname "$manifest")
+    echo "$name ${dir#"$top"/} ${exe#"$top"/}" >> target/manifest
+done
+if [ ! -s target/manifest ]; then
+    echo "pack-tests: cargo built no test binaries" >&2
+    exit 1
+fi
+cat target/manifest
+# tar rather than the artifact itself, which would drop the
+# executable bit.
+tar -cf tests.tar -C target manifest \
+    -C "$top" $(awk '{print $3}' target/manifest)
