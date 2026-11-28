@@ -41,7 +41,7 @@ jobs:
           - arch: x86-64
             runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - arch: arm64
+          - arch: aarch64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
           # The RISE runner is off until the RVA23 machines arrive:
@@ -147,7 +147,7 @@ jobs:
           key: sde-${{ env.SDE_SHA256 }}
 
       - name: Install QEMU
-        if: ${{ matrix.arch == 'arm64' && steps.native.outputs.missing != '' }}
+        if: ${{ matrix.arch == 'aarch64' && steps.native.outputs.missing != '' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends qemu-user
@@ -163,7 +163,7 @@ jobs:
           name=$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')
           case ${{ matrix.arch }} in
               x86-64) runner="$HOME/sde/sde64 -future --" ;;
-              arm64) runner="qemu-aarch64 -cpu max" ;;
+              aarch64) runner="qemu-aarch64 -cpu max" ;;
           esac
           export "CARGO_TARGET_${name}_RUNNER=$runner"
           cargo test --release -p scytale --lib kernels:: -- --nocapture \
@@ -211,7 +211,7 @@ jobs:
           - arch: x86-64
             runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - arch: arm64
+          - arch: aarch64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
     steps:
@@ -275,7 +275,7 @@ jobs:
           key: sde-${{ env.SDE_SHA256 }}
 
       - name: Install QEMU
-        if: ${{ matrix.arch == 'arm64' && steps.native.outputs.missing != '' }}
+        if: ${{ matrix.arch == 'aarch64' && steps.native.outputs.missing != '' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends qemu-user
@@ -288,7 +288,7 @@ jobs:
           name=$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')
           case ${{ matrix.arch }} in
               x86-64) runner="$HOME/sde/sde64 -future --" ;;
-              arm64) runner="qemu-aarch64 -cpu max" ;;
+              aarch64) runner="qemu-aarch64 -cpu max" ;;
           esac
           export "CARGO_TARGET_${name}_RUNNER=$runner"
           # Only the suites that own those kernels: each test reads its
@@ -324,7 +324,7 @@ jobs:
   # The binary is built once, in the job before, and every part runs
   # that one. The container is for its QEMU, as below, and the build
   # is in the same container so that the binary's paths to the
-  # vectors and its C library are the ones the parts have. The arm64
+  # vectors and its C library are the ones the parts have. The AArch64
   # runners are an experiment: on the x86-64 pool two or three jobs a
   # run took three times as long as the same jobs in other runs,
   # every suite and the compile alike, which the steps around the
@@ -661,22 +661,29 @@ jobs:
   # The rows of an architecture run the same binaries on different
   # processors, so those are built once, in the job before, in the
   # same container, so that their paths to the vectors and their C
-  # library are the ones the rows have.
+  # library are the ones the rows have. x86-64 and AArch64 build and
+  # run on runners of their own architecture, so nothing is
+  # cross-compiled and QEMU translates no more than it must; RISC-V
+  # is cross-compiled on x86-64, the RISE runners being slower than
+  # emulation.
   emulated-build:
-    name: build (${{ matrix.arch }}, emulated)
-    runs-on: ubuntu-latest
+    name: build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     container: debian:trixie
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x86_64
+            runner: ubuntu-latest
             packages: -p scytale
           - arch: aarch64
+            runner: ubuntu-24.04-arm
             packages: -p scytale
           # The whole workspace's library tests too, for the row
           # that is RISC-V's one run of them.
           - arch: riscv64
+            runner: ubuntu-latest
             packages: --workspace --exclude scytale-acvp
     steps:
       - uses: actions/checkout@v7
@@ -687,9 +694,7 @@ jobs:
           # package and another in the C library's.
           case ${{ matrix.arch }} in
               x86_64) target=x86_64-unknown-linux-gnu; cross= ;;
-              aarch64)
-                  target=aarch64-unknown-linux-gnu
-                  cross="gcc-aarch64-linux-gnu libc6-dev-arm64-cross" ;;
+              aarch64) target=aarch64-unknown-linux-gnu; cross= ;;
               riscv64)
                   target=riscv64gc-unknown-linux-gnu
                   cross="gcc-riscv64-linux-gnu libc6-dev-riscv64-cross" ;;
@@ -718,7 +723,7 @@ jobs:
             ~/.cargo/git/db
             target
           key: >-
-            emulated-${{ matrix.arch }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+            emulated-${{ matrix.arch }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build
         run: |
@@ -756,7 +761,9 @@ jobs:
   emulated:
     name: test (${{ matrix.arch }}, ${{ matrix.cpu }})
     needs: emulated-build
-    runs-on: ubuntu-latest
+    # Each on a runner of the architecture its build job ran on.
+    runs-on: >-
+      ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     container: debian:trixie
     strategy:
       fail-fast: false
@@ -822,14 +829,14 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install QEMU and the C library
-        # And GCC's runtime, which the binaries link for unwinding;
-        # the build job had it through the cross compiler.
+        # RISC-V's, and GCC's runtime, which the binaries link for
+        # unwinding; the build job had them through the cross
+        # compiler. The others run on their own architecture's.
         run: |
           case ${{ matrix.arch }} in
-              x86_64) libc= ;;
-              aarch64) libc="libc6-arm64-cross libgcc-s1-arm64-cross" ;;
               riscv64)
                   libc="libc6-riscv64-cross libgcc-s1-riscv64-cross" ;;
+              *) libc= ;;
           esac
           apt-get update
           apt-get install -y --no-install-recommends qemu-user $libc
@@ -846,7 +853,7 @@ jobs:
           set -o pipefail
           arch=${{ matrix.arch }}
           TEST_RUNNER="qemu-$arch -cpu ${{ matrix.cpu }}"
-          if [ "$arch" != x86_64 ]; then
+          if [ "$arch" = riscv64 ]; then
               TEST_RUNNER="$TEST_RUNNER -L /usr/$arch-linux-gnu"
           fi
           export TEST_RUNNER

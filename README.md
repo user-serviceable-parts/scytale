@@ -111,9 +111,9 @@ for BoGo. `scripts/test-openssl-interop` needs OpenSSL 3.
 
 Continuous integration covers the same ground on every push, and tests
 each kernel exactly once: every crate's tests and the ACVP sample
-vectors natively on x86-64 and arm64 runners, then the kernels a
+vectors natively on x86-64 and aarch64 runners, then the kernels a
 runner lacks under an emulator that has them all, Intel SDE on x86-64
-and qemu's `max` on arm64; under qemu's `max` for riscv64; and on
+and qemu's `max` on aarch64; under qemu's `max` for riscv64; and on
 32-bit x86. A vector is answered by each kernel it tests and by no
 kernel twice. Older and newer processors of each architecture, the
 RVA22 and RVA23 profiles among them, are emulated for a dispatch check
