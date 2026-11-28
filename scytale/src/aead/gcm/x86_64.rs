@@ -385,6 +385,72 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
             Kernel::Aesni
         }
     }
+
+    /// Starts a message under a 96-bit nonce: the tag mask, which is
+    /// the first counter block encrypted, and the counter the message
+    /// itself begins at. `false`, with nothing written, where `cipher`
+    /// is not one whose round keys these instructions can read.
+    ///
+    /// The block is built and encrypted in a register and each result
+    /// goes out in one store. Assembled in memory, a byte or a word at
+    /// a time as the compiler likes, it is read back as one block
+    /// before those stores can be forwarded, and the processor waits
+    /// for them: about a third of a short message's whole cost.
+    pub(crate) fn start(
+        &self,
+        cipher: &C,
+        nonce: &[u8; 12],
+        mask: &mut [u8; BLOCK],
+        counter: &mut [u8; BLOCK],
+    ) -> bool {
+        let Some(schedule) = (self.keys)(cipher) else {
+            return false;
+        };
+        let [a, b, c, d, e, f, g, h, i, j, k, l] = *nonce;
+        let low = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
+        let high = u64::from_le_bytes([i, j, k, l, 0, 0, 0, 0]);
+        // SAFETY: an engine exists only where the list chose one of
+        // this file's rows, whose features include AES-NI; the
+        // schedule holds `rounds + 1` round keys.
+        unsafe { start_blocks(schedule, low, high, mask, counter) };
+        true
+    }
+}
+
+/// The work of [`Engine::start`]: `low` and `high` are the nonce's
+/// first eight bytes and its last four, as little-endian words.
+///
+/// # Safety
+///
+/// The processor must have AES-NI.
+#[target_feature(enable = "aes")]
+unsafe fn start_blocks(
+    schedule: Schedule<'_>,
+    low: u64,
+    high: u64,
+    mask: &mut [u8; BLOCK],
+    counter: &mut [u8; BLOCK],
+) {
+    use core::arch::x86_64::{
+        __m128i, _mm_aesenc_si128, _mm_aesenclast_si128, _mm_loadu_si128,
+        _mm_set_epi64x, _mm_storeu_si128, _mm_xor_si128,
+    };
+    // The counter field is big-endian, so its low byte is the block's
+    // last, the top byte of the high word.
+    let block = |n: u64| _mm_set_epi64x((high | n << 56) as i64, low as i64);
+    let rk = schedule.keys().cast::<__m128i>();
+    let rounds = schedule.rounds();
+    // SAFETY: the schedule holds `rounds + 1` round keys, sixteen
+    // bytes each; both outputs are a block.
+    unsafe {
+        _mm_storeu_si128(counter.as_mut_ptr().cast(), block(2));
+        let mut x = _mm_xor_si128(block(1), _mm_loadu_si128(rk));
+        for round in 1..rounds {
+            x = _mm_aesenc_si128(x, _mm_loadu_si128(rk.add(round)));
+        }
+        x = _mm_aesenclast_si128(x, _mm_loadu_si128(rk.add(rounds)));
+        _mm_storeu_si128(mask.as_mut_ptr().cast(), x);
+    }
 }
 
 /// By hand rather than derived: nothing here is a cipher, only a

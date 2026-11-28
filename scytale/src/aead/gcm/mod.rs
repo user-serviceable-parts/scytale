@@ -503,8 +503,9 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
     /// assumes, so reach for another length only when a protocol
     /// dictates it.
     pub fn encryptor(&self, nonce: &[u8]) -> Result<Encryptor<'_, C>, Error> {
+        check_nonce(nonce)?;
         Ok(Encryptor {
-            core: Core::try_new(self, nonce)?,
+            core: Core::new(self, nonce),
         })
     }
 
@@ -513,8 +514,9 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
     /// Takes a nonce of any length, as
     /// [`encryptor`](Self::encryptor) explains.
     pub fn decryptor(&self, nonce: &[u8]) -> Result<Decryptor<'_, C>, Error> {
+        check_nonce(nonce)?;
         Ok(Decryptor {
-            core: Core::try_new(self, nonce)?,
+            core: Core::new(self, nonce),
         })
     }
 }
@@ -551,10 +553,20 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Aead for Gcm<C> {
         data: &mut [u8],
         tag: &mut Self::Tag,
     ) -> Result<(), Error> {
-        let mut state = self.encryptor(nonce)?;
+        // Built here rather than through `encryptor`: a 96-bit nonce
+        // needs no checking, and without the `Result` to unwrap the
+        // state is built where it is used instead of being built
+        // and then copied, which a short message pays for in stalls
+        // on the fields the copy reads back just after they were
+        // written.
+        let mut state = Encryptor {
+            core: Core::new(self, nonce),
+        };
         state.aad(aad)?;
         state.update(data)?;
-        *tag = state.finalize();
+        // The core's own tag rather than `finalize`, which takes the
+        // state by value and so copies it.
+        *tag = state.core.tag();
         Ok(())
     }
 
@@ -565,10 +577,15 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Aead for Gcm<C> {
         data: &mut [u8],
         tag: &Self::Tag,
     ) -> Result<(), Error> {
-        let mut state = self.decryptor(nonce)?;
+        // As in `encrypt`.
+        let mut state = Decryptor {
+            core: Core::new(self, nonce),
+        };
         state.aad(aad)?;
         state.update(data)?;
-        match state.verify(tag) {
+        // As in `encrypt`: checked in place rather than through
+        // `verify`, which takes the state by value.
+        match state.check(tag) {
             Ok(()) => Ok(()),
             Err(e) => {
                 data.fill(0);
@@ -578,35 +595,73 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Aead for Gcm<C> {
     }
 }
 
-/// The first counter block, from which everything else follows.
-///
-/// A 96-bit nonce becomes the counter directly, with a one in the
-/// counter field. Any other length is hashed down to a block, which
-/// is why that case costs more. An empty nonce is refused: the
-/// standard allows it, and it makes every message share a counter.
-fn counter_start<C: BlockCipher<Block = [u8; BLOCK]>>(
-    gcm: &Gcm<C>,
-    nonce: &[u8],
-) -> Result<[u8; BLOCK], Error> {
+/// Refuses a nonce no counter can start from. An empty one is
+/// refused: the standard allows it, and it makes every message share
+/// a counter. One whose length in bits overflows the length block
+/// could never be hashed.
+fn check_nonce(nonce: &[u8]) -> Result<(), Error> {
     if nonce.is_empty() {
         return Err(Error::InvalidNonceLength(0));
     }
+    if (nonce.len() as u64).checked_mul(8).is_none() {
+        return Err(Error::MessageTooLong);
+    }
+    Ok(())
+}
+
+/// The first counter block, from which everything else follows, for
+/// a nonce [`check_nonce`] accepted.
+///
+/// A 96-bit nonce becomes the counter directly, with a one in the
+/// counter field. Any other length is hashed down to a block, which
+/// is why that case costs more.
+fn counter_start<C: BlockCipher<Block = [u8; BLOCK]>>(
+    gcm: &Gcm<C>,
+    nonce: &[u8],
+) -> [u8; BLOCK] {
     if nonce.len() == SHORT_NONCE {
         let mut start = [0u8; BLOCK];
         start[..SHORT_NONCE].copy_from_slice(nonce);
         start[BLOCK - 1] = 1;
-        return Ok(start);
+        return start;
     }
     let mut hash = Hash::new(gcm);
     hash.hash(nonce);
     hash.pad();
-    let bits = (nonce.len() as u64)
-        .checked_mul(8)
-        .ok_or(Error::MessageTooLong)?;
+    // `check_nonce` refused any length this would overflow at.
+    let bits = (nonce.len() as u64).wrapping_mul(8);
     let mut lengths = [0u8; BLOCK];
     lengths[8..].copy_from_slice(&bits.to_be_bytes());
     hash.hash(&lengths);
-    Ok(hash.finish())
+    hash.finish()
+}
+
+/// The tag mask, which is the first counter block encrypted, and the
+/// counter the message begins at, for a nonce [`check_nonce`]
+/// accepted.
+fn start<C: BlockCipher<Block = [u8; BLOCK]>>(
+    gcm: &Gcm<C>,
+    nonce: &[u8],
+    mask: &mut [u8; BLOCK],
+    counter: &mut [u8; BLOCK],
+) {
+    // The native engine builds both blocks in registers and stores
+    // each whole. The general path below cannot promise that: the
+    // compiler may assemble the block a byte at a time, and a block
+    // stored in pieces and then loaded whole stalls until the pieces
+    // reach the cache, a third of a short message's cost.
+    #[cfg(target_arch = "x86_64")]
+    if let (Engine::Native(engine), Ok(nonce)) =
+        (&gcm.engine, <&[u8; SHORT_NONCE]>::try_from(nonce))
+        && engine.start(&gcm.cipher, nonce, mask, counter)
+    {
+        return;
+    }
+    let block = counter_start(gcm, nonce);
+    *mask = block;
+    gcm.cipher.encrypt_one(mask);
+    *counter = block;
+    increment32(counter);
 }
 
 /// Adds one to the last four bytes of the counter, wrapping within
@@ -663,15 +718,21 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Core<'_, C> {
 }
 
 impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
-    fn try_new(gcm: &'a Gcm<C>, nonce: &[u8]) -> Result<Self, Error> {
-        let cipher = &gcm.cipher;
-        let start = counter_start(gcm, nonce)?;
-        let mut mask = start;
-        cipher.encrypt_one(&mut mask);
-        let mut counter = start;
-        increment32(&mut counter);
-        Ok(Core {
-            cipher,
+    /// The state for `nonce`, which [`check_nonce`] must have
+    /// accepted.
+    ///
+    /// Infallible, and built in one expression, so that it can be
+    /// built where the caller keeps it rather than built here and
+    /// copied there: the copy reads the fields back in wide loads
+    /// just after they were written in narrow stores, and the
+    /// processor stalls on every one.
+    #[inline]
+    fn new(gcm: &'a Gcm<C>, nonce: &[u8]) -> Self {
+        let mut mask = [0; BLOCK];
+        let mut counter = [0; BLOCK];
+        start(gcm, nonce, &mut mask, &mut counter);
+        Core {
+            cipher: &gcm.cipher,
             engine: Hash::new(gcm),
             counter,
             keystream: [0; BLOCK],
@@ -680,7 +741,7 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
             aad_bits: 0,
             message_bytes: 0,
             started: false,
-        })
+        }
     }
 
     fn aad(&mut self, data: &[u8]) -> Result<(), Error> {
@@ -897,6 +958,12 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Decryptor<'_, C> {
     /// 2^128. Compare `tag.len()` against the constant the protocol
     /// fixed before calling, or slice to that constant.
     pub fn verify_truncated(mut self, tag: &[u8]) -> Result<(), Error> {
+        self.check(tag)
+    }
+
+    /// The work of [`verify_truncated`](Self::verify_truncated), on
+    /// the state where it is.
+    fn check(&mut self, tag: &[u8]) -> Result<(), Error> {
         if !(MIN_TAG..=TAG).contains(&tag.len()) {
             return Err(Error::InvalidTagLength(tag.len()));
         }
@@ -1021,7 +1088,34 @@ pub(crate) mod tests {
         published_test_cases(under);
         the_engines_agree(under);
         the_engines_agree_on_a_long_nonce(under);
+        the_start_is_the_standards(under);
         crate::aead::gcm_siv::tests::agrees(under);
+    }
+
+    /// A 96-bit nonce starts the message through whichever path the
+    /// engine has, and that must give the mask and counter SP 800-38D
+    /// gives: the nonce, then a counter of one encrypted, and of two.
+    /// Nonces that end in ones would show a counter written into the
+    /// wrong end of the block, or carried into the nonce.
+    fn the_start_is_the_standards(under: &features::Under) {
+        let key = Key::from([0x3cu8; 16]);
+        let gcm = Gcm::<Aes128>::new(under.ctx(), &key);
+        let cipher = Aes128::new(under.ctx(), &key);
+        for nonce in
+            [[0u8; 12], [0xffu8; 12], core::array::from_fn(|i| i as u8)]
+        {
+            let mut expected = [0u8; BLOCK];
+            expected[..12].copy_from_slice(&nonce);
+            expected[15] = 2;
+            let counter = expected;
+            expected[15] = 1;
+            cipher.encrypt_one(&mut expected);
+
+            let (mut mask, mut next) = ([0u8; BLOCK], [0u8; BLOCK]);
+            start(&gcm, &nonce, &mut mask, &mut next);
+            assert_eq!(mask, expected, "mask for {nonce:02x?}");
+            assert_eq!(next, counter, "counter for {nonce:02x?}");
+        }
     }
 
     fn published_test_cases(under: &features::Under) {
